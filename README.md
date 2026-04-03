@@ -2,8 +2,8 @@
 <p align="center"><b>Your agent forgets everything. Every session. hex fixes that.</b></p>
 
 <p align="center">
-  <a href="https://github.com/mrap/hex-hermes/stargazers"><img src="https://img.shields.io/github/stars/mrap/hex-hermes?style=social" alt="GitHub Stars"></a>
-  <a href="https://github.com/mrap/hex-hermes/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License"></a>
+  <a href="https://github.com/mrap/hex/stargazers"><img src="https://img.shields.io/github/stars/mrap/hex?style=social" alt="GitHub Stars"></a>
+  <a href="https://github.com/mrap/hex/blob/main/LICENSE"><img src="https://img.shields.io/badge/license-MIT-lightgrey" alt="MIT License"></a>
   <img src="https://img.shields.io/badge/dependencies-zero-brightgreen" alt="Zero Dependencies">
   <img src="https://img.shields.io/badge/python-3.8+-blue" alt="Python 3.8+">
 </p>
@@ -35,7 +35,7 @@ It feels like someone who has been on your team for months.
 
 ```bash
 # From your project directory:
-git clone https://github.com/mrap/hex-hermes.git /tmp/hex-setup
+git clone https://github.com/mrap/hex.git /tmp/hex-setup
 cp -r /tmp/hex-setup/{CLAUDE.md,AGENTS.md,setup.sh,.hex} .
 bash setup.sh
 rm -rf /tmp/hex-setup
@@ -171,5 +171,5 @@ MIT — see [LICENSE](LICENSE).
 ---
 
 <p align="center">
-  <sub>Built by <a href="https://github.com/mrap">@mrap</a> · If hex saves you from Groundhog Day, <a href="https://github.com/mrap/hex-hermes">⭐ star the repo</a></sub>
+  <sub>Built by <a href="https://github.com/mrap">@mrap</a> · If hex saves you from Groundhog Day, <a href="https://github.com/mrap/hex">⭐ star the repo</a></sub>
 </p>
