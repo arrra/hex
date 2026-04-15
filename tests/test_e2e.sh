@@ -23,7 +23,7 @@ echo ""
 
 # ── Test 1: Install ────────────────────────────────────────────────
 echo "[1] Install"
-bash /tmp/hex-setup/install.sh /tmp/test-hex --no-boi --no-events
+bash /tmp/hex-setup/install.sh /tmp/test-hex
 echo "  PASS: Install completed"
 PASS=$((PASS + 1))
 TOTAL=$((TOTAL + 1))
@@ -80,7 +80,6 @@ if echo "$OUTPUT" | grep -q "sentinel_xyz"; then
     PASS=$((PASS + 1))
 else
     echo "  FAIL: Search didn't find saved memory"
-    echo "  Output: $OUTPUT"
     FAIL=$((FAIL + 1))
 fi
 TOTAL=$((TOTAL + 1))
@@ -95,7 +94,6 @@ if echo "$STATS" | grep -q "Files indexed:"; then
     PASS=$((PASS + 1))
 else
     echo "  FAIL: Unexpected stats output"
-    echo "  Output: $STATS"
     FAIL=$((FAIL + 1))
 fi
 TOTAL=$((TOTAL + 1))
@@ -109,7 +107,6 @@ if echo "$OUTPUT" | grep -q "todo.md\|Priorities"; then
     PASS=$((PASS + 1))
 else
     echo "  FAIL: Search didn't find indexed content"
-    echo "  Output: $OUTPUT"
     FAIL=$((FAIL + 1))
 fi
 TOTAL=$((TOTAL + 1))
@@ -140,7 +137,7 @@ else
 fi
 TOTAL=$((TOTAL + 1))
 
-# ── Test 12: No personal references in CLAUDE.md ───────────────────
+# ── Test 12: No personal references ───────────────────────────────
 echo "[12] No personal references"
 if grep -qi "mike\|rapadas\|whitney\|hermes\|nanoclaw\|cc-connect\|mrap" /tmp/test-hex/CLAUDE.md; then
     echo "  FAIL: Personal references found in CLAUDE.md"
@@ -151,8 +148,86 @@ else
 fi
 TOTAL=$((TOTAL + 1))
 
-# ── Test 13: Unit tests ────────────────────────────────────────────
-echo "[13] Unit tests"
+# ── Test 13: Commands installed to .claude/commands/ ───────────────
+echo "[13] Commands"
+for cmd in hex-startup hex-checkpoint hex-shutdown hex-consolidate hex-reflect hex-debrief hex-triage hex-decide hex-doctor hex-upgrade; do
+    check "command: $cmd" test -f "/tmp/test-hex/.claude/commands/$cmd.md"
+done
+
+# ── Test 14: Doctor passes on fresh install ────────────────────────
+echo "[14] Doctor"
+cd /tmp/test-hex
+DOCTOR_OUT=$(HEX_DIR=/tmp/test-hex bash .hex/scripts/doctor.sh 2>&1 || true)
+if echo "$DOCTOR_OUT" | grep -q "hex is healthy"; then
+    echo "  PASS: Doctor passes on fresh install"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: Doctor found issues"
+    echo "$DOCTOR_OUT" | grep "✗\|FAIL" | head -5
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+# ── Test 15: Startup script runs ──────────────────────────────────
+echo "[15] Startup script"
+cd /tmp/test-hex
+STARTUP_OUT=$(HEX_DIR=/tmp/test-hex bash .hex/scripts/startup.sh 2>&1)
+if echo "$STARTUP_OUT" | grep -q "Ready"; then
+    echo "  PASS: Startup script runs"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: Startup script failed"
+    echo "  Output: $STARTUP_OUT"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+# ── Test 16: Upgrade — zone merge preserves user content ───────────
+echo "[16] Upgrade zone merge"
+cd /tmp/test-hex
+
+# Add custom rule to user zone
+python3 -c "
+text = open('CLAUDE.md').read()
+text = text.replace(
+    'Add your own rules',
+    'MY_CUSTOM_RULE_12345\n\nAdd your own rules'
+)
+open('CLAUDE.md', 'w').write(text)
+"
+
+# Simulate upgrade: bump version in the 'repo'
+echo "0.2.0" > /tmp/hex-setup/system/version.txt
+
+# Run upgrade
+HEX_DIR=/tmp/test-hex TMPDIR=/tmp bash /tmp/test-hex/.hex/scripts/upgrade.sh 2>&1 || true
+
+# Verify user zone preserved
+if grep -q "MY_CUSTOM_RULE_12345" /tmp/test-hex/CLAUDE.md; then
+    echo "  PASS: User zone preserved after upgrade"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: User zone lost during upgrade"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+# Verify system zone updated (version should be 0.2.0)
+NEW_VER=$(cat /tmp/test-hex/.hex/version.txt 2>/dev/null)
+if [ "$NEW_VER" = "0.2.0" ]; then
+    echo "  PASS: System files updated to 0.2.0"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: System version not updated (got: $NEW_VER)"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+# Restore version for consistency
+echo "0.1.0" > /tmp/hex-setup/system/version.txt
+
+# ── Test 17: Unit tests ───────────────────────────────────────────
+echo "[17] Unit tests"
 cd /tmp/hex-setup
 if python3 -m pytest tests/test_memory.py -v 2>&1; then
     echo "  PASS: All unit tests pass"

@@ -2,7 +2,10 @@
 set -euo pipefail
 
 # hex install — Creates a hex instance on the user's machine.
-# Usage: bash install.sh [target_dir] [--no-boi] [--no-events]
+# Usage: bash install.sh [target_dir]
+#
+# hex is an all-or-nothing package. BOI (parallel workers) and hex-events
+# (reactive automation) are integral — there are no flags to skip them.
 #
 # The repo is the installer, not the workspace. This script creates a
 # separate instance directory. The repo is disposable after install.
@@ -10,14 +13,10 @@ set -euo pipefail
 VERSION=$(cat "$(dirname "${BASH_SOURCE[0]}")/system/version.txt" 2>/dev/null || echo "0.1.0")
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 TARGET_DIR=""
-INSTALL_BOI=true
-INSTALL_EVENTS=true
 
 for arg in "$@"; do
     case "$arg" in
-        --no-boi)    INSTALL_BOI=false ;;
-        --no-events) INSTALL_EVENTS=false ;;
-        --help|-h)   echo "Usage: bash install.sh [target_dir] [--no-boi] [--no-events]"; exit 0 ;;
+        --help|-h)   echo "Usage: bash install.sh [target_dir]"; exit 0 ;;
         -*)          echo "Unknown flag: $arg"; exit 1 ;;
         *)           TARGET_DIR="$arg" ;;
     esac
@@ -177,25 +176,33 @@ SOEOF
 
 echo "  Standing orders     ✓"
 
-# ── Phase 6: Install companions ────────────────────────────────────
+# ── Phase 5: Install companions ────────────────────────────────────
 
-if [ "$INSTALL_BOI" = true ]; then
-    if [ -d "$HOME/.boi" ]; then
-        echo "  BOI already installed  ✓"
+echo "Installing companions..."
+
+# BOI — parallel worker dispatch
+if [ -d "$HOME/.boi" ]; then
+    echo "  BOI already installed  ✓"
+else
+    if git clone --depth 1 https://github.com/mrap/boi.git "$HOME/.boi" 2>/dev/null; then
+        echo "  BOI installed  ✓"
     else
-        echo "  BOI: skipped (install separately: https://github.com/mrap/boi)"
+        echo "  BOI: repo not yet available (will install on next upgrade)"
     fi
 fi
 
-if [ "$INSTALL_EVENTS" = true ]; then
-    if [ -d "$HOME/.hex-events" ]; then
-        echo "  hex-events already installed  ✓"
+# hex-events — reactive event system
+if [ -d "$HOME/.hex-events" ]; then
+    echo "  hex-events already installed  ✓"
+else
+    if git clone --depth 1 https://github.com/mrap/hex-events.git "$HOME/.hex-events" 2>/dev/null; then
+        echo "  hex-events installed  ✓"
     else
-        echo "  hex-events: skipped (install separately: https://github.com/mrap/hex-events)"
+        echo "  hex-events: repo not yet available (will install on next upgrade)"
     fi
 fi
 
-# ── Phase 7: Register install ──────────────────────────────────────
+# ── Phase 6: Register install ──────────────────────────────────────
 
 python3 -c "
 import json, os

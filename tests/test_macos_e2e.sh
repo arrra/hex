@@ -117,7 +117,7 @@ echo "  VM Python: $(vm_run 'python3 --version 2>&1' || echo 'NOT FOUND')"
 # ── Step 4: Run install ───────────────────────────────────────────
 
 echo "[4/6] Running install.sh inside VM..."
-INSTALL_OUTPUT=$(vm_run "bash /tmp/hex-setup/install.sh /tmp/test-hex --no-boi --no-events" 2>&1 || true)
+INSTALL_OUTPUT=$(vm_run "bash /tmp/hex-setup/install.sh /tmp/test-hex" 2>&1 || true)
 echo "$INSTALL_OUTPUT" | tail -8
 echo ""
 
