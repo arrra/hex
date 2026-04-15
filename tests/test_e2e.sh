@@ -130,7 +130,8 @@ TOTAL=$((TOTAL + 1))
 
 # ── Test 11: Re-install guard ──────────────────────────────────────
 echo "[11] Re-install guard"
-if bash /tmp/hex-setup/install.sh /tmp/test-hex 2>&1 | grep -q "already exists"; then
+REINSTALL_OUTPUT=$(bash /tmp/hex-setup/install.sh /tmp/test-hex 2>&1 || true)
+if echo "$REINSTALL_OUTPUT" | grep -q "already exists"; then
     echo "  PASS: Re-install blocked"
     PASS=$((PASS + 1))
 else

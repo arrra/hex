@@ -1,7 +1,8 @@
 FROM python:3.10-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends git && \
-    rm -rf /var/lib/apt/lists/*
+    rm -rf /var/lib/apt/lists/* && \
+    pip install --no-cache-dir pytest
 
 # Git needs a user for commits (not used, but prevents warnings)
 RUN git config --global user.email "test@test.com" && \
