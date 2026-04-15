@@ -102,6 +102,12 @@ if [ -d "$SCRIPT_DIR/tests" ]; then
     cp -r "$SCRIPT_DIR/tests" "$TARGET_DIR/tests"
 fi
 
+# Copy commands to .claude/commands/ (where Claude Code discovers them)
+if [ -d "$SCRIPT_DIR/system/commands" ]; then
+    mkdir -p "$TARGET_DIR/.claude/commands"
+    cp "$SCRIPT_DIR/system/commands/"*.md "$TARGET_DIR/.claude/commands/"
+fi
+
 echo "  Directory structure  ✓"
 
 # ── Phase 3: Initialize memory ─────────────────────────────────────
