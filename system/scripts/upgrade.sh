@@ -57,9 +57,11 @@ echo "  Backup: $BACKUP_DIR"
 
 # Phase 3: Update system files
 echo "[3/5] Updating system files..."
-rsync -a --delete \
-    --exclude='memory.db' \
-    "$TMPDIR/hex-repo/system/" "$HEX_DIR/.hex/"
+# Preserve memory.db, replace everything else
+cp "$HEX_DIR/.hex/memory.db" "$TMPDIR/memory.db.bak" 2>/dev/null || true
+rm -rf "$HEX_DIR/.hex"
+cp -r "$TMPDIR/hex-repo/system" "$HEX_DIR/.hex"
+cp "$TMPDIR/memory.db.bak" "$HEX_DIR/.hex/memory.db" 2>/dev/null || true
 echo "  System files updated"
 
 # Phase 4: Merge CLAUDE.md (preserve user zone)
