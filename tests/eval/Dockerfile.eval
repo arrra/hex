@@ -1,0 +1,20 @@
+FROM node:20-slim
+
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends python3 python3-pip git && \
+    rm -rf /var/lib/apt/lists/* && \
+    npm install -g @anthropic-ai/claude-code && \
+    pip3 install pyyaml pytest --break-system-packages
+
+RUN git config --global user.email "test@test.com" && \
+    git config --global user.name "Test"
+
+COPY . /tmp/hex-setup
+
+# Pre-validate (dry run costs nothing)
+RUN cd /tmp/hex-setup && python3 tests/eval/run_eval.py --dry-run
+
+# Live run needs ANTHROPIC_API_KEY at runtime:
+#   docker run -e ANTHROPIC_API_KEY=$ANTHROPIC_API_KEY hex-eval --live
+ENTRYPOINT ["python3", "/tmp/hex-setup/tests/eval/run_eval.py"]
+CMD ["--dry-run"]
