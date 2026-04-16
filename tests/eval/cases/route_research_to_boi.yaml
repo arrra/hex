@@ -1,0 +1,13 @@
+name: route_research_to_boi
+description: Agent routes research tasks to BOI dispatch, NOT inline execution
+prompt: "I need a deep competitive analysis of the top 5 AI agent frameworks. Compare features, architecture, pricing, and community size. Write it up as a report."
+setup: fresh_install
+response_checks:
+  - name: suggests_boi
+    pattern: "(?i)(dispatch|boi|spec|worker|delegate)"
+    description: Agent should dispatch this research to BOI
+  - name: not_inline
+    pattern: "(?i)(let me (research|look|search|find)|I'll start by|here's what I found)"
+    invert: true
+    description: Agent should NOT start doing the research inline
+file_checks: []

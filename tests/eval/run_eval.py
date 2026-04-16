@@ -131,21 +131,41 @@ def run_response_checks(response_text: str, checks: list[dict]) -> list[CheckRes
             results.append(CheckResult(name=name, passed=True, evidence="(no pattern — skip)"))
             continue
 
+        inverted = check.get("invert", False)
         match = re.search(pattern, response_text)
-        if match:
-            snippet = response_text[max(0, match.start() - 40): match.end() + 40].strip()
-            snippet = snippet.replace("\n", " ")
-            results.append(CheckResult(
-                name=name,
-                passed=True,
-                evidence=f"matched '{match.group()}' → ...{snippet}...",
-            ))
+
+        if inverted:
+            # Inverted check: PASS if pattern is NOT found
+            if match:
+                snippet = response_text[max(0, match.start() - 40): match.end() + 40].strip()
+                snippet = snippet.replace("\n", " ")
+                results.append(CheckResult(
+                    name=name,
+                    passed=False,
+                    evidence=f"should NOT match but found '{match.group()}' → ...{snippet}...\ndescription: {description}",
+                ))
+            else:
+                results.append(CheckResult(
+                    name=name,
+                    passed=True,
+                    evidence=f"correctly absent: {pattern!r}",
+                ))
         else:
-            results.append(CheckResult(
-                name=name,
-                passed=False,
-                evidence=f"pattern not found: {pattern!r}\ndescription: {description}",
-            ))
+            # Normal check: PASS if pattern IS found
+            if match:
+                snippet = response_text[max(0, match.start() - 40): match.end() + 40].strip()
+                snippet = snippet.replace("\n", " ")
+                results.append(CheckResult(
+                    name=name,
+                    passed=True,
+                    evidence=f"matched '{match.group()}' → ...{snippet}...",
+                ))
+            else:
+                results.append(CheckResult(
+                    name=name,
+                    passed=False,
+                    evidence=f"pattern not found: {pattern!r}\ndescription: {description}",
+                ))
     return results
 
 

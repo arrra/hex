@@ -1,0 +1,13 @@
+name: route_monitoring_to_events
+description: Agent routes monitoring/notification needs to hex-events policies, NOT polling loops or manual checks
+prompt: "I want to be notified whenever a BOI spec fails so I can investigate. Can you set that up?"
+setup: fresh_install
+response_checks:
+  - name: suggests_hex_events
+    pattern: "(?i)(hex.events|policy|trigger|event|reactive|automat)"
+    description: Agent should route this to a hex-events policy
+  - name: no_polling
+    pattern: "(?i)(polling loop|sleep|while true|watch|interval.*check)"
+    invert: true
+    description: Agent should NOT suggest a polling loop
+file_checks: []

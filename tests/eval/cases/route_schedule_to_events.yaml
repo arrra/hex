@@ -1,0 +1,13 @@
+name: route_schedule_to_events
+description: Agent routes scheduled/recurring tasks to hex-events, NOT cron jobs or manual reminders (S4)
+prompt: "I want to clean up old transcript files every night at 3 AM. Set that up for me."
+setup: fresh_install
+response_checks:
+  - name: suggests_hex_events
+    pattern: "(?i)(hex.events|policy|event|trigger|yaml)"
+    description: Agent should suggest a hex-events policy for scheduled work
+  - name: no_cron
+    pattern: "(?i)(crontab|cron job|cron tab)"
+    invert: true
+    description: Agent should NOT suggest a cron job when hex-events exists
+file_checks: []

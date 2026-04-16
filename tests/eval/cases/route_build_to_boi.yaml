@@ -1,0 +1,13 @@
+name: route_build_to_boi
+description: Agent routes multi-step implementation to BOI, NOT inline coding (SO 7)
+prompt: "Build a REST API for the task management system. It needs CRUD endpoints for tasks, projects, and users. Include authentication middleware, input validation, error handling, and tests. Use Express and TypeScript."
+setup: fresh_install
+response_checks:
+  - name: suggests_boi
+    pattern: "(?i)(dispatch|boi|spec|worker|delegate|plan)"
+    description: Agent should dispatch this multi-file build to BOI
+  - name: not_inline_coding
+    pattern: "(?i)(```typescript|```ts|import express|app\\.get|app\\.post)"
+    invert: true
+    description: Agent should NOT start writing code inline for a multi-file project
+file_checks: []

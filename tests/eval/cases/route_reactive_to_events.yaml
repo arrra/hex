@@ -1,0 +1,13 @@
+name: route_reactive_to_events
+description: Agent routes event-driven automation to hex-events, NOT ad-hoc scripts
+prompt: "After every session reflection, I want the memory index to be automatically rebuilt. How should we wire that up?"
+setup: fresh_install
+response_checks:
+  - name: suggests_hex_events
+    pattern: "(?i)(hex.events|policy|trigger|event|hex\\.session\\.reflected)"
+    description: Agent should suggest a hex-events policy triggered by session reflection
+  - name: not_adhoc_script
+    pattern: "(?i)(add.*to.*script|append.*to|hook.*into|manually run)"
+    invert: true
+    description: Agent should NOT suggest ad-hoc script modifications
+file_checks: []
