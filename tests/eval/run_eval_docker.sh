@@ -33,6 +33,7 @@ if [ "$MODE" = "--live" ]; then
     echo "Running live eval..."
     docker run --rm \
         -e ANTHROPIC_API_KEY="$ANTHROPIC_API_KEY" \
+        -e HEX_EVAL_SANDBOXED=1 \
         hex-eval "$@"
 else
     echo "Running dry-run..."

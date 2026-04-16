@@ -95,7 +95,7 @@ fi
 # Run eval
 echo "[4/5] Running eval..."
 if [ "$MODE" = "--live" ]; then
-    vm_run "cd /tmp/hex-setup && ANTHROPIC_API_KEY='$ANTHROPIC_API_KEY' python3 tests/eval/run_eval.py --live --model sonnet"
+    vm_run "cd /tmp/hex-setup && HEX_EVAL_SANDBOXED=1 ANTHROPIC_API_KEY='$ANTHROPIC_API_KEY' python3 tests/eval/run_eval.py --live --model sonnet"
 else
     vm_run "cd /tmp/hex-setup && python3 tests/eval/run_eval.py --dry-run"
 fi

@@ -37,7 +37,7 @@ CASES_DIR = SCRIPT_DIR / "cases"
 INSTALL_SH = REPO_ROOT / "install.sh"
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
-DEFAULT_TIMEOUT = 120  # seconds per claude call
+DEFAULT_TIMEOUT = 180  # seconds per claude call
 
 # Model shorthand → full model ID
 MODEL_ALIASES = {
@@ -236,6 +236,7 @@ def run_claude(prompt: str, hex_dir: Path, model: str, timeout: int) -> tuple[st
         "claude",
         "-p", prompt,
         "--model", model,
+        "--dangerously-skip-permissions",
     ]
     result = subprocess.run(
         cmd,
@@ -366,6 +367,23 @@ def dry_run(cases: list[dict]) -> int:
 
 def live_run(cases: list[dict], model: str, timeout: int, verbose: bool = False) -> int:
     """Run cases against real Claude. Returns exit code."""
+    # Sandbox guard: --live uses `--dangerously-skip-permissions` and writes to the
+    # invoking user's filesystem. Agents can and do write outside the temp hex_dir
+    # (e.g. policies to ~/.hex-events/). The shell runners (run_eval_docker.sh,
+    # run_eval_macos.sh) set HEX_EVAL_SANDBOXED=1 to opt in. Refuse otherwise.
+    if os.environ.get("HEX_EVAL_SANDBOXED") != "1":
+        print("ERROR: --live eval must run inside a sandbox (Docker or Tart VM).")
+        print("  Agents write outside the temp dir (e.g. policies to ~/.hex-events/)")
+        print("  which would contaminate the host environment.")
+        print()
+        print("Use one of:")
+        print("  bash tests/eval/run_eval_docker.sh --live")
+        print("  bash tests/eval/run_eval_macos.sh --live")
+        print()
+        print("To override (dangerous, writes to your real home dir):")
+        print("  HEX_EVAL_SANDBOXED=1 python3 tests/eval/run_eval.py --live")
+        return 2
+
     print("=== hex eval — live run ===")
     print(f"  Model   : {model}")
     print(f"  Cases   : {len(cases)}")
