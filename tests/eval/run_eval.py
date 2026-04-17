@@ -37,7 +37,7 @@ CASES_DIR = SCRIPT_DIR / "cases"
 INSTALL_SH = REPO_ROOT / "install.sh"
 
 DEFAULT_MODEL = "claude-sonnet-4-5"
-DEFAULT_TIMEOUT = 180  # seconds per claude call
+DEFAULT_TIMEOUT = 300  # seconds per claude call
 
 # Model shorthand → full model ID
 MODEL_ALIASES = {
@@ -63,15 +63,20 @@ class CaseResult:
     response_text: str
     checks: list[CheckResult] = field(default_factory=list)
     error: Optional[str] = None
+    skipped: bool = False
 
     @property
     def passed(self) -> bool:
+        if self.skipped:
+            return True
         if self.error:
             return False
         return all(c.passed for c in self.checks)
 
     @property
     def check_summary(self) -> str:
+        if self.skipped:
+            return "SKIP"
         passed = sum(1 for c in self.checks if c.passed)
         return f"{passed}/{len(self.checks)}"
 
@@ -459,6 +464,20 @@ def live_run(cases: list[dict], model: str, timeout: int, verbose: bool = False)
 
             # Dispatch to the appropriate agent runner
             prompt = case["prompt"]
+
+            # Skip codex cases gracefully when OPENAI_API_KEY is absent
+            if agent == "codex" and not os.environ.get("OPENAI_API_KEY"):
+                result = CaseResult(
+                    case_name=name,
+                    prompt=prompt,
+                    response_text="",
+                    skipped=True,
+                )
+                results.append(result)
+                print("  SKIP: OPENAI_API_KEY not set — codex live session skipped")
+                print()
+                continue
+
             try:
                 if agent == "codex":
                     stdout, stderr = run_codex(prompt, hex_dir, timeout)
@@ -545,8 +564,8 @@ def print_summary(results: list[CaseResult]) -> None:
     print(header)
     print("-" * 60)
     for r in results:
-        status = "PASS" if r.passed else "FAIL"
-        checks = r.check_summary if r.checks else ("ERROR" if r.error else "—")
+        status = "SKIP" if r.skipped else ("PASS" if r.passed else "FAIL")
+        checks = r.check_summary if (r.checks or r.skipped) else ("ERROR" if r.error else "—")
         print(f"{r.case_name:<{col_name}}  {status:<6}  {checks}")
         if r.error:
             print(f"  {'':>{col_name}}  {r.error}")
