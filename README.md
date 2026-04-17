@@ -1,8 +1,6 @@
-# hex
+# hex-foundation
 
-Your AI brain. All your work flows through it.
-
-The harder you push, the better it gets. Every correction becomes a rule. Every decision becomes memory. Give it the thing you don't know how to do. Watch it fail. Correct it. Now it never fails that way again. Do that for six weeks and you have something no one else can buy — an agent that works exactly the way you think, because you forged it.
+A minimal, installable template for the hex agent system — a persistent AI workspace for Claude Code that accumulates context, learns your patterns, and improves itself over time.
 
 **For:** engineers on Claude Code who are tired of their agent starting from zero every session.
 
@@ -11,170 +9,162 @@ The harder you push, the better it gets. Every correction becomes a rule. Every 
 ## Quick start
 
 ```bash
-git clone https://github.com/mrap/hex /tmp/hex-setup
+git clone https://github.com/mrap/hex-foundation /tmp/hex-setup
 bash /tmp/hex-setup/install.sh
 cd ~/hex && claude
 ```
 
 Your agent walks you through setup on first run. Three questions, then you're working.
 
+### Prerequisites
+
+- Python 3.9+
+- git
+- [Claude Code CLI](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code) (`claude`) — warning-only; install separately
+
+The installer also clones two companion repos into `~/.boi` and `~/.hex-events`. Versions pinned in [`VERSIONS`](./VERSIONS).
+
+### Install options
+
+```bash
+bash install.sh              # installs to ~/hex
+bash install.sh ~/my-hex     # custom location
+```
+
+To use a fork of the companions, set `HEX_BOI_REPO` and/or `HEX_EVENTS_REPO` before running install.
+
 ---
 
 ## What you get
 
-### Persistent memory
-Every session, hex saves context to files. Between sessions, it searches before guessing.
-
-- **Search:** `memory_search.py "query"` — FTS5 full-text search across all your project, people, and decision files
-- **Save:** Observations, decisions, and learnings written to the right place immediately — not summarized into a chat bubble that disappears
-- **Index:** Incremental SQLite index rebuilt on startup, rebuilt in full on checkpoint
-
-### Operating model
-CLAUDE.md ships with a battle-tested operating model:
-
-- **20 core standing orders** — search-verify-assert, persist immediately, parallel by default, plan before building, review before shipping, and 15 more
-- **Learning engine** — observes your communication style, decision patterns, work habits. Records to `me/learnings.md` with evidence and dates. Gets more accurate over time.
-- **Improvement engine** — 5 phases: detect friction patterns → log observations → propose fixes after 3+ occurrences → implement after approval → track in changelog. The system improves itself.
-
-### Session lifecycle
-hex knows where it is in every session.
-
-- **Startup** — loads priorities, today's landings, pending reflection fixes. First run triggers onboarding.
-- **Checkpoint** — distill pass, write handoff file, update landings, trigger background reflection. Use mid-session before context gets heavy.
-- **Shutdown** — quick distill, deregister session, trigger transcript backup and reflection.
-
-Context monitoring: `ACTIVE` → `WARMING` (65%) → `HOT` (80%) → `CHECKPOINT` → `FRESH`. The agent tells you when it's getting heavy.
-
-### Compounding engine
-- **Reflect** — after each session, extract learnings, identify failures, produce standing order candidates
-- **Consolidate** — daily automated pass audits the operating model for contradictions, staleness, and orphaned references
-- **Debrief** — weekly walk-through of projects, org signals, relationships, career direction
-
-### Doctor + upgrade
-- **Doctor** — validates structure, checks for missing files and stale config. Runs automatically after upgrade.
-- **Upgrade** — pulls latest system files without touching your data. Your customizations survive via zone-based CLAUDE.md merge.
-
-### Multi-agent support
-- `CLAUDE.md` — for Claude Code
-- `AGENTS.md` — for Codex, Cursor, Gemini CLI, Aider, or any agent that reads markdown
-
----
-
-## How it works
-
-The repo is the installer. Your hex instance is separate.
+After install, `~/hex/` contains:
 
 ```
-github.com/mrap/hex       ← installer (this repo)
-~/hex/                     ← your instance (not a git repo)
+~/hex/
+├── CLAUDE.md         Operating model for Claude Code (system zone + your zone)
+├── AGENTS.md         Operating model for other agents (Codex, Cursor, etc.)
+├── todo.md           Your priorities and action items
+├── me/               About you — me.md (stable), learnings.md (observed patterns)
+├── projects/         Per-project context, decisions, meetings, drafts
+├── people/           Profiles and relationship notes
+├── evolution/        Self-improvement engine — observations, suggestions, changelog
+├── landings/         Daily outcome targets
+├── raw/              Transcripts, handoffs, unprocessed input
+├── specs/            BOI spec drafts
+├── .hex/             System files (scripts, skills, memory.db) — managed
+└── .claude/commands/ Claude Code slash commands — managed
 ```
 
-Your instance has two kinds of directories:
+Companion systems installed alongside:
 
-| Directory | Owned by | Survives upgrade? |
-|-----------|----------|-------------------|
-| `.hex/` | System | Overwritten |
-| `CLAUDE.md`, `AGENTS.md` | System + you | System zone replaced, your zone preserved |
-| `me/`, `projects/`, `people/` | You | Never touched |
-| `evolution/`, `landings/`, `raw/` | You | Never touched |
-| `todo.md`, `specs/` | You | Never touched |
-
-The `.hex/` directory contains everything that runs: scripts, skills, commands, hooks, and templates. You don't edit it. When hex upgrades, only this directory gets replaced.
-
-Your data — memory, learnings, decisions, project context — lives outside `.hex/` and is never overwritten.
+- **[`~/.boi`](https://github.com/mrap/boi)** — parallel Claude Code worker dispatch
+- **[`~/.hex-events`](https://github.com/mrap/hex-events)** — reactive event policies
 
 ---
 
-## Commands
+## Core ideas
 
-| Command | What it does |
-|---------|-------------|
-| `/hex-startup` | Session init. Load priorities, landings, reflection fixes. Triggers onboarding on first run. |
-| `/hex-checkpoint` | Mid-session save. Distill pass, handoff file, landings update, background reflection. |
-| `/hex-shutdown` | Session close. Quick distill, deregister session, trigger Stop hooks. |
-| `/hex-reflect` | Session reflection. Extract learnings, identify failures, produce standing order candidates. |
-| `/hex-consolidate` | System hygiene. Audit operating model for contradictions, staleness, orphaned refs. |
-| `/hex-debrief` | Weekly debrief. Walk through projects, org signals, relationships, career. |
-| `/hex-decide` | Structured decision framework. Context, options, reasoning, impact. |
-| `/hex-triage` | Triage pending captures from `raw/`. Route to correct locations. |
-| `/hex-doctor` | Health check. Validate structure, missing files, stale config. |
-| `/hex-upgrade` | Pull latest system files. Run doctor after. |
+**Persistent memory.** Every observation, decision, and learning gets written to a file — not summarized into a chat bubble that disappears. A SQLite FTS5 index at `.hex/memory.db` makes all of it searchable.
 
----
+**Operating model.** `CLAUDE.md` ships with 20 core standing orders, a learning engine that records observations to `me/learnings.md` with evidence and dates, and an improvement engine that detects friction, proposes fixes after 3+ occurrences, and tracks what ships.
 
-## Customization
-
-CLAUDE.md has two zones:
+**Two-zone CLAUDE.md.** The system zone is managed by upgrades; your zone is preserved byte-for-byte. Add your own rules without losing them on every update.
 
 ```markdown
 <!-- hex:system-start — DO NOT EDIT BELOW THIS LINE -->
-... standing orders, lifecycle, learning engine — managed by hex
+... managed by hex
 <!-- hex:system-end -->
 
-## My Rules
-
 <!-- hex:user-start — YOUR CUSTOMIZATIONS GO HERE -->
-... your personal standing orders and preferences go here
+- Always check Jira before starting feature work
+- Prefer rebase over merge
 <!-- hex:user-end -->
 ```
 
-Add your own rules in the user zone. They survive every upgrade, byte-for-byte.
+---
 
-Example additions:
-```markdown
-<!-- hex:user-start -->
-- Always check Jira before starting work on a feature
-- When writing SQL, add an EXPLAIN before any destructive query
-- My preferred branch naming: {type}/{ticket}-{short-description}
-<!-- hex:user-end -->
-```
+## Slash commands (inside a Claude Code session)
+
+These are Claude Code slash commands, not shell CLIs. Use them inside a `claude` session running in your hex directory.
+
+| Command | What it does |
+|---------|--------------|
+| `/hex-startup` | Session init. Loads priorities, today's landings, pending reflection fixes. Triggers onboarding on first run. |
+| `/hex-checkpoint` | Mid-session save. Distill pass, handoff file, landings update. |
+| `/hex-shutdown` | Session close. Quick distill, deregister session. |
+| `/hex-reflect` | Session reflection. Extract learnings, identify failures, propose standing order candidates. |
+| `/hex-consolidate` | System hygiene. Audit operating model for contradictions, staleness, orphaned refs. |
+| `/hex-debrief` | Weekly walk-through of projects, org signals, relationships, career. |
+| `/hex-decide` | Structured decision framework — context, options, reasoning, impact. |
+| `/hex-triage` | Route untriaged content from `raw/` to the right files. |
+| `/hex-doctor` | Health check. Validate structure, missing files, stale config. |
+| `/hex-upgrade` | Pull latest system files from hex-foundation. Runs doctor after. |
 
 ---
 
 ## Upgrading
 
+Inside your hex instance directory:
+
 ```bash
-hex upgrade
+bash .hex/scripts/upgrade.sh
 ```
-
-What it does:
-1. Backs up `.hex/` to `.hex-upgrade-backup-YYYYMMDD/`
-2. Fetches latest system files
-3. Replaces `.hex/` and the system zone of `CLAUDE.md`
-4. Preserves your user zone in `CLAUDE.md`
-5. Runs `hex doctor`
-6. Prints what changed
-
-Your data is never touched. Rollback: restore from the backup directory.
 
 Options:
-- `hex upgrade --dry-run` — show what would change without changing it
-- `hex upgrade --skip-boi` — skip BOI upgrade
-- `hex upgrade --skip-events` — skip hex-events upgrade
+
+- `--dry-run` — show what would change
+- `--skip-boi` / `--skip-events` — skip a companion
+
+What it does:
+
+1. Backs up `.hex/` to `.hex-upgrade-backup-YYYYMMDD/`
+2. Fetches the latest `hex-foundation` release
+3. Replaces `.hex/` (preserving `memory.db`)
+4. Merges `CLAUDE.md`: system zone replaced, user zone preserved
+5. Runs `doctor.sh`
+
+Your data (`me/`, `projects/`, `people/`, `evolution/`, `landings/`, `raw/`, `todo.md`) is never touched.
+
+You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 
 ---
 
-## Requirements
+## Multi-agent support
 
-- Python 3.10+
-- git
-- Claude Code CLI (`claude`)
-
-Install script checks Python and git, exits with guidance if missing. Warns (non-blocking) if `claude` isn't found.
+`AGENTS.md` ships for Codex, Cursor, Gemini CLI, Aider, or any agent that reads a markdown operating-model file. Slash commands are Claude Code-specific.
 
 ---
 
-## Install options
+## Project layout (this repo)
 
-```bash
-# Default: installs to ~/hex/
-bash install.sh
-
-# Custom location
-bash install.sh ~/my-hex
-
-# Skip companion systems
-bash install.sh --no-boi --no-events
+```
+hex-foundation/
+├── install.sh           Single install entrypoint
+├── VERSIONS             Pinned boi / hex-events versions
+├── system/              → becomes ~/hex/.hex/ on install
+│   ├── scripts/         startup.sh, doctor.sh, upgrade.sh, today.sh
+│   ├── commands/        → copied to ~/hex/.claude/commands/ (Claude Code slash commands)
+│   ├── skills/memory/   memory_index.py, memory_save.py, memory_search.py
+│   └── version.txt
+├── templates/           Seeds for CLAUDE.md, AGENTS.md, me.md, todo.md, etc.
+├── docs/architecture.md System overview
+└── tests/               E2E, full-stack, and memory tests
 ```
 
-No interactive prompts during install. All interaction happens in your first Claude Code session.
+---
+
+## Roadmap
+
+v0.1.0 is the foundation release. Next up:
+
+- Hooks pack: transcript backup, reflection dispatch
+- Session lifecycle automation (warming → hot → checkpoint transitions)
+- More skills (landings, triage, debrief) split out of CLAUDE.md
+
+Open an issue or PR — the system is meant to evolve.
+
+---
+
+## License
+
+MIT. See [LICENSE](./LICENSE).
