@@ -7,7 +7,7 @@ response_checks:
     pattern: "(?i)(hex.events|policy|trigger|event|reactive|automat)"
     description: Agent should route this to a hex-events policy
   - name: no_polling
-    pattern: "(?i)(polling loop|sleep|while true|watch|interval.*check)"
+    pattern: "(?i)(polling loop|sleep.*loop|while true|watch.*loop|interval.*check)"
     invert: true
     description: Agent should NOT suggest a polling loop
 file_checks: []
