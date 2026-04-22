@@ -113,7 +113,12 @@ def main():
         return 0
 
     # 5. Compile event policies
-    compiled = compile_mod.compile_policies(bundle_dir, name, policies_dir)
+    try:
+        compiled = compile_mod.compile_policies(bundle_dir, name, policies_dir)
+    except compile_mod.CompileError as e:
+        print(f"[install] ERROR: {e}", file=sys.stderr)
+        emit("hex.integration.installed.fail", {"name": name, "reason": "compile_error"})
+        return 1
     log(f"Compiled {len(compiled)} policy file(s)")
 
     # 6. Create symlink: .hex/scripts/integrations/<name>.sh -> ../../../integrations/<name>/probe.sh

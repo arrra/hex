@@ -1,16 +1,18 @@
-"""Compile bundle event policy templates into ~/.hex-events/policies/."""
+"""Compile bundle event policies via hex-events CLI."""
 import os
-import shutil
-import tempfile
-from datetime import datetime, timezone
+import subprocess
+import sys
 
 
-GENERATED_HEADER = "# generated_from: {source}\n# installed_at: {ts}\n"
+HEX_EVENTS_CLI = os.path.expanduser("~/.hex-events/hex_events_cli.py")
 GENERATED_MARKER = "# generated_from:"
 
 
+class CompileError(Exception):
+    pass
+
+
 def _policy_stem(source_path: str) -> str:
-    """Extract stem from events/<stem>.yaml path."""
     return os.path.splitext(os.path.basename(source_path))[0]
 
 
@@ -25,73 +27,34 @@ def compile_policies(
     dry_run: bool = False,
 ) -> list[str]:
     """
-    Compile all events/*.yaml from bundle_dir into policies_dir.
-    Returns list of output policy file paths written (or would-be written on dry_run).
-    Idempotent: skips unchanged files.
+    Compile all events/*.yaml in bundle_dir via `hex-events compile`.
+    Returns list of output policy file paths written.
+    Raises CompileError on compile failure.
     """
-    events_dir = os.path.join(bundle_dir, "events")
-    if not os.path.isdir(events_dir):
-        return []
+    cmd = [sys.executable, HEX_EVENTS_CLI, "compile", bundle_dir]
+    if dry_run:
+        cmd.append("--dry-run")
 
-    os.makedirs(policies_dir, exist_ok=True)
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    # Always surface compile output so the user sees check failures
+    if result.stderr:
+        print(result.stderr, file=sys.stderr, end="")
+    if result.stdout:
+        print(result.stdout, file=sys.stderr, end="")
+
+    if result.returncode != 0:
+        raise CompileError(
+            f"hex-events compile failed (exit {result.returncode})"
+        )
+
+    # Parse "  compiled: <abs-path>" lines from stdout
     written: list[str] = []
-    ts = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-
-    for fname in sorted(os.listdir(events_dir)):
-        if not fname.endswith(".yaml"):
-            continue
-        stem = _policy_stem(fname)
-        source_rel = f"integrations/{bundle_name}/events/{fname}"
-        out_name = _output_name(bundle_name, stem)
-        out_path = os.path.join(policies_dir, out_name)
-        src_path = os.path.join(events_dir, fname)
-
-        with open(src_path) as f:
-            body = f.read()
-
-        header = GENERATED_HEADER.format(source=source_rel, ts=ts)
-        # Strip any existing generated header from body (idempotency)
-        lines = body.splitlines(keepends=True)
-        body_lines = []
-        for line in lines:
-            if line.startswith("# generated_from:") or line.startswith("# installed_at:"):
-                continue
-            body_lines.append(line)
-        new_content = header + "".join(body_lines)
-
-        # Check if existing file already has same body (ignoring header ts)
-        if os.path.isfile(out_path):
-            with open(out_path) as f:
-                existing = f.read()
-            # Compare body content, ignoring installed_at timestamp differences
-            existing_body = _strip_header(existing)
-            new_body = _strip_header(new_content)
-            if existing_body == new_body:
-                continue  # No change
-
-        if not dry_run:
-            # Atomic write: write to .tmp then mv
-            tmp_path = out_path + ".tmp"
-            try:
-                with open(tmp_path, "w") as f:
-                    f.write(new_content)
-                os.replace(tmp_path, out_path)
-            finally:
-                if os.path.exists(tmp_path):
-                    os.unlink(tmp_path)
-
-        written.append(out_path)
+    for line in result.stdout.splitlines():
+        if line.startswith("  compiled: "):
+            written.append(line[len("  compiled: "):].strip())
 
     return written
-
-
-def _strip_header(content: str) -> str:
-    """Remove generated header lines for comparison."""
-    lines = content.splitlines(keepends=True)
-    return "".join(
-        line for line in lines
-        if not line.startswith("# generated_from:") and not line.startswith("# installed_at:")
-    )
 
 
 def list_compiled_policies(bundle_name: str, policies_dir: str) -> list[str]:

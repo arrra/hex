@@ -75,7 +75,12 @@ def main():
         return 0
 
     # 3. Re-compile all policies (atomic)
-    compiled = compile_mod.compile_policies(bundle_dir, name, policies_dir)
+    try:
+        compiled = compile_mod.compile_policies(bundle_dir, name, policies_dir)
+    except compile_mod.CompileError as e:
+        print(f"[update] ERROR: {e}", file=sys.stderr)
+        emit("hex.integration.updated.fail", {"name": name, "reason": "compile_error"})
+        return 1
     log(f"Compiled {len(compiled)} policy file(s)")
 
     # Refresh probe symlink
