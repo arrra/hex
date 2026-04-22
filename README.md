@@ -10,9 +10,7 @@ A minimal, installable template for the hex agent system — a persistent AI wor
 ## Quick start
 
 ```bash
-git clone https://github.com/mrap/hex-foundation /tmp/hex-setup
-bash /tmp/hex-setup/install.sh
-cd ~/hex && claude
+git clone https://github.com/mrap/hex-foundation /tmp/hex-setup && bash /tmp/hex-setup/install.sh && cd ~/hex && claude
 ```
 
 Your agent walks you through setup on first run. Three questions, then you're working.
