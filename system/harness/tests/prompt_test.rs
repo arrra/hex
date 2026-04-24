@@ -85,6 +85,36 @@ fn test_assessment_prompt_structure() {
 }
 
 #[test]
+fn test_prompt_includes_live_messaging_guidance() {
+    let state = hex_agent::state::initialize("test", 2.0);
+    let p = prompt::build("id: test", &state, "manual", "{}", None, None);
+    assert!(
+        p.contains("response_requested"),
+        "prompt must teach agents about response_requested field"
+    );
+    assert!(
+        p.contains("wake the target agent immediately"),
+        "prompt must explain that response_requested triggers a live wake"
+    );
+    assert!(
+        p.contains("Do not park work waiting for an agent reply"),
+        "prompt must discourage parking when live wake is available"
+    );
+}
+
+#[test]
+fn test_prompt_message_schema_includes_response_requested() {
+    let state = hex_agent::state::initialize("test", 2.0);
+    let p = prompt::build("id: test", &state, "manual", "{}", None, None);
+    let msg_schema_region = p.find("outbound_messages").expect("must have outbound_messages in schema");
+    let after_schema = &p[msg_schema_region..];
+    assert!(
+        after_schema.contains("response_requested"),
+        "response schema example must show response_requested field"
+    );
+}
+
+#[test]
 fn test_assessment_prompt_shows_cadence_overrides() {
     let charter = hex_agent::charter::load_from_str(
         "id: test\nname: Test Bot\nrole: Test role\nwake:\n  triggers: []\n  responsibilities:\n    - name: task-a\n      interval: 3600\n      description: Do task A\nauthority:\n  green: []\n  yellow: []\n  red: []\nbudget:\n  wakes_per_hour: 10\n  usd_per_day: 1\n  usd_per_shift: 0.5\nkill_switch: /tmp/test-halt"

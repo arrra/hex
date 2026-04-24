@@ -106,6 +106,28 @@ Each trail entry must have `type` and `detail` fields. Required detail fields pe
 | reframe | abandoned, reason, new_framing |
 | message_sent | to, subject, body |
 
+## Messaging other agents
+
+Send messages via `outbound_messages`. Each message has these fields:
+
+```json
+{{
+  "to": "agent-id",
+  "subject": "...",
+  "body": "...",
+  "response_requested": true
+}}
+```
+
+**When you need a reply to proceed, set `response_requested: true`.** The harness will wake the target agent immediately so they can read your message and respond in the same cycle. Use this for:
+- Reviews/sign-offs you're blocked on (e.g. security review, release approval)
+- Questions where the answer determines your next action
+- Collaboration that needs a back-and-forth
+
+If you're just informing another agent (status update, FYI), leave `response_requested: false` — they'll see it on their next scheduled wake.
+
+**Do not park work waiting for an agent reply when you could wake them now.** Moving items to blocked and hoping the other agent wakes up is the slow path. `response_requested: true` is the fast path.
+
 ## Response format
 
 Return a single JSON object (AgentResponse) with exactly these fields:
@@ -122,7 +144,9 @@ Return a single JSON object (AgentResponse) with exactly these fields:
     "parked": []
   }},
   "memory_updates": {{"key": "value"}},
-  "outbound_messages": [],
+  "outbound_messages": [
+    {{"to": "agent-id", "subject": "...", "body": "...", "response_requested": false}}
+  ],
   "active_drained": true
 }}
 ```
