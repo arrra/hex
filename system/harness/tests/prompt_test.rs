@@ -115,6 +115,21 @@ fn test_prompt_message_schema_includes_response_requested() {
 }
 
 #[test]
+fn test_principles_live_collaboration_injected() {
+    let state = hex_agent::state::initialize("test", 2.0);
+    let principles = "## Live Collaboration by Default\n\nWhen you send a message to another agent, default to response_requested: true.";
+    let p = prompt::build("id: test", &state, "manual", "{}", Some(principles), None);
+    assert!(
+        p.contains("Live Collaboration by Default"),
+        "principles with live collaboration guidance must appear in prompt"
+    );
+    assert!(
+        p.contains("default to response_requested: true"),
+        "live collaboration principle must specify response_requested: true as default"
+    );
+}
+
+#[test]
 fn test_assessment_prompt_shows_cadence_overrides() {
     let charter = hex_agent::charter::load_from_str(
         "id: test\nname: Test Bot\nrole: Test role\nwake:\n  triggers: []\n  responsibilities:\n    - name: task-a\n      interval: 3600\n      description: Do task A\nauthority:\n  green: []\n  yellow: []\n  red: []\nbudget:\n  wakes_per_hour: 10\n  usd_per_day: 1\n  usd_per_shift: 0.5\nkill_switch: /tmp/test-halt"
