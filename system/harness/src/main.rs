@@ -504,7 +504,14 @@ fn main() {
                 sent_at: chrono::Utc::now(),
             };
             match hex_agent::message::send(&msg_dir, &msg) {
-                Ok(()) => println!("Sent message '{}' from {} to {}", subject, from, to),
+                Ok(()) => {
+                    println!("Sent message '{}' from {} to {}", subject, from, to);
+                    if response_requested {
+                        let audit_dir = hex_dir.join(".hex/audit");
+                        wake::auto_wake_target(&hex_dir, &to, &from, &audit_dir);
+                        println!("Auto-waking {} for live response", to);
+                    }
+                }
                 Err(e) => {
                     eprintln!("Failed to send message: {e}");
                     std::process::exit(1);

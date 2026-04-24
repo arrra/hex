@@ -335,6 +335,9 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
                             "subject": msg.subject,
                         }),
                     );
+                    if msg.response_requested {
+                        auto_wake_target(hex_dir, &msg.to, &config.agent_id, &audit_dir);
+                    }
                 }
                 Err(e) => {
                     eprintln!(
@@ -508,6 +511,67 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     );
 
     Ok(0)
+}
+
+/// Spawn a background wake for a target agent when response_requested is true.
+/// Fire-and-forget: the current wake doesn't block on the target's wake.
+pub fn auto_wake_target(hex_dir: &Path, target_id: &str, sender_id: &str, audit_dir: &Path) {
+    let charter_path = hex_dir.join(format!("projects/{}/charter.yaml", target_id));
+    if !charter_path.exists() {
+        eprintln!(
+            "[{}] SKIP auto-wake: target '{}' has no charter",
+            sender_id, target_id
+        );
+        return;
+    }
+    let binary = hex_dir.join(".hex/bin/hex-agent");
+    if !binary.exists() {
+        eprintln!(
+            "[{}] SKIP auto-wake: hex-agent binary not found at {}",
+            sender_id,
+            binary.display()
+        );
+        return;
+    }
+    let trigger = format!("inbox-from-{}", sender_id);
+    match std::process::Command::new(&binary)
+        .arg("wake")
+        .arg(target_id)
+        .arg("--trigger")
+        .arg(&trigger)
+        .env("HEX_DIR", hex_dir)
+        .stdin(std::process::Stdio::null())
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .spawn()
+    {
+        Ok(_) => {
+            audit::append(
+                audit_dir,
+                sender_id,
+                "auto-wake-spawned",
+                &serde_json::json!({
+                    "target": target_id,
+                    "trigger": trigger,
+                }),
+            );
+        }
+        Err(e) => {
+            eprintln!(
+                "[{}] auto-wake FAILED for '{}': {e}",
+                sender_id, target_id
+            );
+            audit::append(
+                audit_dir,
+                sender_id,
+                "auto-wake-failed",
+                &serde_json::json!({
+                    "target": target_id,
+                    "error": e.to_string(),
+                }),
+            );
+        }
+    }
 }
 
 pub fn compute_action_hash(agent_id: &str, trail_type: &str, detail: &serde_json::Value) -> String {
