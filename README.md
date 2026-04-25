@@ -30,6 +30,7 @@ Full guide: [docs/migrate-v1-to-v2.md](./docs/migrate-v1-to-v2.md).
 - Python 3.9+
 - git
 - [Claude Code CLI](https://docs.anthropic.com/en/docs/agents-and-tools/claude-code) (`claude`) — warning-only; install separately
+- Rust / cargo ([rustup.rs](https://rustup.rs)) — required to build the hex-agent harness from source; without it, install attempts a pre-built binary download (fails hard if neither works)
 
 The installer also clones two companion repos into `~/.boi` and `~/.hex-events`. Versions pinned in [`VERSIONS`](./VERSIONS).
 
@@ -144,6 +145,22 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 ## Multi-agent support
 
 `AGENTS.md` ships for Codex, Cursor, Gemini CLI, Aider, or any agent that reads a markdown operating-model file. Slash commands are Claude Code-specific.
+
+---
+
+## Architecture
+
+hex-agent (the multi-agent harness) is **core infrastructure**, not optional.
+It drives all agent wakes, fleet management, cost tracking, gate validation,
+and initiative execution. Without it, hex is a collection of scripts with
+no orchestration.
+
+Requirements: Rust toolchain (for building from source) or a supported
+platform for pre-built binaries (macOS arm64/x86_64, Linux x86_64).
+
+The harness binary is built or downloaded automatically by `install.sh`. Install
+will **fail with an error** if the harness cannot be built or downloaded — it
+does not silently continue without it. This is required, not optional.
 
 ---
 

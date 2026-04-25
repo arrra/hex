@@ -720,6 +720,86 @@ if [ -f "$HEX_DOTDIR/scripts/doctor.sh" ]; then
   fi
 fi
 
+# ─── Step 4d: Rebuild harness if source changed ─────────────────────────────
+header "4d. Harness (hex-agent)"
+
+_upgrade_harness_build_from_source() {
+    local src_harness="$SOURCE_DIR/system/harness"
+    if [ ! -d "$src_harness" ]; then
+        return 1
+    fi
+    info "Building hex-agent from source..."
+    ( cd "$src_harness" && cargo build --release 2>&1 | while IFS= read -r line; do info "  $line"; done ) || return 1
+    cp "$src_harness/target/release/hex-agent" "$HEX_DOTDIR/bin/hex-agent.tmp"
+    mv "$HEX_DOTDIR/bin/hex-agent.tmp" "$HEX_DOTDIR/bin/hex-agent"
+    chmod +x "$HEX_DOTDIR/bin/hex-agent"
+}
+
+_upgrade_harness_download_prebuilt() {
+    local arch os version harness_url
+    arch=$(uname -m)
+    os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    version=$(grep "^HARNESS_VERSION=" "$SOURCE_DIR/VERSIONS" 2>/dev/null | cut -d= -f2 || echo "")
+    if [ -z "$version" ]; then
+        warn "HARNESS_VERSION not found in $SOURCE_DIR/VERSIONS — cannot download"
+        return 1
+    fi
+    harness_url="https://github.com/mrap/hex-foundation/releases/download/${version}/hex-agent-${os}-${arch}"
+    info "Downloading hex-agent ${version} from ${harness_url}..."
+    curl -fSL "$harness_url" -o "$HEX_DOTDIR/bin/hex-agent.tmp" || return 1
+    mv "$HEX_DOTDIR/bin/hex-agent.tmp" "$HEX_DOTDIR/bin/hex-agent"
+    chmod +x "$HEX_DOTDIR/bin/hex-agent"
+}
+
+mkdir -p "$HEX_DOTDIR/bin"
+
+HARNESS_NEEDS_REBUILD=false
+HARNESS_BINARY="$HEX_DOTDIR/bin/hex-agent"
+
+if [ ! -f "$HARNESS_BINARY" ]; then
+    HARNESS_NEEDS_REBUILD=true
+    info "hex-agent binary not found — installing..."
+elif [ -d "$SOURCE_DIR/system/harness/src" ]; then
+    while IFS= read -r src_file; do
+        if [ "$src_file" -nt "$HARNESS_BINARY" ]; then
+            HARNESS_NEEDS_REBUILD=true
+            info "Source newer than binary: $(basename "$src_file")"
+            break
+        fi
+    done < <(find "$SOURCE_DIR/system/harness/src" -name "*.rs" -type f 2>/dev/null)
+fi
+
+if $HARNESS_NEEDS_REBUILD; then
+    if $DRY_RUN; then
+        info "[dry-run] Would rebuild or re-download hex-agent harness"
+    else
+        rebuild_ok=false
+        if command -v cargo &>/dev/null; then
+            if _upgrade_harness_build_from_source; then
+                pass "hex-agent rebuilt from source"
+                rebuild_ok=true
+            else
+                warn "Build failed — trying pre-built binary download..."
+            fi
+        else
+            info "cargo not found — trying pre-built binary download..."
+        fi
+        if ! $rebuild_ok; then
+            if _upgrade_harness_download_prebuilt; then
+                pass "hex-agent downloaded (pre-built)"
+            else
+                warn "Could not rebuild or download hex-agent harness."
+                warn "Existing binary preserved. To fix: install Rust (https://rustup.rs)"
+                warn "and re-run upgrade, or download manually from"
+                warn "https://github.com/mrap/hex-foundation/releases"
+                COMPONENT_WARNINGS=$((COMPONENT_WARNINGS + 1))
+            fi
+        fi
+    fi
+else
+    pass "hex-agent harness up to date"
+fi
+
 # ─── Record upgrade SHA (for update notifications) ───────────────────────────
 # Write last_remote_sha to upgrade.json so check-update.sh knows our baseline.
 # Works for both remote upgrades (CACHE_DIR) and --local upgrades (LOCAL_PATH).

@@ -235,7 +235,7 @@ build_heavy() {
 
     # upgrade.json
     write_file "$root/.claude/upgrade.json" \
-        '{"repo": "https://github.com/mrap/hex-foundation.git", "last_upgrade": "2026-01-01"}'
+        '{"repo": "https://github.com/example/hex-foundation.git", "last_upgrade": "2026-01-01"}'
 
     # statusline.sh
     write_file "$root/.claude/statusline.sh" \

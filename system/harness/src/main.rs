@@ -80,7 +80,7 @@ fn get_hex_dir() -> PathBuf {
         eprintln!("ERROR: neither HEX_DIR nor HOME is set");
         std::process::exit(1);
     });
-    let p = PathBuf::from(&home).join("mrap-hex");
+    let p = PathBuf::from(&home).join("hex");
     if !p.join("CLAUDE.md").exists() {
         eprintln!(
             "ERROR: default hex dir {} does not contain CLAUDE.md — set HEX_DIR explicitly",

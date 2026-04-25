@@ -13,10 +13,10 @@ Reusable local web form for ingesting API keys, tokens, and key files into hex.
 
 ## When to Use
 
-- Mike wants to add credentials for a new service or institution
+- Adding credentials for a new service or institution
 - Rotating or updating existing API keys
 - Onboarding a new integration that needs secrets
-- Any time secrets need to get from Mike's browser into `.hex/secrets/`
+- Any time secrets need to get from a browser into `.hex/secrets/`
 
 ## How to Start
 
@@ -24,7 +24,7 @@ Reusable local web form for ingesting API keys, tokens, and key files into hex.
 bash $AGENT_DIR/.hex/skills/secret-intake/scripts/start.sh
 ```
 
-Then give Mike the Tailscale URL: `https://mac-mini.tailbd5748.ts.net/secrets`
+Then give the user the Tailscale URL: `https://<your-tailscale-hostname>/secrets`
 
 The server runs on `:9877` locally. hex-router fronts it at `/secrets` with TLS via Tailscale Serve.
 
@@ -74,7 +74,7 @@ bash $AGENT_DIR/.hex/skills/secret-intake/scripts/stop.sh
 The intake server is plain HTTP on `:9877`. hex-router (`:8880`) proxies `/secrets` → `:9877` with prefix stripping. Tailscale Serve fronts hex-router on `:443` with TLS.
 
 ```
-Browser → https://mac-mini.tailbd5748.ts.net/secrets
+Browser → https://<your-tailscale-hostname>/secrets
        → Tailscale Serve (TLS termination)
        → hex-router :8880 /secrets → strip prefix → :9877 /
        → secret-intake server (plain HTTP)
@@ -85,4 +85,4 @@ Browser → https://mac-mini.tailbd5748.ts.net/secrets
 | Env var | Default | What it does |
 |---------|---------|-------------|
 | `PORT` | `9877` | Server listen port |
-| `HEX_DIR` | `/Users/mrap/mrap-hex` | Hex root directory |
+| `HEX_DIR` | `$AGENT_DIR` | Hex root directory |

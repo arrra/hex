@@ -116,9 +116,9 @@ fi
 bold "── hex-agent-spawn.sh ──"
 SPAWN_SCRIPT="$INSTALL_DIR/.hex/scripts/hex-agent-spawn.sh"
 if [ -f "$SPAWN_SCRIPT" ]; then
-  if grep -q '/Users/mrap' "$SPAWN_SCRIPT"; then
-    assert_fail "hex-agent-spawn.sh still contains hardcoded /Users/mrap paths"
-    grep '/Users/mrap' "$SPAWN_SCRIPT" | head -3
+  if grep -q "$HOME" "$SPAWN_SCRIPT"; then
+    assert_fail "hex-agent-spawn.sh still contains hardcoded home path ($HOME)"
+    grep "$HOME" "$SPAWN_SCRIPT" | head -3
   else
     assert_pass "hex-agent-spawn.sh has no hardcoded user paths"
   fi

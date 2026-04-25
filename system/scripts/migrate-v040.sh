@@ -3,7 +3,7 @@
 #
 # Fixes generated files that reference old patterns:
 #   1. .hex/env.sh → .hex/scripts/env.sh (env.sh moved)
-#   2. Hardcoded /Users/<user>/<dir> in wake scripts → $HEX_DIR-relative
+#   2. Hardcoded absolute paths in wake scripts (e.g. $HOME/<dir>) → $HEX_DIR-relative
 #   3. Old hex_events_cli.py path refs → hex-events binary
 #   4. Old bash ~/.boi/boi refs → boi binary
 #
@@ -105,14 +105,14 @@ done < <(
 # ── 3. Fix wake scripts: hardcoded user paths ────────────────────────────────
 bold "3. Hardcoded user paths in wake scripts"
 
-# Detect the user's home dir pattern (e.g., /Users/mrap or /home/user)
+# Detect the user's home dir pattern
 USER_HOME="$HOME"
 
 while IFS= read -r wake_script; do
   [ -f "$wake_script" ] || continue
   basename_ws="$(basename "$wake_script")"
 
-  # Check for hardcoded HEX_DIR assignments like HEX_DIR="/Users/mrap/mrap-hex"
+  # Check for hardcoded HEX_DIR assignments like HEX_DIR="$HOME/hex"
   if grep -q "^HEX_DIR=\"${HEX_DIR}\"" "$wake_script" 2>/dev/null; then
     sed -i '' "s|^HEX_DIR=\"${HEX_DIR}\"|HEX_DIR=\"\${HEX_DIR:-${HEX_DIR}}\"|g" "$wake_script" 2>/dev/null || \
     sed -i "s|^HEX_DIR=\"${HEX_DIR}\"|HEX_DIR=\"\${HEX_DIR:-${HEX_DIR}}\"|g" "$wake_script" 2>/dev/null

@@ -8,7 +8,7 @@ PORT="${PORT:-9877}"
 
 if [ -f "$PIDFILE" ] && kill -0 "$(cat "$PIDFILE")" 2>/dev/null; then
   echo "Already running (pid $(cat "$PIDFILE")) on :$PORT"
-  echo "https://mac-mini.tailbd5748.ts.net:$PORT"
+  echo "https://${HEX_HOST:-localhost}:$PORT"
   exit 0
 fi
 
@@ -19,7 +19,7 @@ echo "$PID" > "$PIDFILE"
 sleep 0.5
 if kill -0 "$PID" 2>/dev/null; then
   echo "secret-intake running (pid $PID) on :$PORT"
-  echo "https://mac-mini.tailbd5748.ts.net:$PORT"
+  echo "https://${HEX_HOST:-localhost}:$PORT"
 else
   echo "ERR: server failed to start" >&2
   rm -f "$PIDFILE"

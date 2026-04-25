@@ -1,0 +1,36 @@
+name: nightly-consolidation
+description: "Deterministic nightly consolidation — no LLM. Dedup, stale refs, memory reindex, health checks."
+standing_orders: []
+reflection_ids: []
+
+provides:
+  events:
+    - hex.consolidation.clean
+    - hex.consolidation.issues_found
+
+requires:
+  events:
+    - timer.tick.daily
+
+rate_limit:
+  max_fires: 1
+  window: 20h
+
+rules:
+  - name: run-consolidation
+    trigger:
+      event: timer.tick.daily
+    actions:
+      - type: shell
+        command: |
+          AGENT_DIR="${AGENT_DIR:-$HOME/hex}"
+          bash "$AGENT_DIR/.hex/scripts/consolidate.sh"
+        timeout: 120
+        on_success:
+          - type: emit
+            event: hex.consolidation.clean
+            source: "hex:consolidation"
+        on_failure:
+          - type: emit
+            event: hex.consolidation.issues_found
+            source: "hex:consolidation"

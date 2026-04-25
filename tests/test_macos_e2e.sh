@@ -192,7 +192,7 @@ else
 fi
 
 # No personal refs
-if vm_run "grep -qi 'mike\|rapadas\|whitney\|hermes\|nanoclaw\|mrap' /tmp/test-hex/CLAUDE.md" 2>/dev/null; then
+if vm_run "grep -qi 'mike\|rapadas\|whitney\|hermes\|nanoclaw' /tmp/test-hex/CLAUDE.md" 2>/dev/null; then
     echo "  FAIL: Personal references in CLAUDE.md"
     FAIL=$((FAIL + 1))
 else

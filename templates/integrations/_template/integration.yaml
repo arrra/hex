@@ -1,7 +1,7 @@
 # ─── Identity ────────────────────────────────────────────────────────────────
 name: REPLACE_ME
 description: One-line description of this integration
-owner: mike
+owner: your-name
 tier: standard           # critical | standard | slow
 version: "1.0"
 

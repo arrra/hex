@@ -2,7 +2,7 @@
 
 **Integration:** REPLACE_ME
 **Tier:** standard
-**Owner:** mike
+**Owner:** your-name
 **Bundle:** `integrations/REPLACE_ME/`
 
 ---

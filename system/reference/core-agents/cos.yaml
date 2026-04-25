@@ -68,6 +68,6 @@ hooks:
   on_act: null
   on_verify: null
 
-escalation_channel: "#from-mrap-hex"
+escalation_channel: "${HEX_CHANNEL:-#hex-main}"
 kill_switch: ~/.hex-cos-HALT
 core: true

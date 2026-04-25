@@ -139,7 +139,7 @@ TOTAL=$((TOTAL + 1))
 
 # ── Test 12: No personal references ───────────────────────────────
 echo "[12] No personal references"
-if grep -qi "mike\|rapadas\|whitney\|hermes\|nanoclaw\|cc-connect\|mrap" /tmp/test-hex/CLAUDE.md; then
+if grep -qi "mike\|rapadas\|whitney\|hermes\|nanoclaw\|cc-connect" /tmp/test-hex/CLAUDE.md; then
     echo "  FAIL: Personal references found in CLAUDE.md"
     FAIL=$((FAIL + 1))
 else

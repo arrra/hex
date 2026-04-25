@@ -70,7 +70,7 @@ wake:
       description: >
         Generate weekly BOI health report: KPI trends, experiments run,
         improvements landed, cost savings, top remaining bottlenecks.
-        Post summary to #from-mrap-hex.
+        Post summary to ${HEX_CHANNEL:-#hex-main}.
 
 authority:
   green:
@@ -108,6 +108,6 @@ hooks:
   on_act: null
   on_verify: null
 
-escalation_channel: "#from-mrap-hex"
+escalation_channel: "${HEX_CHANNEL:-#hex-main}"
 kill_switch: ~/.hex-boi-optimizer-HALT
 core: true

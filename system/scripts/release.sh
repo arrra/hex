@@ -91,8 +91,16 @@ else
   fi
 fi
 
-# ── Gate 3: Ahead of remote ─────────────────────────────────────────────────
-bold "Gate 3: Commits to push"
+# ── Gate 3: Sanitize check ──────────────────────────────────────────────────
+bold "Gate 3: Sanitize check"
+if bash "$SCRIPT_DIR/sanitize-check.sh" 2>&1; then
+  green "  No personalization violations ✓"
+else
+  gate_fail "personalization violations found — run 'bash system/scripts/sanitize-check.sh --verbose' for details"
+fi
+
+# ── Gate 4: Ahead of remote ─────────────────────────────────────────────────
+bold "Gate 4: Commits to push"
 REMOTE_SHA=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
 if [ "$FULL_SHA" = "$REMOTE_SHA" ]; then
   green "  Already up to date — nothing to push"
@@ -116,7 +124,7 @@ fi
 
 # ── Sentinel notification ────────────────────────────────────────────────────
 bold "Notify: Sentinel"
-HEX_AGENT="${HEX_DIR:-$HOME/mrap-hex}/.hex/bin/hex-agent"
+HEX_AGENT="${AGENT_DIR:-$HOME/hex}/.hex/bin/hex-agent"
 if [ -x "$HEX_AGENT" ]; then
   "$HEX_AGENT" message hex-main sentinel \
     --subject "REVIEW REQUEST: hex-foundation $VERSION ($SHA)" \

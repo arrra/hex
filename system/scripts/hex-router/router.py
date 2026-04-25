@@ -1,12 +1,12 @@
 """
 hex-router — tiny path-routing reverse proxy for named local services.
 
-Runs on 127.0.0.1:7000. Tailscale Serve fronts it on :443 so users get:
-  https://mac-mini.tailbd5748.ts.net/ui        → hex-ui MVP
-  https://mac-mini.tailbd5748.ts.net/boi       → BOI live status
-  https://mac-mini.tailbd5748.ts.net/visions   → UX vision pitch site
-  https://mac-mini.tailbd5748.ts.net/demos     → demos page
-  https://mac-mini.tailbd5748.ts.net/          → landing page
+Runs on 127.0.0.1:7000. Tailscale Serve (or any reverse proxy) fronts it on :443 so users get:
+  https://<your-host>/ui        → hex-ui MVP
+  https://<your-host>/boi       → BOI live status
+  https://<your-host>/visions   → UX vision pitch site
+  https://<your-host>/demos     → demos page
+  https://<your-host>/          → landing page
 
 To add a new named service, add an entry to ROUTES.
 """
@@ -78,7 +78,7 @@ footer { margin-top: 1.5rem; font-family: "SF Mono", Menlo, Consolas, monospace;
 </head><body>
 <main>
   <h1><span>▶</span> hex — local services</h1>
-  <p>Named paths for the services running on the mac-mini. Add more by editing <code>hex-router/router.py</code>.</p>
+  <p>Named paths for the services running on this host. Add more by editing <code>hex-router/router.py</code>.</p>
   <div class="list">
     <a class="row" href="/ui/">        <span class="name">/ui</span>      <span class="desc">hex-ui MVP (Morning Anchor, conversation)</span> <span class="arrow">→</span></a>
     <a class="row" href="/boi">        <span class="name">/boi</span>     <span class="desc">BOI live status — running specs, progress, queue</span> <span class="arrow">→</span></a>

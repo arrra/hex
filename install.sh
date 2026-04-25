@@ -119,6 +119,73 @@ ln -sfn ../.hex/skills "$TARGET_DIR/.agents/skills"
 # Seed optional configs doctor expects. Defaults are safe and overridable later.
 echo '{}' > "$TARGET_DIR/.hex/settings.json"
 
+# Copy hook scripts and configure Claude Code hooks in .claude/settings.json
+HOOKS_MANIFEST="$SCRIPT_DIR/system/hooks/required-hooks.json"
+if [ -d "$SCRIPT_DIR/system/hooks/scripts" ]; then
+    mkdir -p "$TARGET_DIR/.hex/hooks/scripts"
+    cp "$SCRIPT_DIR/system/hooks/scripts/"* "$TARGET_DIR/.hex/hooks/scripts/" 2>/dev/null || true
+    chmod +x "$TARGET_DIR/.hex/hooks/scripts/"*.sh 2>/dev/null || true
+fi
+if [ -f "$HOOKS_MANIFEST" ]; then
+    mkdir -p "$TARGET_DIR/.claude"
+    MANIFEST_PATH="$HOOKS_MANIFEST" SETTINGS_PATH="$TARGET_DIR/.claude/settings.json" python3 << 'PYEOF'
+import json, os
+
+manifest_path = os.environ['MANIFEST_PATH']
+settings_path = os.environ['SETTINGS_PATH']
+
+with open(manifest_path) as f:
+    manifest = json.load(f)
+
+if os.path.exists(settings_path):
+    with open(settings_path) as f:
+        try:
+            settings = json.load(f)
+        except json.JSONDecodeError:
+            settings = {}
+else:
+    settings = {}
+
+if 'hooks' not in settings:
+    settings['hooks'] = {}
+
+hooks_section = settings['hooks']
+
+for event_type, hook_defs in manifest.items():
+    if event_type not in hooks_section:
+        hooks_section[event_type] = []
+    event_hooks = hooks_section[event_type]
+    for hook_def in hook_defs:
+        matcher = hook_def.get('matcher', '')
+        if 'command' in hook_def:
+            hook_command = hook_def['command']
+            is_present = any(
+                any(h.get('command', '') == hook_command for h in entry.get('hooks', []))
+                for entry in event_hooks
+            )
+        else:
+            script_rel = hook_def['script']
+            script_name = os.path.basename(script_rel)
+            hook_command = f'bash "$CLAUDE_PROJECT_DIR/{script_rel}"'
+            is_present = any(
+                any(script_name in h.get('command', '') for h in entry.get('hooks', []))
+                for entry in event_hooks
+            )
+        if not is_present:
+            event_hooks.append({
+                'matcher': matcher,
+                'hooks': [{'type': 'command', 'command': hook_command}]
+            })
+
+tmp = settings_path + '.tmp'
+os.makedirs(os.path.dirname(tmp), exist_ok=True)
+with open(tmp, 'w') as f:
+    json.dump(settings, f, indent=2)
+os.replace(tmp, settings_path)
+PYEOF
+    echo "  Claude Code hooks   ✓"
+fi
+
 # env.sh is already copied from system/scripts/env.sh via the cp -r above.
 # Make it executable.
 chmod +x "$TARGET_DIR/.hex/scripts/env.sh"
@@ -230,6 +297,7 @@ if [ ! -f "$VERSIONS_FILE" ]; then
 fi
 BOI_VERSION=$(grep "^BOI_VERSION=" "$VERSIONS_FILE" | cut -d= -f2)
 HEX_EVENTS_VERSION=$(grep "^HEX_EVENTS_VERSION=" "$VERSIONS_FILE" | cut -d= -f2)
+HARNESS_VERSION=$(grep "^HARNESS_VERSION=" "$VERSIONS_FILE" | cut -d= -f2 || true)
 BOI_REPO="${HEX_BOI_REPO:-https://github.com/mrap/boi.git}"
 HEX_EVENTS_REPO="${HEX_EVENTS_REPO:-https://github.com/mrap/hex-events.git}"
 
@@ -308,6 +376,31 @@ install_or_upgrade_hex_events() {
 }
 install_or_upgrade_hex_events
 
+# ── Phase 5b: Deploy default policies ─────────────────────────────
+
+POLICIES_SRC="$SCRIPT_DIR/system/policies"
+if [ -d "$POLICIES_SRC" ] && ls "$POLICIES_SRC"/*.yaml &>/dev/null; then
+    if [ -d "$HOME/.hex-events" ]; then
+        POLICIES_DST="$HOME/.hex-events/policies"
+        mkdir -p "$POLICIES_DST"
+        copied=0
+        skipped=0
+        for policy_file in "$POLICIES_SRC"/*.yaml; do
+            policy_name="$(basename "$policy_file")"
+            dst="$POLICIES_DST/$policy_name"
+            if [ -f "$dst" ]; then
+                skipped=$((skipped + 1))
+            else
+                cp "$policy_file" "$dst"
+                copied=$((copied + 1))
+            fi
+        done
+        echo "  Default policies    ✓ (copied: $copied, skipped existing: $skipped)"
+    else
+        echo "  hex-events not found, skipping default policy installation."
+    fi
+fi
+
 # ── Phase 6: Register install ──────────────────────────────────────
 
 python3 -c "
@@ -326,6 +419,55 @@ with open(os.path.expanduser('~/.hex-install.json'), 'w') as f:
 # HEX_DIR must be set explicitly so doctor.sh doesn't auto-detect the caller's cwd.
 # Silent; any failure is non-fatal.
 HEX_DIR="$TARGET_DIR" bash "$TARGET_DIR/.hex/scripts/doctor.sh" --fix --quiet >/dev/null 2>&1 || true
+
+# ── Phase 7: Install hex-agent harness ────────────────────────────
+
+echo "Installing hex-agent harness..."
+
+mkdir -p "$TARGET_DIR/.hex/bin"
+
+_harness_build_from_source() {
+    echo "  Building hex-agent from source..."
+    ( cd "$SCRIPT_DIR/system/harness" && cargo build --release 2>&1 ) || return 1
+    cp "$SCRIPT_DIR/system/harness/target/release/hex-agent" "$TARGET_DIR/.hex/bin/hex-agent"
+    chmod +x "$TARGET_DIR/.hex/bin/hex-agent"
+}
+
+_harness_download_prebuilt() {
+    local arch os harness_url
+    arch=$(uname -m)
+    os=$(uname -s | tr '[:upper:]' '[:lower:]')
+    harness_url="https://github.com/mrap/hex-foundation/releases/download/${HARNESS_VERSION}/hex-agent-${os}-${arch}"
+    echo "  Downloading hex-agent from ${harness_url}..."
+    curl -fSL "$harness_url" -o "$TARGET_DIR/.hex/bin/hex-agent" && chmod +x "$TARGET_DIR/.hex/bin/hex-agent"
+}
+
+_harness_fatal() {
+    echo ""
+    echo "ERROR: hex-agent harness is REQUIRED but could not be built or downloaded."
+    echo "  Install Rust (https://rustup.rs) and re-run, or download the binary manually"
+    echo "  from https://github.com/mrap/hex-foundation/releases"
+    exit 1
+}
+
+if command -v cargo &>/dev/null; then
+    _harness_build_from_source || {
+        echo "  Build failed — trying pre-built binary download..."
+        _harness_download_prebuilt || _harness_fatal
+    }
+else
+    echo "  cargo not found — trying pre-built binary download..."
+    _harness_download_prebuilt || _harness_fatal
+fi
+
+if ! "$TARGET_DIR/.hex/bin/hex-agent" --version &>/dev/null; then
+    echo ""
+    echo "ERROR: hex-agent binary installed but failed to execute."
+    echo "  The harness is required for hex to function. Check the binary and re-run."
+    exit 1
+fi
+
+echo "  hex-agent harness   ✓"
 
 echo ""
 echo "========================================="

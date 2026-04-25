@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Hex Pulse — live system health dashboard server. Port 8896."""
+"""Hex Pulse — live system health dashboard server. Port configurable via HEX_PULSE_PORT (default 8896)."""
 
 import json
 import os
@@ -19,7 +19,7 @@ try:
 except ImportError:
     _HAS_SDK = False
 
-PORT = 8896
+PORT = int(os.environ.get("HEX_PULSE_PORT", 8896))
 _THIS = os.path.abspath(__file__)
 HEX_ROOT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.dirname(_THIS))))
 VITALS_SCRIPT = os.path.join(HEX_ROOT, ".hex", "scripts", "hex-vitals.py")

@@ -9,7 +9,7 @@ import sys
 from pathlib import Path
 
 PORT = int(os.environ.get("PORT", 9877))
-HEX_DIR = Path(os.environ.get("HEX_DIR", "/Users/mrap/mrap-hex"))
+HEX_DIR = Path(os.environ.get("HEX_DIR", os.path.expanduser("~/hex")))
 SECRETS_DIR = HEX_DIR / ".hex" / "secrets"
 SYNC_SCRIPT = HEX_DIR / ".hex" / "scripts" / "sync-secrets.sh"
 
