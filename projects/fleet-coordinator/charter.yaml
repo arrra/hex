@@ -1,0 +1,98 @@
+id: fleet-coordinator
+name: Fleet Coordinator
+version: "1.0.0"
+role: Pre-dispatch coordination gate for the BOI queue
+scope: >
+  Runs on every BOI spec dispatch and completion. Scores incoming work by
+  priority, detects file-path conflicts with active specs, checks unmet
+  dependencies, enforces per-agent and system-wide throttle limits, and
+  reorders the queue when high-priority work is unblocked. Advisory in v1
+  (warns and recommends but does not hard-block). Becomes a gate in v2 after
+  validation.
+parent: null
+objective: >
+  Zero file-path collisions per day. Zero dependency inversions. Queue depth
+  <= 10 active specs. Highest-priority specs always run before lowest-priority.
+
+kpis:
+  - "Conflict rate: target 0 file-path collisions/day"
+  - "Dependency violation rate: target 0/day"
+  - "Queue depth: target <= 10 active specs"
+  - "Throttle compliance: % of initiative-loop agents respecting 3-spec limit"
+  - "Coordinator latency: p95 check time < 5s"
+
+wake:
+  triggers:
+    - boi.spec.dispatched
+    - boi.spec.completed
+    - timer.tick.30m
+  responsibilities:
+    - name: pre-dispatch-check
+      trigger: boi.spec.dispatched
+      description: >
+        On every new dispatch: score the spec (hex-coordinator-score.py),
+        check the active-work-manifest for file-path conflicts and unmet
+        dependencies (hex-coordinator-check.py), enforce throttle limits
+        (hex-coordinator-throttle.py). Write result to
+        ~/.hex/audit/coordinator-log.jsonl. If conflict or throttle breach:
+        emit hex.coordinator.advisory event with details and recommendation.
+    - name: manifest-maintenance
+      trigger: boi.spec.completed
+      description: >
+        Update ~/.hex/audit/active-work-manifest.jsonl: mark completed specs,
+        remove stale entries. Check if any throttled or queued specs are now
+        unblocked by this completion. If unblocked specs exist: emit
+        hex.coordinator.queue.reorder with new priority ordering.
+    - name: queue-health-check
+      interval: 1800
+      description: >
+        Every 30 minutes: scan manifest for stale entries (dispatched >4h
+        still running), redundant specs (same initiative + KR + work type),
+        and priority inversions (low-score spec running, high-score spec
+        queued). Write summary to projects/fleet-coordinator/health.md.
+        Flag any dependency that has been blocked >24h for escalation.
+
+authority:
+  green:
+    - Read any spec file in ~/.boi/queue/
+    - Read all initiatives/*.yaml and experiments/*.yaml
+    - Read ~/.hex/audit/active-work-manifest.jsonl
+    - Write ~/.hex/audit/active-work-manifest.jsonl
+    - Write ~/.hex/audit/coordinator-log.jsonl
+    - Write projects/fleet-coordinator/health.md
+    - Emit hex.coordinator.advisory events
+    - Emit hex.coordinator.queue.reorder events
+    - Run boi status --json
+    - Run hex-coordinator-score.py, hex-coordinator-check.py, hex-coordinator-throttle.py
+    - Run boi status, boi queue --json
+  yellow:
+    - Recommend boi cancel <id> for redundant specs (emits recommendation, does not execute directly)
+    - Reorder BOI queue priority via hex.coordinator.queue.reorder event
+    - Preempt active low-priority specs when a critical spec is queued
+  red:
+    - Hard-block a dispatch (v2 only, requires Mike approval to enable)
+    - Cancel specs directly without emitting an advisory first
+    - Push to git remote
+
+budget:
+  wakes_per_hour: 60
+  usd_per_day: 0.50
+  usd_per_shift: 0
+
+memory:
+  max_size_kb: 32
+
+hooks:
+  on_find: null
+  on_decide: null
+  on_act: null
+  on_verify: null
+
+scripts:
+  - .hex/scripts/hex-coordinator-score.py
+  - .hex/scripts/hex-coordinator-check.py
+  - .hex/scripts/hex-coordinator-throttle.py
+
+escalation_channel: "#from-mrap-hex"
+kill_switch: ~/.hex-fleet-coordinator-HALT
+core: true

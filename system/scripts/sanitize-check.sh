@@ -58,9 +58,10 @@ run_check "hardcoded /Users/ path" "/Users/[a-zA-Z]" \
     --include="*.py" --include="*.sh" --include="*.yaml" \
     --include="*.md" --include="*.json" --include="*.toml"
 
-# mrap-specific identifiers
+# mrap-specific identifiers (exclude projects/ — development workspace, not distributed content)
 run_check "mrap-specific identifier" \
     "mrap-hex\|mrap-mrap\|mike@mrap\|mrap\.me\|Mike Rapadas" \
+    --exclude-dir=projects \
     --include="*.py" --include="*.sh" --include="*.yaml" \
     --include="*.md" --include="*.json"
 
@@ -123,6 +124,77 @@ if [ -n "$SECRETS_VIOLATIONS" ]; then
         done
     else
         red "  [hardcoded secrets path] $COUNT violation(s)"
+    fi
+fi
+
+# Claude-Code-only: direct 'claude -p' or 'claude exec' invocations that bypass
+# the runtime abstraction (hex_invoke / env.sh wrapper). New scripts should use
+# hex_invoke so they work on both Claude Code and Codex runtimes.
+CLAUDE_BIN_VIOLATIONS=$(grep -rn 'claude\s\+-p\b\|exec\s\+claude\b\|\bcodex exec\b' . \
+    --exclude-dir=.git \
+    --exclude-dir=tests \
+    --exclude-dir=eval \
+    --include="*.sh" 2>/dev/null \
+    | grep -v "/${SELF}:" \
+    | grep -v '/env\.sh:' \
+    | grep -v '/runtime\.sh:' \
+    | grep -v 'hex-agent-spawn\.sh:' \
+    | grep -v "personalization-audit" \
+    | grep -v '^\s*#' \
+    || true)
+if [ -n "$CLAUDE_BIN_VIOLATIONS" ]; then
+    VIOLATIONS+=("hardcoded-runtime-binary")
+    COUNT=$(echo "$CLAUDE_BIN_VIOLATIONS" | wc -l | tr -d ' ')
+    if $VERBOSE; then
+        red "  [hardcoded-runtime-binary] $COUNT violation(s) — use hex_invoke instead of direct claude/codex invocation:"
+        echo "$CLAUDE_BIN_VIOLATIONS" | while IFS= read -r line; do
+            printf '    %s\n' "$line" >&2
+        done
+    else
+        red "  [hardcoded-runtime-binary] $COUNT violation(s) — use hex_invoke instead of direct claude/codex invocation"
+    fi
+fi
+
+# Claude-Code-only: .claude/ paths hardcoded without a runtime guard or fallback.
+# Scripts referencing .claude/ directly break on Codex which uses .codex/.
+# Legitimate exceptions: env.sh, runtime.sh, doctor.sh, and files that also
+# reference HEX_RUNTIME or .codex/ as a fallback.
+CLAUDE_PATH_FILES=$(grep -rln '\.claude/' . \
+    --exclude-dir=.git \
+    --exclude-dir=tests \
+    --exclude-dir=eval \
+    --include="*.sh" --include="*.py" 2>/dev/null \
+    | grep -v "/${SELF}" \
+    | grep -v '/env\.sh$' \
+    | grep -v '/runtime\.sh$' \
+    | grep -v '/doctor\.sh$' \
+    | grep -v '/install\.sh$' \
+    | grep -v '/bootstrap-migrate\.sh$' \
+    | grep -v '/migrate-v1-to-v2\.sh$' \
+    | grep -v '/backup_session\.sh$' \
+    | grep -v '/consolidate\.sh$' \
+    | grep -v "personalization-audit" \
+    || true)
+CLAUDE_PATH_VIOLATIONS=""
+while IFS= read -r fpath; do
+    [ -z "$fpath" ] && continue
+    # Allow if the file also references HEX_RUNTIME, .codex, or CLAUDE_PROJECT_MEMORY as fallback guard
+    if ! grep -q 'HEX_RUNTIME\|\.codex\|CLAUDE_PROJECT_MEMORY' "$fpath" 2>/dev/null; then
+        matches=$(grep -n '\.claude/' "$fpath" 2>/dev/null || true)
+        CLAUDE_PATH_VIOLATIONS="${CLAUDE_PATH_VIOLATIONS}${matches}"$'\n'
+    fi
+done <<< "$CLAUDE_PATH_FILES"
+CLAUDE_PATH_VIOLATIONS=$(echo "$CLAUDE_PATH_VIOLATIONS" | grep -v '^\s*$' || true)
+if [ -n "$CLAUDE_PATH_VIOLATIONS" ]; then
+    VIOLATIONS+=("hardcoded-.claude/-path-no-fallback")
+    COUNT=$(echo "$CLAUDE_PATH_VIOLATIONS" | wc -l | tr -d ' ')
+    if $VERBOSE; then
+        red "  [hardcoded-.claude/-path-no-fallback] $COUNT violation(s) — add HEX_RUNTIME guard or .codex fallback:"
+        echo "$CLAUDE_PATH_VIOLATIONS" | while IFS= read -r line; do
+            printf '    %s\n' "$line" >&2
+        done
+    else
+        red "  [hardcoded-.claude/-path-no-fallback] $COUNT violation(s) — add HEX_RUNTIME guard or .codex fallback"
     fi
 fi
 

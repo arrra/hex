@@ -22,11 +22,14 @@ REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
 DRY_RUN=false
 SKIP_E2E=false
 
+SKIP_PARITY=false
+
 for arg in "$@"; do
   case "$arg" in
-    --dry-run)  DRY_RUN=true ;;
-    --skip-e2e) SKIP_E2E=true ;;
-    *)          echo "Unknown arg: $arg"; exit 1 ;;
+    --dry-run)      DRY_RUN=true ;;
+    --skip-e2e)     SKIP_E2E=true ;;
+    --skip-parity)  SKIP_PARITY=true ;;
+    *)              echo "Unknown arg: $arg"; exit 1 ;;
   esac
 done
 
@@ -99,8 +102,44 @@ else
   gate_fail "personalization violations found — run 'bash system/scripts/sanitize-check.sh --verbose' for details"
 fi
 
-# ── Gate 4: Ahead of remote ─────────────────────────────────────────────────
-bold "Gate 4: Commits to push"
+# ── Gate 4: Codex parity ────────────────────────────────────────────────────
+bold "Gate 4: Codex parity"
+if $SKIP_PARITY; then
+  red "  SKIPPED (--skip-parity) — emergency bypass"
+elif $SKIP_E2E; then
+  red "  SKIPPED (--skip-e2e implies --skip-parity)"
+elif ! command -v docker >/dev/null 2>&1; then
+  echo "  Docker not available — skipping codex parity gate"
+else
+  HEX_WORKSPACE="${HEX_WORKSPACE:-$HOME/hex}"
+  PARITY_DIR="$HEX_WORKSPACE/tests/codex-parity"
+  if [ ! -d "$PARITY_DIR" ]; then
+    echo "  Parity tests not found at $PARITY_DIR — skipping codex parity gate"
+    echo "  Set HEX_WORKSPACE to enable. Expected: \$HEX_WORKSPACE/tests/codex-parity"
+  else
+    echo "  Building codex parity image..."
+    if docker build -f "$PARITY_DIR/Dockerfile" -t hex-codex-parity "$HEX_WORKSPACE" >/dev/null 2>&1; then
+      PARITY_OUTPUT=$(docker run --rm hex-codex-parity 2>&1)
+      PARITY_FAIL=$(echo "$PARITY_OUTPUT" | grep -c '\[.*FAIL\]' || true)
+      PARITY_PARTIAL=$(echo "$PARITY_OUTPUT" | grep -c '\[.*PARTIAL\]' || true)
+      if [ "$PARITY_FAIL" -gt 0 ]; then
+        gate_fail "Codex parity failure: $PARITY_FAIL test(s) failed"
+        echo "$PARITY_OUTPUT" | grep 'FAIL\]' >&2
+      else
+        if [ "$PARITY_PARTIAL" -gt 0 ]; then
+          green "  Codex parity: PASS ($PARITY_PARTIAL PARTIAL — known differences) ✓"
+        else
+          green "  Codex parity: PASS ✓"
+        fi
+      fi
+    else
+      gate_fail "Failed to build codex parity Docker image (check $PARITY_DIR/Dockerfile)"
+    fi
+  fi
+fi
+
+# ── Gate 5: Ahead of remote ─────────────────────────────────────────────────
+bold "Gate 5: Commits to push"
 REMOTE_SHA=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
 if [ "$FULL_SHA" = "$REMOTE_SHA" ]; then
   green "  Already up to date — nothing to push"
