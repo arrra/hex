@@ -8,7 +8,7 @@ import sys
 import time
 from pathlib import Path
 
-SUMMARIES_DIR = Path(os.environ["AGENT_DIR"]) / ".hex" / "sessions" / "summaries"
+SUMMARIES_DIR = Path(os.environ.get("AGENT_DIR", os.environ.get("HEX_DIR", "."))) / ".hex" / "sessions" / "summaries"
 AUDIT_DIR = Path.home() / ".hex" / "audit"
 OUTPUT_FILE = AUDIT_DIR / "loop-detections.jsonl"
 WINDOW_SECONDS = 48 * 3600

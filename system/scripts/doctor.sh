@@ -640,16 +640,16 @@ check_20() {
 
 # 21: Agent liveness — all wake scripts source env.sh, claude is reachable, recent logs show successes (error, fix: add source)
 check_21() {
-  local env_file="$HEX_DIR/.hex/env.sh"
+  local env_file="$HEX_DIR/.hex/scripts/env.sh"
   if [ ! -f "$env_file" ]; then
-    _error ".hex/env.sh missing — agents have no shared environment"
+    _error ".hex/scripts/env.sh missing — agents have no shared environment"
     _rec 21 "agent-liveness" "error" "env.sh missing"
     return
   fi
 
   # Verify claude is reachable via env.sh
   if ! bash -c "source '$env_file' && command -v claude" &>/dev/null; then
-    _error "claude not reachable after sourcing .hex/env.sh — check PATH in env.sh"
+    _error "claude not reachable after sourcing .hex/scripts/env.sh — check PATH in env.sh"
     _rec 21 "agent-liveness" "error" "claude not on PATH via env.sh"
     return
   fi

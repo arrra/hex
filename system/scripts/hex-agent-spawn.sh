@@ -3,13 +3,14 @@
 # Usage: bash hex-agent-spawn.sh <role-spec-file.yaml>
 set -uo pipefail
 
-HEX_DIR="/Users/mrap/mrap-hex"
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HEX_DIR="${HEX_DIR:-$(cd "$SCRIPT_DIR/../.." && pwd)}"
+export HEX_DIR
 TEMPLATES_DIR="$HEX_DIR/.hex/templates/agent"
 POLICIES_DIR="$HOME/.hex-events/policies"
 SPAWNS_LOG_DIR="$HEX_DIR/projects/hex-agents/_spawns"
 AGENTS_MD="$HEX_DIR/projects/hex-agents/AGENTS.md"
 DECISIONS_DIR="$HEX_DIR/me/decisions"
-HEX_EVENTS_CLI="/Users/mrap/github.com/mrap/hex-events/hex_events_cli.py"
 
 RESERVED_IDS="mike hex hex-main hex-agents hex-v2-team"
 
@@ -481,7 +482,7 @@ print(json.dumps(obj))
 ROLLBACK_FILES+=("$AUDIT_FILE")  # not ideal (file may pre-exist), handled in rollback via line-count
 
 # ── step 10: write decision record ───────────────────────────────────────────
-python3 ~/.boi/lib/coordination.py lock "$DECISIONS_DIR/spawn-${AGENT_ID}-${TODAY}.md" "hex-agent-spawn" 2>/dev/null || true
+python3 "$HOME/.boi/lib/coordination.py" lock "$DECISIONS_DIR/spawn-${AGENT_ID}-${TODAY}.md" "hex-agent-spawn" 2>/dev/null || true
 DECISION_FILE="$DECISIONS_DIR/spawn-${AGENT_ID}-${TODAY}.md"
 cat > "${DECISION_FILE}.tmp" <<DEC
 # Spawn Decision: $AGENT_NAME ($AGENT_ID)
@@ -507,18 +508,18 @@ $AGENT_REASON
 Agent starts **HALTED**. To activate: \`rm $HALT_FILE\`
 DEC
 mv "${DECISION_FILE}.tmp" "$DECISION_FILE"
-python3 ~/.boi/lib/coordination.py unlock "$DECISION_FILE" "hex-agent-spawn" 2>/dev/null || true
+python3 "$HOME/.boi/lib/coordination.py" unlock "$DECISION_FILE" "hex-agent-spawn" 2>/dev/null || true
 ROLLBACK_FILES+=("$DECISION_FILE")
 
 # ── step 11: validate policy ──────────────────────────────────────────────────
-if [[ -f "$HEX_EVENTS_CLI" ]]; then
-  if ! python3 "$HEX_EVENTS_CLI" validate "$POLICY_PATH" 2>&1; then
+if command -v hex-events &>/dev/null; then
+  if ! hex-events validate "$POLICY_PATH" 2>&1; then
     echo "Policy validation failed — rolling back" >&2
     rollback
     exit 1
   fi
 else
-  echo "WARNING: hex_events_cli.py not found at $HEX_EVENTS_CLI — skipping policy validation" >&2
+  echo "WARNING: hex-events binary not found on PATH — skipping policy validation" >&2
 fi
 
 # ── step 11b: validate wake script (env.sh sourced, no hardcoded claude path) ─
@@ -527,8 +528,8 @@ if ! grep -q 'source.*env\.sh' "$WAKE_SCRIPT_PATH"; then
   echo "FATAL: $WAKE_SCRIPT_PATH does not source env.sh" >&2
   WAKE_ERRORS=$((WAKE_ERRORS + 1))
 fi
-if grep -q '/Users/mrap/.local/bin/claude' "$WAKE_SCRIPT_PATH"; then
-  echo "FATAL: $WAKE_SCRIPT_PATH hardcodes claude path (must use env.sh function)" >&2
+if grep -v '^\s*#' "$WAKE_SCRIPT_PATH" | grep -qE '/[a-zA-Z]+/.*/bin/claude\b'; then
+  echo "FATAL: $WAKE_SCRIPT_PATH hardcodes an absolute claude path (must use env.sh function)" >&2
   WAKE_ERRORS=$((WAKE_ERRORS + 1))
 fi
 if grep -v '^\s*#' "$WAKE_SCRIPT_PATH" | grep -q '\-\-dangerously-skip-permissions'; then
@@ -549,7 +550,7 @@ echo "  Wake script: $WAKE_SCRIPT_PATH"
 echo "  Policy:      $POLICY_PATH"
 echo "  HALT file:   $HALT_FILE (agent is HALTED)"
 echo ""
-echo "To activate + verify first wake: bash /Users/mrap/mrap-hex/.hex/bin/hex-agent-activate.sh $AGENT_ID"
+echo "To activate + verify first wake: bash $HEX_DIR/.hex/bin/hex-agent-activate.sh $AGENT_ID"
 echo "  (or halt-only: rm $HALT_FILE + emit your own attention event)"
 echo ""
 echo "NOTE: activate-and-verify is preferred — plain 'rm HALT_FILE' is emit-and-forget;"

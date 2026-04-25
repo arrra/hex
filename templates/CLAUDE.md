@@ -27,8 +27,9 @@ You are not a chatbot. You are a persistent AI agent that compounds over time.
 | `landings/` | Daily outcome targets with L1-L4 priority tiers. |
 | `raw/` | Unprocessed input: transcripts, handoffs, documents. |
 | `.hex/` | System directory. Scripts, skills, templates. Don't edit directly. |
-| `~/.hex-events/` | **Automation system.** All scheduled/reactive work goes here as YAML policies. See "hex-events" section below. |
-| `~/.boi/` | **Delegation system.** All multi-step work gets dispatched here as spec files. See "BOI" section below. |
+| `hex-events` (binary) | **Automation system.** CLI for scheduled/reactive work. Policies live at `~/.hex-events/policies/`. See "hex-events" section below. |
+| `boi` (binary) | **Delegation system.** CLI for multi-step work dispatch. See "BOI" section below. |
+| `.hex/scripts/env.sh` | **Shared environment.** Sourced by agents and workers. Sets PATH, HEX_DIR, claude wrapper. |
 
 ---
 
@@ -261,7 +262,7 @@ Activates before executing: 3+ file edits, 3+ sequential commands, any task taki
 Decision tree:
 1. Is this a single-line edit? → Do it inline.
 2. Is this recurring, scheduled, or reactive (fires on an event)? → **Write a hex-events policy** (`~/.hex-events/policies/*.yaml`). NEVER use CronCreate, hooks, or cron.
-3. Is this multi-step work, research, or generation? → **Write a BOI spec and dispatch** (`bash ~/.boi/boi dispatch <spec.md>`). NEVER code inline for multi-file projects.
+3. Is this multi-step work, research, or generation? → **Write a BOI spec and dispatch** (`boi dispatch <spec.md>`). NEVER code inline for multi-file projects.
 4. Is it a one-time lookup or simple edit? → Do it inline.
 
 **Post-Task Landings Update**
@@ -414,12 +415,12 @@ action:
 
 ```bash
 # Emit a custom event
-python3 ~/.hex-events/hex_emit.py event.type '{"key": "value"}'
+hex-events emit event.type '{"key": "value"}'
 
 # Inspect
-python3 ~/.hex-events/hex_events_cli.py status       # daemon + recent events
-python3 ~/.hex-events/hex_events_cli.py trace        # event flow
-python3 ~/.hex-events/hex_events_cli.py validate ~/.hex-events/policies/  # schema check
+hex-events status       # daemon + recent events
+hex-events trace        # event flow
+hex-events validate     # schema check
 
 # List active policies
 ls ~/.hex-events/policies/
@@ -459,9 +460,9 @@ BOI is the **ONLY** delegation system in hex. Multi-step work, research, generat
 ### How BOI Works
 
 1. Write a spec — a markdown file with numbered `### t-N` task headings
-2. Dispatch: `bash ~/.boi/boi dispatch <spec.md>`
+2. Dispatch: `boi dispatch <spec.md>`
 3. Worker picks it up from queue, executes task, critic reviews, moves to next task
-4. Check status: `bash ~/.boi/boi status`
+4. Check status: `boi status`
 
 ### Spec Template (copy this)
 
@@ -503,17 +504,15 @@ BOI is the **ONLY** delegation system in hex. Multi-step work, research, generat
 ### CLI
 
 ```bash
-bash ~/.boi/boi dispatch <spec.md>          # enqueue a spec
-bash ~/.boi/boi status                      # queue + worker status
-bash ~/.boi/boi log <queue-id>              # iteration history
-bash ~/.boi/boi cancel <queue-id>           # stop a spec
-ls ~/.boi/queue/                            # active specs
-ls ~/.boi/projects/                         # completed work
+boi dispatch <spec.md>          # enqueue a spec
+boi status                      # queue + worker status
+boi log <queue-id>              # iteration history
+boi cancel <queue-id>           # stop a spec
 ```
 
 ### Dependencies (DAG)
 
-Specs can depend on each other. `bash ~/.boi/boi dispatch --after q-NNN <spec.md>` blocks until `q-NNN` completes.
+Specs can depend on each other. `boi dispatch --after q-NNN <spec.md>` blocks until `q-NNN` completes.
 
 ### When a user asks for multi-step work, respond with a BOI spec
 
@@ -522,7 +521,7 @@ Specs can depend on each other. `bash ~/.boi/boi dispatch --after q-NNN <spec.md
 - "Research the top 5 AI frameworks" → write spec (mode: generate), dispatch
 - "Analyze the competitive landscape" → write spec (mode: generate), dispatch
 
-ALWAYS write the spec inline in your response and give the exact `bash ~/.boi/boi dispatch` command. Do NOT start coding/researching inline.
+ALWAYS write the spec inline in your response and give the exact `boi dispatch` command. Do NOT start coding/researching inline.
 
 ---
 

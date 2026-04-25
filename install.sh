@@ -118,6 +118,11 @@ ln -sfn ../.hex/skills "$TARGET_DIR/.agents/skills"
 
 # Seed optional configs doctor expects. Defaults are safe and overridable later.
 echo '{}' > "$TARGET_DIR/.hex/settings.json"
+
+# env.sh is already copied from system/scripts/env.sh via the cp -r above.
+# Make it executable.
+chmod +x "$TARGET_DIR/.hex/scripts/env.sh"
+echo "  env.sh              ✓"
 if [ -L /etc/localtime ]; then
     # /etc/localtime → /var/db/timezone/zoneinfo/America/Los_Angeles → America/Los_Angeles
     readlink /etc/localtime 2>/dev/null | sed 's|.*zoneinfo/||' > "$TARGET_DIR/.hex/timezone"
@@ -229,26 +234,79 @@ BOI_REPO="${HEX_BOI_REPO:-https://github.com/mrap/boi.git}"
 HEX_EVENTS_REPO="${HEX_EVENTS_REPO:-https://github.com/mrap/hex-events.git}"
 
 # BOI — parallel worker dispatch
-if [ -d "$HOME/.boi" ]; then
-    echo "  BOI already installed  ✓"
-else
-    if git clone --depth 1 --branch "$BOI_VERSION" "$BOI_REPO" "$HOME/.boi" 2>/dev/null; then
-        echo "  BOI installed ($BOI_VERSION)  ✓"
+# Fresh install: clone at pinned version, then run the project's own installer.
+# Existing install: fetch latest tag and upgrade in place.
+install_or_upgrade_boi() {
+    if [ -d "$HOME/.boi" ]; then
+        echo "  BOI exists — upgrading to $BOI_VERSION..."
+        if [ -d "$HOME/.boi/.git" ]; then
+            ( cd "$HOME/.boi" && git fetch --tags --depth 1 origin 2>/dev/null && \
+              git checkout "$BOI_VERSION" 2>/dev/null ) || true
+        elif [ -d "$HOME/.boi/src/.git" ]; then
+            ( cd "$HOME/.boi/src" && git fetch --tags --depth 1 origin 2>/dev/null && \
+              git checkout "$BOI_VERSION" 2>/dev/null ) || true
+        fi
+        # Re-run BOI's own installer to rebuild venv/symlinks
+        if [ -f "$HOME/.boi/src/install-public.sh" ]; then
+            BOI_CONTEXT_ROOT="$TARGET_DIR" bash "$HOME/.boi/src/install-public.sh" --update 2>/dev/null || true
+        fi
+        echo "  BOI upgraded ($BOI_VERSION)  ✓"
     else
-        echo "  BOI: failed to clone $BOI_REPO @ $BOI_VERSION (will install on next upgrade)"
+        if git clone --depth 1 --branch "$BOI_VERSION" "$BOI_REPO" "$HOME/.boi" 2>/dev/null; then
+            # Run BOI's own installer for venv setup and PATH symlink
+            if [ -f "$HOME/.boi/src/install-public.sh" ]; then
+                BOI_CONTEXT_ROOT="$TARGET_DIR" bash "$HOME/.boi/src/install-public.sh" 2>/dev/null || true
+            fi
+            echo "  BOI installed ($BOI_VERSION)  ✓"
+        else
+            echo "  BOI: failed to clone $BOI_REPO @ $BOI_VERSION (will install on next upgrade)"
+        fi
     fi
-fi
+
+    # Verify boi is on PATH
+    if ! command -v boi &>/dev/null; then
+        echo "  ⚠️  'boi' not found on PATH. Add ~/bin to your PATH:"
+        echo "     export PATH=\"\$HOME/bin:\$PATH\""
+    fi
+}
+install_or_upgrade_boi
 
 # hex-events — reactive event system
-if [ -d "$HOME/.hex-events" ]; then
-    echo "  hex-events already installed  ✓"
-else
-    if git clone --depth 1 --branch "$HEX_EVENTS_VERSION" "$HEX_EVENTS_REPO" "$HOME/.hex-events" 2>/dev/null; then
-        echo "  hex-events installed ($HEX_EVENTS_VERSION)  ✓"
+# Same pattern: fresh install or upgrade existing.
+install_or_upgrade_hex_events() {
+    if [ -d "$HOME/.hex-events" ]; then
+        echo "  hex-events exists — upgrading to $HEX_EVENTS_VERSION..."
+        local src_dir=""
+        if [ -d "$HOME/.hex-events/.git" ]; then
+            src_dir="$HOME/.hex-events"
+        fi
+        if [ -n "$src_dir" ]; then
+            ( cd "$src_dir" && git fetch --tags --depth 1 origin 2>/dev/null && \
+              git checkout "$HEX_EVENTS_VERSION" 2>/dev/null ) || true
+        fi
+        # Re-run hex-events' own installer for venv/LaunchAgent setup
+        if [ -f "$HOME/.hex-events/install.sh" ]; then
+            bash "$HOME/.hex-events/install.sh" 2>/dev/null || true
+        fi
+        echo "  hex-events upgraded ($HEX_EVENTS_VERSION)  ✓"
     else
-        echo "  hex-events: failed to clone $HEX_EVENTS_REPO @ $HEX_EVENTS_VERSION (will install on next upgrade)"
+        if git clone --depth 1 --branch "$HEX_EVENTS_VERSION" "$HEX_EVENTS_REPO" "$HOME/.hex-events" 2>/dev/null; then
+            # Run hex-events' own installer for venv/daemon setup
+            if [ -f "$HOME/.hex-events/install.sh" ]; then
+                bash "$HOME/.hex-events/install.sh" 2>/dev/null || true
+            fi
+            echo "  hex-events installed ($HEX_EVENTS_VERSION)  ✓"
+        else
+            echo "  hex-events: failed to clone $HEX_EVENTS_REPO @ $HEX_EVENTS_VERSION (will install on next upgrade)"
+        fi
     fi
-fi
+
+    # Verify hex-events is on PATH
+    if ! command -v hex-events &>/dev/null; then
+        echo "  ⚠️  'hex-events' not found on PATH. It should be at ~/.hex-events/venv/bin/hex-events"
+    fi
+}
+install_or_upgrade_hex_events
 
 # ── Phase 6: Register install ──────────────────────────────────────
 

@@ -24,7 +24,7 @@ FRUSTRATION_PATTERNS = [
 
 COMPILED = [(p, re.compile(p, re.IGNORECASE)) for p in FRUSTRATION_PATTERNS]
 
-SUMMARIES_DIR = Path(os.environ["AGENT_DIR"]) / ".hex" / "sessions" / "summaries"
+SUMMARIES_DIR = Path(os.environ.get("AGENT_DIR", os.environ.get("HEX_DIR", "."))) / ".hex" / "sessions" / "summaries"
 AUDIT_DIR = Path.home() / ".hex" / "audit"
 OUTPUT_FILE = AUDIT_DIR / "frustration-signals.jsonl"
 THRESHOLD = 4

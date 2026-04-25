@@ -9,8 +9,11 @@ set -uo pipefail
 
 PASS=0
 FAIL=0
-HEX_DIR="${AGENT_DIR:?AGENT_DIR not set}"
-ENV_SH="$HEX_DIR/.hex/env.sh"
+_SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+HEX_DIR="${AGENT_DIR:-${HEX_DIR:-$(cd "$_SCRIPT_DIR/../.." && pwd)}}"
+export HEX_DIR
+export AGENT_DIR="$HEX_DIR"
+ENV_SH="$HEX_DIR/.hex/scripts/env.sh"
 
 red()   { printf '\033[31m%s\033[0m\n' "$*"; }
 green() { printf '\033[32m%s\033[0m\n' "$*"; }

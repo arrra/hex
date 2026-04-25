@@ -15,8 +15,9 @@ import sys
 from datetime import datetime, timezone
 from pathlib import Path
 
-MEMORY_DIR = Path(os.environ.get("CLAUDE_PROJECT_MEMORY", str(Path.home() / ".claude/projects" / ("-" + os.environ["AGENT_DIR"].replace("/", "-").lstrip("-")) / "memory")))
-SUMMARIES_DIR = Path(os.environ["AGENT_DIR"]) / ".hex" / "sessions" / "summaries"
+_AGENT_DIR = os.environ.get("AGENT_DIR", os.environ.get("HEX_DIR", "."))
+MEMORY_DIR = Path(os.environ.get("CLAUDE_PROJECT_MEMORY", str(Path.home() / ".claude/projects" / ("-" + _AGENT_DIR.replace("/", "-").lstrip("-")) / "memory")))
+SUMMARIES_DIR = Path(_AGENT_DIR) / ".hex" / "sessions" / "summaries"
 AUDIT_DIR = Path.home() / ".hex/audit"
 OUTPUT_FILE = AUDIT_DIR / "memory-effectiveness.jsonl"
 

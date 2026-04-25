@@ -14,12 +14,16 @@ from glob import glob
 
 # ── Paths ──────────────────────────────────────────────────────────────────
 BOI_DB = os.path.expanduser("~/.boi/boi.db")
-_HEX_ROOT = os.environ["AGENT_DIR"]  # set by .hex/env.sh
+_HEX_ROOT = os.environ.get("AGENT_DIR") or os.environ.get("HEX_DIR")
+if not _HEX_ROOT:
+    _HEX_ROOT = str(
+        os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+    )
 _CLAUDE_PROJECT = os.environ.get("CLAUDE_PROJECT_MEMORY", "")
 if not _CLAUDE_PROJECT:
     _CLAUDE_PROJECT = os.path.join(
         os.path.expanduser("~/.claude/projects"),
-        "-" + os.environ["AGENT_DIR"].replace("/", "-").lstrip("-"),
+        "-" + _HEX_ROOT.replace("/", "-").lstrip("-"),
         "memory"
     )
 FEEDBACK_GLOB = os.path.join(_CLAUDE_PROJECT, "feedback_*.md")
