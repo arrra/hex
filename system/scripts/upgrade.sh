@@ -696,10 +696,23 @@ if [ -f "$CLAUDE_MD" ] && [ -f "$TEMPLATE_CLAUDE_MD" ]; then
   fi
 fi
 
+# ─── Run version-specific migrations ─────────────────────────────────────────
+# Migrations are idempotent — safe to run on every upgrade. They fix generated
+# files (wake scripts, watchdog, templates) that reference old patterns.
+for migration in "$HEX_DOTDIR/scripts/migrate-"*.sh; do
+  [ -f "$migration" ] || continue
+  header "4b. Migration: $(basename "$migration" .sh)"
+  if HEX_DIR="$HEX_DIR" bash "$migration" 2>&1; then
+    pass "$(basename "$migration") completed"
+  else
+    warn "$(basename "$migration") had issues — review output above"
+  fi
+done
+
 # ─── Post-upgrade health check ──────────────────────────────────────────────
 # Run doctor in quiet mode to catch any issues introduced by the upgrade.
 if [ -f "$HEX_DOTDIR/scripts/doctor.sh" ]; then
-  header "4b. Post-Upgrade Health Check"
+  header "4c. Post-Upgrade Health Check"
   if HEX_DIR="$HEX_DIR" bash "$HEX_DOTDIR/scripts/doctor.sh" --quiet 2>/dev/null; then
     pass "Doctor: all checks passed"
   else
