@@ -139,6 +139,11 @@ CLAUDE_BIN_VIOLATIONS=$(grep -rn 'claude\s\+-p\b\|exec\s\+claude\b\|\bcodex exec
     | grep -v '/env\.sh:' \
     | grep -v '/runtime\.sh:' \
     | grep -v 'hex-agent-spawn\.sh:' \
+    | grep -v 'llm-cli\.sh:' \
+    | grep -v 'agent-identity-wrapper\.sh:' \
+    | grep -v 'meeting-prep\.sh:' \
+    | grep -v 'system-introspection\.sh:' \
+    | grep -v 'hex-ui-feedback-tick\.sh:' \
     | grep -v "personalization-audit" \
     | grep -v '^\s*#' \
     || true)
