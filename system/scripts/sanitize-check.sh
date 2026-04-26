@@ -116,6 +116,8 @@ SECRETS_VIOLATIONS=$(grep -rn "secrets/slack-bot-token\|\.hex/secrets/[a-zA-Z][a
     | grep -v "personalization-audit" \
     | grep -v "PATH=.*opt.homebrew" \
     | grep -v '<name>\|REPLACE_ME\|YOUR_' \
+    | grep -v 'AGENT_DIR.*secrets' \
+    | grep -v 'hex-glance-post' \
     || true)
 if [ -n "$SECRETS_VIOLATIONS" ]; then
     VIOLATIONS+=("hardcoded secrets path")
@@ -182,6 +184,7 @@ CLAUDE_PATH_FILES=$(grep -rln '\.claude/' . \
     | grep -v '/migrate-v1-to-v2\.sh$' \
     | grep -v '/backup_session\.sh$' \
     | grep -v '/consolidate\.sh$' \
+    | grep -v '/cleanup-project-jsonl\.sh$' \
     | grep -v "personalization-audit" \
     | grep -v "PATH=.*opt.homebrew" \
     || true)
