@@ -15,7 +15,7 @@ class NotifyAction:
         message = render_templates({"message": message}, tpl_ctx)["message"]
         try:
             result = subprocess.run(
-                ["bash", os.path.expanduser("~/.claude/scripts/hex-notify.sh"), message],
+                ["bash", os.path.expanduser("$HEX_DIR/.hex/scripts/hex-notify.sh"), message],
                 capture_output=True, text=True, timeout=30,
             )
             if result.returncode == 0:

@@ -162,7 +162,7 @@ Emit a new hex-events event.
 
 ### `notify`
 
-Send a notification via `~/.claude/scripts/hex-notify.sh`.
+Send a notification via `$HEX_DIR/.hex/scripts/hex-notify.sh`.
 
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
