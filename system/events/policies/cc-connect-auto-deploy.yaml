@@ -14,6 +14,7 @@ requires:
 provides:
   events:
     - cc-connect.deployed
+    - cc-connect.deploy-failed
 
 rules:
   - name: poll-and-deploy
@@ -28,3 +29,9 @@ rules:
             event: cc-connect.deployed
             payload:
               source: auto-deploy-policy
+        on_failure:
+          - type: emit
+            event: cc-connect.deploy-failed
+            payload:
+              source: auto-deploy-policy
+              error: "cc-connect-auto-deploy.sh exited non-zero — see ~/.hex-events/logs/cc-connect-deploy.log"
