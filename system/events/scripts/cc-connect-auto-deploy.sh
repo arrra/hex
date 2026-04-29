@@ -3,7 +3,7 @@
 # Called by hex-events on timer.tick.5m. Designed to be idempotent and non-fatal.
 set -uo pipefail
 
-REPO="/Users/sagarsingh/github.com/mrap/cc-connect"
+REPO="/Users/sagarsingh/github.com/arrra/cc-connect"
 BINARY="/opt/homebrew/bin/cc-connect"
 SERVICE="com.cc-connect.service"
 SOCKET="$HOME/.cc-connect/data/run/api.sock"
