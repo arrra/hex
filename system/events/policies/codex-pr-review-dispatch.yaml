@@ -1,0 +1,43 @@
+name: codex-pr-review-dispatch
+description: >
+  On github.pr.opened, invoke dispatch-codex-pr-review.sh to post a gpt-5
+  code review comment. Runs in parallel with the existing Opus 4.7 reviewer
+  to provide cross-family review independence.
+
+requires:
+  events:
+    - github.pr.opened
+
+provides:
+  events:
+    - codex.pr.review.posted
+    - codex.pr.review.failed
+
+rules:
+  - name: dispatch-codex-pr-review
+    trigger:
+      event: github.pr.opened
+    actions:
+      - type: shell
+        command: |
+          EVENT_REPO="{{ event.repo }}" \
+          EVENT_NUMBER="{{ event.number }}" \
+          EVENT_URL="{{ event.url }}" \
+          EVENT_TITLE="{{ event.title }}" \
+          bash "$HOME/.hex-events/scripts/dispatch-codex-pr-review.sh"
+        timeout: 300
+        on_success:
+          - type: emit
+            event: codex.pr.review.posted
+            payload:
+              repo: "{{ event.repo }}"
+              number: "{{ event.number }}"
+              status: success
+        on_failure:
+          - type: emit
+            event: codex.pr.review.failed
+            payload:
+              repo: "{{ event.repo }}"
+              number: "{{ event.number }}"
+              status: failed
+              error: "dispatch-codex-pr-review exited non-zero"
