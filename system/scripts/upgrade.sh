@@ -169,12 +169,11 @@ else
 fi
 info "Source layout: $SOURCE_LAYOUT"
 
-# ─── Step 2: Core Components (hex-events + BOI) ─────────────────────────────
+# ─── Step 2: Core Components (BOI) ──────────────────────────────────────────
+# hex-events is built into the hex Rust binary (`hex events`) and no longer
+# requires a separate Python install. BOI is the only external core component.
 header "2. Core Components"
 
-HEX_EVENTS_REPO="https://github.com/mrap/hex-events.git"
-HEX_EVENTS_DIR="${HEX_EVENTS_DIR:-$HOME/.hex-events}"
-HEX_EVENTS_SRC="${HEX_EVENTS_SRC:-$HOME/github.com/mrap/hex-events}"
 BOI_INSTALLER_URL="https://raw.githubusercontent.com/mrap/boi/main/install-public.sh"
 
 # --- Ensure Python 3.10+ is available (auto-install via uv if needed) ---
@@ -284,63 +283,20 @@ else
   fi
 
   if ! $PYTHON_OK; then
-    fail "Could not get Python 3.10+. hex-events and BOI require it."
+    fail "Could not get Python 3.10+. BOI requires it."
     echo ""
     echo -e "  ${YELLOW}${BOLD}Manual fix:${RESET}"
     echo -e "  ${DIM}macOS:${RESET}  brew install python@3.12"
     echo -e "  ${DIM}Linux:${RESET}  sudo apt install python3.12"
     echo -e "  ${DIM}Any:${RESET}    curl -LsSf https://astral.sh/uv/install.sh | sh && uv python install 3.12"
     echo ""
-    echo -e "  hex-events and BOI are ${BOLD}core components${RESET}, not optional."
-    echo -e "  Without them, hex cannot run background automation or dispatch parallel work."
+    echo -e "  BOI is a ${BOLD}core component${RESET}, not optional."
+    echo -e "  Without it, hex cannot dispatch parallel work."
     echo ""
   fi
 fi
 
 # --- Verification helpers ---
-
-# Verify hex-events is functional after install/update.
-# Sets COMPONENT_WARNINGS+=1 on failure (non-fatal, matches bootstrap.sh behavior).
-verify_hex_events() {
-  # Find hex-events binary: prefer PATH, fall back to venv location
-  local hex_events_bin=""
-  if command -v hex-events &>/dev/null; then
-    hex_events_bin="hex-events"
-  elif [ -x "$HEX_EVENTS_DIR/venv/bin/hex-events" ]; then
-    hex_events_bin="$HEX_EVENTS_DIR/venv/bin/hex-events"
-  fi
-
-  if [ -z "$hex_events_bin" ]; then
-    warn "hex-events binary not found on PATH or at $HEX_EVENTS_DIR/venv/bin/hex-events — skipping verification"
-    COMPONENT_WARNINGS=$((COMPONENT_WARNINGS + 1))
-    return
-  fi
-
-  local verify_failed=false
-
-  if "$hex_events_bin" validate &>/dev/null; then
-    info "hex-events validate: OK"
-  else
-    warn "hex-events validate failed"
-    verify_failed=true
-  fi
-
-  if "$hex_events_bin" status &>/dev/null; then
-    info "hex-events status: OK"
-  else
-    warn "hex-events status failed"
-    verify_failed=true
-  fi
-
-  if $verify_failed; then
-    warn "hex-events verification failed — install may be incomplete (non-fatal)"
-    COMPONENT_WARNINGS=$((COMPONENT_WARNINGS + 1))
-    return 1
-  else
-    pass "hex-events verified"
-    return 0
-  fi
-}
 
 # Verify BOI is functional after install/update.
 # Sets COMPONENT_WARNINGS+=1 on failure (BOI is optional).
@@ -356,84 +312,6 @@ verify_boi() {
     warn "boi status failed — BOI install may be incomplete (non-fatal)"
     COMPONENT_WARNINGS=$((COMPONENT_WARNINGS + 1))
     return 1
-  fi
-}
-
-# --- hex-events ---
-install_hex_events() {
-  if [ -f "$HEX_EVENTS_DIR/hex_eventd.py" ] || [ -f "$HEX_EVENTS_SRC/hex_eventd.py" ]; then
-    # Already installed — pull latest and re-run installer
-    local src_dir=""
-    if [ -d "$HEX_EVENTS_SRC/.git" ]; then
-      src_dir="$HEX_EVENTS_SRC"
-    elif [ -L "$HEX_EVENTS_DIR" ] && [ -d "$(readlink "$HEX_EVENTS_DIR")/.git" ]; then
-      src_dir="$(readlink "$HEX_EVENTS_DIR")"
-    elif [ -d "$HEX_EVENTS_DIR/.git" ]; then
-      src_dir="$HEX_EVENTS_DIR"
-    fi
-
-    if [ -n "$src_dir" ]; then
-      # Snapshot current commit SHA for rollback if upgrade verification fails.
-      # Assumption: hex-events DB schema changes are additive (no destructive migrations),
-      # so git reset + install.sh is sufficient to restore a working state.
-      local SAVED_SHA=""
-      SAVED_SHA=$(git -C "$src_dir" rev-parse HEAD 2>/dev/null || echo "")
-      info "Updating hex-events at $src_dir (snapshot: ${SAVED_SHA:0:8})"
-      (cd "$src_dir" && git pull --ff-only 2>&1 | head -3) || warn "hex-events git pull failed (non-fatal)"
-      if [ -f "$src_dir/install.sh" ]; then
-        if $DRY_RUN; then
-          info "[dry-run] Would re-run hex-events install.sh"
-        else
-          HEX_EVENTS_DIR="$HEX_EVENTS_DIR" bash "$src_dir/install.sh" 2>&1 | while read -r line; do info "  $line"; done
-          pass "hex-events updated"
-          if ! verify_hex_events; then
-            # Verification failed — roll back to the pre-upgrade commit
-            if [ -n "$SAVED_SHA" ]; then
-              warn "Rolling back hex-events to $SAVED_SHA"
-              git -C "$src_dir" reset --hard "$SAVED_SHA" 2>&1 | head -3 || true
-              # Re-run install.sh to rebuild venv and LaunchAgents against the rolled-back code
-              if [ -f "$src_dir/install.sh" ]; then
-                HEX_EVENTS_DIR="$HEX_EVENTS_DIR" bash "$src_dir/install.sh" 2>&1 | while read -r line; do info "  $line"; done
-              fi
-              # On macOS: reload the LaunchAgent so the daemon restarts with rolled-back code
-              if [[ "$(uname)" == "Darwin" ]]; then
-                local plist="$HOME/Library/LaunchAgents/com.hex-events.plist"
-                if [ -f "$plist" ]; then
-                  launchctl unload "$plist" 2>/dev/null || true
-                  launchctl load  "$plist" 2>/dev/null || true
-                  info "hex-events LaunchAgent reloaded"
-                fi
-              fi
-              info "hex-events rolled back to $SAVED_SHA"
-            fi
-          fi
-        fi
-      fi
-    else
-      pass "hex-events present (no git repo found for update)"
-      verify_hex_events
-    fi
-  else
-    # Fresh install
-    info "hex-events not found. Installing..."
-    if $DRY_RUN; then
-      info "[dry-run] Would clone $HEX_EVENTS_REPO and run install.sh"
-    else
-      mkdir -p "$(dirname "$HEX_EVENTS_SRC")"
-      if git clone "$HEX_EVENTS_REPO" "$HEX_EVENTS_SRC" 2>&1 | while read -r line; do info "  $line"; done; then
-        if [ -f "$HEX_EVENTS_SRC/install.sh" ]; then
-          HEX_EVENTS_DIR="$HEX_EVENTS_DIR" bash "$HEX_EVENTS_SRC/install.sh" 2>&1 | while read -r line; do info "  $line"; done
-          pass "hex-events installed"
-          verify_hex_events
-        else
-          fail "hex-events cloned but no install.sh found"
-          COMPONENT_WARNINGS=$((COMPONENT_WARNINGS + 1))
-        fi
-      else
-        fail "Failed to clone hex-events (non-fatal, continuing)"
-        COMPONENT_WARNINGS=$((COMPONENT_WARNINGS + 1))
-      fi
-    fi
   fi
 }
 
@@ -490,10 +368,9 @@ install_boi() {
 }
 
 if $PYTHON_OK; then
-  install_hex_events
   install_boi
 else
-  warn "Skipping hex-events and BOI installation (Python 3.10+ required)"
+  warn "Skipping BOI installation (Python 3.10+ required)"
 fi
 
 # ─── Step 3: Detect what will change ────────────────────────────────────────
@@ -770,7 +647,7 @@ fi
 # Clear update-available flag (we just upgraded)
 rm -f "$HEX_DOTDIR/.update-available"
 
-# v1-only: Copy evolution scripts, BOI archive scripts, and hex-events policies.
+# v1-only: Copy evolution scripts and BOI archive scripts.
 # These directories have no equivalent in the v2 layout.
 if [ "$SOURCE_LAYOUT" = "v1" ]; then
   # Copy evolution scripts to agent workspace (these live outside .hex/)
@@ -789,11 +666,6 @@ if [ "$SOURCE_LAYOUT" = "v1" ]; then
     info "BOI archive scripts updated"
   fi
 
-  # Copy hex-events policies
-  if [ -d "$SOURCE_DIR/dot-claude/hex-events-policies" ] && [ -d "$HOME/.hex-events/policies" ]; then
-    rsync -a "$SOURCE_DIR/dot-claude/hex-events-policies/" "$HOME/.hex-events/policies/"
-    info "hex-events policies updated"
-  fi
 fi
 
 # Store template hash for next upgrade
