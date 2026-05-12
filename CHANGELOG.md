@@ -2,6 +2,12 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-12] — Harness messaging + binary resolution fix (v0.15.0)
+
+### Fixed
+- `system/harness/src/messaging.rs`: `MessagingHandler::cli_send()` now writes to `.hex/messages/{agent}.jsonl` in addition to `messages.json`. The harness wake cycle reads only from the JSONL inbox (`message::receive()`), so CLI-sent messages were silently dropped — causing agent-to-agent messaging deadlocks (Releaser→Sentinel sign-off blocked for 16+ days; root cause S1499).
+- `system/harness/src/claude.rs`: `claude::invoke()` now resolves the `claude` binary via `$CLAUDE_BIN` env var, then `$HOME/.local/bin/claude`, then PATH fallback. LaunchAgent/daemon wakes inherit a restricted PATH that excludes `~/.local/bin`, causing "failed to spawn claude: No such file or directory" in automated wake contexts.
+
 ## [2026-05-12] — Slack/cc-connect deprecation + upgrade.sh cleanup (v0.14.0)
 
 ### Changed
