@@ -287,157 +287,15 @@ def save_cache(data: dict) -> None:
         pass
 
 
-# ── Slack ──────────────────────────────────────────────────────────────────
-SLACK_SECRET_FILES = [
-    os.path.join(_HEX_ROOT, ".hex", "secrets", "slack-bot-token.env"),  # spec path
-    os.path.join(_HEX_ROOT, ".hex", "secrets", "slack-bot.env"),        # actual path
-]
-SLACK_CHANNEL = "hex-vitals"
-
-
-def _load_slack_token() -> str:
-    """Return Slack bot token from env or secrets file."""
-    for var in ("SLACK_BOT_TOKEN", "HEX_SLACK_BOT_TOKEN"):
-        val = os.environ.get(var, "")
-        if val.startswith("xoxb-"):
-            return val
-
-    for path in SLACK_SECRET_FILES:
-        if not os.path.exists(path):
-            continue
-        with open(path) as f:
-            for line in f:
-                line = line.strip()
-                if line.startswith("#") or "=" not in line:
-                    continue
-                k, _, v = line.partition("=")
-                if k.strip() in ("SLACK_BOT_TOKEN", "HEX_SLACK_BOT_TOKEN"):
-                    v = v.strip().strip('"').strip("'")
-                    if v.startswith("xoxb-"):
-                        return v
-
-    raise RuntimeError(
-        "No Slack bot token found. Set SLACK_BOT_TOKEN or HEX_SLACK_BOT_TOKEN, "
-        "or place the token in one of: " + ", ".join(SLACK_SECRET_FILES)
-    )
-
-
-def _slack_api(token: str, method: str, payload: dict) -> dict:
-    url = f"https://slack.com/api/{method}"
-    data = json.dumps(payload).encode()
-    req = urllib.request.Request(
-        url,
-        data=data,
-        headers={
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json; charset=utf-8",
-        },
-    )
-    with urllib.request.urlopen(req, timeout=15) as resp:
-        return json.loads(resp.read())
-
-
-def _ensure_channel(token: str, name: str) -> str:
-    """Return channel ID for `name`, creating it if needed."""
-    # List all public channels and find ours
-    cursor = None
-    while True:
-        params = {"exclude_archived": True, "limit": 200, "types": "public_channel"}
-        if cursor:
-            params["cursor"] = cursor
-        result = _slack_api(token, "conversations.list", params)
-        if not result.get("ok"):
-            raise RuntimeError(f"conversations.list failed: {result.get('error')}")
-        for ch in result.get("channels", []):
-            if ch["name"] == name:
-                return ch["id"]
-        meta = result.get("response_metadata", {})
-        cursor = meta.get("next_cursor")
-        if not cursor:
-            break
-
-    # Channel not found — create it
-    result = _slack_api(token, "conversations.create", {"name": name, "is_private": False})
-    if not result.get("ok"):
-        raise RuntimeError(f"conversations.create failed: {result.get('error')}")
-    return result["channel"]["id"]
-
-
-def _build_slack_blocks(data: dict, prev: dict | None) -> list:
-    """Build Slack mrkdwn blocks from scorer output."""
-    overall = data["overall"]
-    ts = data["ts"][:19].replace("T", " ")
-    emoji = {"healthy": ":large_green_circle:", "degraded": ":large_yellow_circle:", "critical": ":red_circle:"}
-    sig_emoji = {"healthy": ":large_green_circle:", "degraded": ":large_yellow_circle:", "critical": ":red_circle:"}
-
-    prev_signals = (prev or {}).get("signals", {})
-
-    def _arrow(sig_key: str, current_val, prev_val) -> str:
-        if prev_val is None or current_val is None:
-            return ""
-        lower_is_better = sig_key in ("zero_task_failures", "correction_frequency")
-        if lower_is_better:
-            return " ↓" if current_val < prev_val else (" ↑" if current_val > prev_val else " →")
-        return " ↑" if current_val > prev_val else (" ↓" if current_val < prev_val else " →")
-
-    rows = []
-    signal_map = [
-        ("completion_rate",    "Completion rate"),
-        ("task_throughput",    "Task throughput"),
-        ("zero_task_failures", "Zero-task fails"),
-        ("correction_frequency", "Correction freq"),
-    ]
-    for sig_key, label in signal_map:
-        sig = data["signals"][sig_key]
-        val = sig["value"]
-        status = sig["status"]
-        prev_val = prev_signals.get(sig_key, {}).get("value") if prev_signals else None
-        arrow = _arrow(sig_key, val, prev_val)
-        val_str = f"{val*100:.0f}%" if sig_key == "completion_rate" and val is not None else ("N/A" if val is None else str(val))
-        rows.append(f"{sig_emoji[status]} *{label}*  `{val_str}`{arrow}")
-
-    body = "\n".join(rows)
-    if data.get("_error"):
-        body += f"\n⚠ _{data['_error']}_"
-
-    return [
-        {
-            "type": "header",
-            "text": {"type": "plain_text", "text": f"hex-vitals  {emoji[overall]} {overall.upper()}"},
-        },
-        {
-            "type": "section",
-            "text": {"type": "mrkdwn", "text": f"*{ts} UTC*\n{body}"},
-        },
-    ]
-
-
-def post_to_slack(data: dict, prev: dict | None) -> None:
-    token = _load_slack_token()
-    channel_id = _ensure_channel(token, SLACK_CHANNEL)
-    blocks = _build_slack_blocks(data, prev)
-    result = _slack_api(token, "chat.postMessage", {
-        "channel": channel_id,
-        "blocks": blocks,
-        "text": f"hex-vitals {data['overall'].upper()}",  # fallback
-    })
-    if not result.get("ok"):
-        raise RuntimeError(f"chat.postMessage failed: {result.get('error')}")
-    print(f"posted to #{SLACK_CHANNEL} (ts={result.get('ts')}) — success")
-
-
 # ── Entry point ────────────────────────────────────────────────────────────
 def main() -> int:
     args = sys.argv[1:]
     want_human = "--human" in args
-    want_slack = "--slack" in args
 
     data = score()
     prev = load_cache()
 
-    if want_slack:
-        post_to_slack(data, prev)
-    elif want_human:
+    if want_human:
         print(human_output(data, prev))
     else:
         print(json.dumps(data, indent=2))

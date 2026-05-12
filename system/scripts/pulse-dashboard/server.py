@@ -438,33 +438,7 @@ function removeLastStatus() {
   if (statuses.length) statuses[statuses.length - 1].remove();
 }
 
-async function loadMessages() {
-  try {
-    const resp = await fetch('./api/messages');
-    const msgs = await resp.json();
-    if (msgs.length === lastMsgCount) return;
-    lastMsgCount = msgs.length;
-
-    const el = document.getElementById('chatMessages');
-    el.innerHTML = '';
-    msgs.forEach(m => {
-      const div = document.createElement('div');
-      if (m.user === MIKE_USER_ID) {
-        div.className = 'chat-msg user';
-      } else if (m.bot) {
-        div.className = 'chat-msg hex';
-      } else {
-        div.className = 'chat-msg hex';
-      }
-      div.textContent = m.text;
-      el.appendChild(div);
-    });
-    el.scrollTop = el.scrollHeight;
-  } catch(e) {}
-}
-
-loadMessages();
-setInterval(loadMessages, 3000);
+// Chat-message polling removed with cc-connect deprecation 2026-05-12.
 </script>
 </body>
 </html>"""
@@ -789,34 +763,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 payload = {"error": str(exc)}
             self.wfile.write(json.dumps(payload).encode())
 
-        elif self.path == "/api/messages":
-            self.send_response(200)
-            self.send_header("Content-Type", "application/json; charset=utf-8")
-            self.end_headers()
-
-            slack_token = os.environ.get("HEX_SLACK_BOT_TOKEN", "")
-            messages = []
-            if slack_token:
-                try:
-                    req = urllib.request.Request(
-                        "https://slack.com/api/conversations.history?channel=C0AUYHWBBFU&limit=30",
-                        headers={"Authorization": f"Bearer {slack_token}"},
-                    )
-                    with urllib.request.urlopen(req, timeout=5) as resp:
-                        data = json.loads(resp.read())
-                    if data.get("ok"):
-                        for msg in reversed(data.get("messages", [])):
-                            messages.append({
-                                "ts": msg.get("ts", ""),
-                                "text": msg.get("text", ""),
-                                "user": msg.get("user", ""),
-                                "bot": "bot_id" in msg or "app_id" in msg,
-                            })
-                except Exception:
-                    pass
-
-            self.wfile.write(json.dumps(messages).encode())
-
         elif self.path.startswith("/api/message-status"):
             self.send_response(200)
             self.send_header("Content-Type", "application/json; charset=utf-8")
@@ -882,43 +828,10 @@ class Handler(http.server.BaseHTTPRequestHandler):
                 "capture_file": str(capture_file),
             })
 
-            # 2. Post to #hex-pulse via Slack — cc-connect routes this to a
-            #    Claude Code session that can actually act on it
-            slack_token = os.environ.get("HEX_SLACK_BOT_TOKEN", "")
-            slack_ts = None
-            if slack_token:
-                try:
-                    slack_data = json.dumps({
-                        "channel": "C0AUYHWBBFU",
-                        "text": text,
-                    }).encode()
-                    slack_req = urllib.request.Request(
-                        "https://slack.com/api/chat.postMessage",
-                        data=slack_data,
-                        headers={
-                            "Authorization": f"Bearer {slack_token}",
-                            "Content-Type": "application/json; charset=utf-8",
-                        },
-                        method="POST",
-                    )
-                    with urllib.request.urlopen(slack_req, timeout=5) as resp:
-                        sr = json.loads(resp.read())
-                        slack_ts = sr.get("ts")
-                    if slack_ts:
-                        _emit("pulse.message.routed", {
-                            "message_id": message_id,
-                            "channel": "C0AUYHWBBFU",
-                            "slack_ts": slack_ts,
-                        })
-                except Exception:
-                    pass
-
             self.wfile.write(json.dumps({
                 "captured": True,
                 "message_id": message_id,
                 "file": str(capture_file),
-                "slack_ts": slack_ts,
-                "channel": "C0AUYHWBBFU",
             }).encode())
         else:
             self.send_response(404)

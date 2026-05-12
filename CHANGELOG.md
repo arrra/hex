@@ -2,6 +2,18 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-12] — Slack/cc-connect deprecation + upgrade.sh cleanup (v0.14.0)
+
+### Changed
+- `system/scripts/upgrade.sh`: dropped legacy hex-events standalone install path — hex-events is now a subcommand of the `hex` binary (`hex events`) and no longer requires a separate Python install or LaunchAgent. Removes `HEX_EVENTS_REPO/DIR/SRC` variables, `verify_hex_events()`, `install_hex_events()`, v1 rsync block, and misleading "hex-events and BOI" error framing.
+- `system/scripts/hex-vitals.py`: removed `--slack` flag and Slack posting (~155 LOC). cc-connect / Slack fully deprecated.
+- `system/scripts/hex-doctor`: removed dead `check-slack-alert-roundtrip` module.
+- `system/scripts/pulse-dashboard/server.py`: removed `/api/messages` Slack-fetch endpoint and `loadMessages()` frontend poller.
+- `system/scripts/pulse/server.py`: removed dead Slack surface entry.
+- `system/scripts/telemetry-ratio.py`: removed `slack` surface entry.
+- `system/skills/secret-intake/SKILL.md`: removed cc-connect references.
+- `system/scripts/integrations/slack-bot.sh`, `secrets-pipeline.sh`: archived to `_archive/` — not removed from history, just retired from active use.
+
 ## [2026-05-06] — messaging.receive + wake crash-recovery + health scripts (v0.13.3)
 
 ### Added

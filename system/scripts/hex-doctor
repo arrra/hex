@@ -464,23 +464,6 @@ if [ -f "$FAILURE_ROUTING_CHECK" ]; then
   fi
 fi
 
-# ─── Slack Alert Roundtrip check ─────────────────────────────────────────────
-SLACK_ROUNDTRIP_CHECK="$SCRIPTS_DIR/health/check-slack-alert-roundtrip.sh"
-if [ -f "$SLACK_ROUNDTRIP_CHECK" ]; then
-  MODULE_COUNT=$((MODULE_COUNT + 1))
-  echo ""
-  echo -e "${BOLD}Slack Alert Roundtrip${RESET}"
-  echo "  ─────────────────────────────────────────"
-  slack_rt_out=""
-  slack_rt_exit=0
-  slack_rt_out="$(bash "$SLACK_ROUNDTRIP_CHECK" 2>&1)" || slack_rt_exit=$?
-  if [ "$slack_rt_exit" -eq 0 ]; then
-    _pass "$slack_rt_out"
-  else
-    _error "$slack_rt_out"
-  fi
-fi
-
 # ─── Summary ──────────────────────────────────────────────────────────────────
 echo ""
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"

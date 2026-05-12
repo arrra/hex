@@ -698,9 +698,8 @@ _hex_session_id = None
 class DashboardContext:
     """Pulse is a surface. Hex is the brain.
 
-    Messages route through claude -p with full CLAUDE.md context,
-    same as cc-connect does for Slack. Dashboard state is injected
-    as context alongside the user's message.
+    Messages route through claude -p with full CLAUDE.md context.
+    Dashboard state is injected as context alongside the user's message.
     """
 
     MAX_EFFECTS = 5

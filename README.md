@@ -352,6 +352,14 @@ bash tests/eval/run_eval_macos.sh            # macOS Tart
 
 ## Roadmap
 
+v0.14.0: **Slack/cc-connect deprecation + upgrade.sh cleanup.**
+- **Slack/cc-connect fully removed**: hex no longer requires or references Slack. Removed `--slack` flag from `hex-vitals.py`, Slack posting code (~155 LOC), dead `check-slack-alert-roundtrip` module from `hex-doctor`, `/api/messages` Slack-fetch endpoint from pulse dashboard, and `slack` surface from `telemetry-ratio.py`. `slack-bot.sh` and `secrets-pipeline.sh` archived.
+- **upgrade.sh simplified**: dropped legacy hex-events standalone install path. hex-events ships as `hex events` subcommand — no separate Python install or LaunchAgent needed.
+
+v0.13.3 fixes: **Health scripts + messaging.receive + wake crash-recovery.**
+- **New health scripts**: `check-hex-events-policy-load.sh` surfaces POLICY LOAD/VALIDATION ERROR entries from the hex-events daemon log (previously silent). `check-vector-search.sh` verifies sqlite-vec is loadable and memory.db has vectors.
+- **wake.rs crash recovery**: `messaging.receive()` transitions inbox messages to `in_progress` atomically — messages survive `claude::invoke` errors and are re-delivered on the next wake. Legacy JSONL inbox drained in parallel.
+
 v0.13.2 fixes: **Session-start checkpoint resume, integration-check emit fix, and memory leak fix.**
 - **Channel checkpoint resume**: `session-start.sh` now surfaces `projects/<topic>/checkpoint.md` for `hex-<topic>` channels. Sessions pick up where they left off automatically. Generalized blocker-flag scan (`.hex/state/blockers/*.flag`) and topic-regex sanitization included.
 - **Integration-check emit fix**: `export _error_raw` bug — 11,948+ events/day were emitted with `error: null` because the env var wasn't propagating into the command-substitution subshell. Fixed. Emit-throttle added for persistent fail streaks (heartbeat every 60 checks; no more event spam for a single dead probe).

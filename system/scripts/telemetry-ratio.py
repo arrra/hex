@@ -28,11 +28,6 @@ SURFACES = {
         "inputs":  ["pulse.message.received"],
         "outputs": ["pulse.message.acted_on", "pulse.message.routed", "pulse.message.responded"],
     },
-    "slack": {
-        "label": "slack",
-        "inputs":  ["slack.message.received"],
-        "outputs": ["slack.message.responded"],
-    },
     "captures": {
         "label": "captures",
         "inputs":  ["capture.created"],

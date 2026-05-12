@@ -3,7 +3,7 @@ name: secret-intake
 description: >
   Secure credential intake via local web form. Spin up a one-page server on
   Tailscale, paste keys, upload PEM/JSON files, hit submit — secrets land in
-  .hex/secrets/ with 600 perms and auto-sync to launchctl + cc-connect.
+  .hex/secrets/ with 600 perms and auto-sync to launchctl.
 version: 1.0.0
 ---
 
@@ -40,7 +40,7 @@ bash $HEX_DIR/.hex/skills/secret-intake/scripts/stop.sh
 2. Key files (PEM, JSON, p12, etc.) are written to `.hex/secrets/{institution}-{filename}`
 3. All files get `chmod 600`
 4. If an `.env` file already exists for that institution, new keys are *merged* (existing keys preserved, matching keys updated)
-5. `sync-secrets.sh` runs automatically — propagates to `launchctl setenv` + cc-connect plist + daemon restart
+5. `sync-secrets.sh` runs automatically — propagates to `launchctl setenv`
 
 ## Security Properties
 
