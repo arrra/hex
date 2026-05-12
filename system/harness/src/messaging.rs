@@ -8,6 +8,7 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 use uuid::Uuid;
 
+use crate::message;
 use crate::server::{Request, Response};
 use crate::sse::SseBus;
 use crate::telemetry::Telemetry;
@@ -560,6 +561,40 @@ impl MessagingHandler {
         if let Err(e) = self.write_messages(&messages) {
             eprintln!("write failed: {e}");
             std::process::exit(1);
+        }
+
+        // Also write to per-agent JSONL inbox so harness wake cycle can receive it.
+        // Parse content "[subject] body" to extract subject/body for types::Message.
+        let (subj, bod) = if content.starts_with('[') {
+            if let Some(close) = content.find("] ") {
+                (&content[1..close], &content[close + 2..])
+            } else {
+                ("", content)
+            }
+        } else {
+            ("", content)
+        };
+        let inbox_msg = crate::types::Message {
+            id: id.clone(),
+            msg_type: crate::types::MessageType::Agent,
+            from: from.to_string(),
+            to: to.clone(),
+            content: content.to_string(),
+            anchor: anchor.map(|s| s.to_string()),
+            status: "new".to_string(),
+            created_at: message.created_at.clone(),
+            action_log: Vec::new(),
+            routed_to: Vec::new(),
+            subject: subj.to_string(),
+            body: bod.to_string(),
+            initiative_id: None,
+            response_requested: false,
+            in_reply_to: None,
+            sent_at: Utc::now(),
+        };
+        let msg_dir = self.hex_dir.join(".hex/messages");
+        if let Err(e) = message::send(&msg_dir, &inbox_msg) {
+            eprintln!("WARN: cli_send: failed to write agent JSONL inbox: {e}");
         }
 
         self.bus.publish(
