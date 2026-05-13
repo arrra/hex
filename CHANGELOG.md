@@ -2,6 +2,20 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-13] — Skills expansion: 9 new skills + bet-status command (v0.16.0)
+
+### Added
+- `system/skills/hex-event/`: Policy-based event engine skill — wire reactive automation, event chains, and oneshot notifications.
+- `system/skills/hex-save/`: Persist and retrieve named context snapshots across sessions.
+- `system/skills/hex-switch/`: Switch active hex topic/project context cleanly.
+- `system/skills/imessage/`: iMessage integration skill for sending messages from Claude sessions.
+- `system/skills/mirofish/`: Miro board integration for visual brainstorming and diagram workflows.
+- `system/skills/remodeling/`: Home remodeling project planning and tracking skill.
+- `system/skills/x-twitter/`: X/Twitter post drafting and publishing skill via MCP.
+- `system/skills/conjecture-criticism/`: Structured conjecture-criticism-synthesis reasoning framework with agent prompt and cross-critique templates.
+- `system/skills/vibe-to-prod/`: Vibe-to-production pipeline skill — assess, characterize, refactor, verify phases with spec templates and metric scripts.
+- `system/commands/bet-status.md`: `/bet-status` slash command — surfaces active bets, their confidence levels, and resolution status.
+
 ## [2026-05-12] — Harness messaging + binary resolution fix (v0.15.0)
 
 ### Fixed

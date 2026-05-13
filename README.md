@@ -294,7 +294,9 @@ hex-foundation/
 │   ├── commands/        → copied to ~/hex/.claude/commands/ (Claude Code) and ~/hex/.hex/commands/ (doctor/tooling)
 │   ├── skills/          memory/ (index+search+save), landings, hex-reflect, hex-decide,
 │   │                    hex-debrief, hex-consolidate, hex-doctor, hex-checkpoint,
-│   │                    hex-shutdown, hex-startup, hex-triage
+│   │                    hex-shutdown, hex-startup, hex-triage, hex-event, hex-save,
+│   │                    hex-switch, x-twitter, imessage, mirofish, remodeling,
+│   │                    conjecture-criticism, vibe-to-prod
 │   ├── policies/        quality-spec-audit, quality-kr-check, quality-sweep,
 │   │                    quality-gaming-alert — event-driven quality gates
 │   └── reference/       core-agents/ — quality-antagonist and fleet agent charters
