@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use hex::{state, wake};
 
 mod integration;
+mod integration_mcp_exa;
 mod kalshi;
 mod mirofish;
 mod path_map;
@@ -290,6 +291,9 @@ enum IntegrationCommands {
     Rotate { name: String },
     /// Print integration health-check template to stdout (port of integrations/_template.sh)
     Template,
+    /// Run Exa MCP health probe (port of integrations/mcp-exa.sh)
+    #[command(name = "mcp-exa")]
+    McpExa,
 }
 
 #[derive(Subcommand)]
@@ -1173,6 +1177,9 @@ fn main() {
                 integration::template();
                 return;
             }
+            if let IntegrationCommands::McpExa = command {
+                std::process::exit(integration_mcp_exa::run_probe());
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
@@ -1185,6 +1192,7 @@ fn main() {
                 IntegrationCommands::Probe { name } => ("probe", Some(name.clone())),
                 IntegrationCommands::Rotate { name } => ("rotate", Some(name.clone())),
                 IntegrationCommands::Template => unreachable!(),
+                IntegrationCommands::McpExa => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
