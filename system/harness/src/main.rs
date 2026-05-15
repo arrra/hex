@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use hex::{state, wake};
 
+mod kalshi;
 mod mirofish;
 mod path_map;
 mod session_reflect;
@@ -84,6 +85,11 @@ enum Commands {
     Mirofish {
         #[command(subcommand)]
         command: MirofishCommands,
+    },
+    /// Kalshi prediction market integration
+    Kalshi {
+        #[command(subcommand)]
+        command: KalshiCommands,
     },
     /// Session lifecycle commands
     Session {
@@ -359,6 +365,16 @@ enum SessionCommands {
 enum MirofishCommands {
     /// Check VM status and service health
     Status,
+}
+
+#[derive(Subcommand)]
+enum KalshiCommands {
+    /// Generate RSA keypair for Kalshi API authentication (port of kalshi-keygen.sh)
+    Keygen {
+        /// Override the secrets directory (default: $HEX_DIR/.hex/secrets)
+        #[arg(long)]
+        secrets_dir: Option<std::path::PathBuf>,
+    },
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
@@ -1285,6 +1301,18 @@ fn main() {
         }
         Commands::Mirofish { command } => match command {
             MirofishCommands::Status => mirofish::run_status(),
+        },
+        Commands::Kalshi { command } => match command {
+            KalshiCommands::Keygen { secrets_dir } => {
+                let dir = match secrets_dir {
+                    Some(d) => d,
+                    None => {
+                        let hex_dir = get_hex_dir();
+                        kalshi::secrets_dir_from_hex(&hex_dir)
+                    }
+                };
+                kalshi::run_keygen(&dir);
+            }
         },
         Commands::Session { command } => match command {
             SessionCommands::Reflect { session_id, quiet } => {
