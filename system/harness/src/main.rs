@@ -8,6 +8,7 @@ mod integration;
 mod integration_mcp_exa;
 mod integration_mcp_excalidraw;
 mod integration_mcp_plugin_ecc;
+mod integration_x_twitter;
 mod kalshi;
 mod mcp;
 mod mirofish;
@@ -308,6 +309,9 @@ enum IntegrationCommands {
     /// Run ECC plugin health probe (port of integrations/mcp-plugin-ecc.sh)
     #[command(name = "mcp-plugin-ecc")]
     McpPluginEcc,
+    /// Run X (Twitter) API bearer token probe (port of integrations/x-twitter.sh)
+    #[command(name = "x-twitter")]
+    XTwitter,
 }
 
 #[derive(Subcommand)]
@@ -1210,6 +1214,9 @@ fn main() {
             if let IntegrationCommands::McpPluginEcc = command {
                 std::process::exit(integration_mcp_plugin_ecc::run_probe());
             }
+            if let IntegrationCommands::XTwitter = command {
+                std::process::exit(integration_x_twitter::run_probe());
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
@@ -1225,6 +1232,7 @@ fn main() {
                 IntegrationCommands::McpExa => unreachable!(),
                 IntegrationCommands::McpExcalidraw => unreachable!(),
                 IntegrationCommands::McpPluginEcc => unreachable!(),
+                IntegrationCommands::XTwitter => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
