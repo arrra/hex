@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use hex::{state, wake};
 
+mod path_map;
 mod today;
 
 #[derive(Parser)]
@@ -70,6 +71,12 @@ enum Commands {
         quiet: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Translate paths between v1 and v2 hex layouts (port of .hex/scripts/path-mapping.sh)
+    #[command(name = "path-map")]
+    PathMap {
+        #[command(subcommand)]
+        command: PathMapCommands,
     },
     /// Print today's date (port of .hex/scripts/today.sh)
     Today {
@@ -299,6 +306,28 @@ enum ExtensionCommands {
     Enable { name: String },
     /// Disable an installed extension
     Disable { name: String },
+}
+
+#[derive(Subcommand)]
+enum PathMapCommands {
+    /// Translate a v1 path (dot-claude/…) to its v2 equivalent (system/…)
+    #[command(name = "v1-to-v2")]
+    V1ToV2 {
+        /// Source-relative v1 path (e.g. dot-claude/scripts/foo.sh)
+        path: String,
+    },
+    /// Translate a v2 path (system/…) to its v1 equivalent (dot-claude/…)
+    #[command(name = "v2-to-v1")]
+    V2ToV1 {
+        /// Source-relative v2 path (e.g. system/scripts/foo.sh)
+        path: String,
+    },
+    /// Detect whether a repo root uses the v1 or v2 layout
+    #[command(name = "detect-layout")]
+    DetectLayout {
+        /// Path to the repo root directory
+        root: String,
+    },
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
@@ -1223,6 +1252,11 @@ fn main() {
             }
             std::process::exit(exit_code);
         }
+        Commands::PathMap { command } => match command {
+            PathMapCommands::V1ToV2 { path } => path_map::run_v1_to_v2(&path),
+            PathMapCommands::V2ToV1 { path } => path_map::run_v2_to_v1(&path),
+            PathMapCommands::DetectLayout { root } => path_map::run_detect_layout(&root),
+        },
         Commands::Today { format } => {
             today::run(format.as_deref());
         }
