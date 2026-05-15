@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use hex::{state, wake};
 
+mod mirofish;
 mod path_map;
 mod session_reflect;
 mod today;
@@ -78,6 +79,11 @@ enum Commands {
     PathMap {
         #[command(subcommand)]
         command: PathMapCommands,
+    },
+    /// Mirofish VM and service health (port of .hex/scripts/mirofish-status.sh)
+    Mirofish {
+        #[command(subcommand)]
+        command: MirofishCommands,
     },
     /// Session lifecycle commands
     Session {
@@ -347,6 +353,12 @@ enum SessionCommands {
         #[arg(long)]
         quiet: bool,
     },
+}
+
+#[derive(Subcommand)]
+enum MirofishCommands {
+    /// Check VM status and service health
+    Status,
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
@@ -1271,6 +1283,9 @@ fn main() {
             }
             std::process::exit(exit_code);
         }
+        Commands::Mirofish { command } => match command {
+            MirofishCommands::Status => mirofish::run_status(),
+        },
         Commands::Session { command } => match command {
             SessionCommands::Reflect { session_id, quiet } => {
                 session_reflect::run(session_id.as_deref(), quiet);
