@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use hex::{state, wake};
 
+mod integration;
 mod kalshi;
 mod mirofish;
 mod path_map;
@@ -287,6 +288,8 @@ enum IntegrationCommands {
     Probe { name: String },
     /// Rotate an integration's credentials
     Rotate { name: String },
+    /// Print integration health-check template to stdout (port of integrations/_template.sh)
+    Template,
 }
 
 #[derive(Subcommand)]
@@ -1166,6 +1169,10 @@ fn main() {
             }
         },
         Commands::Integration { command } => {
+            if let IntegrationCommands::Template = command {
+                integration::template();
+                return;
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
@@ -1177,6 +1184,7 @@ fn main() {
                 IntegrationCommands::Status { name } => ("status", name.clone()),
                 IntegrationCommands::Probe { name } => ("probe", Some(name.clone())),
                 IntegrationCommands::Rotate { name } => ("rotate", Some(name.clone())),
+                IntegrationCommands::Template => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
