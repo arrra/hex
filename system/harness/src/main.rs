@@ -7,6 +7,7 @@ use hex::{state, wake};
 mod kalshi;
 mod mirofish;
 mod path_map;
+mod pulse;
 mod session_reflect;
 mod today;
 
@@ -90,6 +91,11 @@ enum Commands {
     Kalshi {
         #[command(subcommand)]
         command: KalshiCommands,
+    },
+    /// Pulse server lifecycle (port of .hex/scripts/pulse/start.sh)
+    Pulse {
+        #[command(subcommand)]
+        command: PulseCommands,
     },
     /// Session lifecycle commands
     Session {
@@ -374,6 +380,16 @@ enum KalshiCommands {
         /// Override the secrets directory (default: $HEX_DIR/.hex/secrets)
         #[arg(long)]
         secrets_dir: Option<std::path::PathBuf>,
+    },
+}
+
+#[derive(Subcommand)]
+enum PulseCommands {
+    /// Load API key from secrets and start the pulse server.py (port of pulse/start.sh)
+    Start {
+        /// Extra arguments forwarded to server.py
+        #[arg(trailing_var_arg = true)]
+        args: Vec<String>,
     },
 }
 
@@ -1312,6 +1328,12 @@ fn main() {
                     }
                 };
                 kalshi::run_keygen(&dir);
+            }
+        },
+        Commands::Pulse { command } => match command {
+            PulseCommands::Start { args } => {
+                let hex_dir = get_hex_dir();
+                pulse::run_start(&hex_dir, &args);
             }
         },
         Commands::Session { command } => match command {
