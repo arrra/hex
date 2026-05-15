@@ -9,6 +9,7 @@ mod integration_mcp_exa;
 mod integration_mcp_excalidraw;
 mod integration_mcp_plugin_ecc;
 mod kalshi;
+mod mcp;
 mod mirofish;
 mod path_map;
 mod pulse;
@@ -110,6 +111,11 @@ enum Commands {
     Today {
         /// Optional date format, e.g. +%a (passed to strftime; mirrors shell's $1)
         format: Option<String>,
+    },
+    /// MCP utilities
+    Mcp {
+        #[command(subcommand)]
+        command: McpCommands,
     },
     /// Print version
     Version,
@@ -405,6 +411,16 @@ enum PulseCommands {
         /// Extra arguments forwarded to server.py
         #[arg(trailing_var_arg = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum McpCommands {
+    /// Rewrite MCP OAuth auth URL so redirect_uri routes through hex-router (port of mcp-oauth-rewrite.sh)
+    #[command(name = "oauth-rewrite")]
+    OauthRewrite {
+        /// The OAuth auth URL to rewrite
+        auth_url: String,
     },
 }
 
@@ -1381,6 +1397,11 @@ fn main() {
         Commands::Today { format } => {
             today::run(format.as_deref());
         }
+        Commands::Mcp { command } => match command {
+            McpCommands::OauthRewrite { auth_url } => {
+                std::process::exit(mcp::oauth_rewrite(&auth_url));
+            }
+        },
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }
