@@ -4,6 +4,8 @@ use std::path::{Path, PathBuf};
 
 use hex::{state, wake};
 
+mod today;
+
 #[derive(Parser)]
 #[command(name = "hex", about = "Hex multi-agent harness", version)]
 struct Cli {
@@ -68,6 +70,11 @@ enum Commands {
         quiet: bool,
         #[arg(long)]
         json: bool,
+    },
+    /// Print today's date (port of .hex/scripts/today.sh)
+    Today {
+        /// Optional date format, e.g. +%a (passed to strftime; mirrors shell's $1)
+        format: Option<String>,
     },
     /// Print version
     Version,
@@ -1215,6 +1222,9 @@ fn main() {
                 }));
             }
             std::process::exit(exit_code);
+        }
+        Commands::Today { format } => {
+            today::run(format.as_deref());
         }
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
