@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use hex::{state, wake};
 
 mod path_map;
+mod session_reflect;
 mod today;
 
 #[derive(Parser)]
@@ -77,6 +78,11 @@ enum Commands {
     PathMap {
         #[command(subcommand)]
         command: PathMapCommands,
+    },
+    /// Session lifecycle commands
+    Session {
+        #[command(subcommand)]
+        command: SessionCommands,
     },
     /// Print today's date (port of .hex/scripts/today.sh)
     Today {
@@ -327,6 +333,19 @@ enum PathMapCommands {
     DetectLayout {
         /// Path to the repo root directory
         root: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SessionCommands {
+    /// Post-session reflection: update reflection-log.md and run session-delta.py (port of session-reflect.sh)
+    Reflect {
+        /// Session identifier to record in the reflection log
+        #[arg(long)]
+        session_id: Option<String>,
+        /// Suppress informational output
+        #[arg(long)]
+        quiet: bool,
     },
 }
 
@@ -1252,6 +1271,11 @@ fn main() {
             }
             std::process::exit(exit_code);
         }
+        Commands::Session { command } => match command {
+            SessionCommands::Reflect { session_id, quiet } => {
+                session_reflect::run(session_id.as_deref(), quiet);
+            }
+        },
         Commands::PathMap { command } => match command {
             PathMapCommands::V1ToV2 { path } => path_map::run_v1_to_v2(&path),
             PathMapCommands::V2ToV1 { path } => path_map::run_v2_to_v1(&path),
