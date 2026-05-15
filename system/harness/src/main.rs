@@ -6,6 +6,7 @@ use hex::{state, wake};
 
 mod integration;
 mod integration_mcp_exa;
+mod integration_mcp_excalidraw;
 mod kalshi;
 mod mirofish;
 mod path_map;
@@ -294,6 +295,9 @@ enum IntegrationCommands {
     /// Run Exa MCP health probe (port of integrations/mcp-exa.sh)
     #[command(name = "mcp-exa")]
     McpExa,
+    /// Run Excalidraw MCP health probe (port of integrations/mcp-excalidraw.sh)
+    #[command(name = "mcp-excalidraw")]
+    McpExcalidraw,
 }
 
 #[derive(Subcommand)]
@@ -1180,6 +1184,9 @@ fn main() {
             if let IntegrationCommands::McpExa = command {
                 std::process::exit(integration_mcp_exa::run_probe());
             }
+            if let IntegrationCommands::McpExcalidraw = command {
+                std::process::exit(integration_mcp_excalidraw::run_probe());
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
@@ -1193,6 +1200,7 @@ fn main() {
                 IntegrationCommands::Rotate { name } => ("rotate", Some(name.clone())),
                 IntegrationCommands::Template => unreachable!(),
                 IntegrationCommands::McpExa => unreachable!(),
+                IntegrationCommands::McpExcalidraw => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
