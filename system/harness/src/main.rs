@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use hex::{state, wake};
 
+mod doctor;
 mod health;
 mod integration;
 mod integration_apple_addressbook;
@@ -89,16 +90,10 @@ enum Commands {
         #[command(subcommand)]
         command: HealthCommands,
     },
-    /// System health check
+    /// System health checks
     Doctor {
-        #[arg(long)]
-        fix: bool,
-        #[arg(long)]
-        smoke: bool,
-        #[arg(long)]
-        quiet: bool,
-        #[arg(long)]
-        json: bool,
+        #[command(subcommand)]
+        command: DoctorCommands,
     },
     /// Translate paths between v1 and v2 hex layouts (port of .hex/scripts/path-mapping.sh)
     #[command(name = "path-map")]
@@ -501,6 +496,24 @@ enum HealthCommands {
     /// Check agent memory system health (port of health/check-agent-memory.sh)
     #[command(name = "check-agent-memory")]
     CheckAgentMemory,
+}
+
+#[derive(Subcommand)]
+enum DoctorCommands {
+    /// Run the full hex-doctor script
+    Run {
+        #[arg(long)]
+        fix: bool,
+        #[arg(long)]
+        smoke: bool,
+        #[arg(long)]
+        quiet: bool,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Check Codex CLI + config health (port of doctor-checks/codex.sh)
+    #[command(name = "check-codex")]
+    CheckCodex,
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
@@ -1430,48 +1443,54 @@ fn main() {
                 health::check_agent_memory();
             }
         },
-        Commands::Doctor { fix, smoke, quiet, json } => {
+        Commands::Doctor { command } => {
             let hex_dir = get_hex_dir();
-            let script = hex_dir.join(".hex/scripts/hex-doctor");
-            let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(&hex_dir));
-            let start = std::time::Instant::now();
-            let mut cmd = std::process::Command::new("bash");
-            cmd.arg(&script);
-            if fix { cmd.arg("--fix"); }
-            if smoke { cmd.arg("--smoke"); }
-            if quiet { cmd.arg("--quiet"); }
-            if json { cmd.arg("--json"); }
-            cmd.env("HEX_DIR", &hex_dir);
-            // Stream stdout/stderr live so module headers, check results, and
-            // long-running integration check progress appear as they happen.
-            // Buffering broke perceived responsiveness — see hang investigation 2026-05-05.
-            cmd.stdout(std::process::Stdio::inherit());
-            cmd.stderr(std::process::Stdio::inherit());
-            let mut child = cmd.spawn().unwrap_or_else(|e| {
-                eprintln!("hex doctor: failed to run script: {e}");
-                std::process::exit(1);
-            });
-            let status = child.wait().unwrap_or_else(|e| {
-                eprintln!("hex doctor: wait failed: {e}");
-                std::process::exit(1);
-            });
-            let exit_code = status.code().unwrap_or(1);
-            let duration_ms = start.elapsed().as_millis() as u64;
-            telemetry.emit("hex.doctor.run", &serde_json::json!({
-                "fix": fix,
-                "smoke": smoke,
-                "quiet": quiet,
-                "json": json,
-                "exit_code": exit_code,
-                "duration_ms": duration_ms,
-            }));
-            if exit_code != 0 {
-                telemetry.emit("hex.doctor.failed", &serde_json::json!({
-                    "exit_code": exit_code,
-                    "duration_ms": duration_ms,
-                }));
+            match command {
+                DoctorCommands::CheckCodex => {
+                    doctor::check_codex(&hex_dir);
+                }
+                DoctorCommands::Run { fix, smoke, quiet, json } => {
+                    let script = hex_dir.join(".hex/scripts/hex-doctor");
+                    let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(&hex_dir));
+                    let start = std::time::Instant::now();
+                    let mut cmd = std::process::Command::new("bash");
+                    cmd.arg(&script);
+                    if fix { cmd.arg("--fix"); }
+                    if smoke { cmd.arg("--smoke"); }
+                    if quiet { cmd.arg("--quiet"); }
+                    if json { cmd.arg("--json"); }
+                    cmd.env("HEX_DIR", &hex_dir);
+                    // Stream stdout/stderr live — buffering broke perceived responsiveness
+                    // (see hang investigation 2026-05-05).
+                    cmd.stdout(std::process::Stdio::inherit());
+                    cmd.stderr(std::process::Stdio::inherit());
+                    let mut child = cmd.spawn().unwrap_or_else(|e| {
+                        eprintln!("hex doctor: failed to run script: {e}");
+                        std::process::exit(1);
+                    });
+                    let status = child.wait().unwrap_or_else(|e| {
+                        eprintln!("hex doctor: wait failed: {e}");
+                        std::process::exit(1);
+                    });
+                    let exit_code = status.code().unwrap_or(1);
+                    let duration_ms = start.elapsed().as_millis() as u64;
+                    telemetry.emit("hex.doctor.run", &serde_json::json!({
+                        "fix": fix,
+                        "smoke": smoke,
+                        "quiet": quiet,
+                        "json": json,
+                        "exit_code": exit_code,
+                        "duration_ms": duration_ms,
+                    }));
+                    if exit_code != 0 {
+                        telemetry.emit("hex.doctor.failed", &serde_json::json!({
+                            "exit_code": exit_code,
+                            "duration_ms": duration_ms,
+                        }));
+                    }
+                    std::process::exit(exit_code);
+                }
             }
-            std::process::exit(exit_code);
         }
         Commands::Mirofish { command } => match command {
             MirofishCommands::Status => mirofish::run_status(),
