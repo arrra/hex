@@ -19,7 +19,7 @@ struct SearchResult {
     source_path: String,
     heading: String,
     #[allow(dead_code)]
-    chunk_index: i64,
+    chunk_index: String,
     content: String,
     score: f64,
 }
