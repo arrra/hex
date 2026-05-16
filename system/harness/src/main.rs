@@ -6,6 +6,7 @@ use hex::{state, wake};
 
 mod integration;
 mod integration_apple_addressbook;
+mod metrics;
 mod startup;
 mod integration_tailscale;
 mod integration_mcp_exa;
@@ -74,6 +75,11 @@ enum Commands {
     Extension {
         #[command(subcommand)]
         command: ExtensionCommands,
+    },
+    /// User-outcome metrics (port of .hex/scripts/metrics/run-all.sh)
+    Metrics {
+        #[command(subcommand)]
+        command: MetricsCommands,
     },
     /// System health check
     Doctor {
@@ -467,6 +473,13 @@ enum McpCommands {
 enum WorkspaceCommands {
     /// Create or attach to the hex tmux workspace (port of workspace.sh)
     Launch,
+}
+
+#[derive(Subcommand)]
+enum MetricsCommands {
+    /// Run all user-outcome metric scripts and report PASS/FAIL (port of metrics/run-all.sh)
+    #[command(name = "run-all")]
+    RunAll,
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
@@ -1377,6 +1390,12 @@ fn main() {
             );
             std::process::exit(exit_code);
         }
+        Commands::Metrics { command } => match command {
+            MetricsCommands::RunAll => {
+                let hex_dir = get_hex_dir();
+                metrics::run_all(&hex_dir);
+            }
+        },
         Commands::Doctor { fix, smoke, quiet, json } => {
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-doctor");
