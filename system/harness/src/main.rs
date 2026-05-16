@@ -15,6 +15,7 @@ mod integration_mcp_excalidraw;
 mod integration_mcp_plugin_ecc;
 mod integration_x_twitter;
 mod integration_publer;
+mod integration_granola_mcp;
 mod kalshi;
 mod mcp;
 mod mirofish;
@@ -355,6 +356,9 @@ enum IntegrationCommands {
     /// Run Publer API health probe (port of integrations/publer.sh)
     #[command(name = "publer")]
     Publer,
+    /// Run Granola MCP health probe (port of integrations/granola-mcp.sh)
+    #[command(name = "granola-mcp")]
+    GranolaMcp,
 }
 
 #[derive(Subcommand)]
@@ -1297,6 +1301,9 @@ fn main() {
             if let IntegrationCommands::Publer = command {
                 std::process::exit(integration_publer::run_probe());
             }
+            if let IntegrationCommands::GranolaMcp = command {
+                std::process::exit(integration_granola_mcp::run_probe());
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
@@ -1316,6 +1323,7 @@ fn main() {
                 IntegrationCommands::AppleAddressbook => unreachable!(),
                 IntegrationCommands::Tailscale => unreachable!(),
                 IntegrationCommands::Publer => unreachable!(),
+                IntegrationCommands::GranolaMcp => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
