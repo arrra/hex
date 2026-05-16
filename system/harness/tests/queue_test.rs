@@ -33,8 +33,15 @@ fn test_inbox_creates_active_items() {
     let mut state = hex::state::initialize("test", 2.0);
     state.inbox.push(Message {
         id: "msg-1".into(),
+        msg_type: hex::types::MessageType::Agent,
         from: "cos".into(),
-        to: "test".into(),
+        to: vec!["test".into()],
+        content: "[Check v2-arch] Dead for 12 hours".into(),
+        anchor: None,
+        status: "new".into(),
+        created_at: now.to_rfc3339(),
+        action_log: vec![],
+        routed_to: vec![],
         subject: "Check v2-arch".into(),
         body: "Dead for 12 hours".into(),
         initiative_id: None,

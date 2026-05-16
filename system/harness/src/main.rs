@@ -21,6 +21,7 @@ mod integration_publer;
 mod integration_granola_mcp;
 mod kalshi;
 mod mcp;
+mod memory;
 mod mirofish;
 mod path_map;
 mod pulse;
@@ -394,6 +395,18 @@ enum MemoryCommands {
     Index {
         #[arg(long)]
         full: bool,
+        #[arg(long)]
+        stats: bool,
+    },
+    /// Parse Claude JSONL transcripts to markdown
+    #[command(name = "parse-transcripts")]
+    ParseTranscripts {
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1381,7 +1394,10 @@ fn main() {
                 MemoryCommands::Bootstrap => "bootstrap",
                 MemoryCommands::Health => "health",
                 MemoryCommands::Search { .. } => "search",
-                MemoryCommands::Index { .. } => "index",
+                MemoryCommands::Index { stats, .. } => {
+                    if *stats { "index-stats" } else { "index" }
+                }
+                MemoryCommands::ParseTranscripts { .. } => "parse-transcripts",
             };
             let start = std::time::Instant::now();
             let exit_code = match &command {
@@ -1395,15 +1411,13 @@ fn main() {
                     cmd.env("HEX_DIR", &hex_dir);
                     cmd.status().map(|s| s.code().unwrap_or(1)).unwrap_or(1)
                 }
-                MemoryCommands::Index { full } => {
-                    let script = hex_dir.join(".hex/skills/memory/scripts/memory_index.py");
-                    let mut cmd = std::process::Command::new("python3");
-                    cmd.arg(&script);
-                    if *full {
-                        cmd.arg("--full");
-                    }
-                    cmd.env("HEX_DIR", &hex_dir);
-                    cmd.status().map(|s| s.code().unwrap_or(1)).unwrap_or(1)
+                MemoryCommands::Index { full, stats } => {
+                    memory::index::run(&hex_dir, *full, *stats)
+                }
+                MemoryCommands::ParseTranscripts { .. } => {
+                    // T2EEE: parse-transcripts is ported in a subsequent iteration
+                    eprintln!("hex memory parse-transcripts: not yet implemented in native Rust");
+                    1
                 }
                 _ => {
                     let hex_memory = hex_dir.join(".hex/scripts/bin/hex-memory");
