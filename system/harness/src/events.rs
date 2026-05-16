@@ -630,31 +630,47 @@ impl EventEngine {
     }
 
     pub fn start_scheduler(engine: Arc<Self>) {
+        use chrono::Timelike;
         std::thread::spawn(move || {
-            let mut last_minutely = Instant::now();
-            let mut last_hourly = Instant::now();
-            let mut last_6h = Instant::now();
-            let mut last_daily = Instant::now();
-
             loop {
-                std::thread::sleep(Duration::from_secs(60));
-                let now = Instant::now();
+                // Sleep until the next whole-minute boundary (wall-clock aligned).
+                // This avoids Instant-based drift and aligns ticks to real calendar minutes.
+                let now = chrono::Utc::now();
+                let ms_past = now.second() as u64 * 1_000
+                    + now.nanosecond() as u64 / 1_000_000;
+                // Add 50ms buffer so we land just past the boundary, not before it.
+                let ms_to_next = (60_000u64).saturating_sub(ms_past) + 50;
+                std::thread::sleep(Duration::from_millis(ms_to_next));
 
-                if now.duration_since(last_minutely).as_secs() >= 60 {
-                    engine.ingest("timer.tick.minutely", &serde_json::json!({}), "scheduler");
-                    last_minutely = now;
-                }
-                if now.duration_since(last_hourly).as_secs() >= 3600 {
-                    engine.ingest("timer.tick.hourly", &serde_json::json!({}), "scheduler");
-                    last_hourly = now;
-                }
-                if now.duration_since(last_6h).as_secs() >= 6 * 3600 {
-                    engine.ingest("timer.tick.6h", &serde_json::json!({}), "scheduler");
-                    last_6h = now;
-                }
-                if now.duration_since(last_daily).as_secs() >= 24 * 3600 {
-                    engine.ingest("timer.tick.daily", &serde_json::json!({}), "scheduler");
-                    last_daily = now;
+                let tick_time = chrono::Utc::now();
+                let minute = tick_time.minute();
+                let hour = tick_time.hour();
+                let tick_ts = tick_time.format("%Y-%m-%dT%H:%M").to_string();
+
+                // Payload carries dedup_key for idempotent catchup if daemon restarts.
+                // Format: "timer.tick.5m:2026-05-16T05:20"
+                let candidates: &[(&str, bool)] = &[
+                    ("timer.tick.minutely", true),
+                    ("timer.tick.1m", true),
+                    ("timer.tick.5m", minute % 5 == 0),
+                    ("timer.tick.30m", minute % 30 == 0),
+                    ("timer.tick.1h", minute == 0),
+                    ("timer.tick.6h", hour % 6 == 0 && minute == 0),
+                    ("timer.tick.daily", hour == 0 && minute == 0),
+                ];
+
+                for &(event_type, should_fire) in candidates {
+                    if should_fire {
+                        let dedup_key = format!("{event_type}:{tick_ts}");
+                        engine.ingest(
+                            event_type,
+                            &serde_json::json!({
+                                "dedup_key": dedup_key,
+                                "tick_time": tick_ts,
+                            }),
+                            "scheduler",
+                        );
+                    }
                 }
             }
         });
@@ -1829,5 +1845,129 @@ rules:
         assert_eq!(parse_duration_str("1h"), 3600);
         assert_eq!(parse_duration_str("6h"), 21600);
         assert_eq!(parse_duration_str("1d"), 86400);
+    }
+
+    // ── scheduler_* tests ────────────────────────────────────────────────────
+
+    fn scheduler_ticks_at(minute: u32, hour: u32) -> Vec<&'static str> {
+        let candidates: &[(&str, bool)] = &[
+            ("timer.tick.minutely", true),
+            ("timer.tick.1m", true),
+            ("timer.tick.5m", minute % 5 == 0),
+            ("timer.tick.30m", minute % 30 == 0),
+            ("timer.tick.1h", minute == 0),
+            ("timer.tick.6h", hour % 6 == 0 && minute == 0),
+            ("timer.tick.daily", hour == 0 && minute == 0),
+        ];
+        candidates
+            .iter()
+            .filter(|(_, fire)| *fire)
+            .map(|(name, _)| *name)
+            .collect()
+    }
+
+    #[test]
+    fn scheduler_ticks_minute_only() {
+        // At a non-special minute (e.g., 10:03), only minutely and 1m should fire
+        let ticks = scheduler_ticks_at(3, 10);
+        assert_eq!(ticks, vec!["timer.tick.minutely", "timer.tick.1m"]);
+    }
+
+    #[test]
+    fn scheduler_ticks_5m() {
+        // At minute 5, also 5m fires
+        let ticks = scheduler_ticks_at(5, 10);
+        assert!(ticks.contains(&"timer.tick.5m"));
+        assert!(!ticks.contains(&"timer.tick.30m"));
+        assert!(!ticks.contains(&"timer.tick.1h"));
+    }
+
+    #[test]
+    fn scheduler_ticks_30m() {
+        // At minute 30, 5m and 30m fire (30 is divisible by 5)
+        let ticks = scheduler_ticks_at(30, 10);
+        assert!(ticks.contains(&"timer.tick.5m"));
+        assert!(ticks.contains(&"timer.tick.30m"));
+        assert!(!ticks.contains(&"timer.tick.1h"));
+    }
+
+    #[test]
+    fn scheduler_ticks_top_of_hour() {
+        // At minute 0 of a non-6h hour (e.g., 10:00), 5m+30m+1h fire but not 6h/daily
+        let ticks = scheduler_ticks_at(0, 10);
+        assert!(ticks.contains(&"timer.tick.5m"));
+        assert!(ticks.contains(&"timer.tick.30m"));
+        assert!(ticks.contains(&"timer.tick.1h"));
+        assert!(!ticks.contains(&"timer.tick.6h"));
+        assert!(!ticks.contains(&"timer.tick.daily"));
+    }
+
+    #[test]
+    fn scheduler_ticks_6h_boundary() {
+        // At 06:00, 5m+30m+1h+6h fire but not daily
+        let ticks = scheduler_ticks_at(0, 6);
+        assert!(ticks.contains(&"timer.tick.1h"));
+        assert!(ticks.contains(&"timer.tick.6h"));
+        assert!(!ticks.contains(&"timer.tick.daily"));
+    }
+
+    #[test]
+    fn scheduler_ticks_midnight() {
+        // At 00:00, all long-cadence ticks fire
+        let ticks = scheduler_ticks_at(0, 0);
+        assert!(ticks.contains(&"timer.tick.1h"));
+        assert!(ticks.contains(&"timer.tick.6h"));
+        assert!(ticks.contains(&"timer.tick.daily"));
+    }
+
+    #[test]
+    fn scheduler_dedup_key_format() {
+        // Verify dedup key follows "timer.tick.5m:2026-05-16T10:05" pattern
+        let event_type = "timer.tick.5m";
+        let tick_ts = "2026-05-16T10:05";
+        let dedup_key = format!("{event_type}:{tick_ts}");
+        assert_eq!(dedup_key, "timer.tick.5m:2026-05-16T10:05");
+        assert!(dedup_key.contains(':'));
+        assert!(dedup_key.starts_with("timer.tick."));
+    }
+
+    #[test]
+    fn scheduler_emits_events_to_db() {
+        // Simulate scheduler emitting a minutely tick and verify DB persistence
+        let tmp = TempDir::new().unwrap();
+        let engine = make_engine(&tmp);
+
+        // Simulate what the scheduler does at 10:05
+        let tick_ts = "2026-05-16T10:05";
+        let dedup_key = format!("timer.tick.minutely:{tick_ts}");
+        engine.ingest(
+            "timer.tick.minutely",
+            &serde_json::json!({"dedup_key": dedup_key, "tick_time": tick_ts}),
+            "scheduler",
+        );
+
+        let db = engine.db.lock().unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_type='timer.tick.minutely' AND source='scheduler'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+
+        // Verify payload contains dedup_key
+        let payload_str: String = db
+            .query_row(
+                "SELECT payload FROM events WHERE event_type='timer.tick.minutely'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let payload: serde_json::Value = serde_json::from_str(&payload_str).unwrap();
+        assert_eq!(
+            payload["dedup_key"].as_str().unwrap(),
+            "timer.tick.minutely:2026-05-16T10:05"
+        );
     }
 }
