@@ -87,8 +87,12 @@ pub fn load_policy_events(home: &str, agent_id: &str) -> Option<(Vec<String>, bo
 }
 
 pub fn run(hex_dir: &Path, mode: &str) -> i32 {
-    let post_migration = mode == "post-migration";
     let home = std::env::var("HOME").unwrap_or_default();
+    run_with_home(hex_dir, mode, &home)
+}
+
+pub fn run_with_home(hex_dir: &Path, mode: &str, home: &str) -> i32 {
+    let post_migration = mode == "post-migration";
 
     let allowlist = match load_allowlist(&home) {
         Ok(p) => p,
