@@ -21,6 +21,7 @@ mod integration_publer;
 mod integration_granola_mcp;
 mod kalshi;
 mod mcp;
+mod memory;
 mod mirofish;
 mod path_map;
 mod pulse;
@@ -387,13 +388,38 @@ enum MemoryCommands {
     /// Search indexed memory files
     Search {
         query: String,
+        /// Number of results (default 10)
+        #[arg(long, default_value = "10")]
+        top: usize,
+        /// Filter results to paths matching this pattern
         #[arg(long)]
-        top: Option<usize>,
+        file: Option<String>,
+        /// Compact single-line output per result
+        #[arg(long)]
+        compact: bool,
+        /// Show N lines of context around matching terms
+        #[arg(long)]
+        context: Option<usize>,
+        /// Exclude sensitive paths (me/, people/, raw/)
+        #[arg(long)]
+        private: bool,
     },
     /// Index memory files
     Index {
         #[arg(long)]
         full: bool,
+        #[arg(long)]
+        stats: bool,
+    },
+    /// Parse Claude JSONL transcripts to markdown
+    #[command(name = "parse-transcripts")]
+    ParseTranscripts {
+        #[arg(long)]
+        file: Option<String>,
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        force: bool,
     },
 }
 
@@ -1381,29 +1407,34 @@ fn main() {
                 MemoryCommands::Bootstrap => "bootstrap",
                 MemoryCommands::Health => "health",
                 MemoryCommands::Search { .. } => "search",
-                MemoryCommands::Index { .. } => "index",
+                MemoryCommands::Index { stats, .. } => {
+                    if *stats { "index-stats" } else { "index" }
+                }
+                MemoryCommands::ParseTranscripts { .. } => "parse-transcripts",
             };
             let start = std::time::Instant::now();
             let exit_code = match &command {
-                MemoryCommands::Search { query, top } => {
-                    let script = hex_dir.join(".hex/skills/memory/scripts/memory_search.py");
-                    let mut cmd = std::process::Command::new("python3");
-                    cmd.arg(&script).arg(query);
-                    if let Some(t) = top {
-                        cmd.arg("--top").arg(t.to_string());
-                    }
-                    cmd.env("HEX_DIR", &hex_dir);
-                    cmd.status().map(|s| s.code().unwrap_or(1)).unwrap_or(1)
+                MemoryCommands::Search { query, top, file, compact, context, private } => {
+                    let args = memory::search::SearchArgs {
+                        query: query.clone(),
+                        top: *top,
+                        file: file.clone(),
+                        compact: *compact,
+                        context: *context,
+                        private: *private,
+                    };
+                    memory::search::run(&hex_dir, &args)
                 }
-                MemoryCommands::Index { full } => {
-                    let script = hex_dir.join(".hex/skills/memory/scripts/memory_index.py");
-                    let mut cmd = std::process::Command::new("python3");
-                    cmd.arg(&script);
-                    if *full {
-                        cmd.arg("--full");
-                    }
-                    cmd.env("HEX_DIR", &hex_dir);
-                    cmd.status().map(|s| s.code().unwrap_or(1)).unwrap_or(1)
+                MemoryCommands::Index { full, stats } => {
+                    memory::index::run(&hex_dir, *full, *stats)
+                }
+                MemoryCommands::ParseTranscripts { file, dry_run, force } => {
+                    let args = memory::parse_transcripts::ParseArgs {
+                        file: file.clone(),
+                        dry_run: *dry_run,
+                        force: *force,
+                    };
+                    memory::parse_transcripts::run(&hex_dir, &args)
                 }
                 _ => {
                     let hex_memory = hex_dir.join(".hex/scripts/bin/hex-memory");

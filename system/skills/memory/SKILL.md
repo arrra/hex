@@ -16,29 +16,37 @@ version: 1
 
 The hex memory system stores persistent facts across sessions using SQLite FTS5 (full-text search) with optional vector embedding for semantic recall. Memories are markdown files with YAML frontmatter stored in `.hex/memory/`.
 
-## Scripts
+## Commands
 
-- **memory_search.py** — Search memories by keyword or semantic similarity
-- **memory_save.py** — Save a new memory with optional tags
-- **memory_index.py** — Index filesystem content into the SQLite database
+- **hex memory search** — Search memories by keyword or semantic similarity
+- **hex memory index** — Index filesystem content into the SQLite database
+- **hex memory parse-transcripts** — Parse JSONL transcripts into markdown
+
+> The Python scripts (`memory_search.py`, `memory_index.py`) are quarantined as
+> `.legacy.py` files. Use the `hex memory` subcommands instead.
 
 ## Usage
 
 ### Search
 ```bash
-python3 .hex/skills/memory/scripts/memory_search.py "query terms"
-python3 .hex/skills/memory/scripts/memory_search.py --top 5 "phrase"
-python3 .hex/skills/memory/scripts/memory_search.py --compact "keyword"
-```
-
-### Save
-```bash
-python3 .hex/skills/memory/scripts/memory_save.py "memory content" --tags "tag1,tag2"
+hex memory search "query terms"
+hex memory search --top 5 "phrase"
+hex memory search --compact "keyword"
+hex memory search --private "keyword"          # excludes me/, people/, raw/
+hex memory search --file PATTERN "keyword"     # restrict to matching file paths
+hex memory search --context N "keyword"        # show N lines of context
 ```
 
 ### Index
 ```bash
-python3 .hex/skills/memory/scripts/memory_index.py --path .hex/memory/
+hex memory index                # incremental (skips unchanged files)
+hex memory index --full         # force re-index all files
+hex memory index --stats        # show index statistics
+```
+
+### Parse Transcripts
+```bash
+hex memory parse-transcripts    # parse JSONL transcripts → markdown
 ```
 
 ## Memory Format
