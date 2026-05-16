@@ -604,6 +604,13 @@ enum HealthCommands {
     /// Check agent memory system health (port of health/check-agent-memory.sh)
     #[command(name = "check-agent-memory")]
     CheckAgentMemory,
+    /// Auto-reset agent budget periods with tiered safety gate (port of health/budget-period-reset.py)
+    #[command(name = "budget-reset")]
+    BudgetReset {
+        /// Report what would happen without writing any state
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1554,6 +1561,14 @@ fn main() {
         Commands::Health { command } => match command {
             HealthCommands::CheckAgentMemory => {
                 health::check_agent_memory();
+            }
+            HealthCommands::BudgetReset { dry_run } => {
+                let hex_dir = get_hex_dir();
+                let code = health::budget_reset::run(&health::budget_reset::BudgetResetConfig {
+                    hex_dir,
+                    dry_run,
+                });
+                std::process::exit(code);
             }
         },
         Commands::Doctor { command } => {

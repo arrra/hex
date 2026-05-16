@@ -1,3 +1,5 @@
+pub mod budget_reset;
+
 /// Port of .hex/scripts/health/check-agent-memory.sh
 ///
 /// Health check for the agent memory system. Verifies:
