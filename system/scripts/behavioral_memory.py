@@ -33,10 +33,10 @@ ESCALATIONS_FILE = os.path.join(HEX_ROOT, "evolution", "behavioral-escalations.m
 
 HOOK_SIGNALS = [
     (r"cron(?:create)?", "settings.json block"),
-    (r"slack", "hex-events:before_slack_message"),
+    (r"imessage|i-message", "hex-events:before_imessage_send"),
     (r"publish", "hex-events:before_publish"),
     (r"send.*email", "hex-events:before_email_send"),
-    (r"markdown.*table.*slack|slack.*markdown", "SO_S8"),
+    (r"markdown.*table.*imessage|imessage.*markdown", "SO_S8"),
     (r"force.*push", "git pre-push hook"),
     (r"rm\s+-rf", "shell allowlist"),
     (r"delete.*branch", "git hook"),
