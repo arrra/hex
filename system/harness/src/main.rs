@@ -11,6 +11,7 @@ mod boi_web;
 mod capture;
 mod router;
 mod spec_tool;
+mod charter_triggers;
 mod doctor;
 mod fleet;
 mod health;
@@ -965,6 +966,13 @@ enum DoctorCommands {
         /// Retention period in days (default 30)
         #[arg(default_value = "30")]
         days: u32,
+    },
+    /// Validate charter → policy trigger contract for all fleet agents
+    #[command(name = "charter-triggers")]
+    CharterTriggers {
+        /// Validation mode: pre-migration (default) or post-migration
+        #[arg(long, default_value = "pre-migration")]
+        mode: String,
     },
 }
 
@@ -2149,6 +2157,9 @@ fn main() {
                     let script = hex_dir.join("system/scripts/cleanup-project-jsonl.sh");
                     let days_s = days.to_string();
                     std::process::exit(exec_script(&script, &[&days_s]));
+                }
+                DoctorCommands::CharterTriggers { mode } => {
+                    std::process::exit(charter_triggers::run(&hex_dir, &mode));
                 }
                 DoctorCommands::Run { fix, smoke, quiet, json } => {
                     let script = hex_dir.join(".hex/scripts/hex-doctor");
