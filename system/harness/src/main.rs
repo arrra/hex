@@ -6,6 +6,7 @@ use hex::{state, wake};
 
 mod integration;
 mod integration_apple_addressbook;
+mod integration_tailscale;
 mod integration_mcp_exa;
 mod integration_mcp_excalidraw;
 mod integration_mcp_plugin_ecc;
@@ -322,6 +323,9 @@ enum IntegrationCommands {
     /// Run Apple Contacts TCC access probe (port of integrations/apple-addressbook.sh)
     #[command(name = "apple-addressbook")]
     AppleAddressbook,
+    /// Run Tailscale daemon and peer connectivity probe (port of integrations/tailscale.sh)
+    #[command(name = "tailscale")]
+    Tailscale,
 }
 
 #[derive(Subcommand)]
@@ -1244,6 +1248,9 @@ fn main() {
             if let IntegrationCommands::AppleAddressbook = command {
                 std::process::exit(integration_apple_addressbook::run_probe());
             }
+            if let IntegrationCommands::Tailscale = command {
+                std::process::exit(integration_tailscale::run_probe());
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
@@ -1261,6 +1268,7 @@ fn main() {
                 IntegrationCommands::McpPluginEcc => unreachable!(),
                 IntegrationCommands::XTwitter => unreachable!(),
                 IntegrationCommands::AppleAddressbook => unreachable!(),
+                IntegrationCommands::Tailscale => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
