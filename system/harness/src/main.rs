@@ -38,6 +38,7 @@ mod pulse;
 mod session_reflect;
 mod today;
 mod workspace;
+mod env;
 
 #[derive(Parser)]
 #[command(name = "hex", about = "Hex multi-agent harness", version)]
@@ -213,6 +214,11 @@ enum Commands {
     Synthesis {
         #[command(subcommand)]
         command: SynthesisCommands,
+    },
+    /// Environment setup utilities (Phase 5: port of env.sh non-shell logic)
+    Env {
+        #[command(subcommand)]
+        command: env::EnvCommands,
     },
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
     Upgrade {
@@ -2367,6 +2373,7 @@ fn main() {
                 }
             }
         }
+        Commands::Env { command } => env::run_env_command(command),
         Commands::Upgrade { args } => {
             let hex_dir = get_hex_dir();
             let legacy = hex_dir.join("system/scripts/upgrade.sh.legacy.sh");
