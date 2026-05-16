@@ -39,6 +39,7 @@ mod session_reflect;
 mod today;
 mod workspace;
 mod env;
+mod agent_spawn;
 
 #[derive(Parser)]
 #[command(name = "hex", about = "Hex multi-agent harness", version)]
@@ -280,6 +281,14 @@ enum AgentCommands {
     },
     /// Run daily agent performance analysis and evolution proposals (port of agent-evolution.sh)
     Evolution {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Spawn a new hex agent from a role-spec YAML file (port of hex-agent-spawn.sh)
+    Spawn {
+        /// Path to role-spec YAML file
+        spec_file: std::path::PathBuf,
+        /// Validate spec but don't write any files
         #[arg(long)]
         dry_run: bool,
     },
@@ -1660,6 +1669,10 @@ fn run_agent_command(command: AgentCommands) {
                 std::process::exit(1);
             });
             std::process::exit(status.code().unwrap_or(0));
+        }
+        AgentCommands::Spawn { spec_file, dry_run } => {
+            let rc = agent_spawn::run_spawn(&spec_file, dry_run);
+            std::process::exit(rc);
         }
     }
 }
