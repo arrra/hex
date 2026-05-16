@@ -1,10 +1,13 @@
 use chrono::Utc;
+use regex::Regex;
 use rusqlite::{params, Connection};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 use std::collections::HashMap;
+use std::io::Write;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, RwLock};
+use std::process::Stdio;
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::server::{Request, Response};
@@ -97,6 +100,25 @@ pub struct Action {
     pub source: Option<String>,
     #[serde(default)]
     pub message: Option<String>,
+    // update-file fields
+    #[serde(default)]
+    pub target: Option<String>,
+    #[serde(default)]
+    pub pattern: Option<String>,
+    #[serde(default)]
+    pub replace: Option<String>,
+    #[serde(default)]
+    pub mode: Option<String>,    // "replace" (default) | "append"
+    #[serde(default)]
+    pub content: Option<String>,
+    // emit fields
+    #[serde(default)]
+    pub dedup_key: Option<String>,
+    #[serde(default)]
+    pub delay: Option<String>,
+    // notify fields
+    #[serde(default)]
+    pub tier: Option<String>,
 }
 
 // ── Engine ────────────────────────────────────────────────────────────────────
@@ -109,6 +131,7 @@ pub struct EventEngine {
     pub bus: Arc<SseBus>,
     start_time: Instant,
     events_processed: Mutex<u64>,
+    rate_limiter: Mutex<HashMap<String, Vec<Instant>>>,
 }
 
 impl EventEngine {
@@ -137,6 +160,7 @@ impl EventEngine {
             bus,
             start_time: Instant::now(),
             events_processed: Mutex::new(0),
+            rate_limiter: Mutex::new(HashMap::new()),
         });
 
         engine.load_policies();
@@ -209,6 +233,16 @@ impl EventEngine {
     /// Ingest an event: write to DB, match policies, execute actions.
     /// Returns the new event's row ID, or -1 on error.
     pub fn ingest(&self, event_type: &str, payload: &Value, source: &str) -> i64 {
+        self.ingest_with_depth(event_type, payload, source, 0)
+    }
+
+    fn ingest_with_depth(
+        &self,
+        event_type: &str,
+        payload: &Value,
+        source: &str,
+        depth: u32,
+    ) -> i64 {
         let now = Utc::now().to_rfc3339();
         let payload_str = payload.to_string();
 
@@ -275,6 +309,8 @@ impl EventEngine {
                         &rule.name,
                         event_type,
                         payload,
+                        policy.rate_limit.as_ref(),
+                        depth,
                     );
                 }
             }
@@ -371,27 +407,68 @@ impl EventEngine {
         rule_name: &str,
         event_type: &str,
         payload: &Value,
+        rate_limit: Option<&Value>,
+        depth: u32,
     ) {
+        if depth > 8 {
+            eprintln!(
+                "events: emit depth limit reached policy={policy_name} rule={rule_name}"
+            );
+            return;
+        }
+
+        // Rate limiting check (per-policy sliding window)
+        if let Some(rl) = rate_limit {
+            let max_fires = rl
+                .get("max_fires")
+                .and_then(|v| v.as_u64())
+                .unwrap_or(0);
+            let window_str = rl
+                .get("window")
+                .and_then(|v| v.as_str())
+                .unwrap_or("1h");
+            let window_secs = parse_duration_str(window_str);
+
+            if max_fires > 0 && window_secs > 0 {
+                let rl_key = format!("{policy_name}:{event_type}");
+                let now_instant = Instant::now();
+                match self.rate_limiter.lock() {
+                    Ok(mut guard) => {
+                        let timestamps = guard.entry(rl_key).or_default();
+                        timestamps
+                            .retain(|t| now_instant.duration_since(*t).as_secs() < window_secs);
+                        if timestamps.len() as u64 >= max_fires {
+                            eprintln!(
+                                "events: rate limited policy={policy_name} ({}/{} fires in {window_secs}s)",
+                                timestamps.len(),
+                                max_fires
+                            );
+                            return;
+                        }
+                        timestamps.push(now_instant);
+                    }
+                    Err(e) => eprintln!("events: rate_limiter lock poisoned: {e}"),
+                }
+            }
+        }
+
         let now = Utc::now().to_rfc3339();
 
         match action.r#type.as_str() {
             "shell" => {
-                let (status, error) = if let Some(cmd_tpl) = &action.command {
+                let timeout_secs = action.timeout.unwrap_or(60);
+                let (status, error, stdout) = if let Some(cmd_tpl) = &action.command {
                     let cmd = render_template(cmd_tpl, event_type, payload);
-                    match std::process::Command::new("sh").arg("-c").arg(&cmd).output() {
-                        Ok(out) => {
-                            if out.status.success() {
-                                ("ok".to_string(), String::new())
-                            } else {
-                                let err = String::from_utf8_lossy(&out.stderr).to_string();
-                                ("error".to_string(), err[..err.len().min(500)].to_string())
-                            }
-                        }
-                        Err(e) => ("error".to_string(), e.to_string()),
-                    }
+                    run_shell_with_timeout(&cmd, timeout_secs)
                 } else {
-                    ("error".to_string(), "no command specified".to_string())
+                    (
+                        "error".to_string(),
+                        "no command specified".to_string(),
+                        String::new(),
+                    )
                 };
+
+                let succeeded = status == "ok";
                 match self.db.lock() {
                     Ok(db) => {
                         let _ = db.execute(
@@ -403,29 +480,151 @@ impl EventEngine {
                     }
                     Err(e) => eprintln!("events: db lock poisoned in execute_action(shell): {e}"),
                 }
-            }
-            "emit" => {
-                if let Some(emit_event) = &action.event {
-                    let rendered = render_template(emit_event, event_type, payload);
-                    self.ingest(&rendered, payload, "event_engine");
+
+                // on_success / on_failure chaining
+                let chained = if succeeded {
+                    &action.on_success
+                } else {
+                    &action.on_failure
+                };
+                let chain_payload = if succeeded && !stdout.is_empty() {
+                    let mut p = payload.clone();
+                    if let Value::Object(ref mut map) = p {
+                        map.insert(
+                            "action".to_string(),
+                            serde_json::json!({ "stdout": stdout }),
+                        );
+                    }
+                    p
+                } else {
+                    payload.clone()
+                };
+                for chained_action in chained {
+                    self.execute_action(
+                        chained_action,
+                        event_id,
+                        policy_name,
+                        rule_name,
+                        event_type,
+                        &chain_payload,
+                        None,
+                        depth + 1,
+                    );
                 }
             }
-            "notify" => {
-                eprintln!(
-                    "events: [notify] policy={policy_name} rule={rule_name} event={event_type}"
-                );
+
+            "emit" => {
+                let (status, error) = if let Some(emit_type) = &action.event {
+                    let rendered_type = render_template(emit_type, event_type, payload);
+                    let emit_payload = action
+                        .payload
+                        .as_ref()
+                        .map(|p| render_value_templates(p, event_type, payload))
+                        .unwrap_or_else(|| payload.clone());
+                    let src = action.source.as_deref().unwrap_or("policy-emit");
+                    self.ingest_with_depth(&rendered_type, &emit_payload, src, depth + 1);
+                    ("ok".to_string(), String::new())
+                } else {
+                    (
+                        "error".to_string(),
+                        "emit action missing 'event' parameter".to_string(),
+                    )
+                };
                 match self.db.lock() {
                     Ok(db) => {
                         let _ = db.execute(
                             "INSERT INTO action_log \
                              (event_id, policy_name, rule_name, action_type, status, error, created_at) \
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                            params![event_id, policy_name, rule_name, "notify", "ok", "", now],
+                            params![event_id, policy_name, rule_name, "emit", status, error, now],
+                        );
+                    }
+                    Err(e) => eprintln!("events: db lock poisoned in execute_action(emit): {e}"),
+                }
+            }
+
+            "notify" => {
+                let (status, error) = if let Some(msg_tpl) = &action.message {
+                    let msg = render_template(msg_tpl, event_type, payload);
+                    deliver_notification(&msg, action.tier.as_deref())
+                } else {
+                    (
+                        "error".to_string(),
+                        "notify action missing 'message' parameter".to_string(),
+                    )
+                };
+                match self.db.lock() {
+                    Ok(db) => {
+                        let _ = db.execute(
+                            "INSERT INTO action_log \
+                             (event_id, policy_name, rule_name, action_type, status, error, created_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![
+                                event_id, policy_name, rule_name, "notify", status, error, now
+                            ],
                         );
                     }
                     Err(e) => eprintln!("events: db lock poisoned in execute_action(notify): {e}"),
                 }
             }
+
+            "update-file" => {
+                let (status, error) = if let Some(target_tpl) = &action.target {
+                    let target = render_template(target_tpl, event_type, payload);
+                    let target = shellexpand::tilde(&target).into_owned();
+                    let mode = action.mode.as_deref().unwrap_or("replace");
+                    match mode {
+                        "append" => {
+                            let content = action
+                                .content
+                                .as_ref()
+                                .map(|c| render_template(c, event_type, payload))
+                                .unwrap_or_default();
+                            atomic_file_append(&target, &content)
+                        }
+                        _ => {
+                            let pattern = action
+                                .pattern
+                                .as_ref()
+                                .map(|p| render_template(p, event_type, payload))
+                                .unwrap_or_default();
+                            let replace = action
+                                .replace
+                                .as_ref()
+                                .map(|r| render_template(r, event_type, payload))
+                                .unwrap_or_default();
+                            atomic_regex_replace(&target, &pattern, &replace)
+                        }
+                    }
+                } else {
+                    (
+                        "error".to_string(),
+                        "update-file action missing 'target' parameter".to_string(),
+                    )
+                };
+                match self.db.lock() {
+                    Ok(db) => {
+                        let _ = db.execute(
+                            "INSERT INTO action_log \
+                             (event_id, policy_name, rule_name, action_type, status, error, created_at) \
+                             VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                            params![
+                                event_id,
+                                policy_name,
+                                rule_name,
+                                "update-file",
+                                status,
+                                error,
+                                now
+                            ],
+                        );
+                    }
+                    Err(e) => {
+                        eprintln!("events: db lock poisoned in execute_action(update-file): {e}")
+                    }
+                }
+            }
+
             other => eprintln!("events: unknown action type '{other}'"),
         }
     }
@@ -717,6 +916,12 @@ impl EventEngine {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn init_schema(conn: &Connection) -> Result<(), String> {
+    // Disable FK constraints — bundled-full enables them by default, but we use
+    // event_id as a soft reference (no cascade needed) and the Python daemon
+    // never enforced FKs either.
+    conn.execute_batch("PRAGMA foreign_keys = OFF")
+        .map_err(|e| format!("schema init failed: {e}"))?;
+
     // `extra_check` (pulled in by bundled-full → modern-full) makes execute_batch
     // error on any PRAGMA that returns rows. Use query_row to consume the result
     // row that journal_mode=WAL always emits; use execute for busy_timeout which
@@ -811,6 +1016,223 @@ fn render_template(template: &str, event_type: &str, payload: &Value) -> String 
     s
 }
 
+// ── Action helpers ────────────────────────────────────────────────────────────
+
+/// Run a shell command with a timeout. Returns (status, error, stdout).
+fn run_shell_with_timeout(cmd: &str, timeout_secs: u64) -> (String, String, String) {
+    let child = std::process::Command::new("sh")
+        .arg("-c")
+        .arg(cmd)
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn();
+
+    let child = match child {
+        Ok(c) => c,
+        Err(e) => return ("error".to_string(), e.to_string(), String::new()),
+    };
+
+    // Capture pid before moving child into the thread (for kill on timeout).
+    let pid = child.id();
+    let (tx, rx) = mpsc::channel::<std::io::Result<std::process::Output>>();
+
+    // Move child into thread — wait_with_output() takes ownership and reads pipes
+    std::thread::spawn(move || {
+        let _ = tx.send(child.wait_with_output());
+    });
+
+    match rx.recv_timeout(Duration::from_secs(timeout_secs)) {
+        Ok(Ok(output)) => {
+            let stdout = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let stderr = String::from_utf8_lossy(&output.stderr).trim().to_string();
+            match output.status.code() {
+                Some(0) => ("ok".to_string(), String::new(), stdout),
+                Some(c) => {
+                    let err = if stderr.is_empty() {
+                        format!("exit code {c}")
+                    } else {
+                        stderr[..stderr.len().min(500)].to_string()
+                    };
+                    ("error".to_string(), err, stdout)
+                }
+                None => (
+                    "error".to_string(),
+                    "terminated by signal".to_string(),
+                    stdout,
+                ),
+            }
+        }
+        Ok(Err(e)) => ("error".to_string(), e.to_string(), String::new()),
+        Err(_) => {
+            // Timeout — kill by PID
+            #[cfg(unix)]
+            let _ = std::process::Command::new("kill")
+                .args(["-9", &pid.to_string()])
+                .spawn();
+            #[cfg(not(unix))]
+            let _ = pid;
+            (
+                "error".to_string(),
+                format!("timeout after {timeout_secs}s"),
+                String::new(),
+            )
+        }
+    }
+}
+
+/// Deliver a system notification. Falls back to osascript on macOS.
+fn deliver_notification(message: &str, tier: Option<&str>) -> (String, String) {
+    // tier: "log" → just log, no OS notification; otherwise try OS notification
+    match tier {
+        Some("log") => {
+            eprintln!("events: [notify/log] {message}");
+            return ("ok".to_string(), String::new());
+        }
+        Some("digest") => {
+            eprintln!("events: [notify/digest] {message}");
+            return ("ok".to_string(), String::new());
+        }
+        _ => {}
+    }
+
+    // Try hex-notify.sh first
+    let notify_sh = shellexpand::tilde("~/.hex/scripts/hex-notify.sh").into_owned();
+    if std::path::Path::new(&notify_sh).exists() {
+        match std::process::Command::new("bash")
+            .arg(&notify_sh)
+            .arg(message)
+            .output()
+        {
+            Ok(out) if out.status.success() => return ("ok".to_string(), String::new()),
+            Ok(out) => {
+                eprintln!(
+                    "events: hex-notify.sh failed: {}",
+                    String::from_utf8_lossy(&out.stderr)
+                );
+            }
+            Err(_) => {}
+        }
+    }
+
+    // macOS osascript fallback
+    #[cfg(target_os = "macos")]
+    {
+        let script = format!(
+            "display notification {} with title \"hex-events\"",
+            serde_json::to_string(message).unwrap_or_else(|_| format!("\"{message}\""))
+        );
+        match std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .output()
+        {
+            Ok(out) if out.status.success() => return ("ok".to_string(), String::new()),
+            Ok(out) => {
+                let err = String::from_utf8_lossy(&out.stderr).trim().to_string();
+                return ("error".to_string(), err[..err.len().min(200)].to_string());
+            }
+            Err(e) => return ("error".to_string(), e.to_string()),
+        }
+    }
+
+    #[cfg(not(target_os = "macos"))]
+    {
+        eprintln!("events: [notify] {message}");
+        ("ok".to_string(), String::new())
+    }
+}
+
+/// Atomic append to a file (write tmp beside target, then rename).
+fn atomic_file_append(path: &str, content: &str) -> (String, String) {
+    let path = std::path::Path::new(path);
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+
+    let existing = if path.exists() {
+        match std::fs::read_to_string(path) {
+            Ok(s) => s,
+            Err(e) => return ("error".to_string(), e.to_string()),
+        }
+    } else {
+        String::new()
+    };
+
+    let new_content = format!("{existing}{content}");
+    match write_atomic(path, dir, &new_content) {
+        Ok(()) => ("ok".to_string(), String::new()),
+        Err(e) => ("error".to_string(), e),
+    }
+}
+
+/// Atomic regex find/replace in a file.
+fn atomic_regex_replace(path: &str, pattern: &str, replace: &str) -> (String, String) {
+    let path = std::path::Path::new(path);
+    let dir = path.parent().unwrap_or(std::path::Path::new("."));
+
+    let content = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return ("error".to_string(), e.to_string()),
+    };
+
+    let re = match Regex::new(pattern) {
+        Ok(r) => r,
+        Err(e) => return ("error".to_string(), format!("bad regex: {e}")),
+    };
+    let new_content = re.replace_all(&content, replace).into_owned();
+
+    match write_atomic(path, dir, &new_content) {
+        Ok(()) => ("ok".to_string(), String::new()),
+        Err(e) => ("error".to_string(), e),
+    }
+}
+
+fn write_atomic(target: &Path, dir: &Path, content: &str) -> Result<(), String> {
+    let tmp = dir.join(format!(
+        ".hex_tmp_{}.tmp",
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.subsec_nanos())
+            .unwrap_or(0)
+    ));
+    let mut f = std::fs::File::create(&tmp).map_err(|e| e.to_string())?;
+    f.write_all(content.as_bytes()).map_err(|e| e.to_string())?;
+    f.flush().map_err(|e| e.to_string())?;
+    std::fs::rename(&tmp, target).map_err(|e| e.to_string())?;
+    Ok(())
+}
+
+/// Recursively render {{...}} templates in a JSON value.
+fn render_value_templates(v: &Value, event_type: &str, payload: &Value) -> Value {
+    match v {
+        Value::String(s) => Value::String(render_template(s, event_type, payload)),
+        Value::Object(map) => {
+            let new_map = map
+                .iter()
+                .map(|(k, v)| (k.clone(), render_value_templates(v, event_type, payload)))
+                .collect();
+            Value::Object(new_map)
+        }
+        Value::Array(arr) => {
+            Value::Array(arr.iter().map(|v| render_value_templates(v, event_type, payload)).collect())
+        }
+        other => other.clone(),
+    }
+}
+
+/// Parse a duration string like "60s", "5m", "1h", "6h", "1d" into seconds.
+fn parse_duration_str(s: &str) -> u64 {
+    if let Some(n) = s.strip_suffix('s') {
+        n.parse().unwrap_or(0)
+    } else if let Some(n) = s.strip_suffix('m') {
+        n.parse::<u64>().unwrap_or(0) * 60
+    } else if let Some(n) = s.strip_suffix('h') {
+        n.parse::<u64>().unwrap_or(0) * 3600
+    } else if let Some(n) = s.strip_suffix('d') {
+        n.parse::<u64>().unwrap_or(0) * 86400
+    } else {
+        s.parse().unwrap_or(0)
+    }
+}
+
 fn json_ok<T: Serialize>(val: &T) -> Response {
     Response {
         status: 200,
@@ -848,6 +1270,7 @@ mod tests {
             bus,
             start_time: Instant::now(),
             events_processed: Mutex::new(0),
+            rate_limiter: Mutex::new(HashMap::new()),
         })
     }
 
@@ -1087,6 +1510,7 @@ rules:
             bus,
             start_time: Instant::now(),
             events_processed: Mutex::new(0),
+            rate_limiter: Mutex::new(HashMap::new()),
         });
         engine.load_policies();
         assert_eq!(engine.policy_count(), 1, "should have 1 policy after initial load");
@@ -1114,5 +1538,296 @@ rules:
             std::thread::sleep(Duration::from_millis(200));
         }
         assert_eq!(engine.policy_count(), 2);
+    }
+
+    // ── actions_* tests (found by `cargo test actions`) ─────────────────────
+
+    fn make_action(r#type: &str) -> Action {
+        Action {
+            r#type: r#type.to_string(),
+            command: None,
+            event: None,
+            timeout: None,
+            payload: None,
+            on_success: vec![],
+            on_failure: vec![],
+            source: None,
+            message: None,
+            target: None,
+            pattern: None,
+            replace: None,
+            mode: None,
+            content: None,
+            dedup_key: None,
+            delay: None,
+            tier: None,
+        }
+    }
+
+    #[test]
+    fn actions_shell_success() {
+        let tmp = TempDir::new().unwrap();
+        let engine = make_engine(&tmp);
+        let action = Action {
+            command: Some("echo hello".to_string()),
+            ..make_action("shell")
+        };
+        let payload = serde_json::json!({});
+        engine.execute_action(&action, 1, "test-policy", "r1", "test.event", &payload, None, 0);
+
+        let db = engine.db.lock().unwrap();
+        let status: String = db
+            .query_row(
+                "SELECT status FROM action_log WHERE action_type='shell'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "ok");
+    }
+
+    #[test]
+    fn actions_shell_failure_triggers_on_failure_chain() {
+        let tmp = TempDir::new().unwrap();
+        let engine = make_engine(&tmp);
+        let on_fail = Action {
+            event: Some("test.failed".to_string()),
+            ..make_action("emit")
+        };
+        let action = Action {
+            command: Some("exit 1".to_string()),
+            on_failure: vec![on_fail],
+            ..make_action("shell")
+        };
+        let payload = serde_json::json!({});
+        engine.execute_action(&action, 1, "test-policy", "r1", "test.event", &payload, None, 0);
+
+        let db = engine.db.lock().unwrap();
+        // shell logged as error
+        let status: String = db
+            .query_row(
+                "SELECT status FROM action_log WHERE action_type='shell'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "error");
+        // on_failure emit was recorded
+        let emit_count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM action_log WHERE action_type='emit'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(emit_count, 1);
+    }
+
+    #[test]
+    fn actions_shell_template_rendered() {
+        let tmp = TempDir::new().unwrap();
+        let engine = make_engine(&tmp);
+        let action = Action {
+            command: Some("echo {{event.type}}".to_string()),
+            ..make_action("shell")
+        };
+        let payload = serde_json::json!({});
+        engine.execute_action(
+            &action,
+            1,
+            "test-policy",
+            "r1",
+            "timer.tick.minutely",
+            &payload,
+            None,
+            0,
+        );
+        // Just verify it executed without error (template rendered)
+        let db = engine.db.lock().unwrap();
+        let status: String = db
+            .query_row(
+                "SELECT status FROM action_log WHERE action_type='shell'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "ok");
+    }
+
+    #[test]
+    fn actions_emit_writes_new_event() {
+        let tmp = TempDir::new().unwrap();
+        let engine = make_engine(&tmp);
+        let action = Action {
+            event: Some("child.event".to_string()),
+            ..make_action("emit")
+        };
+        let payload = serde_json::json!({"x": 42});
+        engine.execute_action(&action, 1, "test-policy", "r1", "parent.event", &payload, None, 0);
+
+        let db = engine.db.lock().unwrap();
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_type='child.event'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 1);
+    }
+
+    #[test]
+    fn actions_emit_depth_limit_prevents_infinite_loop() {
+        let tmp = TempDir::new().unwrap();
+        let engine = make_engine(&tmp);
+        // Load a policy that re-emits the same event — would loop forever without depth limit
+        let policy_yaml = r#"
+name: looping-policy
+rules:
+  - name: loop
+    trigger:
+      event: loop.event
+    actions:
+      - type: emit
+        event: loop.event
+"#;
+        {
+            let mut guard = engine.policies.write().unwrap();
+            *guard = vec![serde_yaml::from_str(policy_yaml).unwrap()];
+        }
+
+        // Ingest the event — depth limit should stop the recursion
+        engine.ingest("loop.event", &serde_json::json!({}), "test");
+
+        let db = engine.db.lock().unwrap();
+        // Should have a bounded number of events, not infinity
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM events WHERE event_type='loop.event'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        // depth limit is 9 (0..=8), so at most 9 loop.event entries
+        assert!(count > 0 && count <= 10, "expected bounded count, got {count}");
+    }
+
+    #[test]
+    fn actions_notify_log_tier_skips_os_notification() {
+        let tmp = TempDir::new().unwrap();
+        let engine = make_engine(&tmp);
+        let action = Action {
+            message: Some("test message".to_string()),
+            tier: Some("log".to_string()),
+            ..make_action("notify")
+        };
+        let payload = serde_json::json!({});
+        engine.execute_action(&action, 1, "test-policy", "r1", "test.event", &payload, None, 0);
+
+        let db = engine.db.lock().unwrap();
+        let status: String = db
+            .query_row(
+                "SELECT status FROM action_log WHERE action_type='notify'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "ok");
+    }
+
+    #[test]
+    fn actions_update_file_append() {
+        let tmp = TempDir::new().unwrap();
+        let engine = make_engine(&tmp);
+        let target = tmp.path().join("output.txt");
+        std::fs::write(&target, "line1\n").unwrap();
+
+        let action = Action {
+            target: Some(target.to_string_lossy().to_string()),
+            mode: Some("append".to_string()),
+            content: Some("line2\n".to_string()),
+            ..make_action("update-file")
+        };
+        let payload = serde_json::json!({});
+        engine.execute_action(&action, 1, "test-policy", "r1", "test.event", &payload, None, 0);
+
+        let contents = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(contents, "line1\nline2\n");
+
+        let db = engine.db.lock().unwrap();
+        let status: String = db
+            .query_row(
+                "SELECT status FROM action_log WHERE action_type='update-file'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(status, "ok");
+    }
+
+    #[test]
+    fn actions_update_file_regex_replace() {
+        let tmp = TempDir::new().unwrap();
+        let engine = make_engine(&tmp);
+        let target = tmp.path().join("replace.txt");
+        std::fs::write(&target, "version: 1.0.0\n").unwrap();
+
+        let action = Action {
+            target: Some(target.to_string_lossy().to_string()),
+            pattern: Some(r"version: \d+\.\d+\.\d+".to_string()),
+            replace: Some("version: 2.0.0".to_string()),
+            ..make_action("update-file")
+        };
+        let payload = serde_json::json!({});
+        engine.execute_action(&action, 1, "test-policy", "r1", "test.event", &payload, None, 0);
+
+        let contents = std::fs::read_to_string(&target).unwrap();
+        assert_eq!(contents, "version: 2.0.0\n");
+    }
+
+    #[test]
+    fn actions_rate_limit_blocks_excess_fires() {
+        let tmp = TempDir::new().unwrap();
+        let engine = make_engine(&tmp);
+        let action = Action {
+            command: Some("echo rate-limited-test".to_string()),
+            ..make_action("shell")
+        };
+        let payload = serde_json::json!({});
+        let rate_limit = serde_json::json!({ "max_fires": 2, "window": "60s" });
+
+        // Fire 3 times
+        for _ in 0..3 {
+            engine.execute_action(
+                &action,
+                1,
+                "rl-policy",
+                "r1",
+                "test.event",
+                &payload,
+                Some(&rate_limit),
+                0,
+            );
+        }
+
+        let db = engine.db.lock().unwrap();
+        // Only 2 should have been logged (3rd was rate-limited)
+        let count: i64 = db
+            .query_row(
+                "SELECT COUNT(*) FROM action_log WHERE action_type='shell'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(count, 2, "rate limiter should have blocked the 3rd fire");
+    }
+
+    #[test]
+    fn actions_parse_duration_str() {
+        assert_eq!(parse_duration_str("60s"), 60);
+        assert_eq!(parse_duration_str("5m"), 300);
+        assert_eq!(parse_duration_str("1h"), 3600);
+        assert_eq!(parse_duration_str("6h"), 21600);
+        assert_eq!(parse_duration_str("1d"), 86400);
     }
 }
