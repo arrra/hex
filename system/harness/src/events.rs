@@ -7,12 +7,25 @@ use std::collections::HashMap;
 use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
+use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
 use crate::server::{Request, Response};
 use crate::sse::SseBus;
 use crate::telemetry::Telemetry;
+
+// Global stop flag written by the SIGTERM handler.
+static DAEMON_STOP: AtomicBool = AtomicBool::new(false);
+
+// Raw C signal() — available on all Unix targets without adding libc to Cargo.toml.
+#[cfg(unix)]
+unsafe fn libc_signal(signum: i32, handler: usize) {
+    extern "C" {
+        fn signal(signum: i32, handler: usize) -> usize;
+    }
+    signal(signum, handler);
+}
 
 // ── Policy structures ─────────────────────────────────────────────────────────
 
@@ -322,7 +335,213 @@ impl EventEngine {
             &serde_json::json!({ "event_id": event_id, "event_type": event_type }),
         );
 
+        // Mark as processed so daemon loop doesn't double-dispatch events
+        // that were ingested directly (CLI emit, HTTP ingest, scheduler).
+        let processed_now = Utc::now().to_rfc3339();
+        if let Ok(db) = self.db.lock() {
+            let _ = db.execute(
+                "UPDATE events SET processed_at = ?1 WHERE id = ?2",
+                params![processed_now, event_id],
+            );
+        }
+
         event_id
+    }
+
+    /// Process an already-inserted event through policies (daemon poll loop use).
+    /// Does NOT re-insert to DB. Marks processed_at after dispatch.
+    fn dispatch_existing_event(
+        &self,
+        event_id: i64,
+        event_type: &str,
+        payload: &Value,
+        shadow: bool,
+    ) -> usize {
+        let policies = match self.policies.read() {
+            Ok(guard) => guard.clone(),
+            Err(e) => {
+                eprintln!("events: policies read lock poisoned in dispatch: {e}");
+                return 0;
+            }
+        };
+
+        let mut actions_fired = 0usize;
+        for policy in &policies {
+            for rule in &policy.rules {
+                if !wildcard_matches(&rule.trigger.event, event_type) {
+                    continue;
+                }
+                let singular_pass = rule
+                    .condition
+                    .as_ref()
+                    .map_or(true, |c| self.evaluate_condition(c, payload));
+                let all_pass = singular_pass
+                    && rule.conditions.iter().all(|c| self.evaluate_condition(c, payload))
+                    && rule.trigger.conditions.iter().all(|c| self.evaluate_condition(c, payload));
+                if !all_pass {
+                    continue;
+                }
+                for action in &rule.actions {
+                    if shadow {
+                        eprintln!(
+                            "SHADOW: event={event_type} policy={} rule={} action={}",
+                            policy.name, rule.name, action.r#type
+                        );
+                    } else {
+                        self.execute_action(
+                            action,
+                            event_id,
+                            &policy.name,
+                            &rule.name,
+                            event_type,
+                            payload,
+                            policy.rate_limit.as_ref(),
+                            0,
+                        );
+                    }
+                    actions_fired += 1;
+                }
+            }
+        }
+
+        // Mark processed
+        let now = Utc::now().to_rfc3339();
+        if let Ok(db) = self.db.lock() {
+            let _ = db.execute(
+                "UPDATE events SET processed_at = ?1 WHERE id = ?2",
+                params![now, event_id],
+            );
+        }
+
+        match self.events_processed.lock() {
+            Ok(mut g) => *g += 1,
+            Err(e) => eprintln!("events: events_processed lock poisoned: {e}"),
+        }
+
+        actions_fired
+    }
+
+    /// Fetch up to `limit` unprocessed events (processed_at IS NULL), ordered by id.
+    fn get_unprocessed_batch(&self, limit: i64) -> Vec<(i64, String, Value)> {
+        let db = match self.db.lock() {
+            Ok(g) => g,
+            Err(e) => {
+                eprintln!("events: db lock poisoned in get_unprocessed: {e}");
+                return vec![];
+            }
+        };
+        let mut stmt = match db.prepare(
+            "SELECT id, event_type, payload FROM events \
+             WHERE processed_at IS NULL ORDER BY id LIMIT ?1",
+        ) {
+            Ok(s) => s,
+            Err(e) => {
+                eprintln!("events: prepare unprocessed query failed: {e}");
+                return vec![];
+            }
+        };
+        let mut rows = match stmt.query(params![limit]) {
+            Ok(r) => r,
+            Err(e) => {
+                eprintln!("events: query unprocessed failed: {e}");
+                return vec![];
+            }
+        };
+        let mut events = Vec::new();
+        while let Ok(Some(row)) = rows.next() {
+            let id: i64 = row.get(0).unwrap_or(0);
+            let event_type: String = row.get(1).unwrap_or_default();
+            let payload_str: String = row.get(2).unwrap_or_else(|_| "null".to_string());
+            let payload: Value = serde_json::from_str(&payload_str).unwrap_or(Value::Null);
+            events.push((id, event_type, payload));
+        }
+        events
+    }
+
+    /// Main daemon loop: poll for unprocessed events, dispatch, heartbeat.
+    fn run_daemon_loop(&self, shadow: bool, running: &std::sync::atomic::AtomicBool) {
+        use std::sync::atomic::Ordering;
+
+        let poll_interval = Duration::from_secs(2);
+        let heartbeat_interval = Duration::from_secs(60);
+
+        let mut last_heartbeat = Instant::now();
+        let mut hb_events: u64 = 0;
+        let mut hb_actions: u64 = 0;
+
+        eprintln!(
+            "hex events daemon ready (pid={}{})",
+            std::process::id(),
+            if shadow { ", shadow-mode" } else { "" }
+        );
+
+        while running.load(Ordering::SeqCst) {
+            // Drain unprocessed events from DB (inserted by external tools).
+            let batch = self.get_unprocessed_batch(100);
+            for (id, event_type, payload) in batch {
+                let n = self.dispatch_existing_event(id, &event_type, &payload, shadow);
+                hb_events += 1;
+                hb_actions += n as u64;
+            }
+
+            // Heartbeat
+            if last_heartbeat.elapsed() >= heartbeat_interval {
+                eprintln!(
+                    "heartbeat: pid={} state=healthy events={} actions={}",
+                    std::process::id(),
+                    hb_events,
+                    hb_actions,
+                );
+                hb_events = 0;
+                hb_actions = 0;
+                last_heartbeat = Instant::now();
+            }
+
+            std::thread::sleep(poll_interval);
+        }
+
+        eprintln!("hex events daemon shutting down (SIGTERM received)");
+    }
+
+    pub fn cli_daemon(engine: Arc<Self>, shadow: bool) {
+        use std::sync::Arc as StdArc;
+
+        let running = StdArc::new(AtomicBool::new(true));
+
+        // Install SIGTERM / SIGINT handlers via raw C signal().
+        #[cfg(unix)]
+        {
+            extern "C" fn handle_stop(_: i32) {
+                // Safety: AtomicBool store is async-signal-safe.
+                // We use a global to communicate with the loop.
+                DAEMON_STOP.store(true, std::sync::atomic::Ordering::SeqCst);
+            }
+            unsafe {
+                libc_signal(15 /* SIGTERM */, handle_stop as *const () as usize);
+                libc_signal(2  /* SIGINT  */, handle_stop as *const () as usize);
+            }
+        }
+
+        // Start hot-reload and scheduler background threads.
+        EventEngine::start_hot_reload(engine.clone());
+        EventEngine::start_scheduler(engine.clone());
+
+        // Poll the global stop flag (set by signal handler) and propagate to running.
+        #[cfg(unix)]
+        {
+            let running_clone = running.clone();
+            std::thread::spawn(move || {
+                loop {
+                    if DAEMON_STOP.load(std::sync::atomic::Ordering::SeqCst) {
+                        running_clone.store(false, std::sync::atomic::Ordering::SeqCst);
+                        break;
+                    }
+                    std::thread::sleep(Duration::from_millis(200));
+                }
+            });
+        }
+
+        engine.run_daemon_loop(shadow, &running);
     }
 
     fn evaluate_condition(&self, condition: &Condition, payload: &Value) -> bool {
@@ -953,7 +1172,11 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
              event_type TEXT NOT NULL,
              payload TEXT,
              source TEXT DEFAULT '',
-             created_at TEXT NOT NULL
+             created_at TEXT NOT NULL,
+             processed_at TEXT,
+             dedup_key TEXT,
+             recipe TEXT,
+             condition_details TEXT
          );
          CREATE TABLE IF NOT EXISTS action_log (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -966,9 +1189,23 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
              created_at TEXT NOT NULL
          );
          CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
-         CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);",
+         CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
+         CREATE INDEX IF NOT EXISTS idx_events_unprocessed ON events(processed_at) WHERE processed_at IS NULL;",
     )
-    .map_err(|e| format!("schema init failed: {e}"))
+    .map_err(|e| format!("schema init failed: {e}"))?;
+
+    // Add columns that may not exist in older DB files (Python daemon or earlier Rust builds).
+    // ALTER TABLE ADD COLUMN fails silently if column already exists via ignore_err.
+    for col_ddl in &[
+        "ALTER TABLE events ADD COLUMN processed_at TEXT",
+        "ALTER TABLE events ADD COLUMN dedup_key TEXT",
+        "ALTER TABLE events ADD COLUMN recipe TEXT",
+        "ALTER TABLE events ADD COLUMN condition_details TEXT",
+    ] {
+        let _ = conn.execute_batch(col_ddl);
+    }
+
+    Ok(())
 }
 
 /// Snapshot mtime of every *.yaml file in a directory.

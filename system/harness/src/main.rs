@@ -508,6 +508,12 @@ enum EventsCommands {
     Policies,
     /// Force policy reload
     Reload,
+    /// Run the event daemon (long-running; processes events, fires actions, logs heartbeats)
+    Daemon {
+        /// Shadow mode: process events and log intended actions, but do NOT execute them
+        #[arg(long, default_value_t = false)]
+        shadow: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1767,6 +1773,9 @@ fn main() {
                 EventsCommands::Trace { event_id } => engine.cli_trace(event_id),
                 EventsCommands::Policies => engine.cli_policies(),
                 EventsCommands::Reload => engine.cli_reload(),
+                EventsCommands::Daemon { shadow } => {
+                    hex::events::EventEngine::cli_daemon(engine, shadow);
+                }
             }
         }
         Commands::Sse { command } => match command {
