@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use hex::{state, wake};
 
 mod doctor;
+mod fleet;
 mod health;
 mod integration;
 mod integration_apple_addressbook;
@@ -161,6 +162,11 @@ enum Commands {
         /// Session ID to deregister (from startup output); omit to get manual instructions
         session_id: Option<String>,
     },
+    /// Hex Fleet Manager service management (port of .hex/scripts/hex-fleet/install.sh)
+    Fleet {
+        #[command(subcommand)]
+        command: FleetCommands,
+    },
     /// Print version
     Version,
     /// Generate shell completions
@@ -221,6 +227,12 @@ enum AgentCommands {
         #[arg(long)]
         period: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum FleetCommands {
+    /// Install and register the Hex Fleet Manager LaunchAgent (port of hex-fleet/install.sh)
+    Install,
 }
 
 #[derive(Subcommand)]
@@ -1605,6 +1617,12 @@ fn main() {
             let code = shutdown::run(&hex_dir, shutdown::ShutdownArgs { session_id });
             std::process::exit(code);
         }
+        Commands::Fleet { command } => match command {
+            FleetCommands::Install => {
+                let hex_dir = get_hex_dir();
+                fleet::run_install(&hex_dir);
+            }
+        },
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }
