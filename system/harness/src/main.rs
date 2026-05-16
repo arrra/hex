@@ -6,6 +6,7 @@ use hex::{state, wake};
 
 mod integration;
 mod integration_apple_addressbook;
+mod startup;
 mod integration_tailscale;
 mod integration_mcp_exa;
 mod integration_mcp_excalidraw;
@@ -125,6 +126,18 @@ enum Commands {
     Workspace {
         #[command(subcommand)]
         command: WorkspaceCommands,
+    },
+    /// Run the hex session startup checklist (port of .hex/scripts/startup.sh)
+    Startup {
+        /// Skip slow steps (integration pulls, evolution engine, priority scoring)
+        #[arg(long)]
+        quick: bool,
+        /// Run a single named step and exit (see --status for names)
+        #[arg(long)]
+        step: Option<String>,
+        /// List available steps and exit
+        #[arg(long)]
+        status: bool,
     },
     /// Print version
     Version,
@@ -1459,6 +1472,14 @@ fn main() {
                 workspace::run_launch(&hex_dir);
             }
         },
+        Commands::Startup { quick, step, status } => {
+            let hex_dir = get_hex_dir();
+            let code = startup::run(
+                &hex_dir,
+                startup::StartupArgs { quick, step, status },
+            );
+            std::process::exit(code);
+        }
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }
