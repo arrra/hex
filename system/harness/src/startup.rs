@@ -6,6 +6,7 @@
 /// script calling them.
 
 use chrono::Local;
+use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
 
@@ -554,21 +555,28 @@ fn step_hex_events(state: &mut State) {
 
     let actions_failed: u64 = match output {
         Ok(out) if out.status.success() => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            // Extract actions_failed via embedded python — mirrors the shell one-liner
-            let extract = Command::new("python3")
+            let stdout = out.stdout;
+            // Pipe JSON via stdin to avoid shell quoting issues with string interpolation
+            let mut child = Command::new("python3")
                 .arg("-c")
-                .arg(format!(
-                    "import json,sys; d=json.loads(r\"\"\"{}\"\"\"); print(d.get('actions_failed', 0))",
-                    stdout.replace('"', "\\\"")
-                ))
-                .output();
-            match extract {
-                Ok(e) => String::from_utf8_lossy(&e.stdout)
+                .arg("import json,sys; d=json.load(sys.stdin); print(d.get('actions_failed', 0))")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .stderr(Stdio::null())
+                .spawn()
+                .ok();
+            if let Some(ref mut c) = child {
+                if let Some(stdin) = c.stdin.take() {
+                    let mut stdin = stdin;
+                    let _ = stdin.write_all(&stdout);
+                }
+            }
+            match child.and_then(|c| c.wait_with_output().ok()) {
+                Some(e) => String::from_utf8_lossy(&e.stdout)
                     .trim()
                     .parse()
                     .unwrap_or(0),
-                Err(_) => 0,
+                None => 0,
             }
         }
         _ => 0,
