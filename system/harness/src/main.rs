@@ -6,6 +6,7 @@ use hex::{state, wake};
 
 mod alert;
 mod boi_pm;
+mod synthesis;
 mod boi_web;
 mod capture;
 mod router;
@@ -208,6 +209,11 @@ enum Commands {
         #[command(subcommand)]
         command: AlertCommands,
     },
+    /// Weekly and on-demand synthesis pipeline (port of system/scripts/weekly-synthesis-digest.sh, synthesis-trigger.sh)
+    Synthesis {
+        #[command(subcommand)]
+        command: SynthesisCommands,
+    },
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
     Upgrade {
         /// Extra arguments forwarded to upgrade.sh
@@ -299,6 +305,31 @@ enum FleetCommands {
 enum BoiPmCommands {
     /// Install and register the BOI Process Manager LaunchAgent (port of boi-pm/install.sh)
     Install,
+    /// Verify a BOI spec's completion claims (port of boi-completion-verify.sh)
+    Verify {
+        /// Spec ID to verify
+        spec_id: String,
+    },
+    /// Archive a completed BOI spec as JSON (port of boi-completion-to-archive.sh)
+    Archive {
+        /// Spec ID to archive
+        spec_id: String,
+        /// Target repo path (optional)
+        #[arg(long)]
+        target_repo: Option<String>,
+    },
+    /// Auto-commit BOI spec output to target repo (port of auto-commit-boi-output.sh)
+    #[command(name = "auto-commit")]
+    AutoCommit {
+        /// Spec ID
+        spec_id: String,
+        /// Target repo path (optional)
+        #[arg(long)]
+        target_repo: Option<String>,
+        /// Manifest path (optional)
+        #[arg(long)]
+        manifest: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -311,12 +342,78 @@ enum BoiWebCommands {
 enum SpecToolCommands {
     /// Launch the spec-tool server.py (port of spec-tool/run.sh)
     Run,
+    /// Verify concrete claims in a BOI spec against the codebase (port of verify-spec-claims.py)
+    #[command(name = "verify-claims")]
+    VerifyClaims {
+        /// Spec file path to verify
+        spec_file: String,
+        /// Workspace directory to scan
+        #[arg(long)]
+        workspace: Option<String>,
+        /// Verbose output
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Resolve a spec's owning agent (port of spec-owner-resolver.py)
+    #[command(name = "resolve-owner")]
+    ResolveOwner {
+        /// Spec ID or spec YAML path
+        spec: String,
+    },
+    /// Build a structured failure brief for a failed BOI spec (port of build-failure-brief.py)
+    #[command(name = "failure-brief")]
+    FailureBrief {
+        /// Spec ID
+        spec_id: String,
+    },
+    /// Verify that work traces to active initiatives (port of check-cohesion.py)
+    #[command(name = "check-cohesion")]
+    CheckCohesion {
+        /// Check a specific spec file
+        #[arg(long)]
+        spec: Option<String>,
+        /// Check all active specs
+        #[arg(long)]
+        all: bool,
+        /// Show initiative coverage map
+        #[arg(long)]
+        map: bool,
+    },
 }
 
 #[derive(Subcommand)]
 enum RouterCommands {
     /// Launch the hex-router reverse proxy (port of hex-router/serve.sh)
     Serve,
+    /// Route a comment to matching agents via charter classification (port of route-comment.py)
+    #[command(name = "route-comment")]
+    RouteComment {
+        /// Comment ID
+        comment_id: String,
+        /// Asset identifier
+        asset: String,
+        /// Comment text
+        text: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum SynthesisCommands {
+    /// Summarize the week's input compounding pipeline output (port of weekly-synthesis-digest.sh)
+    Weekly {
+        /// Run regardless of day-of-week
+        #[arg(long)]
+        force: bool,
+        /// Print to stdout, don't write file
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Cluster related inputs and dispatch synthesis BOI specs (port of synthesis-trigger.sh)
+    Trigger {
+        /// Show what would be dispatched without dispatching
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -354,6 +451,12 @@ enum AssetCommands {
     },
     /// List asset types with counts
     Types,
+    /// Auto-discover hex assets and register them (port of hex-asset-discover.py)
+    Discover {
+        /// Report without writing
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -497,6 +600,17 @@ enum IntegrationCommands {
         #[arg(default_value = "hex-integration")]
         source: String,
     },
+    /// Post weekly integrations summary to #integrations (port of integrations-digest.sh)
+    Digest,
+    /// Run one integration sub-check, update state, emit events (port of hex-integration-check.sh)
+    #[command(name = "run-check")]
+    RunCheck {
+        /// Integration name to check
+        name: String,
+    },
+    /// Keep the xmcp OAuth2 access token alive by rotating it in .env (port of x-oauth2-refresh.sh)
+    #[command(name = "x-refresh")]
+    XRefresh,
 }
 
 #[derive(Subcommand)]
@@ -681,6 +795,38 @@ enum MetricsCommands {
     /// Run all user-outcome metric scripts and report PASS/FAIL (port of metrics/run-all.sh)
     #[command(name = "run-all")]
     RunAll,
+    /// Rolling-24h system health scorer (port of hex-vitals.py)
+    Vitals {
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Cost-effectiveness report: KR movement per dollar by agent (port of cost-effectiveness.py)
+    #[command(name = "cost-effectiveness")]
+    CostEffectiveness {
+        /// Filter to a single agent ID
+        #[arg(long)]
+        agent: Option<String>,
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Input:Output telemetry ratio calculator (port of telemetry-ratio.py)
+    #[command(name = "telemetry-ratio")]
+    TelemetryRatio {
+        /// Hours to look back (default 24)
+        #[arg(long, default_value = "24")]
+        hours: u32,
+        /// Filter to a surface (e.g. pulse)
+        #[arg(long)]
+        surface: Option<String>,
+        /// JSON output
+        #[arg(long)]
+        json: bool,
+    },
+    /// Delete telemetry files older than 7 days and cap dirs at 50MB (port of rotate-telemetry.sh)
+    #[command(name = "rotate-telemetry")]
+    RotateTelemetry,
 }
 
 #[derive(Subcommand)]
@@ -701,6 +847,48 @@ enum HealthCommands {
         /// Tier to check: critical, important, or standard
         tier: String,
     },
+    /// Verify sqlite-vec is loadable and memory.db has vectors (port of health/check-vector-search.sh)
+    #[command(name = "check-vector-search")]
+    CheckVectorSearch,
+    /// Detect agent dormancy and ghost-waking via composite liveness score (port of health/check-fleet-pulse.sh)
+    #[command(name = "check-fleet-pulse")]
+    CheckFleetPulse {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Surface POLICY LOAD/VALIDATION ERROR entries from hex-events daemon log (port of health/check-hex-events-policy-load.sh)
+    #[command(name = "check-policy-load")]
+    CheckPolicyLoad,
+    /// Detect stalled initiatives and auto-poke owners (port of health/check-stalled-initiatives.sh)
+    #[command(name = "check-stalled-initiatives")]
+    CheckStalledInitiatives {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Fleet-level agent performance scorecard with coalesced Slack digest (port of health/fleet-scorecard-aggregate.py)
+    #[command(name = "fleet-scorecard")]
+    FleetScorecard {
+        /// Period: 7d, 14d, or 30d
+        #[arg(long, default_value = "7d")]
+        period: String,
+        #[arg(long)]
+        dry_run: bool,
+        /// Write output to a file
+        #[arg(long)]
+        output: Option<String>,
+    },
+    /// Check daily reflection log freshness (port of health/check-reflection-liveness.sh)
+    #[command(name = "check-reflection-liveness")]
+    CheckReflectionLiveness,
+    /// Verify failure-routing pipeline integrity (port of health/check-failure-routing-roundtrip.sh)
+    #[command(name = "check-failure-routing")]
+    CheckFailureRouting,
+    /// Check that initiative watchdog has run recently (port of watchdog-heartbeat-check.sh)
+    #[command(name = "check-watchdog-heartbeat")]
+    CheckWatchdogHeartbeat,
+    /// Run the initiative watchdog full check (port of watchdog-run-full.sh)
+    #[command(name = "watchdog-run")]
+    WatchdogRun,
 }
 
 #[derive(Subcommand)]
@@ -732,9 +920,59 @@ enum DoctorCommands {
         #[arg(long)]
         kr: Option<String>,
     },
+    /// Deterministic dedup, stale reference pruning, memory reindex (port of consolidate.sh)
+    Consolidate,
+    /// Nightly system health audit via claude -p (port of system-introspection.sh)
+    Introspect,
+    /// Proactive tech research agent: generate queries, search, write briefs (port of tech-scout.sh)
+    #[command(name = "tech-scout")]
+    TechScout {
+        #[arg(long)]
+        dry_run: bool,
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Map agent activity to OKRs, assess coverage, write report (port of goal-alignment.sh)
+    #[command(name = "goal-alignment")]
+    GoalAlignment {
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Delete Claude project .jsonl files older than N days (port of cleanup-project-jsonl.sh)
+    #[command(name = "cleanup-projects")]
+    CleanupProjects {
+        /// Retention period in days (default 30)
+        #[arg(default_value = "30")]
+        days: u32,
+    },
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
+/// Run a shell or Python script, streaming stdout/stderr, return exit code.
+fn exec_script(script: &Path, args: &[&str]) -> i32 {
+    if !script.exists() {
+        eprintln!("ERROR: script not found: {}", script.display());
+        return 1;
+    }
+    let ext = script.extension().and_then(|e| e.to_str()).unwrap_or("");
+    let mut cmd = if ext == "py" {
+        let mut c = std::process::Command::new("python3");
+        c.arg(script);
+        c
+    } else {
+        let mut c = std::process::Command::new("bash");
+        c.arg(script);
+        c
+    };
+    for a in args { cmd.arg(a); }
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::inherit());
+    match cmd.status() {
+        Ok(s) => s.code().unwrap_or(1),
+        Err(e) => { eprintln!("ERROR: failed to exec {}: {e}", script.display()); 1 }
+    }
+}
+
 fn yaml_get<'a>(text: &'a str, key: &str) -> Option<&'a str> {
     let prefix = format!("{}: ", key);
     text.lines()
@@ -1490,6 +1728,11 @@ fn main() {
                     handler.cli_register(&r#type, &id, &title, path.as_deref())
                 }
                 AssetCommands::Types => handler.cli_types(),
+                AssetCommands::Discover { dry_run } => {
+                    let script = hex_dir.join("system/scripts/hex-asset-discover.py");
+                    let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
+                    std::process::exit(exec_script(&script, args));
+                }
             }
         }
         Commands::Message { command } => {
@@ -1597,6 +1840,21 @@ fn main() {
                 let code = integration_telemetry::emit_event(&hex_dir, event_type, payload, source);
                 std::process::exit(code);
             }
+            if let IntegrationCommands::Digest = command {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/integrations-digest.sh");
+                std::process::exit(exec_script(&script, &[]));
+            }
+            if let IntegrationCommands::RunCheck { ref name } = command {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/hex-integration-check.sh");
+                std::process::exit(exec_script(&script, &[name]));
+            }
+            if let IntegrationCommands::XRefresh = command {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/x-oauth2-refresh.sh");
+                std::process::exit(exec_script(&script, &[]));
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
@@ -1619,6 +1877,9 @@ fn main() {
                 IntegrationCommands::GranolaMcp => unreachable!(),
                 IntegrationCommands::CheckAll { .. } => unreachable!(),
                 IntegrationCommands::Telemetry { .. } => unreachable!(),
+                IntegrationCommands::Digest => unreachable!(),
+                IntegrationCommands::RunCheck { .. } => unreachable!(),
+                IntegrationCommands::XRefresh => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
@@ -1724,6 +1985,38 @@ fn main() {
                 let hex_dir = get_hex_dir();
                 metrics::run_all(&hex_dir);
             }
+            MetricsCommands::Vitals { json } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/hex-vitals.py");
+                let mut args: Vec<&str> = vec![];
+                let json_flag;
+                if json { json_flag = "--json"; args.push(json_flag); }
+                std::process::exit(exec_script(&script, &args));
+            }
+            MetricsCommands::CostEffectiveness { agent, json } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/cost-effectiveness.py");
+                let mut args: Vec<String> = vec![];
+                if let Some(ref a) = agent { args.push("--agent".into()); args.push(a.clone()); }
+                if json { args.push("--json".into()); }
+                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                std::process::exit(exec_script(&script, &arg_refs));
+            }
+            MetricsCommands::TelemetryRatio { hours, surface, json } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/telemetry-ratio.py");
+                let hours_s = hours.to_string();
+                let mut args: Vec<&str> = vec!["--hours", &hours_s];
+                let surface_flag;
+                if let Some(ref s) = surface { surface_flag = s.clone(); args.push("--surface"); args.push(&surface_flag); }
+                if json { args.push("--json"); }
+                std::process::exit(exec_script(&script, &args));
+            }
+            MetricsCommands::RotateTelemetry => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script = std::path::PathBuf::from(&home).join("mrap-hex/.hex/scripts/rotate-telemetry.sh");
+                std::process::exit(exec_script(&script, &[]));
+            }
         },
         Commands::Health { command } => match command {
             HealthCommands::CheckAgentMemory => {
@@ -1742,6 +2035,57 @@ fn main() {
                 let code = health::run_tier(&hex_dir, &tier);
                 std::process::exit(code);
             }
+            HealthCommands::CheckVectorSearch => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join(".hex/scripts/health/check-vector-search.sh");
+                std::process::exit(exec_script(&script, &[]));
+            }
+            HealthCommands::CheckFleetPulse { dry_run } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join(".hex/scripts/health/check-fleet-pulse.sh");
+                let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
+                std::process::exit(exec_script(&script, args));
+            }
+            HealthCommands::CheckPolicyLoad => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join(".hex/scripts/health/check-hex-events-policy-load.sh");
+                std::process::exit(exec_script(&script, &[]));
+            }
+            HealthCommands::CheckStalledInitiatives { dry_run } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join(".hex/scripts/health/check-stalled-initiatives.sh");
+                let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
+                std::process::exit(exec_script(&script, args));
+            }
+            HealthCommands::FleetScorecard { period, dry_run, output } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join(".hex/scripts/health/fleet-scorecard-aggregate.py");
+                let mut args: Vec<String> = vec!["--period".into(), period];
+                if dry_run { args.push("--dry-run".into()); }
+                if let Some(o) = output { args.push("--output".into()); args.push(o); }
+                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                std::process::exit(exec_script(&script, &arg_refs));
+            }
+            HealthCommands::CheckReflectionLiveness => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script = std::path::PathBuf::from(&home).join("mrap-hex/.hex/scripts/health/check-reflection-liveness.sh");
+                std::process::exit(exec_script(&script, &[]));
+            }
+            HealthCommands::CheckFailureRouting => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script = std::path::PathBuf::from(&home).join("mrap-hex/.hex/scripts/health/check-failure-routing-roundtrip.sh");
+                std::process::exit(exec_script(&script, &[]));
+            }
+            HealthCommands::CheckWatchdogHeartbeat => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/watchdog-heartbeat-check.sh");
+                std::process::exit(exec_script(&script, &[]));
+            }
+            HealthCommands::WatchdogRun => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/watchdog-run-full.sh");
+                std::process::exit(exec_script(&script, &[]));
+            }
         },
         Commands::Doctor { command } => {
             let hex_dir = get_hex_dir();
@@ -1752,6 +2096,31 @@ fn main() {
                 DoctorCommands::QualityCheck { spec, sweep, kr } => {
                     let code = doctor::quality_check(&hex_dir, spec.as_deref(), sweep, kr.as_deref());
                     std::process::exit(code);
+                }
+                DoctorCommands::Consolidate => {
+                    let script = hex_dir.join("system/scripts/consolidate.sh");
+                    std::process::exit(exec_script(&script, &[]));
+                }
+                DoctorCommands::Introspect => {
+                    let script = hex_dir.join("system/scripts/system-introspection.sh");
+                    std::process::exit(exec_script(&script, &[]));
+                }
+                DoctorCommands::TechScout { dry_run, verbose } => {
+                    let script = hex_dir.join("system/scripts/tech-scout.sh");
+                    let mut args: Vec<&str> = vec![];
+                    if dry_run { args.push("--dry-run"); }
+                    if verbose { args.push("--verbose"); }
+                    std::process::exit(exec_script(&script, &args));
+                }
+                DoctorCommands::GoalAlignment { dry_run } => {
+                    let script = hex_dir.join("system/scripts/goal-alignment.sh");
+                    let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
+                    std::process::exit(exec_script(&script, args));
+                }
+                DoctorCommands::CleanupProjects { days } => {
+                    let script = hex_dir.join("system/scripts/cleanup-project-jsonl.sh");
+                    let days_s = days.to_string();
+                    std::process::exit(exec_script(&script, &[&days_s]));
                 }
                 DoctorCommands::Run { fix, smoke, quiet, json } => {
                     let script = hex_dir.join(".hex/scripts/hex-doctor");
@@ -1877,6 +2246,28 @@ fn main() {
                 let hex_dir = get_hex_dir();
                 boi_pm::run_install(&hex_dir);
             }
+            BoiPmCommands::Verify { spec_id } => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script = std::path::PathBuf::from(&home).join("mrap-hex/.hex/scripts/boi-completion-verify.sh");
+                std::process::exit(exec_script(&script, &[&spec_id]));
+            }
+            BoiPmCommands::Archive { spec_id, target_repo } => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script = std::path::PathBuf::from(&home).join(".boi/scripts/boi-completion-to-archive.sh");
+                let mut args: Vec<String> = vec![spec_id];
+                if let Some(r) = target_repo { args.push(r); }
+                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                std::process::exit(exec_script(&script, &arg_refs));
+            }
+            BoiPmCommands::AutoCommit { spec_id, target_repo, manifest } => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script = std::path::PathBuf::from(&home).join(".hex-events/scripts/auto-commit-boi-output.sh");
+                let mut args: Vec<String> = vec![spec_id];
+                if let Some(r) = target_repo { args.push(r); } else { args.push(String::new()); }
+                if let Some(m) = manifest { args.push(m); }
+                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                std::process::exit(exec_script(&script, &arg_refs));
+            }
         },
         Commands::BoiWeb { command } => match command {
             BoiWebCommands::Serve => {
@@ -1889,11 +2280,45 @@ fn main() {
                 let hex_dir = get_hex_dir();
                 spec_tool::run_run(&hex_dir);
             }
+            SpecToolCommands::VerifyClaims { spec_file, workspace, verbose } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/verify-spec-claims.py");
+                let mut args: Vec<String> = vec![spec_file];
+                if let Some(w) = workspace { args.push("--workspace".into()); args.push(w); }
+                if verbose { args.push("--verbose".into()); }
+                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
+                std::process::exit(exec_script(&script, &arg_refs));
+            }
+            SpecToolCommands::ResolveOwner { spec } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/spec-owner-resolver.py");
+                std::process::exit(exec_script(&script, &[&spec]));
+            }
+            SpecToolCommands::FailureBrief { spec_id } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/build-failure-brief.py");
+                std::process::exit(exec_script(&script, &[&spec_id]));
+            }
+            SpecToolCommands::CheckCohesion { spec, all, map } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/check-cohesion.py");
+                let mut args: Vec<&str> = vec![];
+                let spec_s;
+                if let Some(ref s) = spec { spec_s = s.clone(); args.push("--spec"); args.push(&spec_s); }
+                if all { args.push("--all"); }
+                if map { args.push("--map"); }
+                std::process::exit(exec_script(&script, &args));
+            }
         },
         Commands::Router { command } => match command {
             RouterCommands::Serve => {
                 let hex_dir = get_hex_dir();
                 router::run_serve(&hex_dir);
+            }
+            RouterCommands::RouteComment { comment_id, asset, text } => {
+                let hex_dir = get_hex_dir();
+                let script = hex_dir.join("system/scripts/route-comment.py");
+                std::process::exit(exec_script(&script, &[&comment_id, &asset, &text]));
             }
         },
         Commands::Capture { command } => {
@@ -1916,6 +2341,23 @@ fn main() {
                 alert::run_send(&hex_dir, &severity, &agent_id, &message);
             }
         },
+        Commands::Synthesis { command } => {
+            let hex_dir = get_hex_dir();
+            match command {
+                SynthesisCommands::Weekly { force, dry_run } => {
+                    let script = hex_dir.join("system/scripts/weekly-synthesis-digest.sh");
+                    let mut args: Vec<&str> = vec![];
+                    if force { args.push("--force"); }
+                    if dry_run { args.push("--dry-run"); }
+                    std::process::exit(exec_script(&script, &args));
+                }
+                SynthesisCommands::Trigger { dry_run } => {
+                    let script = hex_dir.join("system/scripts/synthesis-trigger.sh");
+                    let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
+                    std::process::exit(exec_script(&script, args));
+                }
+            }
+        }
         Commands::Upgrade { args } => {
             let hex_dir = get_hex_dir();
             let legacy = hex_dir.join("system/scripts/upgrade.sh.legacy.sh");
