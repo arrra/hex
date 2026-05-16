@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use hex::{state, wake};
 
+mod health;
 mod integration;
 mod integration_apple_addressbook;
 mod metrics;
@@ -80,6 +81,11 @@ enum Commands {
     Metrics {
         #[command(subcommand)]
         command: MetricsCommands,
+    },
+    /// Agent health checks (port of .hex/scripts/health/)
+    Health {
+        #[command(subcommand)]
+        command: HealthCommands,
     },
     /// System health check
     Doctor {
@@ -480,6 +486,13 @@ enum MetricsCommands {
     /// Run all user-outcome metric scripts and report PASS/FAIL (port of metrics/run-all.sh)
     #[command(name = "run-all")]
     RunAll,
+}
+
+#[derive(Subcommand)]
+enum HealthCommands {
+    /// Check agent memory system health (port of health/check-agent-memory.sh)
+    #[command(name = "check-agent-memory")]
+    CheckAgentMemory,
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
@@ -1394,6 +1407,11 @@ fn main() {
             MetricsCommands::RunAll => {
                 let hex_dir = get_hex_dir();
                 metrics::run_all(&hex_dir);
+            }
+        },
+        Commands::Health { command } => match command {
+            HealthCommands::CheckAgentMemory => {
+                health::check_agent_memory();
             }
         },
         Commands::Doctor { fix, smoke, quiet, json } => {
