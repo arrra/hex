@@ -6,6 +6,7 @@ use hex::{state, wake};
 
 mod boi_pm;
 mod boi_web;
+mod router;
 mod spec_tool;
 mod doctor;
 mod fleet;
@@ -188,6 +189,11 @@ enum Commands {
         #[command(subcommand)]
         command: SpecToolCommands,
     },
+    /// Hex-router reverse proxy launcher (port of .hex/scripts/hex-router/serve.sh)
+    Router {
+        #[command(subcommand)]
+        command: RouterCommands,
+    },
     /// Print version
     Version,
     /// Generate shell completions
@@ -272,6 +278,12 @@ enum BoiWebCommands {
 enum SpecToolCommands {
     /// Launch the spec-tool server.py (port of spec-tool/run.sh)
     Run,
+}
+
+#[derive(Subcommand)]
+enum RouterCommands {
+    /// Launch the hex-router reverse proxy (port of hex-router/serve.sh)
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -1678,6 +1690,12 @@ fn main() {
             SpecToolCommands::Run => {
                 let hex_dir = get_hex_dir();
                 spec_tool::run_run(&hex_dir);
+            }
+        },
+        Commands::Router { command } => match command {
+            RouterCommands::Serve => {
+                let hex_dir = get_hex_dir();
+                router::run_serve(&hex_dir);
             }
         },
         Commands::Version => {
