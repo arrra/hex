@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# KEEP-DIVERGENT: comments REST API + embeddable widget JS (port 8901).
+# Not consolidated to sse-bus canonical — full CRUD comments service with persistent
+# storage, not an SSE bus. Domain: feedback/annotation layer across hex web assets.
 """hex comments — universal commenting service for all hex web assets.
 Port 8901. Storage: .hex/data/comments.json
 Any hex page can embed the widget via <script src="/comments/widget.js"></script>

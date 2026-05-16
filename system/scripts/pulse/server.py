@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# KEEP-DIVERGENT: hex Pulse health dashboard v2 with SSE, vitals, fleet, quality (port 8896).
+# Not consolidated to sse-bus canonical — primary dashboard server, 1600 lines, active callers
+# in pulse-to-spec.py. This is the dominant/canonical pulse server (vs pulse-dashboard v1).
 """Hex Pulse — live system health dashboard server. Port 8896."""
 
 import json

@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# KEEP-DIVERGENT: pulse dashboard v1 with board/initiative/BOI integration (port 8896).
+# Not consolidated to sse-bus canonical — full dashboard server reading YAML/markdown/sqlite.
+# Alternate to pulse/server.py (v2). Referenced in system/scripts/pulse-to-spec.py.
 """hex pulse dashboard — at-a-glance view of what's being driven."""
 
 import http.server

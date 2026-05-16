@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+# KEEP-DIVERGENT: static file server for hex artifact HTML (port 8897).
+# Not consolidated to sse-bus canonical — different domain (artifact serving vs SSE bus).
 """Serve hex artifacts — static HTML files."""
 import http.server
 import os
