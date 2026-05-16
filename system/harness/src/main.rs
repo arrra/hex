@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use hex::{state, wake};
 
 mod integration;
+mod integration_apple_addressbook;
 mod integration_mcp_exa;
 mod integration_mcp_excalidraw;
 mod integration_mcp_plugin_ecc;
@@ -318,6 +319,9 @@ enum IntegrationCommands {
     /// Run X (Twitter) API bearer token probe (port of integrations/x-twitter.sh)
     #[command(name = "x-twitter")]
     XTwitter,
+    /// Run Apple Contacts TCC access probe (port of integrations/apple-addressbook.sh)
+    #[command(name = "apple-addressbook")]
+    AppleAddressbook,
 }
 
 #[derive(Subcommand)]
@@ -1237,6 +1241,9 @@ fn main() {
             if let IntegrationCommands::XTwitter = command {
                 std::process::exit(integration_x_twitter::run_probe());
             }
+            if let IntegrationCommands::AppleAddressbook = command {
+                std::process::exit(integration_apple_addressbook::run_probe());
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
@@ -1253,6 +1260,7 @@ fn main() {
                 IntegrationCommands::McpExcalidraw => unreachable!(),
                 IntegrationCommands::McpPluginEcc => unreachable!(),
                 IntegrationCommands::XTwitter => unreachable!(),
+                IntegrationCommands::AppleAddressbook => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
