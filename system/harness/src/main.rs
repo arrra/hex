@@ -6,6 +6,7 @@ use hex::{state, wake};
 
 mod boi_pm;
 mod boi_web;
+mod capture;
 mod router;
 mod spec_tool;
 mod doctor;
@@ -193,6 +194,12 @@ enum Commands {
     Router {
         #[command(subcommand)]
         command: RouterCommands,
+    },
+    /// Zero-friction context capture (port of .hex/scripts/capture.sh)
+    Capture {
+        /// Text to capture; omit to read from stdin or $EDITOR
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        text: Vec<String>,
     },
     /// Print version
     Version,
@@ -1698,6 +1705,10 @@ fn main() {
                 router::run_serve(&hex_dir);
             }
         },
+        Commands::Capture { text } => {
+            let hex_dir = get_hex_dir();
+            capture::run_capture(&hex_dir, &text);
+        }
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }
