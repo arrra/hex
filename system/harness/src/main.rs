@@ -5,6 +5,8 @@ use std::path::{Path, PathBuf};
 use hex::{state, wake};
 
 mod integration;
+mod integration_apple_addressbook;
+mod integration_tailscale;
 mod integration_mcp_exa;
 mod integration_mcp_excalidraw;
 mod integration_mcp_plugin_ecc;
@@ -16,6 +18,7 @@ mod path_map;
 mod pulse;
 mod session_reflect;
 mod today;
+mod workspace;
 
 #[derive(Parser)]
 #[command(name = "hex", about = "Hex multi-agent harness", version)]
@@ -117,6 +120,11 @@ enum Commands {
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
+    },
+    /// Hex tmux workspace launcher (port of .hex/scripts/workspace.sh)
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommands,
     },
     /// Print version
     Version,
@@ -312,6 +320,12 @@ enum IntegrationCommands {
     /// Run X (Twitter) API bearer token probe (port of integrations/x-twitter.sh)
     #[command(name = "x-twitter")]
     XTwitter,
+    /// Run Apple Contacts TCC access probe (port of integrations/apple-addressbook.sh)
+    #[command(name = "apple-addressbook")]
+    AppleAddressbook,
+    /// Run Tailscale daemon and peer connectivity probe (port of integrations/tailscale.sh)
+    #[command(name = "tailscale")]
+    Tailscale,
 }
 
 #[derive(Subcommand)]
@@ -396,12 +410,20 @@ enum SessionCommands {
 enum MirofishCommands {
     /// Check VM status and service health
     Status,
+    /// Deploy latest code to Mirofish GCE VM (port of mirofish-deploy.sh)
+    Deploy,
 }
 
 #[derive(Subcommand)]
 enum KalshiCommands {
     /// Generate RSA keypair for Kalshi API authentication (port of kalshi-keygen.sh)
     Keygen {
+        /// Override the secrets directory (default: $HEX_DIR/.hex/secrets)
+        #[arg(long)]
+        secrets_dir: Option<std::path::PathBuf>,
+    },
+    /// Two-legged connectivity probe: public exchange/status + signed portfolio/balance (port of integrations/kalshi.sh)
+    Probe {
         /// Override the secrets directory (default: $HEX_DIR/.hex/secrets)
         #[arg(long)]
         secrets_dir: Option<std::path::PathBuf>,
@@ -426,6 +448,12 @@ enum McpCommands {
         /// The OAuth auth URL to rewrite
         auth_url: String,
     },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCommands {
+    /// Create or attach to the hex tmux workspace (port of workspace.sh)
+    Launch,
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
@@ -1217,6 +1245,12 @@ fn main() {
             if let IntegrationCommands::XTwitter = command {
                 std::process::exit(integration_x_twitter::run_probe());
             }
+            if let IntegrationCommands::AppleAddressbook = command {
+                std::process::exit(integration_apple_addressbook::run_probe());
+            }
+            if let IntegrationCommands::Tailscale = command {
+                std::process::exit(integration_tailscale::run_probe());
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
@@ -1233,6 +1267,8 @@ fn main() {
                 IntegrationCommands::McpExcalidraw => unreachable!(),
                 IntegrationCommands::McpPluginEcc => unreachable!(),
                 IntegrationCommands::XTwitter => unreachable!(),
+                IntegrationCommands::AppleAddressbook => unreachable!(),
+                IntegrationCommands::Tailscale => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
@@ -1373,6 +1409,7 @@ fn main() {
         }
         Commands::Mirofish { command } => match command {
             MirofishCommands::Status => mirofish::run_status(),
+            MirofishCommands::Deploy => mirofish::run_deploy(),
         },
         Commands::Kalshi { command } => match command {
             KalshiCommands::Keygen { secrets_dir } => {
@@ -1384,6 +1421,12 @@ fn main() {
                     }
                 };
                 kalshi::run_keygen(&dir);
+            }
+            KalshiCommands::Probe { secrets_dir } => {
+                let hex_dir = get_hex_dir();
+                let dir = secrets_dir.unwrap_or_else(|| kalshi::secrets_dir_from_hex(&hex_dir));
+                let sign_script = hex_dir.join(".hex/scripts/integrations/lib/kalshi_sign.py");
+                std::process::exit(kalshi::run_probe(&dir, &sign_script));
             }
         },
         Commands::Pulse { command } => match command {
@@ -1408,6 +1451,12 @@ fn main() {
         Commands::Mcp { command } => match command {
             McpCommands::OauthRewrite { auth_url } => {
                 std::process::exit(mcp::oauth_rewrite(&auth_url));
+            }
+        },
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::Launch => {
+                let hex_dir = get_hex_dir();
+                workspace::run_launch(&hex_dir);
             }
         },
         Commands::Version => {

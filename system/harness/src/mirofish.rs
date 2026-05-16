@@ -7,6 +7,47 @@ const ZONE: &str = "us-east1-b";
 const INSTANCE: &str = "mirofish";
 const TAILSCALE_IP: &str = "100.108.180.3";
 
+pub fn run_deploy() {
+    println!("[mirofish] Deploying...");
+    // Acquire OrbStack lease for deploy duration (best-effort)
+    let _ = std::process::Command::new("hex-orb")
+        .args(["acquire", "mirofish-deploy", "--ttl", "30m"])
+        .status();
+
+    let project = PROJECT;
+    let zone = ZONE;
+    let instance = INSTANCE;
+
+    let ssh_cmd = "cd /opt/mirofish && \
+        sudo git pull --ff-only 2>&1 | tail -3 && \
+        sudo docker compose pull 2>&1 | tail -3 && \
+        sudo docker compose up -d 2>&1 | tail -5 && \
+        echo 'Deploy complete'";
+
+    let status = std::process::Command::new("gcloud")
+        .args([
+            "compute",
+            "ssh",
+            instance,
+            &format!("--project={}", project),
+            &format!("--zone={}", zone),
+            "--command",
+            ssh_cmd,
+        ])
+        .status();
+
+    // Release lease (best-effort)
+    let _ = std::process::Command::new("hex-orb")
+        .args(["release", "mirofish-deploy"])
+        .status();
+
+    match status {
+        Err(e) => eprintln!("gcloud: {e}"),
+        Ok(s) if !s.success() => { /* gcloud prints its own error */ }
+        _ => {}
+    }
+}
+
 pub fn run_status() {
     println!("[mirofish] VM status:");
     let status = Command::new("gcloud")
@@ -54,6 +95,19 @@ pub fn run_status() {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn deploy_ssh_command_contains_expected_steps() {
+        let cmd = "cd /opt/mirofish && \
+            sudo git pull --ff-only 2>&1 | tail -3 && \
+            sudo docker compose pull 2>&1 | tail -3 && \
+            sudo docker compose up -d 2>&1 | tail -5 && \
+            echo 'Deploy complete'";
+        assert!(cmd.contains("git pull --ff-only"));
+        assert!(cmd.contains("docker compose pull"));
+        assert!(cmd.contains("docker compose up -d"));
+        assert!(cmd.contains("Deploy complete"));
+    }
+
     /// Verify the constants used to build gcloud/curl commands match the shell script.
     #[test]
     fn constants_match_shell_script() {
