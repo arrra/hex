@@ -1428,10 +1428,13 @@ fn main() {
                 MemoryCommands::Index { full, stats } => {
                     memory::index::run(&hex_dir, *full, *stats)
                 }
-                MemoryCommands::ParseTranscripts { .. } => {
-                    // T2EEE: parse-transcripts is ported in a subsequent iteration
-                    eprintln!("hex memory parse-transcripts: not yet implemented in native Rust");
-                    1
+                MemoryCommands::ParseTranscripts { file, dry_run, force } => {
+                    let args = memory::parse_transcripts::ParseArgs {
+                        file: file.clone(),
+                        dry_run: *dry_run,
+                        force: *force,
+                    };
+                    memory::parse_transcripts::run(&hex_dir, &args)
                 }
                 _ => {
                     let hex_memory = hex_dir.join(".hex/scripts/bin/hex-memory");

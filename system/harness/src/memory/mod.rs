@@ -1,4 +1,5 @@
 pub mod index;
+pub mod parse_transcripts;
 pub mod search;
 
 use std::path::{Path, PathBuf};
