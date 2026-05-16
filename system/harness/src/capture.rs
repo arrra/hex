@@ -68,6 +68,61 @@ pub fn run_capture(hex_dir: &PathBuf, text_args: &[String]) {
     println!("Captured. Will triage on next session startup.");
 }
 
+/// Port of system/scripts/hex-ui-feedback-ingest.sh
+/// Reads hex-ui messages.json, extracts done messages, appends to feedback log.
+pub fn run_ingest(hex_dir: &PathBuf) {
+    let legacy = hex_dir.join("system/scripts/hex-ui-feedback-ingest.sh.legacy.sh");
+    let primary = hex_dir.join("system/scripts/hex-ui-feedback-ingest.sh");
+    let script = if legacy.is_file() { legacy } else { primary };
+
+    if !script.is_file() {
+        eprintln!("hex capture ingest: script not found at {}", script.display());
+        std::process::exit(1);
+    }
+
+    let status = Command::new("bash")
+        .arg(&script)
+        .env("HEX_DIR", hex_dir)
+        .status()
+        .unwrap_or_else(|e| {
+            eprintln!("hex capture ingest: failed to exec script: {e}");
+            std::process::exit(1);
+        });
+
+    std::process::exit(status.code().unwrap_or(1));
+}
+
+/// Port of system/scripts/capture-to-dispatch.sh
+/// Scans triaged captures, generates BOI specs, and dispatches.
+pub fn run_dispatch(hex_dir: &PathBuf, dry_run: bool, max: u32, triage: Option<String>) {
+    let legacy = hex_dir.join("system/scripts/capture-to-dispatch.sh.legacy.sh");
+    let primary = hex_dir.join("system/scripts/capture-to-dispatch.sh");
+    let script = if legacy.is_file() { legacy } else { primary };
+
+    if !script.is_file() {
+        eprintln!("hex capture dispatch: script not found at {}", script.display());
+        std::process::exit(1);
+    }
+
+    let mut cmd = Command::new("bash");
+    cmd.arg(&script);
+    if dry_run {
+        cmd.arg("--dry-run");
+    }
+    cmd.arg("--max").arg(max.to_string());
+    if let Some(t) = triage {
+        cmd.arg("--triage").arg(t);
+    }
+    cmd.env("HEX_DIR", hex_dir);
+
+    let status = cmd.status().unwrap_or_else(|e| {
+        eprintln!("hex capture dispatch: failed to exec script: {e}");
+        std::process::exit(1);
+    });
+
+    std::process::exit(status.code().unwrap_or(1));
+}
+
 fn collect_text(args: &[String]) -> String {
     if !args.is_empty() {
         return args.join(" ");
