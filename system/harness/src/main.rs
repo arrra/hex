@@ -207,6 +207,12 @@ enum Commands {
         #[command(subcommand)]
         command: AlertCommands,
     },
+    /// Upgrade hex installation (port of system/scripts/upgrade.sh)
+    Upgrade {
+        /// Extra arguments forwarded to upgrade.sh
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
     /// Print version
     Version,
     /// Generate shell completions
@@ -1770,6 +1776,24 @@ fn main() {
                 alert::run_send(&hex_dir, &severity, &agent_id, &message);
             }
         },
+        Commands::Upgrade { args } => {
+            let hex_dir = get_hex_dir();
+            let legacy = hex_dir.join("system/scripts/upgrade.sh.legacy.sh");
+            let script = if legacy.exists() { legacy } else { hex_dir.join("system/scripts/upgrade.sh") };
+            if !script.exists() {
+                eprintln!("ERROR: upgrade script not found at {}", script.display());
+                std::process::exit(1);
+            }
+            let status = std::process::Command::new("bash")
+                .arg(&script)
+                .args(&args)
+                .status()
+                .unwrap_or_else(|e| {
+                    eprintln!("ERROR: failed to exec upgrade: {e}");
+                    std::process::exit(1);
+                });
+            std::process::exit(status.code().unwrap_or(0));
+        }
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }
