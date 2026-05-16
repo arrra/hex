@@ -9,6 +9,7 @@ mod health;
 mod integration;
 mod integration_apple_addressbook;
 mod metrics;
+mod checkpoint;
 mod startup;
 mod integration_tailscale;
 mod integration_mcp_exa;
@@ -147,6 +148,11 @@ enum Commands {
         /// List available steps and exit
         #[arg(long)]
         status: bool,
+    },
+    /// Checkpoint the current session (port of /hex-checkpoint slash command)
+    Checkpoint {
+        /// What to work on next (used in compact suggestion and handoff)
+        focus: Option<String>,
     },
     /// Print version
     Version,
@@ -1550,6 +1556,11 @@ fn main() {
                 &hex_dir,
                 startup::StartupArgs { quick, step, status },
             );
+            std::process::exit(code);
+        }
+        Commands::Checkpoint { focus } => {
+            let hex_dir = get_hex_dir();
+            let code = checkpoint::run(&hex_dir, checkpoint::CheckpointArgs { focus });
             std::process::exit(code);
         }
         Commands::Version => {
