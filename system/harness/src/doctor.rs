@@ -155,6 +155,41 @@ pub fn check_codex(hex_dir: &std::path::Path) {
     }
 }
 
+/// Port of .hex/scripts/quality-check.py
+/// Gaming detector for BOI initiative loop specs. Delegates to the Python script.
+pub fn quality_check(hex_dir: &std::path::Path, spec: Option<&str>, sweep: bool, kr: Option<&str>) -> i32 {
+    // Try legacy script (after quarantine) first
+    let legacy = hex_dir.join("system/scripts/quality-check.py.legacy.py");
+    let primary = hex_dir.join("system/scripts/quality-check.py");
+    let script = if legacy.is_file() { legacy } else { primary };
+
+    if !script.is_file() {
+        eprintln!("hex doctor quality-check: script not found at {}", script.display());
+        return 1;
+    }
+
+    let mut cmd = std::process::Command::new("python3");
+    cmd.arg(&script);
+    if let Some(s) = spec {
+        cmd.arg("--spec").arg(s);
+    }
+    if sweep {
+        cmd.arg("--sweep");
+    }
+    if let Some(k) = kr {
+        cmd.arg("--kr").arg(k);
+    }
+    cmd.env("HEX_DIR", hex_dir);
+    cmd.stdout(std::process::Stdio::inherit());
+    cmd.stderr(std::process::Stdio::inherit());
+
+    let status = cmd.status().unwrap_or_else(|e| {
+        eprintln!("hex doctor quality-check: failed to exec script: {e}");
+        std::process::exit(1);
+    });
+    status.code().unwrap_or(1)
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
