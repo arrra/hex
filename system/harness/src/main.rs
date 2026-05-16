@@ -402,6 +402,8 @@ enum SessionCommands {
 enum MirofishCommands {
     /// Check VM status and service health
     Status,
+    /// Deploy latest code to Mirofish GCE VM (port of mirofish-deploy.sh)
+    Deploy,
 }
 
 #[derive(Subcommand)]
@@ -1391,6 +1393,7 @@ fn main() {
         }
         Commands::Mirofish { command } => match command {
             MirofishCommands::Status => mirofish::run_status(),
+            MirofishCommands::Deploy => mirofish::run_deploy(),
         },
         Commands::Kalshi { command } => match command {
             KalshiCommands::Keygen { secrets_dir } => {
