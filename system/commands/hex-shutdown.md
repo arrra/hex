@@ -5,4 +5,6 @@ description: >
   Heavy work (reflection, transcripts, memory) runs via Stop hooks in background.
 ---
 
-Invoke the hex-shutdown skill.
+```bash
+hex shutdown [SESSION_ID]
+```
