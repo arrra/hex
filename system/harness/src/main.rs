@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use hex::{state, wake};
 
+mod alert;
 mod boi_pm;
 mod boi_web;
 mod capture;
@@ -201,6 +202,11 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         text: Vec<String>,
     },
+    /// iMessage alert sender (port of .hex/scripts/hex-alert.sh)
+    Alert {
+        #[command(subcommand)]
+        command: AlertCommands,
+    },
     /// Print version
     Version,
     /// Generate shell completions
@@ -391,6 +397,16 @@ enum SseCommands {
     },
     /// List registered SSE topics
     Topics,
+}
+
+#[derive(Subcommand)]
+enum AlertCommands {
+    /// Send an iMessage alert (port of .hex/scripts/hex-alert.sh)
+    Send {
+        severity: String,
+        agent_id: String,
+        message: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1724,6 +1740,12 @@ fn main() {
             let hex_dir = get_hex_dir();
             capture::run_capture(&hex_dir, &text);
         }
+        Commands::Alert { command } => match command {
+            AlertCommands::Send { severity, agent_id, message } => {
+                let hex_dir = get_hex_dir();
+                alert::run_send(&hex_dir, &severity, &agent_id, &message);
+            }
+        },
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }
