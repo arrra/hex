@@ -4,6 +4,7 @@ use std::path::{Path, PathBuf};
 
 use hex::{state, wake};
 
+mod boi_pm;
 mod doctor;
 mod fleet;
 mod health;
@@ -167,6 +168,12 @@ enum Commands {
         #[command(subcommand)]
         command: FleetCommands,
     },
+    /// BOI Process Manager service management (port of .hex/scripts/boi-pm/install.sh)
+    #[command(name = "boi-pm")]
+    BoiPm {
+        #[command(subcommand)]
+        command: BoiPmCommands,
+    },
     /// Print version
     Version,
     /// Generate shell completions
@@ -232,6 +239,12 @@ enum AgentCommands {
 #[derive(Subcommand)]
 enum FleetCommands {
     /// Install and register the Hex Fleet Manager LaunchAgent (port of hex-fleet/install.sh)
+    Install,
+}
+
+#[derive(Subcommand)]
+enum BoiPmCommands {
+    /// Install and register the BOI Process Manager LaunchAgent (port of boi-pm/install.sh)
     Install,
 }
 
@@ -1621,6 +1634,12 @@ fn main() {
             FleetCommands::Install => {
                 let hex_dir = get_hex_dir();
                 fleet::run_install(&hex_dir);
+            }
+        },
+        Commands::BoiPm { command } => match command {
+            BoiPmCommands::Install => {
+                let hex_dir = get_hex_dir();
+                boi_pm::run_install(&hex_dir);
             }
         },
         Commands::Version => {
