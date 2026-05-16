@@ -26,9 +26,7 @@ HEX_DOTDIR="$HEX_DIR/.hex"
 CACHE_DIR="$HEX_DOTDIR/.upgrade-cache"
 CONFIG_FILE="$HEX_DOTDIR/upgrade.json"
 
-# Source path-mapping library for v1/v2 layout handling
-# shellcheck source=./path-mapping.sh
-source "$SCRIPT_DIR/path-mapping.sh"
+# Path-mapping is provided by the `hex path-map` subcommand; no need to source.
 
 # These are populated after we know the source layout.
 SOURCE_LAYOUT=""
@@ -150,7 +148,7 @@ else
 fi
 
 # Detect source layout and populate layout-specific path variables.
-SOURCE_LAYOUT=$(detect_layout "$SOURCE_DIR")
+SOURCE_LAYOUT=$(hex path-map detect-layout "$SOURCE_DIR")
 if [ "$SOURCE_LAYOUT" = "v1" ]; then
   SOURCE_SUBDIR_SCRIPTS="dot-claude/scripts"
   SOURCE_SUBDIR_SKILLS="dot-claude/skills"

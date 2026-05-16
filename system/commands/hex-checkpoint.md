@@ -80,7 +80,7 @@ Make sure todo.md reflects current state. Move completed items, add new ones dis
 
 ## Step 5: Update daily landings
 
-Get today's date: `bash $HEX_DIR/.hex/scripts/today.sh`
+Get today's date: `hex today`
 
 Read today's landings file at `landings/YYYY-MM-DD.md`. If it exists, update it:
 - Mark any landing items completed during this session segment as Done
