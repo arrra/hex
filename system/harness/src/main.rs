@@ -412,6 +412,12 @@ enum KalshiCommands {
         #[arg(long)]
         secrets_dir: Option<std::path::PathBuf>,
     },
+    /// Two-legged connectivity probe: public exchange/status + signed portfolio/balance (port of integrations/kalshi.sh)
+    Probe {
+        /// Override the secrets directory (default: $HEX_DIR/.hex/secrets)
+        #[arg(long)]
+        secrets_dir: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1396,6 +1402,12 @@ fn main() {
                     }
                 };
                 kalshi::run_keygen(&dir);
+            }
+            KalshiCommands::Probe { secrets_dir } => {
+                let hex_dir = get_hex_dir();
+                let dir = secrets_dir.unwrap_or_else(|| kalshi::secrets_dir_from_hex(&hex_dir));
+                let sign_script = hex_dir.join(".hex/scripts/integrations/lib/kalshi_sign.py");
+                std::process::exit(kalshi::run_probe(&dir, &sign_script));
             }
         },
         Commands::Pulse { command } => match command {
