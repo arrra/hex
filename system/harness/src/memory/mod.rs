@@ -1,4 +1,5 @@
 pub mod index;
+pub mod search;
 
 use std::path::{Path, PathBuf};
 
