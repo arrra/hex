@@ -1,5 +1,96 @@
 pub mod budget_reset;
 
+/// Port of .hex/scripts/run-health-tier.sh
+/// Runs health/check-*.sh scripts for a tier, emits integrations.health.* events.
+pub fn run_tier(hex_dir: &std::path::Path, tier: &str) -> i32 {
+    let health_dir = hex_dir.join(".hex/scripts/health");
+    let hex_emit = std::path::PathBuf::from(std::env::var("HOME").unwrap_or_default())
+        .join(".hex-events/hex_emit.py");
+
+    let names: &[&str] = match tier {
+        "critical"  => &["check-cc-connect", "check-slack-bot", "check-hex-eventd"],
+        "important" => &["check-mcp-servers", "check-secrets", "check-tailscale"],
+        "standard"  => &["check-kalshi"],
+        _ => {
+            eprintln!("Usage: hex health run-tier <critical|important|standard>");
+            return 1;
+        }
+    };
+
+    let mut overall = 0i32;
+
+    for name in names {
+        let script = health_dir.join(format!("{name}.sh"));
+        if !script.is_file() {
+            eprintln!("[WARN] health script not found: {}, skipping", script.display());
+            continue;
+        }
+
+        let result = std::process::Command::new("bash")
+            .arg(&script)
+            .output();
+
+        let (output, exit_code) = match result {
+            Ok(o) => {
+                let code = o.status.code().unwrap_or(1);
+                let out = String::from_utf8_lossy(&o.stdout).to_string()
+                    + &String::from_utf8_lossy(&o.stderr);
+                (out, code)
+            }
+            Err(e) => {
+                eprintln!("[ERROR] failed to run {}: {e}", script.display());
+                overall = 1;
+                continue;
+            }
+        };
+
+        let event = if exit_code == 0 {
+            "integrations.health.ok"
+        } else {
+            overall = 1;
+            "integrations.health.failed"
+        };
+
+        // Emit event best-effort
+        if hex_emit.is_file() {
+            let payload = serde_json::json!({
+                "integration": name,
+                "check": script.to_string_lossy(),
+                "output": output.trim(),
+                "exit_code": exit_code,
+            })
+            .to_string();
+            let _ = std::process::Command::new("python3")
+                .arg(&hex_emit)
+                .arg(event)
+                .arg(&payload)
+                .arg("hex:integrations-health-monitor")
+                .status();
+        }
+
+        if exit_code == 0 {
+            println!("[OK] {name}");
+        } else {
+            eprintln!("[FAIL] {name} (exit {exit_code})");
+        }
+    }
+
+    overall
+}
+
+#[cfg(test)]
+mod health_run_tier_tests {
+    use super::*;
+
+    #[test]
+    fn unknown_tier_returns_nonzero() {
+        let tmp = std::env::temp_dir().join("hex_run_tier_test");
+        std::fs::create_dir_all(&tmp).ok();
+        let code = run_tier(&tmp, "bogus-tier");
+        assert_ne!(code, 0, "unknown tier must return nonzero");
+    }
+}
+
 /// Port of .hex/scripts/health/check-agent-memory.sh
 ///
 /// Health check for the agent memory system. Verifies:

@@ -26,6 +26,8 @@ mod integration_mcp_plugin_ecc;
 mod integration_x_twitter;
 mod integration_publer;
 mod integration_granola_mcp;
+mod integration_check_all;
+mod integration_telemetry;
 mod kalshi;
 mod mcp;
 mod memory;
@@ -198,9 +200,8 @@ enum Commands {
     },
     /// Zero-friction context capture (port of .hex/scripts/capture.sh)
     Capture {
-        /// Text to capture; omit to read from stdin or $EDITOR
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        text: Vec<String>,
+        #[command(subcommand)]
+        command: CaptureCommands,
     },
     /// iMessage alert sender (port of .hex/scripts/hex-alert.sh)
     Alert {
@@ -477,6 +478,25 @@ enum IntegrationCommands {
     /// Run Granola MCP health probe (port of integrations/granola-mcp.sh)
     #[command(name = "granola-mcp")]
     GranolaMcp,
+    /// Run integration checks for a tier in parallel (port of hex-integration-check-all.sh)
+    #[command(name = "check-all")]
+    CheckAll {
+        /// Tier to check: critical, standard, slow, or all (default: all)
+        #[arg(long, default_value = "all")]
+        tier: String,
+    },
+    /// Emit a hex.integration.* telemetry event (port of lib/integration/telemetry.py)
+    #[command(name = "telemetry")]
+    Telemetry {
+        /// Event type, e.g. hex.integration.installed.ok
+        event_type: String,
+        /// JSON payload (default: {})
+        #[arg(default_value = "{}")]
+        payload: String,
+        /// Event source tag
+        #[arg(default_value = "hex-integration")]
+        source: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -607,6 +627,30 @@ enum KalshiCommands {
 }
 
 #[derive(Subcommand)]
+enum CaptureCommands {
+    /// Capture text (port of .hex/scripts/capture.sh)
+    Text {
+        /// Text to capture; omit to read from stdin or $EDITOR
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
+    /// Ingest hex-ui feedback messages into the feedback log (port of hex-ui-feedback-ingest.sh)
+    Ingest,
+    /// Dispatch triaged captures as BOI specs (port of capture-to-dispatch.sh)
+    Dispatch {
+        /// Show what would happen without dispatching
+        #[arg(long)]
+        dry_run: bool,
+        /// Max specs to dispatch per run
+        #[arg(long, default_value = "3")]
+        max: u32,
+        /// Path to a specific triage report
+        #[arg(long)]
+        triage: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
 enum PulseCommands {
     /// Load API key from secrets and start the pulse server.py (port of pulse/start.sh)
     Start {
@@ -651,6 +695,12 @@ enum HealthCommands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Run health checks for a tier, emit integrations.health.* events (port of run-health-tier.sh)
+    #[command(name = "run-tier")]
+    RunTier {
+        /// Tier to check: critical, important, or standard
+        tier: String,
+    },
 }
 
 #[derive(Subcommand)]
@@ -669,6 +719,19 @@ enum DoctorCommands {
     /// Check Codex CLI + config health (port of doctor-checks/codex.sh)
     #[command(name = "check-codex")]
     CheckCodex,
+    /// Gaming detector for BOI initiative loop specs (port of quality-check.py)
+    #[command(name = "quality-check")]
+    QualityCheck {
+        /// Check a specific spec by ID
+        #[arg(long)]
+        spec: Option<String>,
+        /// Sweep all open specs
+        #[arg(long)]
+        sweep: bool,
+        /// Check a specific KR path
+        #[arg(long)]
+        kr: Option<String>,
+    },
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
@@ -1524,6 +1587,16 @@ fn main() {
             if let IntegrationCommands::GranolaMcp = command {
                 std::process::exit(integration_granola_mcp::run_probe());
             }
+            if let IntegrationCommands::CheckAll { ref tier } = command {
+                let hex_dir = get_hex_dir();
+                let code = integration_check_all::run(&hex_dir, tier);
+                std::process::exit(code);
+            }
+            if let IntegrationCommands::Telemetry { ref event_type, ref payload, ref source } = command {
+                let hex_dir = get_hex_dir();
+                let code = integration_telemetry::emit_event(&hex_dir, event_type, payload, source);
+                std::process::exit(code);
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
@@ -1544,6 +1617,8 @@ fn main() {
                 IntegrationCommands::Tailscale => unreachable!(),
                 IntegrationCommands::Publer => unreachable!(),
                 IntegrationCommands::GranolaMcp => unreachable!(),
+                IntegrationCommands::CheckAll { .. } => unreachable!(),
+                IntegrationCommands::Telemetry { .. } => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
@@ -1662,12 +1737,21 @@ fn main() {
                 });
                 std::process::exit(code);
             }
+            HealthCommands::RunTier { tier } => {
+                let hex_dir = get_hex_dir();
+                let code = health::run_tier(&hex_dir, &tier);
+                std::process::exit(code);
+            }
         },
         Commands::Doctor { command } => {
             let hex_dir = get_hex_dir();
             match command {
                 DoctorCommands::CheckCodex => {
                     doctor::check_codex(&hex_dir);
+                }
+                DoctorCommands::QualityCheck { spec, sweep, kr } => {
+                    let code = doctor::quality_check(&hex_dir, spec.as_deref(), sweep, kr.as_deref());
+                    std::process::exit(code);
                 }
                 DoctorCommands::Run { fix, smoke, quiet, json } => {
                     let script = hex_dir.join(".hex/scripts/hex-doctor");
@@ -1812,9 +1896,19 @@ fn main() {
                 router::run_serve(&hex_dir);
             }
         },
-        Commands::Capture { text } => {
+        Commands::Capture { command } => {
             let hex_dir = get_hex_dir();
-            capture::run_capture(&hex_dir, &text);
+            match command {
+                CaptureCommands::Text { args } => {
+                    capture::run_capture(&hex_dir, &args);
+                }
+                CaptureCommands::Ingest => {
+                    capture::run_ingest(&hex_dir);
+                }
+                CaptureCommands::Dispatch { dry_run, max, triage } => {
+                    capture::run_dispatch(&hex_dir, dry_run, max, triage);
+                }
+            }
         }
         Commands::Alert { command } => match command {
             AlertCommands::Send { severity, agent_id, message } => {
