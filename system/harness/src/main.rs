@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use hex::{state, wake};
 
 mod boi_pm;
+mod boi_web;
 mod spec_tool;
 mod doctor;
 mod fleet;
@@ -175,6 +176,12 @@ enum Commands {
         #[command(subcommand)]
         command: BoiPmCommands,
     },
+    /// BOI live status web view launcher (port of .hex/scripts/boi-web/serve.sh)
+    #[command(name = "boi-web")]
+    BoiWeb {
+        #[command(subcommand)]
+        command: BoiWebCommands,
+    },
     /// Spec-tool server launcher (port of .hex/scripts/spec-tool/run.sh)
     #[command(name = "spec-tool")]
     SpecTool {
@@ -253,6 +260,12 @@ enum FleetCommands {
 enum BoiPmCommands {
     /// Install and register the BOI Process Manager LaunchAgent (port of boi-pm/install.sh)
     Install,
+}
+
+#[derive(Subcommand)]
+enum BoiWebCommands {
+    /// Launch the BOI live status web server (port of boi-web/serve.sh)
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -1653,6 +1666,12 @@ fn main() {
             BoiPmCommands::Install => {
                 let hex_dir = get_hex_dir();
                 boi_pm::run_install(&hex_dir);
+            }
+        },
+        Commands::BoiWeb { command } => match command {
+            BoiWebCommands::Serve => {
+                let hex_dir = get_hex_dir();
+                boi_web::run_serve(&hex_dir);
             }
         },
         Commands::SpecTool { command } => match command {
