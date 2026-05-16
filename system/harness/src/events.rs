@@ -636,10 +636,17 @@ impl EventEngine {
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
 fn init_schema(conn: &Connection) -> Result<(), String> {
+    // `extra_check` (pulled in by bundled-full → modern-full) makes execute_batch
+    // error on any PRAGMA that returns rows. Use query_row to consume the result
+    // row that journal_mode=WAL always emits; use execute for busy_timeout which
+    // does not return rows.
+    conn.query_row("PRAGMA journal_mode=WAL", [], |_| Ok(()))
+        .map_err(|e| format!("schema init failed: {e}"))?;
+    conn.query_row("PRAGMA busy_timeout=5000", [], |_| Ok(()))
+        .or_else(|e| if matches!(e, rusqlite::Error::QueryReturnedNoRows) { Ok(()) } else { Err(e) })
+        .map_err(|e| format!("schema init failed: {e}"))?;
     conn.execute_batch(
-        "PRAGMA journal_mode=WAL;
-         PRAGMA busy_timeout=5000;
-         CREATE TABLE IF NOT EXISTS events (
+        "CREATE TABLE IF NOT EXISTS events (
              id INTEGER PRIMARY KEY AUTOINCREMENT,
              event_type TEXT NOT NULL,
              payload TEXT,
