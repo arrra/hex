@@ -257,6 +257,19 @@ enum AgentCommands {
     CheckCore,
     /// Restore missing core agents from reference (never overwrites existing)
     RestoreCore,
+    /// Wake the boi-optimizer agent (port of .hex/scripts/boi-optimizer-wake.sh)
+    #[command(name = "optimizer-wake")]
+    OptimizerWake {
+        #[arg(default_value = "timer.tick.6h")]
+        trigger: String,
+        #[arg(default_value = "{}")]
+        payload: String,
+    },
+    /// Run daily agent performance analysis and evolution proposals (port of agent-evolution.sh)
+    Evolution {
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Query audit trail
     Audit {
         #[arg(long)]
@@ -1301,6 +1314,39 @@ fn run_agent_command(command: AgentCommands) {
         AgentCommands::Cost { agent, .. } => {
             eprintln!("cost: {:?} (not yet implemented)", agent);
             std::process::exit(1);
+        }
+        AgentCommands::OptimizerWake { trigger, payload } => {
+            let hex_dir = get_hex_dir();
+            let hex_bin = hex_dir.join(".hex/bin/hex");
+            let bin = if hex_bin.exists() { hex_bin } else { std::env::current_exe().unwrap_or_default() };
+            let status = std::process::Command::new(&bin)
+                .args(["agent", "wake", "boi-optimizer", "--trigger"])
+                .arg(&trigger)
+                .arg("--payload")
+                .arg(&payload)
+                .status()
+                .unwrap_or_else(|e| {
+                    eprintln!("ERROR: failed to wake boi-optimizer: {e}");
+                    std::process::exit(1);
+                });
+            std::process::exit(status.code().unwrap_or(0));
+        }
+        AgentCommands::Evolution { dry_run } => {
+            let hex_dir = get_hex_dir();
+            let legacy = hex_dir.join("system/scripts/agent-evolution.sh.legacy.sh");
+            let script = if legacy.exists() { legacy } else { hex_dir.join("system/scripts/agent-evolution.sh") };
+            if !script.exists() {
+                eprintln!("ERROR: agent-evolution script not found at {}", script.display());
+                std::process::exit(1);
+            }
+            let mut cmd = std::process::Command::new("bash");
+            cmd.arg(&script);
+            if dry_run { cmd.arg("--dry-run"); }
+            let status = cmd.status().unwrap_or_else(|e| {
+                eprintln!("ERROR: failed to exec agent-evolution: {e}");
+                std::process::exit(1);
+            });
+            std::process::exit(status.code().unwrap_or(0));
         }
     }
 }
