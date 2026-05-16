@@ -16,6 +16,7 @@ mod path_map;
 mod pulse;
 mod session_reflect;
 mod today;
+mod workspace;
 
 #[derive(Parser)]
 #[command(name = "hex", about = "Hex multi-agent harness", version)]
@@ -117,6 +118,11 @@ enum Commands {
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
+    },
+    /// Hex tmux workspace launcher (port of .hex/scripts/workspace.sh)
+    Workspace {
+        #[command(subcommand)]
+        command: WorkspaceCommands,
     },
     /// Print version
     Version,
@@ -426,6 +432,12 @@ enum McpCommands {
         /// The OAuth auth URL to rewrite
         auth_url: String,
     },
+}
+
+#[derive(Subcommand)]
+enum WorkspaceCommands {
+    /// Create or attach to the hex tmux workspace (port of workspace.sh)
+    Launch,
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
@@ -1408,6 +1420,12 @@ fn main() {
         Commands::Mcp { command } => match command {
             McpCommands::OauthRewrite { auth_url } => {
                 std::process::exit(mcp::oauth_rewrite(&auth_url));
+            }
+        },
+        Commands::Workspace { command } => match command {
+            WorkspaceCommands::Launch => {
+                let hex_dir = get_hex_dir();
+                workspace::run_launch(&hex_dir);
             }
         },
         Commands::Version => {
