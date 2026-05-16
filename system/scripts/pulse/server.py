@@ -585,7 +585,7 @@ def collect_behavioral_health() -> dict:
         from behavioral_memory import get_behavioral_health, check_behavior  # noqa: PLC0415
         health = get_behavioral_health()
         # Spot-check for HIGH-risk patterns relevant to common agent actions
-        spot = check_behavior("agent dispatching spec or sending slack message")
+        spot = check_behavior("agent dispatching spec or sending iMessage")
         data = {
             "status": health.get("status", "ok"),
             "total_patterns": health.get("total_patterns", 0),
