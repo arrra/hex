@@ -44,6 +44,7 @@ mod workspace;
 mod env;
 mod agent_spawn;
 mod hook;
+mod upgrade;
 mod initiative;
 mod learnings;
 use hex::route;
@@ -2862,22 +2863,7 @@ fn main() {
             std::process::exit(code);
         }
         Commands::Upgrade { args } => {
-            let hex_dir = get_hex_dir();
-            let legacy = hex_dir.join("system/scripts/upgrade.sh.legacy.sh");
-            let script = if legacy.exists() { legacy } else { hex_dir.join("system/scripts/upgrade.sh") };
-            if !script.exists() {
-                eprintln!("ERROR: upgrade script not found at {}", script.display());
-                std::process::exit(1);
-            }
-            let status = std::process::Command::new("bash")
-                .arg(&script)
-                .args(&args)
-                .status()
-                .unwrap_or_else(|e| {
-                    eprintln!("ERROR: failed to exec upgrade: {e}");
-                    std::process::exit(1);
-                });
-            std::process::exit(status.code().unwrap_or(0));
+            std::process::exit(upgrade::run(&args));
         }
         Commands::Hook { command } => hook::run(command),
         Commands::Version => {
