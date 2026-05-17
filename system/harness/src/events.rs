@@ -139,35 +139,45 @@ pub struct Action {
 // These types deserialize the `wake:` block from a project charter.yaml.
 // `id` is set by CharterLoader (derived from the project directory name).
 
-#[derive(Debug, Clone, Serialize)]
+#[derive(Debug, Clone)]
 pub struct TriggerSpec {
     pub event: String,
-    #[serde(default)]
     pub condition: Option<String>,
 }
 
 // Accept either a bare string (`"timer.tick.6h"`) or a full struct
 // (`{event: "...", condition: "..."}`). The bare-string form sets
 // `condition = None`.
-impl<'de> Deserialize<'de> for TriggerSpec {
-    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
-    where
-        D: serde::Deserializer<'de>,
-    {
-        #[derive(Deserialize)]
-        #[serde(untagged)]
-        enum Repr {
-            Short(String),
-            Full {
-                event: String,
-                #[serde(default)]
-                condition: Option<String>,
-            },
-        }
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum TriggerSpecRepr {
+    Bare(String),
+    Full {
+        event: String,
+        #[serde(default)]
+        condition: Option<String>,
+    },
+}
 
-        match Repr::deserialize(deserializer)? {
-            Repr::Short(event) => Ok(TriggerSpec { event, condition: None }),
-            Repr::Full { event, condition } => Ok(TriggerSpec { event, condition }),
+impl<'de> Deserialize<'de> for TriggerSpec {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
+        match TriggerSpecRepr::deserialize(d)? {
+            TriggerSpecRepr::Bare(s) => Ok(TriggerSpec { event: s, condition: None }),
+            TriggerSpecRepr::Full { event, condition } => Ok(TriggerSpec { event, condition }),
+        }
+    }
+}
+
+impl Serialize for TriggerSpec {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeStruct;
+        if self.condition.is_none() {
+            s.serialize_str(&self.event)
+        } else {
+            let mut st = s.serialize_struct("TriggerSpec", 2)?;
+            st.serialize_field("event", &self.event)?;
+            st.serialize_field("condition", self.condition.as_ref().unwrap())?;
+            st.end()
         }
     }
 }
@@ -3013,5 +3023,31 @@ rules:
             payload["dedup_key"].as_str().unwrap(),
             "timer.tick.minutely:2026-05-16T10:05"
         );
+    }
+
+    #[test]
+    fn trigger_spec_parses_bare_string() {
+        let y = "- timer.tick.6h\n- boi.spec.completed\n";
+        let v: Vec<TriggerSpec> = serde_yaml::from_str(y).unwrap();
+        assert_eq!(v.len(), 2);
+        assert_eq!(v[0].event, "timer.tick.6h");
+        assert!(v[0].condition.is_none());
+    }
+
+    #[test]
+    fn trigger_spec_parses_struct_form() {
+        let y = "- event: timer.tick.6h\n  condition: hour == 9\n";
+        let v: Vec<TriggerSpec> = serde_yaml::from_str(y).unwrap();
+        assert_eq!(v[0].event, "timer.tick.6h");
+        assert_eq!(v[0].condition.as_deref(), Some("hour == 9"));
+    }
+
+    #[test]
+    fn trigger_spec_parses_mixed() {
+        let y = "- timer.tick.6h\n- event: boi.spec.completed\n  condition: status == 'ok'\n";
+        let v: Vec<TriggerSpec> = serde_yaml::from_str(y).unwrap();
+        assert_eq!(v.len(), 2);
+        assert!(v[0].condition.is_none());
+        assert!(v[1].condition.is_some());
     }
 }
