@@ -44,6 +44,7 @@ mod workspace;
 mod env;
 mod agent_spawn;
 mod initiative;
+mod learnings;
 use hex::route;
 
 #[derive(Parser)]
@@ -240,6 +241,11 @@ enum Commands {
     Initiative {
         #[command(subcommand)]
         command: InitiativeCommands,
+    },
+    /// Learnings analysis and promotion (port of system/scripts/promote-learnings.py)
+    Learnings {
+        #[command(subcommand)]
+        command: LearningsCommands,
     },
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
     Upgrade {
@@ -527,6 +533,16 @@ enum InitiativeCommands {
     Close {
         /// Initiative ID
         id: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum LearningsCommands {
+    /// Scan learnings.md for recurring patterns and write promotion candidates to evolution/suggestions.md
+    Promote {
+        /// Print candidates without writing any files
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -2590,6 +2606,12 @@ fn main() {
                 InitiativeCommands::Create { name, status } => initiative::run_create(&hex_dir, &name, &status),
                 InitiativeCommands::Update { id, status } => initiative::run_update(&hex_dir, &id, &status),
                 InitiativeCommands::Close { id } => initiative::run_close(&hex_dir, &id),
+            }
+        }
+        Commands::Learnings { command } => {
+            let hex_dir = get_hex_dir();
+            match command {
+                LearningsCommands::Promote { dry_run } => learnings::run_promote(&hex_dir, dry_run),
             }
         }
         Commands::Upgrade { args } => {
