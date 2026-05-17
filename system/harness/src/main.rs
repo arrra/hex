@@ -16,6 +16,7 @@ mod doctor;
 mod fleet;
 mod health;
 mod integration;
+mod integration_cmd;
 mod integration_apple_addressbook;
 mod metrics;
 mod checkpoint;
@@ -1971,17 +1972,42 @@ fn main() {
                 let script = hex_dir.join("system/scripts/x-oauth2-refresh.sh");
                 std::process::exit(exec_script(&script, &[]));
             }
+            // Native Rust ports of Python integration commands
+            if let IntegrationCommands::List = command {
+                let hex_dir = get_hex_dir();
+                std::process::exit(integration_cmd::list(&hex_dir, false));
+            }
+            if let IntegrationCommands::Status { ref name } = command {
+                let hex_dir = get_hex_dir();
+                std::process::exit(integration_cmd::status(&hex_dir, name.as_deref(), false));
+            }
+            if let IntegrationCommands::Probe { ref name } = command {
+                let hex_dir = get_hex_dir();
+                std::process::exit(integration_cmd::probe(&hex_dir, name, false, false));
+            }
+            if let IntegrationCommands::Rotate { ref name } = command {
+                let hex_dir = get_hex_dir();
+                std::process::exit(integration_cmd::rotate(&hex_dir, name, false, false));
+            }
+            if let IntegrationCommands::Validate { ref name } = command {
+                let hex_dir = get_hex_dir();
+                std::process::exit(integration_cmd::validate(&hex_dir, name, false, false));
+            }
+            if let IntegrationCommands::Update { ref name } = command {
+                let hex_dir = get_hex_dir();
+                std::process::exit(integration_cmd::update(&hex_dir, name, false, false, false, false));
+            }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
             let (subcmd, name_arg): (&str, Option<String>) = match &command {
                 IntegrationCommands::Install { name } => ("install", Some(name.clone())),
                 IntegrationCommands::Uninstall { name } => ("uninstall", Some(name.clone())),
-                IntegrationCommands::Update { name } => ("update", Some(name.clone())),
-                IntegrationCommands::List => ("list", None),
-                IntegrationCommands::Validate { name } => ("validate", Some(name.clone())),
-                IntegrationCommands::Status { name } => ("status", name.clone()),
-                IntegrationCommands::Probe { name } => ("probe", Some(name.clone())),
-                IntegrationCommands::Rotate { name } => ("rotate", Some(name.clone())),
+                IntegrationCommands::Update { .. } => unreachable!(),
+                IntegrationCommands::List => unreachable!(),
+                IntegrationCommands::Validate { .. } => unreachable!(),
+                IntegrationCommands::Status { .. } => unreachable!(),
+                IntegrationCommands::Probe { .. } => unreachable!(),
+                IntegrationCommands::Rotate { .. } => unreachable!(),
                 IntegrationCommands::Template => unreachable!(),
                 IntegrationCommands::McpExa => unreachable!(),
                 IntegrationCommands::McpExcalidraw => unreachable!(),
