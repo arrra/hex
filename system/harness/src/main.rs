@@ -21,6 +21,7 @@ mod metrics;
 mod checkpoint;
 mod shutdown;
 mod startup;
+mod validate;
 mod integration_tailscale;
 mod integration_mcp_exa;
 mod integration_mcp_excalidraw;
@@ -227,6 +228,11 @@ enum Commands {
     Route {
         #[command(subcommand)]
         command: RouteCommands,
+    },
+    /// Validate BOI specs, hex extensions, and E2E test guards
+    Validate {
+        #[command(subcommand)]
+        command: ValidateCommands,
     },
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
     Upgrade {
@@ -449,6 +455,35 @@ enum RouteCommands {
     DetectContext {
         /// Message text to classify
         message: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ValidateCommands {
+    /// Validate a BOI spec file for known anti-patterns (port of validate-boi-spec.py)
+    #[command(name = "boi-spec")]
+    BoiSpec {
+        /// One or more spec files to validate
+        files: Vec<String>,
+    },
+    /// Validate a hex extension manifest (port of extension-validate.py)
+    Extension {
+        /// Path to extension directory or extension.yaml
+        path: String,
+    },
+    /// HTTP-level E2E guard: verify a deployed URL is reachable and healthy (port of e2e-guard/verify.py)
+    E2e {
+        /// Base URL to test
+        url: String,
+        /// API health endpoint path (e.g. /api/health)
+        #[arg(long, default_value = "")]
+        check_api: String,
+        /// SSE event stream path (e.g. /events)
+        #[arg(long, default_value = "")]
+        check_sse: String,
+        /// Request timeout in seconds
+        #[arg(long, default_value = "30")]
+        timeout: u64,
     },
 }
 
@@ -2468,6 +2503,17 @@ fn main() {
             }
         }
         Commands::Env { command } => env::run_env_command(command),
+        Commands::Validate { command } => match command {
+            ValidateCommands::BoiSpec { files } => {
+                std::process::exit(validate::run_boi_spec(&files));
+            }
+            ValidateCommands::Extension { path } => {
+                std::process::exit(validate::run_extension(&path));
+            }
+            ValidateCommands::E2e { url, check_api, check_sse, timeout } => {
+                std::process::exit(validate::run_e2e(&url, &check_api, &check_sse, timeout));
+            }
+        },
         Commands::Upgrade { args } => {
             let hex_dir = get_hex_dir();
             let legacy = hex_dir.join("system/scripts/upgrade.sh.legacy.sh");
