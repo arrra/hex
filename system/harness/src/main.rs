@@ -42,6 +42,7 @@ mod session_reflect;
 mod today;
 mod workspace;
 mod env;
+mod agent_evolution;
 mod agent_spawn;
 mod hook;
 mod upgrade;
@@ -1852,21 +1853,8 @@ fn run_agent_command(command: AgentCommands) {
             std::process::exit(status.code().unwrap_or(0));
         }
         AgentCommands::Evolution { dry_run } => {
-            let hex_dir = get_hex_dir();
-            let legacy = hex_dir.join("system/scripts/agent-evolution.sh.legacy.sh");
-            let script = if legacy.exists() { legacy } else { hex_dir.join("system/scripts/agent-evolution.sh") };
-            if !script.exists() {
-                eprintln!("ERROR: agent-evolution script not found at {}", script.display());
-                std::process::exit(1);
-            }
-            let mut cmd = std::process::Command::new("bash");
-            cmd.arg(&script);
-            if dry_run { cmd.arg("--dry-run"); }
-            let status = cmd.status().unwrap_or_else(|e| {
-                eprintln!("ERROR: failed to exec agent-evolution: {e}");
-                std::process::exit(1);
-            });
-            std::process::exit(status.code().unwrap_or(0));
+            let rc = agent_evolution::run(dry_run);
+            std::process::exit(rc);
         }
         AgentCommands::Spawn { spec_file, dry_run } => {
             let rc = agent_spawn::run_spawn(&spec_file, dry_run);
