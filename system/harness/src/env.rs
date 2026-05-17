@@ -128,8 +128,9 @@ pub fn compose_path(hex_dir: &Path) -> String {
         .map(|d| d.to_string_lossy().into_owned())
         .collect();
 
+    let mut seen: std::collections::HashSet<String> = new_set;
     for entry in current.split(':') {
-        if !entry.is_empty() && !new_set.contains(entry) {
+        if !entry.is_empty() && seen.insert(entry.to_string()) {
             parts.push(entry.to_string());
         }
     }
