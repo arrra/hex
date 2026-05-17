@@ -41,6 +41,7 @@ mod today;
 mod workspace;
 mod env;
 mod agent_spawn;
+use hex::route;
 
 #[derive(Parser)]
 #[command(name = "hex", about = "Hex multi-agent harness", version)]
@@ -221,6 +222,11 @@ enum Commands {
     Env {
         #[command(subcommand)]
         command: env::EnvCommands,
+    },
+    /// Message routing: classify messages and route comments to agent charters
+    Route {
+        #[command(subcommand)]
+        command: RouteCommands,
     },
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
     Upgrade {
@@ -410,6 +416,39 @@ enum RouterCommands {
         asset: String,
         /// Comment text
         text: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RouteCommands {
+    /// Route a message against agent charters via LLM (port of route-message-llm.py)
+    Message {
+        /// Message text to classify
+        message: Vec<String>,
+        /// Confidence threshold (default 0.4)
+        #[arg(long, default_value = "0.4")]
+        threshold: f64,
+        /// Return all agents regardless of threshold
+        #[arg(long)]
+        all: bool,
+        /// LLM provider: openrouter (default) | ollama
+        #[arg(long, default_value = "openrouter")]
+        provider: String,
+    },
+    /// Route a comment to matching agents (port of route-comment.legacy.py; fixes live bug)
+    Comment {
+        /// Comment ID
+        comment_id: String,
+        /// Asset identifier
+        asset: String,
+        /// Comment text
+        text: Vec<String>,
+    },
+    /// Detect routing context via heuristic fingerprint (port of context_router/)
+    #[command(name = "detect-context")]
+    DetectContext {
+        /// Message text to classify
+        message: Vec<String>,
     },
 }
 
@@ -2394,6 +2433,23 @@ fn main() {
                     let script = hex_dir.join("system/scripts/synthesis-trigger.sh");
                     let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
                     std::process::exit(exec_script(&script, args));
+                }
+            }
+        }
+        Commands::Route { command } => {
+            let hex_dir = get_hex_dir();
+            match command {
+                RouteCommands::Message { message, threshold, all, provider } => {
+                    let text = message.join(" ");
+                    std::process::exit(route::run_message(&hex_dir, &text, threshold, all, &provider));
+                }
+                RouteCommands::Comment { comment_id, asset, text } => {
+                    let text_str = text.join(" ");
+                    std::process::exit(route::run_comment(&hex_dir, &comment_id, &asset, &text_str));
+                }
+                RouteCommands::DetectContext { message } => {
+                    let text = message.join(" ");
+                    std::process::exit(route::run_detect_context(&hex_dir, &text));
                 }
             }
         }

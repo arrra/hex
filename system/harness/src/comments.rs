@@ -239,13 +239,15 @@ impl CommentsHandler {
         self.telemetry
             .emit("hex.comment.created", &serde_json::json!({ "id": id }));
 
-        // Spawn route-comment.py in background (best-effort)
-        let script = self.hex_dir.join(".hex/scripts/route-comment.py");
-        if script.exists() {
-            let _ = std::process::Command::new("python3")
-                .arg(&script)
-                .arg(&id)
-                .spawn();
+        // Route comment to matching agents in background (port of route-comment.py)
+        {
+            let hex_dir = self.hex_dir.clone();
+            let comment_id = id.clone();
+            let asset = comment.asset.clone();
+            let text = comment.text.clone();
+            std::thread::spawn(move || {
+                crate::route::run_comment(&hex_dir, &comment_id, &asset, &text);
+            });
         }
 
         json_created(&comment)
