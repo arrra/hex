@@ -28,6 +28,38 @@ pub fn load(path: &Path) -> Result<Charter, Box<dyn std::error::Error>> {
     Ok(charter)
 }
 
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn all_live_charters_parse() {
+        let dir_str = std::env::var("MRAP_HEX_PROJECTS")
+            .unwrap_or_else(|_| "/Users/mrap/mrap-hex/projects".to_string());
+        let dir = std::path::Path::new(&dir_str);
+        if !dir.exists() {
+            eprintln!("skipping all_live_charters_parse: {} not found", dir.display());
+            return;
+        }
+        let mut count = 0;
+        for entry in std::fs::read_dir(dir).unwrap() {
+            let p = entry.unwrap().path().join("charter.yaml");
+            if !p.exists() {
+                continue;
+            }
+            let c = load(&p)
+                .unwrap_or_else(|e| panic!("failed to load {}: {e}", p.display()));
+            assert!(
+                !c.wake.triggers.is_empty(),
+                "{} has no triggers",
+                p.display()
+            );
+            count += 1;
+        }
+        assert!(count >= 14, "expected ≥14 charters, found {count}");
+    }
+}
+
 fn validate(charter: &Charter) -> Result<(), CharterError> {
     if charter.id.is_empty() {
         return Err(CharterError("id is required and cannot be empty".into()));
