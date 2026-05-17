@@ -338,7 +338,7 @@ One task = one deliverable completable in <15 min of agent time. Workers get kil
 ### VERBAL MONITORING = BUG (TC-040)
 When user leaves and BOI specs are running, NEVER say "I'll keep an eye on it." You cease to exist when the session ends. Set up MECHANICAL monitoring:
 1. Use hex-events to poll `boi status` on a schedule
-2. Notify via Slack on failure or completion
+2. Notify via iMessage thread on failure or completion
 3. Silent while running — no noise overnight
 This is SO #37 (mechanical action, not verbal) applied to BOI monitoring.
 1. **BOI repo is read-only from hex.** Never write to `~/github.com/mrap/boi/` directly.

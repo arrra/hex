@@ -1,3 +1,6 @@
+# KEEP-DIVERGENT: BOI live status SSE server with optional TLS (port 8891).
+# Not consolidated to sse-bus canonical — SSE used for BOI-specific status streaming,
+# not general event bus routing. Started by: hex boi-web serve
 """
 BOI live status web view.
 

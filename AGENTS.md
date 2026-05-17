@@ -1,5 +1,111 @@
 # hex — Agent Instructions (Codex)
 
+---
+
+## Cold-Start Guide
+
+> Read this section first. It answers the 5 questions every agent asks at session start.
+> Each answer is backed by a `hex` command you can run to re-establish ground truth.
+> Commands marked **[TODO stub]** need harness implementation — see "Open Verify Stubs" below.
+
+---
+
+## Question 1 — What is this repo?
+
+**hex-foundation** is the versioned base layer for the hex agent system. It provides the
+Standing Orders, skill framework, hex CLI binary (Rust), directory structure conventions,
+and upgrade tooling that all hex agent instances inherit. This is not an agent workspace —
+it is the template and harness engine from which workspaces are instantiated via `hex new`
+and kept current via `hex upgrade`.
+
+**Tech stack:** Rust binary (`system/harness/`), Python scripts (`system/scripts/`),
+YAML specs (BOI dispatch), hex-events daemon, shell skills (`system/skills/`).
+
+**Related repos:** `github.com/mrap/boi` (delegation engine), `~/hex` (your live workspace
+built on this foundation).
+
+Verify: hex info repo-mission
+
+---
+
+## Question 2 — What is the current state?
+
+**Static answer (as of 2026-05-16):** Active refactor — Phase 5+ harness engineering.
+Critical path identified in `docs/refactor/harness-engineering-audit-2026-05-15.md`.
+13 backlog items totaling ~3 months of work; 7 HIGH severity. Status:
+- C1 agents-md-verification: DONE (this section)
+- C3 session-lifecycle-state (PROGRESS.md schema): pending
+- C2 claude-md-decomposition: pending (depends on C1 + C3)
+- C4 trail-audit-implementation: pending (depends on C1)
+- C5 verify-mechanical-enforcement: pending (depends on C3)
+
+**Build status:** Run `cargo build` in `system/harness/` to verify binary compiles.
+Check `PROGRESS.md` at repo root (once C3 lands) for git commit hash and test status.
+
+Verify: hex doctor
+
+---
+
+## Question 3 — What is the next action?
+
+**Static answer:** Read `todo.md` for the current priority list. The full critical path
+backlog is in `docs/refactor/harness-engineering-audit-2026-05-15.md`. Immediate next items:
+1. C3 — PROGRESS.md schema + minimal initial file (schema design + hex-startup/shutdown wiring)
+2. C2 — CLAUDE.md decomposition: 563-line file → ≤150-line router + topic docs in `docs/harness/`
+3. C4 — Implement `hex agent audit` (currently returns "not yet implemented" in main.rs L1108)
+
+Verify: cat todo.md
+
+---
+
+## Question 4 — Who is working on what?
+
+**Static answer:** Active BOI workers are tracked in the BOI queue. Shared-file writes use
+coordination locks (`python3 ~/.boi/lib/coordination.py check <file_path>`). No other locking
+system is in use. Check live worker state and active agent claims:
+
+Verify: bash ~/.boi/boi status
+
+For file-level coordination locks on shared files (learnings.md, todo.md, evolution/, landings/):
+
+Verify: hex info active-locks
+
+---
+
+## Question 5 — How do I verify ground truth?
+
+Run these commands to re-establish ground truth before starting work or claiming done.
+
+**System health (hex install + subsystems):**
+
+Verify: hex doctor
+
+**Harness binary (build + unit tests):**
+
+Verify: cargo test --manifest-path system/harness/Cargo.toml
+
+**BOI queue integrity (worker state + spec status):**
+
+Verify: bash ~/.boi/boi status
+
+**BOI spec completion claims (verify outputs against codebase):**
+
+Verify: hex verify-claims
+
+---
+
+## Open Verify Stubs
+
+The following commands are referenced above but not yet implemented in the harness.
+Each is a TODO for a future iteration.
+
+| Command | Question | Implementation needed |
+|---------|----------|-----------------------|
+| `hex info repo-mission` | Q1 | Print repo description from README header or `system/version.txt` |
+| `hex info active-locks` | Q4 | Query coordination lock files; print current holders and expiry times |
+
+---
+
 <!-- hex:system-start — DO NOT EDIT BELOW THIS LINE -->
 <!-- System-managed section. Updated by `hex upgrade`. Your customizations go in "My Rules" below. -->
 

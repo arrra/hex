@@ -217,10 +217,10 @@ Consolidated 2026-04-29 (39 → 18 rules). Lineage tags trace to pre-consolidati
 
 | # | Rule |
 |---|------|
-| S1 | **Sync fixes to hex base.** Every fix to hex scripts/skills/config syncs back to the hex-foundation repo. Commit locally; never push without approval. (replaces S10) |
+| S1 | **Hex Foundation is the source of truth.** Core hex changes — scripts, skills, commands, harness — land in the hex-foundation repo FIRST. Your personal hex instance gets them via `/hex-upgrade`. Never make a core-system edit directly in the personal instance; the next sync overwrites it. When dispatching BOI specs that modify core, `workspace:` MUST point at hex-foundation. Layout mapping: `.hex/scripts/*` ↔ `system/scripts/`, `.hex/lib/*` ↔ `system/scripts/lib/`, `.hex/skills/*` ↔ `system/skills/`, `.claude/commands/*` ↔ `system/commands/`. **Exceptions** (personal data, edit in personal instance directly): `me/`, `people/`, `projects/`, `landings/`, `evolution/`, `raw/`, `todo.md`. Commit locally; never push to hex-foundation without approval. (replaces S10) |
 | S2 | **Monitor, audit, and automate BOI operations.** Ensure BOI workers are running or set up failure detection for overnight runs. One restart attempt, then notify. After dispatch failures, audit all config locations. Workers can mutate phase files. Events, notifications, and one-off tasks → hex-events policy. Never ad-hoc polling loops. (consolidates S3, S4, S6) |
 | S3 | **Lock before writing shared files.** Check coordination lock on learnings.md, todo.md, evolution/, landings/. Locks auto-expire after 5 min. (replaces S5) |
-| S4 | **Hex voice and formatting.** Concise, direct, no fluff, no hedging. Lead with the ask. Produce artifacts, not advice. No markdown tables in Slack — bullet lists with bold labels only; never pipe-delimited tables. (consolidates S7, S8) |
+| S4 | **Hex voice and formatting.** Concise, direct, no fluff, no hedging. Lead with the ask. Produce artifacts, not advice. In iMessage and other plain-text channels, use bullet lists with bold labels — never pipe-delimited markdown tables. (consolidates S7, S8) |
 | S5 | **All agent wake scripts source `.hex/env.sh`.** The `claude()` function in `env.sh` provides consistent environment for all agent operations. (replaces S11) |
 | S6 | **No quiet failures.** Every error must be loud — stderr, log, and alert. Silent swallowing is a bug. Budget caps that throttle without alerting, daemons that skip malformed config, policies that timeout without logging, gates that reject without explanation — all bugs. Bias toward crashing over swallowing. (replaces S12) |
 
@@ -544,6 +544,23 @@ Default to assistant. Switch to sparring partner when the user is making a decis
 - Keep output concise. Show the result, not the process.
 
 <!-- hex:system-end -->
+
+---
+
+## Session State — PROGRESS.md
+
+Every hex workspace keeps a `PROGRESS.md` at the repo root. It is the single source of
+truth for session continuity, replacing freeform `landings/` and `raw/handoffs/` files.
+
+**On session start:** Read `PROGRESS.md` before any work. It tells you focus, in-flight
+tasks, and open threads from prior sessions.
+
+**On checkpoint (HOT state or explicit save):** Update `last_updated`, move completed
+items to "Completed This Session", add new open threads.
+
+**Schema:** See `docs/refactor/progress-md-schema.md` for the full field specification
+(YAML frontmatter + markdown sections: In Flight, Completed This Session, Open Threads,
+Decisions Made, Files Modified).
 
 ---
 

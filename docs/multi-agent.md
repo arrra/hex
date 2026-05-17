@@ -1,6 +1,6 @@
 # Multi-Agent System
 
-hex runs a fleet of autonomous agents. Each agent has a charter (what it does), state (what it's working on), and wakes on events to do its work. The **hex harness** (a compiled Rust binary at `.hex/bin/hex`) is the single entry point for all agent operations. Agents cannot bypass it.
+hex runs a fleet of autonomous agents. Each agent has a charter (what it does), state (what it's working on), and wakes on events to do its work. The **hex agent harness** (a compiled Rust binary at `.hex/bin/hex`) is the single entry point for all agent operations. Agents cannot bypass it.
 
 ## Registration
 
@@ -179,6 +179,6 @@ evolution:
 ## Source
 
 - Rust harness: `.hex/harness/` (11 modules)
-- Compiled binary: `.hex/bin/hex` (`.hex/bin/hex-agent` is a backward-compat symlink)
+- Compiled binary: `.hex/bin/hex` (`hex-agent` is a backward-compat symlink)
 - Agent skill: `.hex/skills/hex-agents/SKILL.md`
 - Reference core charters: `.hex/reference/core-agents/`

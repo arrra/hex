@@ -2,43 +2,43 @@
 
 ## Source of Truth
 
-`system/harness/Cargo.toml` is the single source of truth for the hex version. Everything derives from this file:
+`system/harness/Cargo.toml` (in hex-foundation) is the single source of truth for the hex version. Everything derives from this file:
 
-- **Rust binary** — `build.rs` injects git SHA only; `env!("CARGO_PKG_VERSION")` embeds the Cargo.toml version at compile time. The binary prints `hex 0.11.3 (abc1234)`.
-- **`hex version`** — reads `env!("CARGO_PKG_VERSION")` + `env!("HEX_GIT_SHA")` at runtime.
-- **Foundation releases** — git tags (`v0.11.3`) must match Cargo.toml. `release.sh` enforces this atomically.
+- **Rust binary** — `build.rs` injects only the git SHA. `main.rs` reads `env!("CARGO_PKG_VERSION")` at compile time. The binary prints `hex 0.13.3 (abc1234)`.
+- **git tag** — must match `v$(Cargo.toml version)`. Enforced by `release.sh bump-version`.
+- **mrap-hex VERSIONS file** — `HEX_FOUNDATION_VERSION` is pinned by `/hex-upgrade` from foundation's Cargo.toml at the pulled tag.
+- **`.hex/version.txt`** — plain-text semver synced from foundation during `/hex-upgrade`; read by `extension-validate.py` for local tooling checks.
+- **`hex version`** — reads the compiled-in `CARGO_PKG_VERSION` + `HEX_GIT_SHA`.
+- **`hex --version`** — Clap built-in, reads `CARGO_PKG_VERSION`.
 
 ## Version Flow
 
 ```
 system/harness/Cargo.toml (source of truth)
-    ├── env!("CARGO_PKG_VERSION") embedded at compile time → binary
-    ├── git tag = v$(version in Cargo.toml) — enforced by release.sh
-    └── hex VERSIONS file pinned by /hex-upgrade from Cargo.toml at tag
+    ├── env!("CARGO_PKG_VERSION") → embedded in binary at compile time
+    ├── git tag must match (enforced by release.sh)
+    └── mrap-hex VERSIONS pinned by /hex-upgrade
 ```
 
 ## Releasing a New Version
 
-Use `release.sh bump-version <NEW_VERSION>`:
+Use `release.sh bump-version <new-version>` in hex-foundation:
 
-```bash
+```sh
 cd ~/github.com/mrap/hex-foundation
-bash system/scripts/release.sh bump-version 0.11.4
+system/scripts/release.sh bump-version 0.12.0
 ```
 
-This script:
-1. Validates semver shape
-2. Bumps `version = "..."` in `system/harness/Cargo.toml`
-3. Runs `cargo build --release` to confirm compilation
-4. `git add system/harness/Cargo.toml`
-5. `git commit -m "bump: v0.11.4"`
-6. `git tag v0.11.4`
-7. Prints next steps (Docker E2E, push)
+This will:
+1. Validate semver shape
+2. Bump `system/harness/Cargo.toml` version
+3. Verify it compiles (`cargo build --release`)
+4. Commit and tag `v0.12.0`
 
-Push is manual — Mike approves before pushing.
+Then in mrap-hex, run `/hex-upgrade` to pull the new release and pin VERSIONS.
 
-## Why Cargo.toml (not version.txt)
+## hex-doctor version-sync check
 
-- Cargo refuses to compile without a `version =` field, so Cargo.toml will always have the literal. `version.txt` was a parallel sidecar that could drift silently (and did — it reached 0.9.0 while Cargo.toml stayed at 0.8.0).
-- `env!("CARGO_PKG_VERSION")` is idiomatic Rust — the documented way to surface a binary's own version, embedded at compile time with no runtime I/O.
-- Cargo.toml lives in `system/harness/` alongside `src/main.rs`. It is the package manifest — part of the code, not a sidecar.
+`hex-doctor` includes a `version-sync` check that asserts:
+- Compiled binary version == Cargo.toml version (FAIL if mismatch)
+- Latest git tag == Cargo.toml version (WARN if mismatch — Cargo.toml may be ahead between bumps)

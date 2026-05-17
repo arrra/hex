@@ -1,4 +1,7 @@
 #!/usr/bin/env python3
+# KEEP-DIVERGENT: hex Pulse health dashboard v2 with SSE, vitals, fleet, quality (port 8896).
+# Not consolidated to sse-bus canonical — primary dashboard server, 1600 lines, active callers
+# in pulse-to-spec.py. This is the dominant/canonical pulse server (vs pulse-dashboard v1).
 """Hex Pulse — live system health dashboard server. Port 8896."""
 
 import json
@@ -582,7 +585,7 @@ def collect_behavioral_health() -> dict:
         from behavioral_memory import get_behavioral_health, check_behavior  # noqa: PLC0415
         health = get_behavioral_health()
         # Spot-check for HIGH-risk patterns relevant to common agent actions
-        spot = check_behavior("agent dispatching spec or sending slack message")
+        spot = check_behavior("agent dispatching spec or sending iMessage")
         data = {
             "status": health.get("status", "ok"),
             "total_patterns": health.get("total_patterns", 0),

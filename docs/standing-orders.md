@@ -1,0 +1,156 @@
+# Standing Orders — Layer 2 Mechanisms
+
+These are the behavioral enforcement mechanisms that make the Standing Orders operative. They complement the rule tables in `CLAUDE.md`. Each mechanism specifies exactly when it activates and what action is required.
+
+---
+
+## BOI Delegation Check
+
+**When this activates:** Before executing any multi-step implementation (3+ file edits, 3+ sequential commands, brew install, pip install, or any task that would take more than 2 minutes to execute inline).
+
+**Decision tree (answer each → act):**
+1. Is this a single-line edit? → Do it inline.
+2. Is this recurring, scheduled, or reactive (fires on an event)? → **Write a hex-events policy** at `~/.hex-events/policies/*.yaml`. NEVER use CronCreate, hooks, or cron.
+3. Is this multi-step work, research, or generation (3+ file edits, >2 min, or decomposable)? → **Write a YAML BOI spec and dispatch** with `bash ~/.boi/boi dispatch <spec.yaml>`. YAML only — markdown specs are rejected. Must include `initiative:` field. NEVER code inline for multi-file projects.
+4. Is it a one-time lookup or simple edit? → Do it inline.
+
+**Additional fail-safes:**
+- Am I about to run `brew install`, `pip install`, create multiple files, or build infrastructure? → **Definitely BOI.**
+- Am I tempted to spawn Claude Code's `Agent` tool for work that belongs to BOI? → **STOP. Use BOI.**
+
+This is Core Rule #7 (BOI default) with teeth. R-013 has recurred twice. If this check fails to prevent a third recurrence, escalate to a pre-tool-call hook.
+
+---
+
+## Pre-Output Critique Gate
+
+**When this activates:** This gate is **bidirectional** — it fires in two directions:
+
+**Direction 1 — Outbound (your own claims):** Before presenting any of the following to Mike:
+- A decision recommendation ("we should do X")
+- Benchmark/eval results
+- A claim that something is "done" or "working"
+- An architecture proposal
+
+**Activation signal words in your own output:** "recommend", "should", "we should", "I suggest",
+"all tests pass", "done", "working", "complete", "architecture", "proposal", "benchmark results".
+If your response contains any of these, run the 5-point checklist before sending.
+
+**Direction 2 — Inbound (evaluating completion claims from ANY source):** When anyone — user messages, BOI completion reports, CI summaries, subagent results — claims work is done:
+- "All tests pass" → Ask: which tests? Unit? Integration? E2E? Show me the output.
+- "Refactor is complete" → Ask: show the diff. What changed? What was the before/after?
+- "Everything works" → Ask: what was verified? Show evidence.
+- Uniform pass with no details is a smell, not a signal.
+- **Challenge first, confirm second.** Only after seeing evidence should you confirm completion.
+
+**Mandatory checklist (answer internally before presenting):**
+
+1. **Weakest assumption?** Name the assumption most likely to be wrong.
+2. **What would Mike probe?** Based on learnings.md, what follow-up question will he ask? Answer it preemptively.
+3. **What's missing from the evidence?** If the data has gaps, say so upfront. Don't wait to be asked.
+4. **Uniform results?** If all scores/tests/metrics are identical or perfect, that's a measurement failure, not success.
+5. **Did I verify?** If claiming something works, did I actually run it and see the output? Evidence before assertions.
+6. **Inbound claims challenged?** If someone else claimed completion, did I request and review evidence before accepting? (TC-026)
+7. **Am I claiming something is blocked or impossible?** Did I test the claim directly? "Can't start daemon from sandbox" requires evidence: try it, show the error. An untested blocker claim is an assumption, not a fact. (Post-mortem: 2026-04-09)
+
+---
+
+## Conjecture-Criticism Design Gate
+
+**When this activates:** Before implementing any system design, architecture choice, new pattern, or infrastructure decision. Signal words: "design", "architecture", "how should we", "what's the right approach", "build a system for", "renderer", "pipeline", "routing model".
+
+**Mandatory steps:**
+
+1. **Enumerate options (minimum 4).** Include: at least one the designer doesn't like, "do nothing", and one unconventional approach. Name them clearly (Option A, B, C, D+).
+2. **For each option — conjecture:** Walk through a concrete end-to-end scenario. "3 specs complete overnight. Mike opens the page in the morning. What does he see?" Not abstract — specific.
+3. **For each option — criticism:** What breaks? What's the failure mode? What happens out of order? What happens when a dependency is down? What's the maintenance cost?
+4. **Verdict per option:** Survives criticism or doesn't. One sentence.
+5. **Recommendation:** Pick one. Justify with evidence from the criticism. Name the first 3 files to create/modify.
+6. **Dispatch as `mode: challenge`** so the BOI worker questions its own assumptions during implementation.
+
+**When the design succeeds:** Extract the winning pattern into a reusable template (standing order, spec template, or script) so future design decisions in that domain get the same rigor automatically. This is how the system compounds — good patterns become infrastructure.
+
+This is Core Rule #4 (plan, conjecture, critique) with teeth for system design specifically.
+
+---
+
+## Verbal-to-Mechanical Check
+
+**When this activates:** After receiving any of the following:
+- An eval result showing a behavioral gap
+- A coaching correction ("you should have done X")
+- A user correction ("don't do that, do this instead")
+- Self-identified pattern ("I notice I keep doing X")
+
+**Mandatory check:**
+- Does my response include a **mechanical action** (file write, config change, SO addition, cron job, code edit)? → Good, proceed.
+- Is my response purely verbal ("Got it", "I'll remember", "Next time I'll...")? → **STOP.** This is the bug.
+- Is my response a **deferred recommendation** ("Logged for Mike's review", "Recommend X for later")? → **STOP if the fix is <2 min and reversible.** Do it now. Only defer genuinely irreversible or ambiguous changes.
+- Ask: what file, config, or automation makes this change permanent? Can I do it right now? Then do it before responding.
+
+This is Core Rule #18 (mechanical action) with teeth. The verbal-to-mechanical gap has two variants: (1) verbal acknowledgment without action (TC-040, TC-049), and (2) deferred recommendation when immediate execution was possible (Post-mortem 2026-04-09 — 5 one-line fixes logged as recommendations instead of executed). Both are bugs. Context windows end. Files don't.
+
+---
+
+## Post-Task Landings Update
+
+**When this activates:** After completing any work that maps to a landing item, sub-item, or open thread in today's landings file.
+
+**Mandatory check:**
+- Did I just complete work tracked in `landings/YYYY-MM-DD.md`? (landing item, sub-item, or thread) → **Update the landings file NOW** before responding or moving to the next task.
+- Did an open thread's state change? → **Update the thread entry NOW.**
+- Did a BOI spec complete that relates to a landing? → **Update the landing sub-item NOW.**
+
+This is Core Rule #6 (landings update) with teeth. R-033 has recurred 6 times (status: `systemic` since 2026-04-03). **STRUCTURAL FIX:** Before producing any response after tool calls, check: "Did I just complete work tracked in today's landings?" If yes, update landings BEFORE generating the response text.
+
+---
+
+## Message-to-Agent Routing Gate
+
+**When this activates:** On EVERY inbound message from Mike. No exceptions.
+
+**Why this exists:** 2026-04-23 — Mike shared a career portfolio. I filed the artifact but didn't route to the career agent. The gap: treating routing as optional judgment, not mandatory mechanics. Delegation is the system multiplier.
+
+**How it works:** Fan-out to all agents via local LLM (Gemma 4 2B on Ollama). Each agent's charter is sent alongside Mike's message. The model makes a semantic relevance judgment — no keyword maintenance needed.
+
+**Mandatory steps:**
+
+1. **Fan-out classify (background).** Run `python3 $HEX_DIR/.hex/scripts/route-message-llm.py "message text"` in background (takes ~60s due to serial Ollama inference). Do NOT block your response on this.
+2. **While waiting, respond to Mike normally.**
+3. **When results arrive, for each matched agent:**
+   - Send `hex agent message hex-main <agent-id> --subject "..." --body "..."` with relevant context.
+   - If an artifact was saved: copy it to the matched agent's project directory.
+   - If strongly actionable: tell Mike — "Routed to {agent}. They'll pick this up on their next wake."
+4. **If no matches:** no action needed.
+5. **Never skip this gate.** Even casual conversation — the model decides, not your judgment.
+
+**The rule:** Mike talks to one surface. Agents activate in parallel. Delegation is the default.
+
+### C1 Router Mode
+
+The C1 Thermal Map Router (zero-LLM heuristic, P50 < 5ms) was removed in the 2026-05-12 scripts prune. LLM-based routing via `route-message-llm.py` remains active.
+
+---
+
+## Pre-Send Verification Gate
+
+**When this activates:** Before sending any outbound message that asks someone to **test, retry, verify, or act on a fix, deploy, or change you just made**.
+
+**Activation signal phrases:** "try it again", "give it another shot", "should work now", "try it now", "let me know if it works", "it's fixed", "redeployed", "pushed the fix", "mind testing".
+
+**Mandatory pre-send checklist. Answer each WITH EVIDENCE. No rationalizing.**
+
+1. **Committed?** `git status` clean. `git log -1` shows the fix commit.
+2. **Pushed?** `git ls-remote origin <branch>` SHA matches `git rev-parse HEAD`. Verify *right now*.
+3. **Deployed to every surface?**
+   - Code → Vercel deploy `Ready` and latest deploy's commit matches fix SHA.
+   - Firestore rules → `firebase deploy --only firestore:rules` succeeded + propagation wait (20-60s) + live REST call.
+   - Env var → `vercel env ls <env>` shows new value; new deploy triggered if `NEXT_PUBLIC_*`.
+4. **Runtime-verified?** One of: (a) bundle contains new strings via curl+grep, (b) REST call reproduces fixed behavior, (c) browser session confirms UX.
+5. **For multi-surface fixes:** verify each surface separately. A Vercel deploy does not deploy Firebase rules.
+
+If any answer is "no" or "not sure" — **DO NOT SEND**. Finish deployment, verify, then send.
+
+**Draft-before-send rule:** Draft the message for Mike's approval first (SO #5), AND include evidence that each gate item passed.
+
+**Why this exists:** 2026-04-17 — Two premature "try it again" messages to Jason Minhas about scavenger hunt demo fixes. Each had incomplete verification. The gap is ALWAYS between "I made the change locally" and "the change reaches the user" — with multiple independent legs (git, CDN, rules engine, browser cache). Skipping any leg produces false "try it now" messages that burn collaborator trust.
