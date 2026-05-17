@@ -41,7 +41,7 @@ imsg history --chat-id <ID> --limit 50 --attachments --json
 imsg history --chat-id <ID> --start 2026-03-01T00:00:00Z --end 2026-03-10T23:59:59Z --json
 
 # Filter by participant in a group chat
-imsg history --chat-id <ID> --participants "+15551234567" --json
+imsg history --chat-id <ID> --participants "<recipient-number>" --json
 ```
 
 Returns JSON lines with: `id`, `guid`, `chat_id`, `text`, `sender`, `is_from_me`, `created_at`, `reactions`, `attachments`, `destination_caller_id`.
@@ -61,17 +61,17 @@ Or to search across all recent messages from all chats, get recent chats first, 
 
 ```bash
 # Send by phone number or email
-imsg send --to "+15551234567" --text "Your message here"
+imsg send --to "<recipient-number>" --text "Your message here"
 
 # Send to a known chat by ID
 imsg send --chat-id <ID> --text "Your message here"
 
 # Send with an attachment
-imsg send --to "+15551234567" --text "Check this out" --file /path/to/file.jpg
+imsg send --to "<recipient-number>" --text "Check this out" --file /path/to/file.jpg
 
 # Force iMessage or SMS
-imsg send --to "+15551234567" --text "Hello" --service imessage
-imsg send --to "+15551234567" --text "Hello" --service sms
+imsg send --to "<recipient-number>" --text "Hello" --service imessage
+imsg send --to "<recipient-number>" --text "Hello" --service sms
 ```
 
 ### Watch for new messages (real-time)
