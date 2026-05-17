@@ -21,6 +21,7 @@ mod metrics;
 mod checkpoint;
 mod shutdown;
 mod startup;
+mod validate;
 mod integration_tailscale;
 mod integration_mcp_exa;
 mod integration_mcp_excalidraw;
@@ -41,6 +42,7 @@ mod today;
 mod workspace;
 mod env;
 mod agent_spawn;
+use hex::route;
 
 #[derive(Parser)]
 #[command(name = "hex", about = "Hex multi-agent harness", version)]
@@ -221,6 +223,16 @@ enum Commands {
     Env {
         #[command(subcommand)]
         command: env::EnvCommands,
+    },
+    /// Message routing: classify messages and route comments to agent charters
+    Route {
+        #[command(subcommand)]
+        command: RouteCommands,
+    },
+    /// Validate BOI specs, hex extensions, and E2E test guards
+    Validate {
+        #[command(subcommand)]
+        command: ValidateCommands,
     },
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
     Upgrade {
@@ -410,6 +422,68 @@ enum RouterCommands {
         asset: String,
         /// Comment text
         text: String,
+    },
+}
+
+#[derive(Subcommand)]
+enum RouteCommands {
+    /// Route a message against agent charters via LLM (port of route-message-llm.py)
+    Message {
+        /// Message text to classify
+        message: Vec<String>,
+        /// Confidence threshold (default 0.4)
+        #[arg(long, default_value = "0.4")]
+        threshold: f64,
+        /// Return all agents regardless of threshold
+        #[arg(long)]
+        all: bool,
+        /// LLM provider: openrouter (default) | ollama
+        #[arg(long, default_value = "openrouter")]
+        provider: String,
+    },
+    /// Route a comment to matching agents (port of route-comment.legacy.py; fixes live bug)
+    Comment {
+        /// Comment ID
+        comment_id: String,
+        /// Asset identifier
+        asset: String,
+        /// Comment text
+        text: Vec<String>,
+    },
+    /// Detect routing context via heuristic fingerprint (port of context_router/)
+    #[command(name = "detect-context")]
+    DetectContext {
+        /// Message text to classify
+        message: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ValidateCommands {
+    /// Validate a BOI spec file for known anti-patterns (port of validate-boi-spec.py)
+    #[command(name = "boi-spec")]
+    BoiSpec {
+        /// One or more spec files to validate
+        files: Vec<String>,
+    },
+    /// Validate a hex extension manifest (port of extension-validate.py)
+    Extension {
+        /// Path to extension directory or extension.yaml
+        path: String,
+    },
+    /// HTTP-level E2E guard: verify a deployed URL is reachable and healthy (port of e2e-guard/verify.py)
+    E2e {
+        /// Base URL to test
+        url: String,
+        /// API health endpoint path (e.g. /api/health)
+        #[arg(long, default_value = "")]
+        check_api: String,
+        /// SSE event stream path (e.g. /events)
+        #[arg(long, default_value = "")]
+        check_sse: String,
+        /// Request timeout in seconds
+        #[arg(long, default_value = "30")]
+        timeout: u64,
     },
 }
 
@@ -911,6 +985,12 @@ enum HealthCommands {
     /// Run the initiative watchdog full check (port of watchdog-run-full.sh)
     #[command(name = "watchdog-run")]
     WatchdogRun,
+    /// Compute mean time-to-detect for integration failures (port of health/compute-mttd.py)
+    #[command(name = "compute-mttd")]
+    ComputeMttd,
+    /// Verify required secret files exist and are non-empty (port of health/check-secrets.sh)
+    #[command(name = "check-secrets")]
+    CheckSecrets,
 }
 
 #[derive(Subcommand)]
@@ -2122,6 +2202,14 @@ fn main() {
                 let script = hex_dir.join("system/scripts/watchdog-run-full.sh");
                 std::process::exit(exec_script(&script, &[]));
             }
+            HealthCommands::ComputeMttd => {
+                let code = health::compute_mttd();
+                std::process::exit(code);
+            }
+            HealthCommands::CheckSecrets => {
+                let code = health::check_secrets();
+                std::process::exit(code);
+            }
         },
         Commands::Doctor { command } => {
             let hex_dir = get_hex_dir();
@@ -2397,7 +2485,35 @@ fn main() {
                 }
             }
         }
+        Commands::Route { command } => {
+            let hex_dir = get_hex_dir();
+            match command {
+                RouteCommands::Message { message, threshold, all, provider } => {
+                    let text = message.join(" ");
+                    std::process::exit(route::run_message(&hex_dir, &text, threshold, all, &provider));
+                }
+                RouteCommands::Comment { comment_id, asset, text } => {
+                    let text_str = text.join(" ");
+                    std::process::exit(route::run_comment(&hex_dir, &comment_id, &asset, &text_str));
+                }
+                RouteCommands::DetectContext { message } => {
+                    let text = message.join(" ");
+                    std::process::exit(route::run_detect_context(&hex_dir, &text));
+                }
+            }
+        }
         Commands::Env { command } => env::run_env_command(command),
+        Commands::Validate { command } => match command {
+            ValidateCommands::BoiSpec { files } => {
+                std::process::exit(validate::run_boi_spec(&files));
+            }
+            ValidateCommands::Extension { path } => {
+                std::process::exit(validate::run_extension(&path));
+            }
+            ValidateCommands::E2e { url, check_api, check_sse, timeout } => {
+                std::process::exit(validate::run_e2e(&url, &check_api, &check_sse, timeout));
+            }
+        },
         Commands::Upgrade { args } => {
             let hex_dir = get_hex_dir();
             let legacy = hex_dir.join("system/scripts/upgrade.sh.legacy.sh");

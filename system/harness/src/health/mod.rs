@@ -189,3 +189,233 @@ mod tests {
         assert_eq!(count, 0, "nonexistent dir must return 0");
     }
 }
+
+/// Port of .hex/scripts/health/compute-mttd.py
+///
+/// Computes mean time from breakage detection to alert (minutes).
+/// Queries ~/.hex-events/events.db for integrations.health.failed events
+/// paired with subsequent doctor.alert / integrations.alert.sent events.
+/// Falls back to median health-check interval if no failures found.
+/// Returns 999 if no data is available. Always exits 0.
+pub fn compute_mttd() -> i32 {
+    use rusqlite::OptionalExtension;
+    let home = std::env::var("HOME").unwrap_or_default();
+    let db_path = PathBuf::from(&home).join(".hex-events/events.db");
+
+    if !db_path.is_file() {
+        println!("999");
+        return 0;
+    }
+
+    let conn = match rusqlite::Connection::open_with_flags(
+        &db_path,
+        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
+    ) {
+        Ok(c) => c,
+        Err(_) => {
+            println!("999");
+            return 0;
+        }
+    };
+
+    let cutoff = chrono::Utc::now() - chrono::Duration::days(7);
+    let cutoff_str = cutoff.format("%Y-%m-%d %H:%M:%S").to_string();
+
+    // Try real MTTD from failure → alert pairs
+    let failures: Vec<(i64, String)> = conn
+        .prepare(
+            "SELECT id, created_at FROM events \
+             WHERE event_type = 'integrations.health.failed' \
+               AND created_at >= ?1 \
+             ORDER BY created_at ASC",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([&cutoff_str], |row| Ok((row.get(0)?, row.get(1)?)))
+                .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default();
+
+    if !failures.is_empty() {
+        let alert_types = "('doctor.alert','integrations.alert.sent')";
+        let mut mttds: Vec<f64> = Vec::new();
+        for (_id, fail_ts) in &failures {
+            let alert_row: Option<String> = conn
+                .prepare(&format!(
+                    "SELECT created_at FROM events \
+                     WHERE event_type IN {alert_types} \
+                       AND created_at > ?1 \
+                     ORDER BY created_at ASC LIMIT 1"
+                ))
+                .and_then(|mut stmt| stmt.query_row([fail_ts], |r| r.get(0)).optional())
+                .unwrap_or(None);
+
+            if let Some(alert_ts) = alert_row {
+                if let (Ok(t_fail), Ok(t_alert)) = (
+                    chrono::DateTime::parse_from_str(
+                        &format!("{fail_ts} +0000"),
+                        "%Y-%m-%d %H:%M:%S %z",
+                    )
+                    .or_else(|_| {
+                        chrono::DateTime::parse_from_rfc3339(fail_ts)
+                    }),
+                    chrono::DateTime::parse_from_str(
+                        &format!("{alert_ts} +0000"),
+                        "%Y-%m-%d %H:%M:%S %z",
+                    )
+                    .or_else(|_| {
+                        chrono::DateTime::parse_from_rfc3339(&alert_ts)
+                    }),
+                ) {
+                    let gap = (t_alert - t_fail).num_seconds() as f64 / 60.0;
+                    if (0.0..=60.0).contains(&gap) {
+                        mttds.push(gap);
+                    }
+                }
+            }
+        }
+        if !mttds.is_empty() {
+            println!("{}", median_f64(&mttds).round().max(1.0) as i64);
+            return 0;
+        }
+    }
+
+    // Fallback: estimate from health-check run frequency
+    let ok_events: Vec<String> = conn
+        .prepare(
+            "SELECT created_at FROM events \
+             WHERE event_type IN ('integrations.health.ok','integrations.health.failed') \
+               AND created_at >= ?1 \
+             ORDER BY created_at ASC",
+        )
+        .and_then(|mut stmt| {
+            stmt.query_map([&cutoff_str], |row| row.get(0))
+                .map(|rows| rows.flatten().collect())
+        })
+        .unwrap_or_default();
+
+    if ok_events.len() < 2 {
+        println!("999");
+        return 0;
+    }
+
+    let times: Vec<chrono::DateTime<chrono::FixedOffset>> = ok_events
+        .iter()
+        .filter_map(|ts| {
+            chrono::DateTime::parse_from_str(&format!("{ts} +0000"), "%Y-%m-%d %H:%M:%S %z")
+                .or_else(|_| chrono::DateTime::parse_from_rfc3339(ts))
+                .ok()
+        })
+        .collect();
+
+    if times.len() < 2 {
+        println!("999");
+        return 0;
+    }
+
+    // Group into batches (events within 60s = same run)
+    let mut batch_starts: Vec<chrono::DateTime<chrono::FixedOffset>> = vec![times[0]];
+    for i in 1..times.len() {
+        if (times[i] - times[i - 1]).num_seconds() > 60 {
+            batch_starts.push(times[i]);
+        }
+    }
+
+    if batch_starts.len() < 2 {
+        println!("999");
+        return 0;
+    }
+
+    let mut intervals: Vec<f64> = (0..batch_starts.len() - 1)
+        .map(|i| (batch_starts[i + 1] - batch_starts[i]).num_seconds() as f64 / 60.0)
+        .filter(|&x| x <= 120.0)
+        .collect();
+
+    if intervals.is_empty() {
+        println!("999");
+        return 0;
+    }
+
+    intervals.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    println!("{}", median_f64(&intervals).round().max(1.0) as i64);
+    0
+}
+
+fn median_f64(values: &[f64]) -> f64 {
+    let mut s = values.to_vec();
+    s.sort_by(|a, b| a.partial_cmp(b).unwrap());
+    let n = s.len();
+    let mid = n / 2;
+    if n % 2 == 1 { s[mid] } else { (s[mid - 1] + s[mid]) / 2.0 }
+}
+
+/// Port of .hex/scripts/health/check-secrets.sh
+///
+/// Verifies required secret files exist and are non-empty.
+/// Exits 0 if all required secrets are present, 1 if any are missing.
+pub fn check_secrets() -> i32 {
+    let home = std::env::var("HOME").unwrap_or_default();
+    let hex_root = std::env::var("CLAUDE_PROJECT_DIR")
+        .or_else(|_| std::env::var("HEX_ROOT"))
+        .unwrap_or_else(|_| format!("{home}/hex"));
+
+    let secrets_dir = PathBuf::from(&hex_root).join(".hex/secrets");
+    let hex_events_dir = PathBuf::from(&home).join(".hex-events");
+
+    let required: &[(&str, bool)] = &[
+        ("x-api.env", false),
+        ("fal.env", false),
+        ("openrouter.env", false),
+        ("excalidraw.env", false),
+    ];
+
+    let mut missing: Vec<String> = Vec::new();
+
+    for (filename, _) in required {
+        let path = secrets_dir.join(filename);
+        if !is_nonempty_file(&path) {
+            missing.push(path.to_string_lossy().into_owned());
+        }
+    }
+
+    // scheduler.yaml in hex-events dir
+    let scheduler = hex_events_dir.join("adapters/scheduler.yaml");
+    if !is_nonempty_file(&scheduler) {
+        missing.push(scheduler.to_string_lossy().into_owned());
+    }
+
+    // Optional kalshi PEM: if present, must look like PEM
+    let kalshi_pem = secrets_dir.join("kalshi-private.pem");
+    if kalshi_pem.is_file() {
+        let content = std::fs::read_to_string(&kalshi_pem).unwrap_or_default();
+        if !content.contains("BEGIN") {
+            missing.push(format!("{} (present but not valid PEM)", kalshi_pem.display()));
+        }
+    }
+
+    if !missing.is_empty() {
+        eprintln!("secrets: FAIL - missing/empty: {}", missing.join(", "));
+        return 1;
+    }
+
+    println!("secrets: ok ({} required files present and non-empty)", required.len() + 1);
+    0
+}
+
+fn is_nonempty_file(path: &std::path::Path) -> bool {
+    path.metadata().map(|m| m.len() > 0).unwrap_or(false)
+}
+
+#[cfg(test)]
+mod compute_mttd_tests {
+    use super::*;
+
+    #[test]
+    fn median_f64_odd() {
+        assert_eq!(median_f64(&[1.0, 3.0, 5.0]), 3.0);
+    }
+
+    #[test]
+    fn median_f64_even() {
+        assert_eq!(median_f64(&[1.0, 2.0, 3.0, 4.0]), 2.5);
+    }
+}
