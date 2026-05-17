@@ -2,7 +2,7 @@
 
 > Implemented: 2026-04-29 (spec SC5D5)
 
-When a BOI spec fails, the system now automatically detects the failure, resolves the spec's owner, builds a structured brief, routes it to the owning agent, and surfaces critical failures to `#from-mrap-hex`. Owners have three choices: revive, redirect, or abandon.
+When a BOI spec fails, the system now automatically detects the failure, resolves the spec's owner, builds a structured brief, routes it to the owning agent, and surfaces critical failures to `#from-hex`. Owners have three choices: revive, redirect, or abandon.
 
 ---
 
@@ -39,7 +39,7 @@ boi.spec.failed event emitted
 boi.spec.failed (if severity=block OR critical initiative)
         │
         └─► [boi-failure-slack-ping policy]
-                └─► post to #from-mrap-hex: "Spec X failed: <reason>. Routed to <owner>."
+                └─► post to #from-hex: "Spec X failed: <reason>. Routed to <owner>."
 
 timer.tick.daily
         └─► [boi-failure-daily-digest policy]
@@ -50,7 +50,7 @@ boi.spec.failed (3rd+ same kind/title in 24h)
                 └─► emit boi.failure.pattern.detected
                         └─► [boi-failure-pattern-handler policy]
                                 └─► route to boi-optimizer
-                                    post to #from-mrap-hex (severity=warn)
+                                    post to #from-hex (severity=warn)
 ```
 
 ---
@@ -75,7 +75,7 @@ All these agents have a `failure-triage` charter responsibility: on inbox messag
 
 ### Per-failure revive budget (3-strike)
 
-`revive-spec.sh` tracks `revive_count` on each spec. Once `revive_count >= 3`, the script refuses and escalates via `#from-mrap-hex` instead of dispatching another worker.
+`revive-spec.sh` tracks `revive_count` on each spec. Once `revive_count >= 3`, the script refuses and escalates via `#from-hex` instead of dispatching another worker.
 
 ### Pattern detection (24h window)
 
@@ -87,7 +87,7 @@ All these agents have a `failure-triage` charter responsibility: on inbox messag
 
 ### Daily digest
 
-Every `timer.tick.daily` fires, the digest policy posts a summary of the past 24h to `#from-mrap-hex`: failure counts by kind, which owners they were routed to, and any specs with no revive attempt.
+Every `timer.tick.daily` fires, the digest policy posts a summary of the past 24h to `#from-hex`: failure counts by kind, which owners they were routed to, and any specs with no revive attempt.
 
 ---
 
@@ -101,7 +101,7 @@ Every `timer.tick.daily` fires, the digest policy posts a summary of the past 24
 | `.hex/scripts/detect-failure-pattern.py` | Query DB for 3+ repeated failures in 24h |
 | `.hex/audit/actions.jsonl` | Append-only log of revive/redirect/abandon actions |
 | `~/.hex-events/policies/boi-failure-route-to-owner.yaml` | Route on `boi.spec.failed` |
-| `~/.hex-events/policies/boi-failure-slack-ping.yaml` | Ping `#from-mrap-hex` on block-severity failures |
+| `~/.hex-events/policies/boi-failure-slack-ping.yaml` | Ping `#from-hex` on block-severity failures |
 | `~/.hex-events/policies/boi-failure-daily-digest.yaml` | Daily 24h aggregate digest |
 | `~/.hex-events/policies/boi-failure-three-strike.yaml` | Detect repeated failure patterns |
 | `~/.hex-events/policies/boi-failure-pattern-handler.yaml` | Handle `boi.failure.pattern.detected` |
@@ -169,13 +169,13 @@ python3 ~/.hex-events/hex_events_cli.py validate ~/.hex-events/policies/boi-fail
 **Step 4 — Test owner resolution manually**
 
 ```bash
-python3 /Users/mrap/mrap-hex/.hex/scripts/spec-owner-resolver.py <spec_id>
+python3 ~/hex/.hex/scripts/spec-owner-resolver.py <spec_id>
 ```
 
 **Step 5 — Build and inspect the brief manually**
 
 ```bash
-python3 /Users/mrap/mrap-hex/.hex/scripts/build-failure-brief.py <spec_id>
+python3 ~/hex/.hex/scripts/build-failure-brief.py <spec_id>
 ```
 
 **Step 6 — Check hex agent message delivery**
@@ -187,7 +187,7 @@ hex agent inbox hex-autonomy   # or whichever owner
 **Step 7 — Check the audit log**
 
 ```bash
-tail -20 /Users/mrap/mrap-hex/.hex/audit/actions.jsonl
+tail -20 ~/hex/.hex/audit/actions.jsonl
 ```
 
 **Common causes of missing routing:**

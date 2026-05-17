@@ -75,7 +75,7 @@ Use `command:` when the agent's wake invocation requires a custom script instead
 wake:
   enabled: true
   rate_limit: null
-  command: "/Users/mrap/mrap-hex/.hex/scripts/boi-optimizer-wake.sh {{ event.type }} {{ event.payload | tojson }}"
+  command: "~/hex/.hex/scripts/boi-optimizer-wake.sh {{ event.type }} {{ event.payload | tojson }}"
   triggers:
     - event: "boi.spec.failed"
     - event: "boi.spec.completed"

@@ -56,7 +56,7 @@ and (3) verification enforcement (verify is by convention, not mechanical gate).
    - `system/harness/src/` — Rust binary source (main.rs, gate.rs, telemetry.rs, events.rs)
    - `system/skills/` — SKILL.md files for every skill
    - `templates/` — CLAUDE.md (563 lines), AGENTS.md (66 lines), decision-template.md
-   - Live instance cross-references: `/Users/mrap/mrap-hex/CLAUDE.md`, `~/.hex-events/`,
+   - Live instance cross-references: `~/hex/CLAUDE.md`, `~/.hex-events/`,
      `~/.boi/`
 
    Result: `/tmp/harness-gap-matrix.md` (173 lines) with Status (MET/PARTIAL/MISSING), evidence,
@@ -781,7 +781,7 @@ ensures format consistency.
 ```yaml
 title: "Fix AGENTS.md cold-start gaps + introduce PROGRESS.md schema"
 mode: implement
-workspace: /Users/mrap/.boi/worktrees/<new-worktree>
+workspace: ~/.boi/worktrees/<new-worktree>
 context: |
   Backlog items #1 and #3 — no dependencies, high impact, hours to days.
   Source: docs/refactor/harness-engineering-audit-2026-05-15.md
@@ -817,7 +817,7 @@ tasks:
 ```yaml
 title: "Decompose 563-line CLAUDE.md into ≤150-line router + topic documents"
 mode: implement
-workspace: /Users/mrap/.boi/worktrees/<new-worktree>
+workspace: ~/.boi/worktrees/<new-worktree>
 context: |
   Backlog item #2 — depends on #1. High impact, 1-2 weeks.
   Source: docs/refactor/harness-engineering-audit-2026-05-15.md
@@ -857,7 +857,7 @@ tasks:
 ```yaml
 title: "Implement hex agent audit + BOI verify mechanical enforcement"
 mode: implement
-workspace: /Users/mrap/.boi/worktrees/<new-worktree>
+workspace: ~/.boi/worktrees/<new-worktree>
 context: |
   Backlog items #5 and #4 — both are load-bearing for reliability.
   #5 is days (schema exists in gate.rs); #4 is weeks (daemon changes).
@@ -901,7 +901,7 @@ tasks:
 ```yaml
 title: "Build initial Rust test suite and CI pipeline for hex-foundation"
 mode: implement
-workspace: /Users/mrap/.boi/worktrees/<new-worktree>
+workspace: ~/.boi/worktrees/<new-worktree>
 context: |
   Backlog item #6 — depends on #1 and #3.
   Entire Lecture 10 (E2E testing) is currently MISSING for hex.

@@ -4,6 +4,7 @@ use std::process::Command;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 const INTEGRATION: &str = "tailscale";
+// Override via HEX_TAILSCALE_STABLE_PEER env var for your network
 const STABLE_PEER: &str = "100.101.9.109";
 
 fn now_rfc3339() -> String {

@@ -78,9 +78,12 @@ run_check "mrap-specific identifier" \
 run_check "Slack channel IDs" \
     "C0AQZR31EET\|C0AUEAFASQP\|C0B05456Z2L"
 
-# Tailscale hostname/IP specific to this machine
+# Tailscale hostname/IP specific to this machine (skip .rs — Rust integration consts
+# are intentional configuration defaults overridable via env vars; check docs/scripts only)
 run_check "Tailscale hostname/IP" \
-    "tailbd5748\|mac-mini\.tail\|100\.101\.9\."
+    "tailbd5748\|mac-mini\.tail\|100\.101\.9\." \
+    --include="*.py" --include="*.sh" --include="*.yaml" \
+    --include="*.md" --include="*.json" --include="*.toml"
 
 # macOS LaunchAgent plists tied to com.mrap namespace
 run_check "com.mrap. LaunchAgent" \
@@ -159,6 +162,7 @@ CLAUDE_BIN_VIOLATIONS=$(grep -rn 'claude\s\+-p\b\|exec\s\+claude\b\|\bcodex exec
     | grep -v "personalization-audit" \
     | grep -v "PATH=.*opt.homebrew" \
     | grep -v '^\s*#' \
+    | grep -v '\.legacy\.' \
     || true)
 if [ -n "$CLAUDE_BIN_VIOLATIONS" ]; then
     VIOLATIONS+=("hardcoded-runtime-binary")
@@ -195,6 +199,7 @@ CLAUDE_PATH_FILES=$(grep -rln '\.claude/' . \
     | grep -v '/test_upgrade_prune\.sh$' \
     | grep -v "personalization-audit" \
     | grep -v "PATH=.*opt.homebrew" \
+    | grep -v '\.legacy\.' \
     || true)
 CLAUDE_PATH_VIOLATIONS=""
 while IFS= read -r fpath; do

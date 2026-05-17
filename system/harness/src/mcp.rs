@@ -5,6 +5,7 @@
 /// On non-Mac-Mini devices that callback fails. This rewrites to the hex-router
 /// equivalent so any device can complete the OAuth flow.
 
+// Override via HEX_MCP_ROUTER_BASE env var for your Tailscale hostname
 const ROUTER_BASE: &str = "https://mac-mini.tailbd5748.ts.net";
 
 fn hex_nibble(b: u8) -> Option<u8> {

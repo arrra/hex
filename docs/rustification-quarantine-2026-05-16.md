@@ -4,7 +4,7 @@
 
 Final sweep quarantine pass executed by BOI worker S9D14.
 
-### mrap-hex: 99 files quarantined
+### hex: 99 files quarantined
 
 All files at `.hex/scripts/` that were confirmed duplicates of
 hex-foundation canonical copies (or had git port commits) were renamed

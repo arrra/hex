@@ -1,12 +1,14 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!-- Template LaunchAgent for hex-eventd (Rust). -->
+<!-- Customize: replace HEX_DIR with your hex workspace path and adjust Label/paths. -->
 <plist version="1.0">
 <dict>
     <key>Label</key>
-    <string>com.mrap.hex-eventd</string>
+    <string>com.hex.hex-eventd</string>
     <key>ProgramArguments</key>
     <array>
-        <string>/Users/mrap/mrap-hex/.hex/bin/hex</string>
+        <string>HEX_DIR/.hex/bin/hex</string>
         <string>events</string>
         <string>daemon</string>
     </array>
@@ -15,19 +17,19 @@
     <key>RunAtLoad</key>
     <true/>
     <key>WorkingDirectory</key>
-    <string>/Users/mrap/.hex-events</string>
+    <string>HOME/.hex-events</string>
     <key>StandardOutPath</key>
-    <string>/Users/mrap/.hex-events/daemon.log</string>
+    <string>HOME/.hex-events/daemon.log</string>
     <key>StandardErrorPath</key>
-    <string>/Users/mrap/.hex-events/daemon.log</string>
+    <string>HOME/.hex-events/daemon.log</string>
     <key>ProcessType</key>
     <string>Interactive</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>PATH</key>
-        <string>/Users/mrap/mrap-hex/.hex/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
+        <string>HEX_DIR/.hex/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin</string>
         <key>HOME</key>
-        <string>/Users/mrap</string>
+        <string>HOME</string>
     </dict>
     <key>ThrottleInterval</key>
     <integer>10</integer>
