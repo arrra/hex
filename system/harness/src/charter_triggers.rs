@@ -165,7 +165,13 @@ pub fn run_with_home(hex_dir: &Path, mode: &str, home: &str) -> i32 {
                 .as_sequence()
                 .unwrap()
                 .iter()
-                .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                .filter_map(|v| {
+                    if let Some(s) = v.as_str() {
+                        Some(s.to_string())
+                    } else {
+                        v.get("event").and_then(|e| e.as_str()).map(|s| s.to_string())
+                    }
+                })
                 .collect();
 
             if triggers.is_empty() {
@@ -197,15 +203,20 @@ pub fn run_with_home(hex_dir: &Path, mode: &str, home: &str) -> i32 {
                             ));
                         }
 
-                        for ct in &triggers {
-                            if !policy_events.contains(ct) {
-                                findings.push((
-                                    if post_migration { Level::Fail } else { Level::Warn },
-                                    format!(
-                                        "charter declares trigger '{}' not in policy",
-                                        ct
-                                    ),
-                                ));
+                        // In post-migration mode only: charter triggers not in policy are
+                        // stale-policy FAILs. Pre-migration: charter is now SoT, so
+                        // charter-only triggers are expected until Phase 4 syncs policies.
+                        if post_migration {
+                            for ct in &triggers {
+                                if !policy_events.contains(ct) {
+                                    findings.push((
+                                        Level::Fail,
+                                        format!(
+                                            "charter declares trigger '{}' not in policy",
+                                            ct
+                                        ),
+                                    ));
+                                }
                             }
                         }
 
@@ -221,7 +232,8 @@ pub fn run_with_home(hex_dir: &Path, mode: &str, home: &str) -> i32 {
                             }
                         }
 
-                        if has_rate_limit {
+                        let charter_has_rate_limit = doc["wake"]["rate_limit"].is_mapping();
+                        if has_rate_limit && !charter_has_rate_limit {
                             findings.push((
                                 if post_migration { Level::Fail } else { Level::Warn },
                                 "policy has rate_limit but charter has no rate_limit (drift)"
