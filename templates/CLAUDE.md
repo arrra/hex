@@ -547,6 +547,23 @@ Default to assistant. Switch to sparring partner when the user is making a decis
 
 ---
 
+## Session State — PROGRESS.md
+
+Every hex workspace keeps a `PROGRESS.md` at the repo root. It is the single source of
+truth for session continuity, replacing freeform `landings/` and `raw/handoffs/` files.
+
+**On session start:** Read `PROGRESS.md` before any work. It tells you focus, in-flight
+tasks, and open threads from prior sessions.
+
+**On checkpoint (HOT state or explicit save):** Update `last_updated`, move completed
+items to "Completed This Session", add new open threads.
+
+**Schema:** See `docs/refactor/progress-md-schema.md` for the full field specification
+(YAML frontmatter + markdown sections: In Flight, Completed This Session, Open Threads,
+Decisions Made, Files Modified).
+
+---
+
 ## My Rules
 
 <!-- hex:user-start — YOUR CUSTOMIZATIONS GO HERE -->
