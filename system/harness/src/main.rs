@@ -2066,22 +2066,7 @@ fn main() {
             }
             SseCommands::Bridge { hex_event_name, payload } => {
                 let hex_dir = get_hex_dir();
-                let legacy = hex_dir.join(".hex/scripts/sse-bus/bridge.py.legacy.py");
-                let script = if legacy.exists() { legacy } else { hex_dir.join(".hex/scripts/sse-bus/bridge.py") };
-                if !script.exists() {
-                    eprintln!("ERROR: sse bridge script not found at {}", script.display());
-                    std::process::exit(1);
-                }
-                let status = std::process::Command::new("python3")
-                    .arg(&script)
-                    .arg(&hex_event_name)
-                    .arg(&payload)
-                    .status()
-                    .unwrap_or_else(|e| {
-                        eprintln!("ERROR: failed to exec sse bridge: {e}");
-                        std::process::exit(1);
-                    });
-                std::process::exit(status.code().unwrap_or(0));
+                hex::sse::bridge(&hex_dir, &hex_event_name, &payload);
             }
         },
         Commands::Integration { command } => {
