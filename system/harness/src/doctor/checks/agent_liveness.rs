@@ -2,83 +2,81 @@ use crate::doctor::check::{Category, CheckResult, Context, DoctorCheck};
 use std::fs;
 use std::process::Command;
 
-/// check_21: Detect per-agent failure streaks via `hex agent liveness` or log scan.
+/// check_21: Agent liveness — env.sh sourced, claude reachable, no failure streaks.
 pub struct AgentLiveness;
 
 impl DoctorCheck for AgentLiveness {
     fn name(&self) -> &str { "agent-liveness" }
     fn category(&self) -> Category { Category::Fleet }
     fn run(&self, ctx: &Context) -> CheckResult {
-        // Try `hex agent liveness` first
+        let env_file = ctx.hex_dir.join(".hex/scripts/env.sh");
+        if !env_file.is_file() {
+            // env-sh check already surfaces this error — skip here to avoid double-reporting
+            return CheckResult::skip("env.sh missing (reported by env-sh check)");
+        }
+
+        // Check claude is reachable via env.sh
+        let claude_check = Command::new("bash")
+            .args(["-c", &format!("source '{}' && command -v claude", env_file.display())])
+            .output();
+        match claude_check {
+            Ok(o) if !o.status.success() => {
+                return CheckResult::fail(
+                    "claude not reachable after sourcing .hex/scripts/env.sh — check PATH in env.sh"
+                );
+            }
+            Err(_) => {
+                return CheckResult::fail("failed to source .hex/scripts/env.sh");
+            }
+            _ => {}
+        }
+
+        // Use hex agent list to enumerate agents and check for failure streaks
         let hex_bin = ctx.hex_dir.join(".hex/bin/hex");
         let bin = if hex_bin.is_file() { hex_bin } else { std::path::PathBuf::from("hex") };
 
-        let result = Command::new(&bin)
-            .args(["agent", "liveness"])
+        let list_out = Command::new(&bin)
+            .args(["agent", "list"])
             .env("HEX_DIR", &ctx.hex_dir)
             .output();
 
-        match result {
-            Ok(out) if out.status.success() => {
-                CheckResult::pass("all agents live (no failure streaks)")
+        let agent_ids: Vec<String> = match list_out {
+            Ok(o) if o.status.success() => {
+                String::from_utf8_lossy(&o.stdout)
+                    .lines()
+                    .map(|l| l.trim().to_string())
+                    .filter(|l| !l.is_empty())
+                    .collect()
             }
-            Ok(out) => {
-                let stdout = String::from_utf8_lossy(&out.stdout).trim().to_string();
-                let stderr = String::from_utf8_lossy(&out.stderr).trim().to_string();
-                let details = [stdout, stderr]
-                    .into_iter()
-                    .filter(|s| !s.is_empty())
-                    .collect::<Vec<_>>()
-                    .join("\n");
-                if out.status.code() == Some(2) {
-                    CheckResult::fail("agent failure streak detected").with_details(details)
-                } else {
-                    CheckResult::warn("agent liveness issues").with_details(details)
-                }
+            _ => {
+                return CheckResult::warn("hex binary unavailable — skipping per-agent liveness checks");
             }
-            Err(_) => {
-                // Fallback: scan log.jsonl files for recent failures
-                self.scan_logs(ctx)
+        };
+
+        let total = agent_ids.len();
+        let mut dead_agents: Vec<String> = Vec::new();
+
+        for agent_id in &agent_ids {
+            let log_path = ctx.hex_dir.join("projects").join(agent_id).join("log.jsonl");
+            if !log_path.is_file() {
+                continue;
             }
-        }
-    }
-}
-
-impl AgentLiveness {
-    fn scan_logs(&self, ctx: &Context) -> CheckResult {
-        let projects_dir = ctx.hex_dir.join("projects");
-        if !projects_dir.is_dir() {
-            return CheckResult::skip("hex binary not available and no projects/ dir to scan");
-        }
-
-        let mut streak_agents: Vec<String> = Vec::new();
-
-        if let Ok(entries) = fs::read_dir(&projects_dir) {
-            for entry in entries.flatten() {
-                let log = entry.path().join("log.jsonl");
-                if !log.is_file() {
-                    continue;
-                }
-                if let Ok(content) = fs::read_to_string(&log) {
-                    let failures: Vec<_> = content
-                        .lines()
-                        .rev()
-                        .take(10)
-                        .filter(|l| l.contains("\"status\":\"failed\""))
-                        .collect();
-                    if failures.len() >= 3 {
-                        streak_agents.push(entry.file_name().to_string_lossy().into_owned());
-                    }
+            if let Ok(content) = fs::read_to_string(&log_path) {
+                let last_5: Vec<&str> = content.lines().rev().take(5).collect();
+                let fail_streak = last_5.iter().take_while(|l| {
+                    l.contains("\"status\":\"failed\"") || l.contains("\"status\":\"throttled\"")
+                }).count();
+                if fail_streak >= 5 {
+                    dead_agents.push(agent_id.clone());
                 }
             }
         }
 
-        if streak_agents.is_empty() {
-            CheckResult::pass("no failure streaks detected (log scan)")
+        if dead_agents.is_empty() {
+            CheckResult::pass(format!("all {} agents healthy (env.sh OK, no failure streaks)", total))
         } else {
-            CheckResult::warn(format!(
-                "{} agent(s) with failure streaks", streak_agents.len()
-            )).with_details(streak_agents.join("\n"))
+            CheckResult::fail(format!("{}/{} agents dead", dead_agents.len(), total))
+                .with_details(dead_agents.join("\n"))
         }
     }
 }

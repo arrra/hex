@@ -1,19 +1,18 @@
 use crate::doctor::check::{Category, CheckResult, Context, DoctorCheck};
 use std::process::Command;
 
-/// check_7: Agent fleet validation — runs `hex fleet validate`.
+/// check_7: Agent fleet validation — runs `hex agent fleet`.
 pub struct AgentFleet;
 
 impl DoctorCheck for AgentFleet {
     fn name(&self) -> &str { "agent-fleet" }
     fn category(&self) -> Category { Category::Fleet }
     fn run(&self, ctx: &Context) -> CheckResult {
-        // Delegate to `hex fleet validate` if hex is available
         let hex_bin = ctx.hex_dir.join(".hex/bin/hex");
         let bin = if hex_bin.is_file() { hex_bin } else { std::path::PathBuf::from("hex") };
 
         let result = Command::new(&bin)
-            .args(["fleet", "validate"])
+            .args(["agent", "fleet"])
             .env("HEX_DIR", &ctx.hex_dir)
             .output();
 
@@ -29,7 +28,14 @@ impl DoctorCheck for AgentFleet {
                     .filter(|s| !s.is_empty())
                     .collect::<Vec<_>>()
                     .join("\n");
-                CheckResult::warn("agent fleet has issues").with_details(details)
+                // Count lines starting with ERROR to determine severity
+                let error_lines = details.lines().filter(|l| l.trim_start().starts_with("ERROR")).count();
+                if error_lines > 0 {
+                    CheckResult::fail(format!("agent fleet has {} charter error(s)", error_lines))
+                        .with_details(details)
+                } else {
+                    CheckResult::warn("agent fleet has issues").with_details(details)
+                }
             }
             Err(_) => CheckResult::skip("hex binary not available for fleet validation"),
         }

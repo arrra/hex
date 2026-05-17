@@ -56,6 +56,7 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::python::PythonVersion),
         Box::new(checks::hex_binary::HexBinaryOnPath),
         // Config checks
+        Box::new(checks::env_sh::EnvSh),
         Box::new(checks::claude_md::ClaudeMdExists),
         Box::new(checks::codex_config::CodexConfigExists),
         Box::new(checks::codex::CodexCliOnPath),

@@ -4,6 +4,7 @@ pub mod boi_health;
 pub mod claude_md;
 pub mod codex;
 pub mod codex_config;
+pub mod env_sh;
 pub mod git;
 pub mod hex_binary;
 pub mod hex_dir;
