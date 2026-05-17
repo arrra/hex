@@ -58,6 +58,11 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         // Config checks
         Box::new(checks::claude_md::ClaudeMdExists),
         Box::new(checks::codex_config::CodexConfigExists),
+        Box::new(checks::codex::CodexCliOnPath),
+        Box::new(checks::codex::CodexVersionOk),
+        Box::new(checks::codex::CodexApiKey),
+        Box::new(checks::codex::CodexAgentsMdExists),
+        Box::new(checks::codex::CodexAgentsMdComplete),
         Box::new(checks::me_md::MeMdContent),
         Box::new(checks::todo_md::TodoMdExists),
         Box::new(checks::llm_preference::LlmPreferenceExists),

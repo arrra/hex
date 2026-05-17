@@ -2,6 +2,7 @@ pub mod agent_fleet;
 pub mod agent_liveness;
 pub mod boi_health;
 pub mod claude_md;
+pub mod codex;
 pub mod codex_config;
 pub mod git;
 pub mod hex_binary;
