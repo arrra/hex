@@ -1074,7 +1074,7 @@ enum HealthCommands {
 
 #[derive(Subcommand)]
 enum DoctorCommands {
-    /// Run the full hex-doctor script
+    /// Run all registered DoctorCheck impls (Rust framework)
     Run {
         #[arg(long)]
         fix: bool,
@@ -1084,7 +1084,12 @@ enum DoctorCommands {
         quiet: bool,
         #[arg(long)]
         json: bool,
+        /// Only run checks whose name contains this pattern
+        #[arg(long)]
+        filter: Option<String>,
     },
+    /// List all registered checks
+    List,
     /// Check Codex CLI + config health (port of doctor-checks/codex.sh)
     #[command(name = "check-codex")]
     CheckCodex,
@@ -2449,36 +2454,27 @@ fn main() {
                     let code = doctor::detect_failure_pattern(window, spec_id.as_deref());
                     std::process::exit(code);
                 }
-                DoctorCommands::Run { fix, smoke, quiet, json } => {
-                    let script = hex_dir.join(".hex/scripts/hex-doctor");
+                DoctorCommands::Run { fix, smoke: _, quiet, json, filter } => {
                     let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(&hex_dir));
                     let start = std::time::Instant::now();
-                    let mut cmd = std::process::Command::new("bash");
-                    cmd.arg(&script);
-                    if fix { cmd.arg("--fix"); }
-                    if smoke { cmd.arg("--smoke"); }
-                    if quiet { cmd.arg("--quiet"); }
-                    if json { cmd.arg("--json"); }
-                    cmd.env("HEX_DIR", &hex_dir);
-                    // Stream stdout/stderr live — buffering broke perceived responsiveness
-                    // (see hang investigation 2026-05-05).
-                    cmd.stdout(std::process::Stdio::inherit());
-                    cmd.stderr(std::process::Stdio::inherit());
-                    let mut child = cmd.spawn().unwrap_or_else(|e| {
-                        eprintln!("hex doctor: failed to run script: {e}");
-                        std::process::exit(1);
-                    });
-                    let status = child.wait().unwrap_or_else(|e| {
-                        eprintln!("hex doctor: wait failed: {e}");
-                        std::process::exit(1);
-                    });
-                    let exit_code = status.code().unwrap_or(1);
+                    let ctx = doctor::Context::new(hex_dir.clone(), fix);
+                    let runner = match &filter {
+                        Some(pat) => doctor::Runner::filtered(pat),
+                        None => doctor::Runner::all_checks(),
+                    };
+                    let results = runner.run(&ctx);
+                    if json {
+                        doctor::reporter::print_json(&results);
+                    } else {
+                        doctor::reporter::print_text(&results, quiet);
+                    }
+                    let exit_code = doctor::reporter::exit_code(&results);
                     let duration_ms = start.elapsed().as_millis() as u64;
                     telemetry.emit("hex.doctor.run", &serde_json::json!({
                         "fix": fix,
-                        "smoke": smoke,
                         "quiet": quiet,
                         "json": json,
+                        "filter": filter,
                         "exit_code": exit_code,
                         "duration_ms": duration_ms,
                     }));
@@ -2489,6 +2485,9 @@ fn main() {
                         }));
                     }
                     std::process::exit(exit_code);
+                }
+                DoctorCommands::List => {
+                    doctor::Runner::all_checks().list();
                 }
             }
         }
