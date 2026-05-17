@@ -189,22 +189,62 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 
 ## Architecture
 
-`hex` is a unified Rust binary — **core infrastructure**, not optional. One binary handles:
+`hex` is a unified Rust binary — **core infrastructure**, not optional. As of v0.16.0, the full Python scripting layer (130 files → ~22) has been ported to native Rust subcommands. The hex-events daemon runs in Rust. One binary handles everything:
 
 - **Agent harness** (`hex agent`) — fleet management, wakes, cost tracking, gate validation, initiative execution
+- **Event engine** (`hex events`) — native Rust event daemon with hot-reload, multi-cadence scheduler, shell/emit/notify/update-file actions (replaces Python hex_eventd.py)
+- **Claude Code hooks** (`hex hook`) — session-start, post-tool-use, backup-session hook runners (replaces .sh hook scripts)
 - **HTTP/SSE server** (`hex server`) — serves all web surfaces, real-time event bus with namespaced topics
 - **Asset registry** (`hex asset`) — unified `{type}:{id}` namespace for all hex artifacts
-- **Comment system** (`hex comment`) — feedback on any asset, routed to agents via LLM classification
+- **Message routing** (`hex message`) — unified messaging: comments, agent messages, notifications
+- **System health** (`hex doctor`) — 55+ checks across env, memory, structure, config, companions
+- **Integration lifecycle** (`hex integration`) — native Rust integration bundle management
 
-Subcommands:
+43 subcommands:
 
 ```
-hex agent wake/fleet/status/message/list    — agent fleet management
-hex server start                            — HTTP server + SSE bus (port 8880)
-hex asset resolve/list/search/types         — asset registry
-hex comment respond/list                    — comment management
-hex sse publish/topics                      — SSE bus operations
-hex version                                 — print version
+hex agent        — agent fleet management (wake, fleet, status, message, list, evolution, reset-periods)
+hex server       — HTTP/SSE server (port 8880)
+hex events       — event engine (start, status, emit, list, tail — native Rust daemon)
+hex hook         — Claude Code hook runners (session-start, post-tool-use, backup-session)
+hex doctor       — system health checks (55+ checks, --fix, --json)
+hex asset        — asset registry (resolve, list, search, types)
+hex message      — unified messaging (send, list, comments, notifications)
+hex sse          — SSE bus operations (publish, topics)
+hex integration  — integration bundle lifecycle (install, check-all, telemetry)
+hex memory       — behavioral and indexed memory operations
+hex health       — agent health checks (run-tier, fleet-pulse, stalled-initiative)
+hex metrics      — user-outcome metrics
+hex session      — session lifecycle (start, resume, stop)
+hex startup      — session startup checklist
+hex checkpoint   — checkpoint current session
+hex shutdown     — close current session
+hex upgrade      — upgrade hex installation (port of upgrade.sh)
+hex capture      — zero-friction context capture
+hex synthesis    — weekly and on-demand synthesis pipeline
+hex initiative   — initiative CRUD
+hex learnings    — learnings analysis and promotion
+hex route        — message routing and comment classification
+hex validate     — BOI spec, extension, and E2E guard validation
+hex telemetry    — telemetry file rotation and management
+hex picker       — interactive workspace picker
+hex fleet        — fleet manager service management
+hex boi-pm       — BOI process manager service management
+hex boi-web      — BOI live status web view
+hex pulse        — pulse server lifecycle
+hex workspace    — hex tmux workspace launcher
+hex env          — environment setup utilities
+hex alert        — iMessage alert sender
+hex path-map     — v1→v2 path translation
+hex mcp          — MCP utilities
+hex extension    — extension management
+hex router       — hex-router reverse proxy
+hex spec-tool    — spec-tool server
+hex kalshi       — Kalshi prediction market integration
+hex mirofish     — Mirofish VM health
+hex today        — print today's date
+hex version      — print version
+hex completions  — shell completions (zsh, bash, fish)
 ```
 
 Backward compatibility: `hex-agent` is a symlink to `hex`. Existing scripts and policies that call `hex-agent` continue to work unchanged.
@@ -265,23 +305,20 @@ hex-foundation/
 ├── install.sh           Single install entrypoint
 ├── VERSIONS             Pinned boi version (hex-events is now inline)
 ├── system/              → becomes ~/hex/.hex/ on install
-│   ├── harness/         ← hex binary Rust source (agent + server + SSE + assets + comments)
-│   │   ├── src/main.rs     unified CLI (hex agent/server/asset/comment/sse)
+│   ├── harness/         ← hex binary Rust source (43 subcommands — full scripting layer ported)
+│   │   ├── src/main.rs     unified CLI (all 43 subcommands)
+│   │   ├── src/events.rs   native Rust event daemon (replaces hex_eventd.py)
+│   │   ├── src/hook.rs     Claude Code hook runners (session-start, post-tool-use, backup-session)
 │   │   ├── src/server.rs   HTTP server + reverse proxy
 │   │   ├── src/sse.rs      SSE bus (topics, subscriptions, publish)
-│   │   ├── src/comments.rs comment API handler
-│   │   ├── src/assets.rs   asset registry handler
-│   │   ├── src/telemetry.rs request + event telemetry (append-only JSONL)
 │   │   ├── src/wake.rs     agent wake cycle
+│   │   ├── src/doctor.rs   DoctorCheck trait + 55+ checks (replaces doctor.sh)
+│   │   ├── src/upgrade.rs  upgrade pipeline (replaces upgrade.sh)
 │   │   └── build.rs        injects git SHA; Cargo.toml is version source
-│   ├── events/          ← hex-events daemon, emitter, CLI (merged from hex-events repo)
-│   │   ├── hex_eventd.py   main daemon
-│   │   ├── hex_emit.py     event emitter
-│   │   ├── hex_events_cli.py CLI
-│   │   ├── actions/        action handlers (shell, emit, notify, render, update_file)
-│   │   ├── adapters/       scheduler and timer adapters
+│   ├── events/          ← hex-events policy definitions and default policies
 │   │   ├── policies/       built-in default policies (boi-lifecycle, capture, etc.)
 │   │   └── docs/           hex-events documentation
+│   │   (daemon, emitter, CLI now native in hex binary — `hex events start/status/emit/list/tail`)
 │   ├── sse/
 │   │   └── topics/      ← SSE topic manifests (content.comments, system.agents, etc.)
 │   ├── scripts/         startup.sh, doctor.sh, upgrade.sh, quality-check.py,

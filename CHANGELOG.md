@@ -2,6 +2,26 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-17] — Full rustification: 43 subcommands, native events daemon, hex hook (v0.16.0)
+
+### Added
+- `hex events` — native Rust event daemon replacing Python `hex_eventd.py`. Full hot-reload, multi-cadence scheduler, shell/emit/notify/update-file action handlers. No Python runtime required for event processing.
+- `hex hook` — Claude Code hook runners ported to Rust: `session-start`, `post-tool-use`, `backup-session`. Shell hook scripts quarantined.
+- `hex doctor` — DoctorCheck trait framework with 55+ checks (replaces `doctor.sh`). Codex-CLI checks 51-55 added.
+- `hex upgrade` — upgrade pipeline ported from `upgrade.sh` to native Rust.
+- `hex agent evolution`, `hex agent reset-periods`, `hex agent optimizer-wake` — harness-native agent lifecycle.
+- `hex learnings`, `hex initiative`, `hex route`, `hex validate`, `hex integration`, `hex health`, `hex metrics`, `hex telemetry`, `hex picker`, `hex synthesis`, `hex capture`, `hex session`, `hex env`, `hex mcp`, `hex extension`, `hex workspace`, `hex alert` — Python scripting layer fully ported; 130 Python files reduced to ~22.
+
+### Changed
+- Real-port phase complete: all `.legacy` shim references removed. `upgrade.sh`, `sse-bus/bridge.py`, `agent-evolution.sh`, `doctor.sh`, `capture.sh`, `hex-integration-check-all.sh` are now Rust-native.
+- `system/events/` retains policy YAML definitions; daemon/emitter/CLI now live in `hex events` subcommand.
+- AGENTS.md rewritten with 5 cold-start questions and verify commands (walkinglabs lecture format).
+- PROGRESS.md added as session state schema for Phase 5+ harness refactor tracking.
+
+### Fixed
+- Doctor equivalence mismatches resolved: agent-fleet, python, env-sh, me-md, scripts-exec, agent-liveness.
+- Routing cluster bug: `hex route` fixes live route-comment regression.
+
 ## [2026-05-12] — Harness messaging + binary resolution fix (v0.15.0)
 
 ### Fixed
