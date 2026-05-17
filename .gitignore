@@ -26,3 +26,8 @@ system/scripts/health/test*.txt
 .agents/
 .codex/
 todo.md
+
+# Generated reports and local test artifacts
+AUDIT-REPORT.md
+pytest.ini
+tests/test_integration.py

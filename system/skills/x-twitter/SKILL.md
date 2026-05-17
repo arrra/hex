@@ -6,7 +6,7 @@ description: "Read, search, and post on X (Twitter) via the official xdevplatfor
 
 # X (Twitter) via xmcp
 
-Access X/Twitter through the `x-twitter` MCP server — official `xdevplatform/xmcp` FastMCP server running at `/Users/mrap/github.com/xdevplatform/xmcp/`, invoked per-session over stdio.
+Access X/Twitter through the `x-twitter` MCP server — official `xdevplatform/xmcp` FastMCP server running at `~/github.com/xdevplatform/xmcp/`, invoked per-session over stdio.
 
 **Transport:** stdio (spawned by Claude Code per session). No daemon.
 **Auth:** OAuth1 user tokens + Bearer (pre-provisioned in `.env`, browser flow skipped).
@@ -89,16 +89,16 @@ Response includes:
 
 ## Server config
 
-- Repo: `/Users/mrap/github.com/xdevplatform/xmcp/`
+- Repo: `~/github.com/xdevplatform/xmcp/`
 - Entry point: `.venv/bin/python server.py`
-- Credentials: `/Users/mrap/github.com/xdevplatform/xmcp/.env` (perms 600, git-ignored)
+- Credentials: `~/github.com/xdevplatform/xmcp/.env` (perms 600, git-ignored)
 - Transport: `MCP_TRANSPORT=stdio`
 - Local patch: `build_oauth1_client()` uses pre-provisioned `X_OAUTH_ACCESS_TOKEN`/`X_OAUTH_ACCESS_TOKEN_SECRET` from env to skip the OAuth1 browser flow (required for daemon-style use).
 - Local patch: `main()` supports `MCP_TRANSPORT=stdio` in addition to default HTTP.
 
 ## Expanding the allowlist
 
-Full tool catalog: see `/Users/mrap/github.com/xdevplatform/xmcp/README.md` (section "Available tool calls"). To add tools:
+Full tool catalog: see `~/github.com/xdevplatform/xmcp/README.md` (section "Available tool calls"). To add tools:
 
 1. Edit `X_API_TOOL_ALLOWLIST` in `.env` (comma-separated)
 2. Next Claude Code session picks it up automatically (stdio spawn)
@@ -108,7 +108,7 @@ Full tool catalog: see `/Users/mrap/github.com/xdevplatform/xmcp/README.md` (sec
 The OAuth1 user tokens above cover post/like/follow. Bookmarks need OAuth2 user context. To enable:
 
 1. Add `CLIENT_ID` / `CLIENT_SECRET` to `.env` (from X Developer Portal → OAuth 2.0 settings).
-2. `cd /Users/mrap/github.com/xdevplatform/xmcp && .venv/bin/python generate_authtoken.py` — follow the prompt, authorize in browser.
+2. `cd ~/github.com/xdevplatform/xmcp && .venv/bin/python generate_authtoken.py` — follow the prompt, authorize in browser.
 3. Paste the returned access token into `X_OAUTH_ACCESS_TOKEN` in `.env`.
 
 Until this is done, the bookmark tools will return auth errors. (Bookmarks are also accessible via Playwright — see `reference_x_tools.md` in memory.)

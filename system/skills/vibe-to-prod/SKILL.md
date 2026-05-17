@@ -142,8 +142,8 @@ each dispatched as BOI specs.
 ```json
 {
   "project_name": "boi",
-  "project_path": "/Users/mrap/.boi/src",
-  "output_dir": "/Users/mrap/hex/projects/boi-v2p",
+  "project_path": "$BOI_SRC",
+  "output_dir": "$HEX_DIR/projects/boi-v2p",
   "started": "2026-03-16T19:00:00",
   "phases": {
     "1": {"status": "completed", "completed_at": "2026-03-16T19:30:00", "boi_queue_id": "q-099"},

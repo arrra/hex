@@ -30,7 +30,7 @@ Known positions (use these as authoritative entry data):
 Run market-price-poll.sh for each position. Use Bash to capture results:
 
 ```bash
-cd /Users/mrap/mrap-hex
+cd ~/hex
 bash .hex/bin/market-price-poll.sh "KXAIMODEL-T4" 2>/dev/null
 bash .hex/bin/market-price-poll.sh "KXAIMODEL-T5" 2>/dev/null
 ```

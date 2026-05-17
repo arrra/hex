@@ -118,8 +118,8 @@ Confirm: "Memory index updated — new mental map is now searchable."
 
 ## Notes
 
-- Scripts live at `~/mrap-hex/.hex/scripts/`
-- Maps live at `~/mrap-hex/me/remodeling/YYYY-MM-DD-title.md`
-- Format spec: `~/mrap-hex/me/remodeling/FORMAT.md`
+- Scripts live at `~/.hex/scripts/`
+- Maps live at `~/hex/me/remodeling/YYYY-MM-DD-title.md`
+- Format spec: `~/hex/me/remodeling/FORMAT.md`
 - Excalidraw Plus MCP support: add as an input source once the alpha API is available
 - Keep conversations focused — the goal is to surface non-obvious things, not exhaustively review every node
