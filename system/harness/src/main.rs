@@ -43,6 +43,7 @@ mod today;
 mod workspace;
 mod env;
 mod agent_spawn;
+mod hook;
 mod initiative;
 mod learnings;
 use hex::route;
@@ -259,6 +260,11 @@ enum Commands {
         /// Extra arguments forwarded to upgrade.sh
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Claude Code hook runners (port of .hex/hooks/scripts/*.sh)
+    Hook {
+        #[command(subcommand)]
+        command: hook::HookCommands,
     },
     /// Print version
     Version,
@@ -2873,6 +2879,7 @@ fn main() {
                 });
             std::process::exit(status.code().unwrap_or(0));
         }
+        Commands::Hook { command } => hook::run(command),
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }
