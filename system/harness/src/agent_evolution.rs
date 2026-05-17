@@ -1,4 +1,4 @@
-/// Real Rust port of agent-evolution.sh.legacy.sh
+/// Real Rust port of the agent-evolution subcommand.
 ///
 /// Reads charter KPIs, state.json trails, and cost ledger to compute
 /// performance metrics for each agent, then writes a dated evolution

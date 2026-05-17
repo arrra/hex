@@ -1,4 +1,4 @@
-/// Port of .hex/scripts/route-message-llm.py + route-comment.legacy.py + context_router/
+/// Port of .hex/scripts/route-message-llm.py + context_router/
 ///
 /// Commands:
 ///   hex route message <text>               - LLM-based message routing

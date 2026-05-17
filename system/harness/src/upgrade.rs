@@ -1,4 +1,4 @@
-//! Real port of system/scripts/upgrade.sh.legacy.sh
+//! Real port of the hex upgrade subcommand.
 //!
 //! Upgrades: scripts, skills, commands, hooks
 //! Preserves: memory.db, settings.local.json, user data, CLAUDE.md

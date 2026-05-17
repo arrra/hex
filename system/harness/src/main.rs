@@ -476,7 +476,7 @@ enum RouteCommands {
         #[arg(long, default_value = "openrouter")]
         provider: String,
     },
-    /// Route a comment to matching agents (port of route-comment.legacy.py; fixes live bug)
+    /// Route a comment to matching agents.
     Comment {
         /// Comment ID
         comment_id: String,

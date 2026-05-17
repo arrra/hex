@@ -136,7 +136,7 @@ fn topic_matches(filter: &str, topic: &str) -> bool {
 }
 
 /// Bridge a hex-event name to a topic/type using manifest data.
-/// Mirrors bridge.py.legacy.py without shelling out.
+/// Real SSE bridge implementation — no shell-out.
 pub fn bridge(hex_dir: &Path, hex_event_name: &str, raw_payload: &str) {
     let bus_url = std::env::var("SSE_BUS_URL")
         .unwrap_or_else(|_| "http://127.0.0.1:8880".to_string());
