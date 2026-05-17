@@ -950,6 +950,12 @@ enum HealthCommands {
     /// Run the initiative watchdog full check (port of watchdog-run-full.sh)
     #[command(name = "watchdog-run")]
     WatchdogRun,
+    /// Compute mean time-to-detect for integration failures (port of health/compute-mttd.py)
+    #[command(name = "compute-mttd")]
+    ComputeMttd,
+    /// Verify required secret files exist and are non-empty (port of health/check-secrets.sh)
+    #[command(name = "check-secrets")]
+    CheckSecrets,
 }
 
 #[derive(Subcommand)]
@@ -2160,6 +2166,14 @@ fn main() {
                 let hex_dir = get_hex_dir();
                 let script = hex_dir.join("system/scripts/watchdog-run-full.sh");
                 std::process::exit(exec_script(&script, &[]));
+            }
+            HealthCommands::ComputeMttd => {
+                let code = health::compute_mttd();
+                std::process::exit(code);
+            }
+            HealthCommands::CheckSecrets => {
+                let code = health::check_secrets();
+                std::process::exit(code);
             }
         },
         Commands::Doctor { command } => {
