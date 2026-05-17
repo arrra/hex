@@ -247,6 +247,13 @@ enum Commands {
         #[command(subcommand)]
         command: LearningsCommands,
     },
+    /// Telemetry file rotation and management (port of rotate-telemetry.sh)
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommands,
+    },
+    /// Interactive workspace picker (port of hex-picker.sh)
+    Picker,
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
     Upgrade {
         /// Extra arguments forwarded to upgrade.sh
@@ -333,6 +340,13 @@ enum AgentCommands {
         agent: Option<String>,
         #[arg(long)]
         period: Option<String>,
+    },
+    /// Reset stale agent budget periods (port of health/reset-periods.py)
+    #[command(name = "reset-periods")]
+    ResetPeriods {
+        /// Report what would happen without writing any state
+        #[arg(long)]
+        dry_run: bool,
     },
 }
 
@@ -985,6 +999,12 @@ enum MetricsCommands {
 }
 
 #[derive(Subcommand)]
+enum TelemetryCommands {
+    /// Delete telemetry files older than 7 days and cap dirs at 50MB (port of rotate-telemetry.sh)
+    Rotate,
+}
+
+#[derive(Subcommand)]
 enum HealthCommands {
     /// Check agent memory system health (port of health/check-agent-memory.sh)
     #[command(name = "check-agent-memory")]
@@ -1112,6 +1132,25 @@ enum DoctorCommands {
         /// Validation mode: pre-migration (default) or post-migration
         #[arg(long, default_value = "pre-migration")]
         mode: String,
+    },
+    /// Scan for stale dependency-blocked items (port of stale_deps.py)
+    #[command(name = "stale-deps")]
+    StaleDeps {
+        /// Days threshold before an item is considered stale
+        #[arg(long, default_value = "2")]
+        threshold: u32,
+        /// Output JSON
+        #[arg(long)]
+        json: bool,
+    },
+    /// Detect three-strike failure patterns in the BOI queue (port of detect-failure-pattern.py)
+    #[command(name = "detect-failure-pattern")]
+    DetectFailurePattern {
+        /// Lookback window in seconds
+        #[arg(long, default_value = "86400")]
+        window: u64,
+        /// Optional spec ID to scope the pattern check
+        spec_id: Option<String>,
     },
 }
 
@@ -1821,6 +1860,75 @@ fn run_agent_command(command: AgentCommands) {
             let rc = agent_spawn::run_spawn(&spec_file, dry_run);
             std::process::exit(rc);
         }
+        AgentCommands::ResetPeriods { dry_run } => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let projects_dir = std::path::PathBuf::from(&home).join("mrap-hex/projects");
+            if !projects_dir.is_dir() {
+                println!("[reset-periods] PROJECTS_DIR not found: {}", projects_dir.display());
+                return;
+            }
+            let now = chrono::Utc::now();
+            let stale_days = 7i64;
+            let mut reset_count = 0u32;
+            let mut checked_count = 0u32;
+            let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&projects_dir)
+                .unwrap_or_else(|_| { eprintln!("cannot read projects dir"); std::process::exit(1); })
+                .filter_map(|e| e.ok())
+                .map(|e| e.path())
+                .filter(|p| p.is_dir() && !p.file_name().unwrap_or_default().to_string_lossy().starts_with('_'))
+                .collect();
+            entries.sort();
+            for agent_dir in entries {
+                let agent_id = agent_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
+                let state_path = agent_dir.join("state.json");
+                if !state_path.is_file() { continue; }
+                let state_text = match std::fs::read_to_string(&state_path) {
+                    Ok(s) => s,
+                    Err(_) => continue,
+                };
+                let mut state: serde_json::Value = match serde_json::from_str(&state_text) {
+                    Ok(v) => v,
+                    Err(_) => continue,
+                };
+                let start_str = state.pointer("/cost/current_period/start")
+                    .and_then(|v| v.as_str())
+                    .map(|s| s.to_string());
+                let start_str = match start_str {
+                    Some(s) => s,
+                    None => continue,
+                };
+                checked_count += 1;
+                let start = match chrono::DateTime::parse_from_rfc3339(&start_str)
+                    .map(|dt| dt.with_timezone(&chrono::Utc))
+                    .or_else(|_| chrono::DateTime::parse_from_rfc3339(&start_str.replace("Z", "+00:00"))
+                        .map(|dt| dt.with_timezone(&chrono::Utc)))
+                {
+                    Ok(dt) => dt,
+                    Err(_) => continue,
+                };
+                let age_days = (now - start).num_days();
+                if age_days > stale_days {
+                    println!("  RESET  {}: period was {} (stale {}d)", agent_id, &start_str[..10], age_days);
+                    if !dry_run {
+                        let new_start = now.to_rfc3339().replace("+00:00", "Z");
+                        if let Some(period) = state.pointer_mut("/cost/current_period") {
+                            period["start"] = serde_json::Value::String(new_start);
+                            period["spent_usd"] = serde_json::Value::from(0.0f64);
+                        }
+                        let tmp_path = state_path.with_extension("json.tmp");
+                        if let Ok(s) = serde_json::to_string_pretty(&state) {
+                            let _ = std::fs::write(&tmp_path, s);
+                            let _ = std::fs::rename(&tmp_path, &state_path);
+                        }
+                    }
+                    reset_count += 1;
+                } else {
+                    println!("  OK     {}: period started {}", agent_id, &start_str[..10]);
+                }
+            }
+            println!("\n[reset-periods] checked={checked_count} reset={reset_count}{}",
+                if dry_run { " (dry-run)" } else { "" });
+        }
     }
 }
 
@@ -2333,6 +2441,14 @@ fn main() {
                 DoctorCommands::CharterTriggers { mode } => {
                     std::process::exit(charter_triggers::run(&hex_dir, &mode));
                 }
+                DoctorCommands::StaleDeps { threshold, json } => {
+                    let code = doctor::stale_deps(&hex_dir, threshold, json);
+                    std::process::exit(code);
+                }
+                DoctorCommands::DetectFailurePattern { window, spec_id } => {
+                    let code = doctor::detect_failure_pattern(window, spec_id.as_deref());
+                    std::process::exit(code);
+                }
                 DoctorCommands::Run { fix, smoke, quiet, json } => {
                     let script = hex_dir.join(".hex/scripts/hex-doctor");
                     let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(&hex_dir));
@@ -2613,6 +2729,132 @@ fn main() {
             match command {
                 LearningsCommands::Promote { dry_run } => learnings::run_promote(&hex_dir, dry_run),
             }
+        }
+        Commands::Telemetry { command } => match command {
+            TelemetryCommands::Rotate => {
+                let home = std::env::var("HOME").unwrap_or_default();
+                let dirs = [
+                    std::path::PathBuf::from(&home).join("mrap-hex/.hex/audit"),
+                    std::path::PathBuf::from(&home).join("mrap-hex/.hex/logs"),
+                ];
+                let ttl_days: u64 = 7;
+                let cap_bytes: u64 = 50 * 1024 * 1024;
+                let mut rotated = 0u64;
+                let mut freed_bytes = 0u64;
+                let mut cap_truncated = 0u64;
+                let now = std::time::SystemTime::now();
+                let ttl_secs = ttl_days * 86400;
+                for dir in &dirs {
+                    if !dir.is_dir() { continue; }
+                    let entries: Vec<_> = std::fs::read_dir(dir)
+                        .unwrap_or_else(|_| { eprintln!("cannot read {}", dir.display()); std::process::exit(1); })
+                        .filter_map(|e| e.ok())
+                        .filter(|e| {
+                            let name = e.file_name();
+                            let n = name.to_string_lossy();
+                            e.path().is_file() && (n.ends_with(".jsonl") || n.ends_with(".log"))
+                        })
+                        .collect();
+                    let mut remaining: Vec<_> = entries.iter().filter_map(|e| {
+                        let meta = e.path().metadata().ok()?;
+                        let modified = meta.modified().ok()?;
+                        let age = now.duration_since(modified).ok()?.as_secs();
+                        if age > ttl_secs {
+                            let sz = meta.len();
+                            let _ = std::fs::remove_file(e.path());
+                            freed_bytes += sz;
+                            rotated += 1;
+                            None
+                        } else {
+                            Some((e.path(), meta.len(), modified))
+                        }
+                    }).collect();
+                    let total: u64 = remaining.iter().map(|(_, sz, _)| sz).sum();
+                    if total > cap_bytes {
+                        remaining.sort_by_key(|(_, _, m)| *m);
+                        let mut running = total;
+                        for (path, sz, _) in &remaining {
+                            if running <= cap_bytes { break; }
+                            let _ = std::fs::remove_file(path);
+                            freed_bytes += sz;
+                            running -= sz;
+                            cap_truncated += 1;
+                        }
+                    }
+                }
+                println!("{{\"rotated\":{rotated},\"freed_bytes\":{freed_bytes},\"cap_truncated\":{cap_truncated}}}");
+            }
+        },
+        Commands::Picker => {
+            let home = std::env::var("HOME").unwrap_or_default();
+            let ctx_json = std::path::PathBuf::from(&home).join("mrap-hex/.hex/contexts.json");
+            let contexts_text = if ctx_json.is_file() {
+                std::fs::read_to_string(&ctx_json).unwrap_or_else(|_| "{}".to_string())
+            } else {
+                "{}".to_string()
+            };
+            let data: serde_json::Value = serde_json::from_str(&contexts_text)
+                .unwrap_or_else(|_| serde_json::json!({}));
+            let active = data.get("active").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let contexts = data.get("contexts").and_then(|v| v.as_object()).cloned().unwrap_or_default();
+            let mut names: Vec<String> = contexts.keys().cloned().collect();
+            names.sort();
+            if !active.is_empty() && !names.contains(&active) {
+                names.insert(0, active.clone());
+            } else if let Some(pos) = names.iter().position(|n| n == &active) {
+                names.remove(pos);
+                names.insert(0, active.clone());
+            }
+            let lines: Vec<String> = names.iter().map(|name| {
+                let marker = if name == &active { "▶" } else { " " };
+                format!("{} {}", marker, name)
+            }).collect();
+            let input = lines.join("\n");
+            let mut fzf = std::process::Command::new("fzf");
+            fzf.arg("--header=Workspaces  |  Enter=switch")
+               .arg("--prompt=  ")
+               .arg("--pointer=▶")
+               .arg("--height=40%")
+               .stdin(std::process::Stdio::piped())
+               .stdout(std::process::Stdio::piped());
+            let mut child = match fzf.spawn() {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("hex picker: fzf not found or failed to start: {e}");
+                    eprintln!("Install fzf: brew install fzf");
+                    std::process::exit(1);
+                }
+            };
+            if let Some(stdin) = child.stdin.take() {
+                use std::io::Write;
+                let mut stdin = stdin;
+                let _ = stdin.write_all(input.as_bytes());
+            }
+            let output = match child.wait_with_output() {
+                Ok(o) => o,
+                Err(e) => {
+                    eprintln!("hex picker: fzf wait failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+            if !output.status.success() { std::process::exit(0); }
+            let selected = String::from_utf8_lossy(&output.stdout).trim().to_string();
+            let context_name = selected.trim_start_matches(['▶', ' ']).trim().to_string();
+            if context_name.is_empty() { std::process::exit(0); }
+            let hex_dir = get_hex_dir();
+            let switch = hex_dir.join(".hex/scripts/hex-context-switch.sh");
+            let code = if switch.is_file() {
+                std::process::Command::new("bash")
+                    .arg(&switch)
+                    .arg(&context_name)
+                    .status()
+                    .map(|s| s.code().unwrap_or(0))
+                    .unwrap_or(0)
+            } else {
+                println!("Selected: {context_name}");
+                0
+            };
+            std::process::exit(code);
         }
         Commands::Upgrade { args } => {
             let hex_dir = get_hex_dir();
