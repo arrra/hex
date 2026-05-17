@@ -43,6 +43,7 @@ mod today;
 mod workspace;
 mod env;
 mod agent_spawn;
+mod initiative;
 use hex::route;
 
 #[derive(Parser)]
@@ -234,6 +235,11 @@ enum Commands {
     Validate {
         #[command(subcommand)]
         command: ValidateCommands,
+    },
+    /// Initiative CRUD (port of system/scripts/hex-initiative.py)
+    Initiative {
+        #[command(subcommand)]
+        command: InitiativeCommands,
     },
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
     Upgrade {
@@ -485,6 +491,42 @@ enum ValidateCommands {
         /// Request timeout in seconds
         #[arg(long, default_value = "30")]
         timeout: u64,
+    },
+}
+
+#[derive(Subcommand)]
+enum InitiativeCommands {
+    /// List initiatives, optionally filtered by status
+    List {
+        /// Filter by status: open, closed, or all (default: all)
+        #[arg(long, default_value = "all")]
+        status: String,
+    },
+    /// Show details for a specific initiative
+    Show {
+        /// Initiative ID
+        id: String,
+    },
+    /// Create a new initiative
+    Create {
+        /// Initiative name (used to derive the ID)
+        name: String,
+        /// Initial status (default: open)
+        #[arg(long, default_value = "open")]
+        status: String,
+    },
+    /// Update an initiative's status
+    Update {
+        /// Initiative ID
+        id: String,
+        /// New status value
+        #[arg(long)]
+        status: String,
+    },
+    /// Close an initiative (set status to closed)
+    Close {
+        /// Initiative ID
+        id: String,
     },
 }
 
@@ -2540,6 +2582,16 @@ fn main() {
                 std::process::exit(validate::run_e2e(&url, &check_api, &check_sse, timeout));
             }
         },
+        Commands::Initiative { command } => {
+            let hex_dir = get_hex_dir();
+            match command {
+                InitiativeCommands::List { status } => initiative::run_list(&hex_dir, Some(&status)),
+                InitiativeCommands::Show { id } => initiative::run_show(&hex_dir, &id),
+                InitiativeCommands::Create { name, status } => initiative::run_create(&hex_dir, &name, &status),
+                InitiativeCommands::Update { id, status } => initiative::run_update(&hex_dir, &id, &status),
+                InitiativeCommands::Close { id } => initiative::run_close(&hex_dir, &id),
+            }
+        }
         Commands::Upgrade { args } => {
             let hex_dir = get_hex_dir();
             let legacy = hex_dir.join("system/scripts/upgrade.sh.legacy.sh");
