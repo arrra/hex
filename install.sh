@@ -141,6 +141,13 @@ fi
 mkdir -p "$TARGET_DIR/.agents"
 ln -sfn ../.hex/skills "$TARGET_DIR/.agents/skills"
 
+# Symlink system/ → .hex/ so the hex Rust binary (v0.16+) resolves its hardcoded
+# "system/skills/...", "system/scripts/..." paths against the install layout.
+# Without this, `hex memory index/search`, `hex doctor`, and `hex integration`
+# all fail with "No such file or directory" because the binary's path resolver
+# was built against the foundation source-tree layout, not the install layout.
+ln -sfn .hex "$TARGET_DIR/system"
+
 # Seed optional configs doctor expects. Defaults are safe and overridable later.
 echo '{}' > "$TARGET_DIR/.hex/settings.json"
 
