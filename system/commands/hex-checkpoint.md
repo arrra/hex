@@ -9,97 +9,44 @@ description: >
 # /hex-checkpoint — Checkpoint and Continue
 
 Persist context from the current conversation, then suggest compact if the user wants a fresh context window.
-Heavy work (reflection, memory index rebuild) is dispatched to the background
-so the user can keep working immediately.
+
+## Usage
+
+Run the checkpoint binary to handle all mechanical steps:
+
+```
+hex checkpoint [focus directive]
+```
+
+The binary will:
+1. Print guidance for the AI-driven distill pass (decisions, people, projects, todo.md)
+2. Dispatch background reflection (session-reflect)
+3. Write a handoff file to `raw/handoffs/YYYY-MM-DD-HHMMSS.md`
+4. Print guidance to update todo.md
+5. Append a changelog entry to today's landings file (if it exists)
+6. Print the compact suggestion with handoff path
 
 ## Arguments
 
-The user may pass a focus directive (what they want to work on next). Use it as the compact summary.
-
-## Step 1: Quick distill pass
-
-Scan the conversation for unpersisted context and write it to files:
-
-- Decisions made (write to `me/decisions/` or `projects/*/decisions/`)
-- People mentioned (write to `people/*/profile.md`)
-- Project updates (write to `projects/*/context.md`)
-- New tasks or priority changes (update `todo.md`)
-- Patterns noticed (update `evolution/observations.md`)
-
-If the session segment was very short (< 5 exchanges) with no meaningful context, skip and note "Distill skipped (short segment)."
-
-## Step 2: Dispatch background reflection
-
-Run reflection asynchronously so it does not block the checkpoint. Use the Task
-tool with `run_in_background: true` to dispatch a subagent that invokes the
-reflection script:
+The user may pass a focus directive (what they want to work on next). Pass it as the first argument:
 
 ```
-Task (run_in_background: true):
-  "Dispatch session reflection in the background."
-  subagent_type: general-purpose
-  prompt: |
-    Run the session reflection script. Execute:
-    bash $AGENT_DIR/.hex/scripts/session-reflect.sh
-    This will process the current transcript and apply reflection fixes.
-    Do not wait for or report the result.
+hex checkpoint "auth refactor"
 ```
 
-If the session has been very short (< 5 exchanges) with no corrections or
-pushback, skip reflection entirely and note "Reflection skipped (short segment,
-no corrections)."
+## AI-driven steps (still required)
 
-Do NOT invoke `/hex-reflect` inline. Do NOT wait for reflection to complete.
+After running `hex checkpoint`, complete the steps that require conversation context:
 
-## Step 3: Write handoff file
+1. **Quick distill pass** — scan the conversation for unpersisted context:
+   - Decisions made → `me/decisions/` or `projects/*/decisions/`
+   - People mentioned → `people/*/profile.md`
+   - Project updates → `projects/*/context.md`
+   - Patterns noticed → `evolution/observations.md`
+   - Skip if session was very short (< 5 exchanges): note "Distill skipped (short segment)."
 
-Write a structured handoff to `raw/handoffs/YYYY-MM-DD-HHMMSS.md`:
+2. **Update todo.md** — move completed items, add newly discovered tasks.
 
-```markdown
-# Session Handoff — YYYY-MM-DD HH:MM
+3. **Fill in the handoff file** — the binary creates the file at the path it prints; fill in "What We Did", "Key Decisions", "Open Threads", and "Files Modified" sections.
 
-## What We Did
-- (bullet list of accomplishments)
-
-## Key Decisions
-- (any decisions made with reasoning)
-
-## Open Threads
-- (anything in progress or unresolved)
-
-## Next Focus
-- (what the user wants to work on next)
-
-## Files Modified This Session
-- (list of files created or changed)
-```
-
-## Step 4: Update todo.md
-
-Make sure todo.md reflects current state. Move completed items, add new ones discovered during the session.
-
-## Step 5: Update daily landings
-
-Get today's date: `bash $AGENT_DIR/.hex/scripts/today.sh`
-
-Read today's landings file at `landings/YYYY-MM-DD.md`. If it exists, update it:
-- Mark any landing items completed during this session segment as Done
-- Update status of in-progress items
-- Update open threads with current state
-- Append a changelog entry: `- HH:MM — Checkpoint: [brief summary of what changed]`
-
-If no landings file exists for today, skip this step.
-
-## Step 6: Suggest compact (optional)
-
-Tell the user: "Checkpointed. Reflection dispatched to background."
-
-Then suggest: "If you want to compact for a fresh context window, run:"
-
-Provide the compact command with a focused summary:
-- The next focus area (from arguments or from the handoff)
-- A pointer to the handoff file
-- Key files to re-read after compact
-
-Example:
-> `/compact [Next focus]. Handoff at raw/handoffs/[filename]. Re-read: todo.md, landings/YYYY-MM-DD.md`
+If the session segment was very short with no corrections or pushback, skip reflection entirely and note "Reflection skipped (short segment, no corrections)."

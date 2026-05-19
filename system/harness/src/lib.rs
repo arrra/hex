@@ -1,5 +1,8 @@
 pub mod assets;
 pub mod audit;
+pub mod route;
+pub mod charter_triggers;
+pub mod extensions;
 pub mod charter;
 pub mod claude;
 pub mod cost;

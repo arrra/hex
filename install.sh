@@ -72,6 +72,23 @@ echo "  Python $PY_VERSION  ✓"
 echo "  git               ✓"
 echo ""
 
+# ── ZONES — Core vs user-space ─────────────────────────────────────
+#
+# CORE (overwritten by hex upgrade):
+#   $TARGET_DIR/.hex/           ← installed from system/ in hex-foundation repo
+#
+# USER SPACE (never touched by hex upgrade):
+#   $TARGET_DIR/.hex/extensions/  ← user-installed extensions
+#   $TARGET_DIR/projects/
+#   $TARGET_DIR/me/
+#   $TARGET_DIR/evolution/
+#   $TARGET_DIR/templates/
+#   $TARGET_DIR/integrations/
+#   $TARGET_DIR/extensions/
+#
+# hex upgrade writes only to the core zone. User space is preserved.
+# See ZONES.md in the hex-foundation repo for the full boundary spec.
+
 # ── Phase 2: Create instance directory structure ───────────────────
 
 echo "Creating hex instance at $TARGET_DIR..."
@@ -82,8 +99,14 @@ mkdir -p "$TARGET_DIR"/landings/weekly
 mkdir -p "$TARGET_DIR"/raw/{transcripts,handoffs}
 mkdir -p "$TARGET_DIR"/specs/_archive
 
-# Copy system files → .hex/
+# Copy system files → .hex/   (CORE zone)
 cp -r "$SCRIPT_DIR/system" "$TARGET_DIR/.hex"
+
+# Create user-space extensions directory (never overwritten by hex upgrade)
+mkdir -p "$TARGET_DIR/.hex/extensions"
+
+# Create memory directory for markdown-format memories
+mkdir -p "$TARGET_DIR/.hex/memory"
 
 # Copy root templates
 cp "$SCRIPT_DIR/templates/CLAUDE.md"  "$TARGET_DIR/CLAUDE.md"
@@ -106,10 +129,12 @@ if [ -d "$SCRIPT_DIR/tests" ]; then
     cp -r "$SCRIPT_DIR/tests" "$TARGET_DIR/tests"
 fi
 
-# Copy commands to .claude/commands/ (where Claude Code discovers them)
+# Copy commands to both .claude/commands/ (Claude Code) and .hex/commands/ (doctor/tooling)
 if [ -d "$SCRIPT_DIR/system/commands" ]; then
     mkdir -p "$TARGET_DIR/.claude/commands"
     cp "$SCRIPT_DIR/system/commands/"*.md "$TARGET_DIR/.claude/commands/"
+    mkdir -p "$TARGET_DIR/.hex/commands"
+    cp "$SCRIPT_DIR/system/commands/"*.md "$TARGET_DIR/.hex/commands/"
 fi
 
 # Symlink .agents/skills/ → .hex/skills/ so tools that look in .agents/ find the same skill set
@@ -303,37 +328,49 @@ BOI_REPO="${HEX_BOI_REPO:-https://github.com/mrap/boi.git}"
 # Fresh install: clone at pinned version, then run the project's own installer.
 # Existing install: fetch latest tag and upgrade in place.
 install_or_upgrade_boi() {
-    if [ -d "$HOME/.boi" ]; then
-        echo "  BOI exists — upgrading to $BOI_VERSION..."
-        if [ -d "$HOME/.boi/.git" ]; then
-            ( cd "$HOME/.boi" && git fetch --tags --depth 1 origin 2>/dev/null && \
-              git checkout "$BOI_VERSION" 2>/dev/null ) || true
-        elif [ -d "$HOME/.boi/src/.git" ]; then
-            ( cd "$HOME/.boi/src" && git fetch --tags --depth 1 origin 2>/dev/null && \
-              git checkout "$BOI_VERSION" 2>/dev/null ) || true
-        fi
-        # Re-run BOI's own installer to rebuild venv/symlinks
-        if [ -f "$HOME/.boi/src/install-public.sh" ]; then
-            BOI_CONTEXT_ROOT="$TARGET_DIR" bash "$HOME/.boi/src/install-public.sh" --update 2>/dev/null || true
-        fi
-        echo "  BOI upgraded ($BOI_VERSION)  ✓"
+    local boi_src="$HOME/github.com/mrap/boi"
+    mkdir -p "$HOME/.boi/bin" "$HOME/.boi/pids" "$HOME/.boi/logs" "$HOME/.boi/worktrees"
+
+    # Clone or update the BOI repo
+    if [ -d "$boi_src/.git" ]; then
+        echo "  BOI repo exists — fetching $BOI_VERSION..."
+        ( cd "$boi_src" && git fetch --tags origin 2>/dev/null && \
+          git checkout "$BOI_VERSION" 2>/dev/null ) || true
     else
-        if git clone --depth 1 --branch "$BOI_VERSION" "$BOI_REPO" "$HOME/.boi" 2>/dev/null; then
-            # Run BOI's own installer for venv setup and PATH symlink
-            if [ -f "$HOME/.boi/src/install-public.sh" ]; then
-                BOI_CONTEXT_ROOT="$TARGET_DIR" bash "$HOME/.boi/src/install-public.sh" 2>/dev/null || true
-            fi
-            echo "  BOI installed ($BOI_VERSION)  ✓"
-        else
-            echo "  BOI: failed to clone $BOI_REPO @ $BOI_VERSION (will install on next upgrade)"
-        fi
+        echo "  Cloning BOI repo..."
+        mkdir -p "$(dirname "$boi_src")"
+        git clone --branch "$BOI_VERSION" "$BOI_REPO" "$boi_src" 2>/dev/null || {
+            echo "  BOI: failed to clone $BOI_REPO @ $BOI_VERSION"
+            return
+        }
     fi
 
-    # Verify boi is on PATH
-    if ! command -v boi &>/dev/null; then
-        echo "  ⚠️  'boi' not found on PATH. Add ~/bin to your PATH:"
-        echo "     export PATH=\"\$HOME/bin:\$PATH\""
+    # Build the Rust binary
+    if command -v cargo &>/dev/null; then
+        echo "  Building BOI binary..."
+        ( cd "$boi_src" && cargo build --release 2>/dev/null ) || {
+            echo "  BOI: cargo build failed"
+            return
+        }
+        # Symlink binary
+        ln -sf "$boi_src/target/release/boi" "$HOME/.boi/bin/boi"
+        echo "  BOI $BOI_VERSION built and linked  ✓"
+    else
+        echo "  ⚠️  Rust/cargo not found — cannot build BOI binary"
+        echo "     Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        return
     fi
+
+    # Create boi.sh wrapper for shell alias
+    cat > "$boi_src/boi.sh" << 'BOISH'
+#!/bin/bash
+if [ -x "$HOME/.boi/bin/boi" ]; then
+    exec "$HOME/.boi/bin/boi" "$@"
+fi
+echo "error: BOI binary not found at ~/.boi/bin/boi"
+exit 1
+BOISH
+    chmod +x "$boi_src/boi.sh"
 }
 install_or_upgrade_boi
 
@@ -346,6 +383,9 @@ install_hex_events_from_source() {
     for item in "$src_dir"/*; do
         name="$(basename "$item")"
         [ "$name" = "policies" ] && continue
+        dst="$dst_dir/$name"
+        # Remove stale symlinks so cp writes a real file instead of following them
+        [ -L "$dst" ] && rm -f "$dst"
         cp -R "$item" "$dst_dir/"
     done
     echo "  hex-events installed from system/events/  ✓"
@@ -471,7 +511,6 @@ if [ -x "$TARGET_DIR/.hex/bin/hex" ]; then
     if ! "$TARGET_DIR/.hex/bin/hex" version &>/dev/null; then
         echo "WARNING: hex binary installed but failed to execute. Re-run install to retry."
     else
-        local hex_ver
         hex_ver=$("$TARGET_DIR/.hex/bin/hex" version 2>/dev/null || echo "unknown")
         echo "  hex binary          ✓ ($hex_ver)"
         # Verify symlink works
@@ -484,6 +523,45 @@ if [ -x "$TARGET_DIR/.hex/bin/hex" ]; then
     fi
 else
     echo "  hex binary          ⚠ (install Rust to enable agent fleet + server)"
+fi
+
+# ── Phase 8: Shell environment setup ─────────────────────────────
+
+SHELL_RC=""
+if [[ -n "${ZSH_VERSION:-}" ]] || [[ "$SHELL" == */zsh ]]; then
+    SHELL_RC="$HOME/.zshrc"
+elif [[ -n "${BASH_VERSION:-}" ]] || [[ "$SHELL" == */bash ]]; then
+    SHELL_RC="$HOME/.bashrc"
+fi
+
+if [[ -n "$SHELL_RC" ]]; then
+    NEEDS_WRITE=false
+    if ! grep -q 'export HEX_DIR=' "$SHELL_RC" 2>/dev/null; then
+        NEEDS_WRITE=true
+    fi
+
+    if $NEEDS_WRITE; then
+        echo "Setting up shell environment in $SHELL_RC..."
+        cat >> "$SHELL_RC" << RCEOF
+
+# =====================
+# Hex Agent
+# =====================
+export HEX_DIR="$TARGET_DIR"
+export AGENT_DIR="\$HEX_DIR"  # deprecated alias — use HEX_DIR
+export PATH="\$HEX_DIR/.hex/bin:\$PATH"
+RCEOF
+        echo "  HEX_DIR, AGENT_DIR (deprecated alias), PATH added to $SHELL_RC ✓"
+        echo "  Run 'source $SHELL_RC' or restart your terminal to activate."
+    else
+        echo "  HEX_DIR already in $SHELL_RC ✓"
+    fi
+else
+    echo ""
+    echo "Add these to your shell rc file:"
+    echo "  export HEX_DIR=\"$TARGET_DIR\""
+    echo "  export AGENT_DIR=\"\$HEX_DIR\"  # deprecated alias — use HEX_DIR"
+    echo "  export PATH=\"\$HEX_DIR/.hex/bin:\$PATH\""
 fi
 
 echo ""

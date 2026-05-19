@@ -110,13 +110,30 @@ pub fn build_args(model: &str, allowed_tools: &[&str]) -> Vec<String> {
     ]
 }
 
+fn resolve_claude_bin() -> String {
+    // Prefer explicit env override, then well-known absolute paths, then PATH lookup
+    if let Ok(p) = std::env::var("CLAUDE_BIN") {
+        if std::path::Path::new(&p).exists() {
+            return p;
+        }
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        let candidate = format!("{}/.local/bin/claude", home);
+        if std::path::Path::new(&candidate).exists() {
+            return candidate;
+        }
+    }
+    "claude".to_string()
+}
+
 pub fn invoke(
     prompt: &str,
     model: &str,
     allowed_tools: &[&str],
 ) -> Result<ClaudeOutput, Box<dyn std::error::Error>> {
     let args = build_args(model, allowed_tools);
-    let mut child = Command::new("claude")
+    let claude_bin = resolve_claude_bin();
+    let mut child = Command::new(&claude_bin)
         .args(&args)
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())

@@ -3,7 +3,7 @@ name: secret-intake
 description: >
   Secure credential intake via local web form. Spin up a one-page server on
   Tailscale, paste keys, upload PEM/JSON files, hit submit — secrets land in
-  .hex/secrets/ with 600 perms and auto-sync to launchctl + cc-connect.
+  .hex/secrets/ with 600 perms and auto-sync to launchctl.
 version: 1.0.0
 ---
 
@@ -21,7 +21,7 @@ Reusable local web form for ingesting API keys, tokens, and key files into hex.
 ## How to Start
 
 ```bash
-bash $AGENT_DIR/.hex/skills/secret-intake/scripts/start.sh
+bash $HEX_DIR/.hex/skills/secret-intake/scripts/start.sh
 ```
 
 Then give the user the Tailscale URL: `https://<your-tailscale-hostname>/secrets`
@@ -31,7 +31,7 @@ The server runs on `:9877` locally. hex-router fronts it at `/secrets` with TLS 
 ## How to Stop
 
 ```bash
-bash $AGENT_DIR/.hex/skills/secret-intake/scripts/stop.sh
+bash $HEX_DIR/.hex/skills/secret-intake/scripts/stop.sh
 ```
 
 ## What Happens on Submit
@@ -40,7 +40,7 @@ bash $AGENT_DIR/.hex/skills/secret-intake/scripts/stop.sh
 2. Key files (PEM, JSON, p12, etc.) are written to `.hex/secrets/{institution}-{filename}`
 3. All files get `chmod 600`
 4. If an `.env` file already exists for that institution, new keys are *merged* (existing keys preserved, matching keys updated)
-5. `sync-secrets.sh` runs automatically — propagates to `launchctl setenv` + cc-connect plist + daemon restart
+5. `sync-secrets.sh` runs automatically — propagates to `launchctl setenv`
 
 ## Security Properties
 
@@ -85,4 +85,4 @@ Browser → https://<your-tailscale-hostname>/secrets
 | Env var | Default | What it does |
 |---------|---------|-------------|
 | `PORT` | `9877` | Server listen port |
-| `HEX_DIR` | `$AGENT_DIR` | Hex root directory |
+| `HEX_DIR` | `$HEX_DIR` | Hex root directory |

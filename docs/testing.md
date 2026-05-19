@@ -6,11 +6,43 @@ This document describes the test suite, what each test verifies, and how to run 
 
 | Category | Files | Needs API key |
 |----------|-------|:-------------:|
-| Static / unit | `test_skill_frontmatter.sh`, `test_skill_refs.sh`, `test_path_mapping.bats` | No |
+| Static / unit | `test_skill_frontmatter.sh`, `test_skill_refs.sh`, `test_path_mapping.bats`, `test_hex_doctor_version_sync.bats`, `test_hex_doctor_hex_binary_version_sync.bats`, `test-upgrade-deletion.sh`, `test-upgrade-binary-swap.sh` | No |
+| Core E2E (containerized) | `tests/core-e2e/run-all.sh` | BOI suites only |
 | Live eval — Claude Code | `test_skill_discovery.sh`, `test_e2e.sh`, `test_fullstack.sh` | Yes |
 | Live eval — Codex | `test_skill_discovery_codex.sh`, `test_codex_onboarding.sh` | Yes |
+| Codex parity (containerized) | `tests/codex-parity/run-all.sh` | No (structural); `OPENAI_API_KEY` for live |
 | Migration | `tests/migrate/test-migrate.sh` | No |
 | Memory | `test_memory.py` | No |
+
+## Core E2E suite (`tests/core-e2e/`)
+
+Auto-discovers all `tests/core-e2e/suites/*.sh` files and runs them. Non-BOI suites run inside the `tests/core-e2e/Dockerfile` container; BOI integration suites run on the host (they need Docker access to spin up their own containers).
+
+CI runs both jobs on every PR and blocks merges on failure (see `.github/workflows/core-e2e.yml`).
+
+```bash
+# All suites (host must have Docker)
+bash tests/core-e2e/run-all.sh
+
+# Filter by pattern — useful when iterating on a specific suite
+bash tests/core-e2e/run-all.sh --include boi          # BOI suites only
+bash tests/core-e2e/run-all.sh --exclude boi          # skip BOI (e.g. inside Docker)
+bash tests/core-e2e/run-all.sh --include 'install|upgrade'  # regex match on suite name
+```
+
+Current suites:
+
+| Suite | What it verifies |
+|-------|-----------------|
+| `test-boi-install` | Fresh BOI install: binary builds, `--help`/`--version`, smoke dispatch |
+| `test-boi-upgrade` | Upgrade path: version bump, stale-symlink detection, doctor catches dangling link |
+| `test-assets` | Asset registry CRUD via `hex asset` subcommands |
+| `test-cli` | All `hex` subcommands reachable; version matches `Cargo.toml` |
+| `test-events` | Event emit, policy firing, trace via `hex events` |
+| `test-messaging` | Message send/receive/filter with SQLite verification |
+| `test-sse` | SSE subscribe/publish, topic filtering, heartbeat |
+| `test-telemetry` | Telemetry JSONL written to `.hex/telemetry/` |
+| `test-doctor-events-coverage` | `hex-doctor` fails loudly on broken policies (parse errors named), passes on valid policies |
 
 ## Tests added in v0.2.4
 
@@ -42,6 +74,26 @@ Requires `~/.hex-test.env` with `ANTHROPIC_API_KEY`.
 
 Mirror of the above for Codex. Because Codex reads `AGENTS.md` rather than `SKILL.md` files directly, this test verifies that the 11 skill names surface via `AGENTS.md` context and that Codex can perform the same three invocations.
 
+## Codex parity suite (`tests/codex-parity/`)
+
+Seven tests that verify behavioral parity between the Claude Code and Codex runtimes. Runs inside a Docker container with Node.js + Codex CLI installed. Structural tests run without an API key; live-dispatch tests are skipped automatically when `OPENAI_API_KEY` is absent.
+
+```bash
+bash tests/codex-parity/run-all.sh
+```
+
+| Test | What it verifies | API key |
+|------|-----------------|:-------:|
+| `test-install-shape.sh` | Fresh hex install produces `.hex/scripts/`, `.hex/skills/`, `.hex/bin/`, `CLAUDE.md`, `AGENTS.md` | No |
+| `test-agents-md-complete.sh` | `AGENTS.md` covers all sections present in `CLAUDE.md` | No |
+| `test-skill-discovery.sh` | All skills are discoverable from `.hex/skills/*/SKILL.md` under Codex | No |
+| `test-doctor-codex.sh` | `doctor.sh` includes and passes the Codex CLI check | No |
+| `test-upgrade-codex.sh` | `upgrade.sh` preserves `AGENTS.md` user customizations | No |
+| `test-boi-dispatch-codex.sh` | Minimal spec with `runtime=codex` completes and produces output | Yes |
+| `test-memory-search.sh` | Memory search index and CLI work identically under the Codex runtime | No |
+
+Gate 5 in `system/scripts/release.sh` runs this suite and blocks on failure; structural tests always run, live tests are skipped when no key is present.
+
 ## Running locally
 
 ### Prerequisites
@@ -63,6 +115,10 @@ bash tests/test_skill_frontmatter.sh
 bash tests/test_skill_refs.sh
 bash tests/migrate/test-migrate.sh
 python3 tests/test_memory.py
+bats tests/test_hex_doctor_version_sync.bats
+bats tests/test_hex_doctor_hex_binary_version_sync.bats
+bash tests/test-upgrade-deletion.sh
+bash tests/test-upgrade-binary-swap.sh
 ```
 
 ### Full Docker eval suite

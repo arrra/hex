@@ -182,6 +182,30 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     let allowed_tools = ["Bash", "Read", "Write", "Edit", "Grep", "Glob"];
     let mut invocation = 0;
 
+    // health-probe agents (charter `wake.skip_llm: true`) bypass the LLM loop —
+    // they exist to validate wake plumbing without paying for a Claude call.
+    // Inbox is populated; post-loop state save + audit still runs.
+    if charter_data.wake.skip_llm {
+        let inbox_count = agent_state.inbox.len();
+        let audit_reason = if inbox_count == 0 {
+            "charter wake.skip_llm=true; empty inbox"
+        } else {
+            "charter wake.skip_llm=true"
+        };
+        audit::append(
+            &audit_dir,
+            &config.agent_id,
+            "wake-skip-llm",
+            &serde_json::json!({
+                "reason": audit_reason,
+                "inbox_count": inbox_count,
+            }),
+        );
+        // Drain inbox-sourced active items to prevent unbounded state.json growth.
+        // health-probe charters have no responsibilities so this is safe.
+        agent_state.queue.active.retain(|i| !i.id.starts_with("inbox-"));
+    } else {
+
     loop {
         invocation += 1;
 
@@ -336,13 +360,15 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
                         }),
                     );
                     if msg.response_requested {
-                        auto_wake_target(hex_dir, &msg.to, &config.agent_id, &audit_dir);
+                        for recipient in &msg.to {
+                            auto_wake_target(hex_dir, recipient, &config.agent_id, &audit_dir);
+                        }
                     }
                 }
                 Err(e) => {
                     eprintln!(
                         "[{}] MESSAGE SEND FAILED to {}: {e}",
-                        config.agent_id, msg.to
+                        config.agent_id, msg.to.join(", ")
                     );
                     audit::append(
                         &audit_dir,
@@ -425,6 +451,11 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
                             agent_state
                                 .cadence_overrides
                                 .insert(change.responsibility.clone(), change.new_interval);
+                            let scheduled_id = format!("s-{}", change.responsibility);
+                            if let Some(item) = agent_state.queue.scheduled.iter_mut()
+                                .find(|s| s.id == scheduled_id) {
+                                item.interval_seconds = change.new_interval;
+                            }
                             audit::append(
                                 &audit_dir,
                                 &config.agent_id,
@@ -494,6 +525,8 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
             }
         }
     }
+
+    } // end if !skip_llm
 
     // 10. Save state
     state::save(&agent_state, &state_path)?;

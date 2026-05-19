@@ -158,12 +158,12 @@ done
 echo "[14] Doctor"
 cd /tmp/test-hex
 DOCTOR_OUT=$(HEX_DIR=/tmp/test-hex bash .hex/scripts/doctor.sh 2>&1 || true)
-if echo "$DOCTOR_OUT" | grep -q "hex is healthy"; then
+if echo "$DOCTOR_OUT" | grep -q ", 0 errors"; then
     echo "  PASS: Doctor passes on fresh install"
     PASS=$((PASS + 1))
 else
     echo "  FAIL: Doctor found issues"
-    echo "$DOCTOR_OUT" | grep "✗\|FAIL" | head -5
+    echo "$DOCTOR_OUT" | grep -E "ERROR|\[31m" | head -5 || true
     FAIL=$((FAIL + 1))
 fi
 TOTAL=$((TOTAL + 1))
@@ -205,7 +205,7 @@ cd /tmp/hex-upgrade-repo && git init -q && git add -A && git commit -q -m "v0.2.
 cd /tmp/test-hex
 
 # Run upgrade pointing to local repo
-HEX_DIR=/tmp/test-hex HEX_REPO_URL=/tmp/hex-upgrade-repo bash /tmp/test-hex/.hex/scripts/upgrade.sh 2>&1 || true
+HEX_DIR=/tmp/test-hex bash /tmp/test-hex/.hex/scripts/upgrade.sh --local /tmp/hex-upgrade-repo 2>&1 || true
 
 # Verify user zone preserved
 if grep -q "MY_CUSTOM_RULE_12345" /tmp/test-hex/CLAUDE.md; then
@@ -236,6 +236,82 @@ if python3 -m pytest tests/test_memory.py -v 2>&1; then
     PASS=$((PASS + 1))
 else
     echo "  FAIL: Unit tests failed"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+# ── Test 18: Install sets AGENT_DIR in shell rc ──────────────────
+echo "[18] Install sets AGENT_DIR"
+if grep -q 'export AGENT_DIR=' "$HOME/.zshrc" 2>/dev/null || \
+   grep -q 'export AGENT_DIR=' "$HOME/.bashrc" 2>/dev/null; then
+    echo "  PASS: AGENT_DIR found in shell rc"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: AGENT_DIR not set in shell rc after install"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+if grep -q 'export HEX_DIR=' "$HOME/.zshrc" 2>/dev/null || \
+   grep -q 'export HEX_DIR=' "$HOME/.bashrc" 2>/dev/null; then
+    echo "  PASS: HEX_DIR found in shell rc"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: HEX_DIR not set in shell rc after install"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+# ── Test 19: Doctor check 23 detects missing AGENT_DIR ───────────
+echo "[19] Doctor AGENT_DIR check"
+cd /tmp/test-hex
+DOCTOR_JSON=$(HEX_DIR=/tmp/test-hex bash .hex/scripts/doctor.sh --json 2>&1 || true)
+if echo "$DOCTOR_JSON" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+found = any(c.get('id') == 23 and c.get('name') == 'hex-dir-set' for c in data.get('checks', []))
+sys.exit(0 if found else 1)
+" 2>/dev/null; then
+    echo "  PASS: Doctor includes AGENT_DIR check (check 23)"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: Doctor missing AGENT_DIR check 23"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+# Verify it passes when AGENT_DIR is set correctly
+DOCTOR_JSON2=$(AGENT_DIR=/tmp/test-hex HEX_DIR=/tmp/test-hex bash .hex/scripts/doctor.sh --json 2>&1 || true)
+if echo "$DOCTOR_JSON2" | python3 -c "
+import json, sys
+data = json.load(sys.stdin)
+c23 = next((c for c in data.get('checks', []) if c.get('id') == 23), None)
+sys.exit(0 if c23 and c23.get('status') == 'pass' else 1)
+" 2>/dev/null; then
+    echo "  PASS: Doctor check 23 passes when AGENT_DIR set"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: Doctor check 23 should pass when AGENT_DIR set"
+    FAIL=$((FAIL + 1))
+fi
+TOTAL=$((TOTAL + 1))
+
+# ── Test 20: Doctor events coverage ──────────────────────────────────
+echo "[20] Doctor events coverage (check_66)"
+EVENTS_COVERAGE_SCRIPT="/tmp/hex-setup/tests/test-doctor-events-coverage.sh"
+if [ -f "$EVENTS_COVERAGE_SCRIPT" ]; then
+    EVENTS_OUT=$(bash "$EVENTS_COVERAGE_SCRIPT" 2>&1)
+    EVENTS_EXIT=$?
+    if [ "$EVENTS_EXIT" -eq 0 ]; then
+        echo "  PASS: all doctor-events-coverage assertions passed"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL: doctor-events-coverage test had failures"
+        echo "$EVENTS_OUT" | tail -20 | sed 's/^/    /'
+        FAIL=$((FAIL + 1))
+    fi
+else
+    echo "  FAIL: test-doctor-events-coverage.sh not found at $EVENTS_COVERAGE_SCRIPT"
     FAIL=$((FAIL + 1))
 fi
 TOTAL=$((TOTAL + 1))

@@ -30,7 +30,7 @@ except ImportError:
     print("ERROR: PyYAML not installed. Run: pip install pyyaml", file=sys.stderr)
     sys.exit(1)
 
-HEX_ROOT = os.environ.get("HEX_ROOT", os.path.expanduser("${AGENT_DIR:-$HOME/hex}"))
+HEX_ROOT = os.environ.get("HEX_ROOT", os.path.expanduser("${HEX_DIR:-$HOME/hex}"))
 INITIATIVES_DIR = os.path.join(HEX_ROOT, "initiatives")
 EXPERIMENTS_DIR = os.path.join(HEX_ROOT, "experiments")
 SCRIPTS_DIR = os.path.join(HEX_ROOT, ".hex", "scripts")
@@ -274,8 +274,8 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
             if kr.get("status") != "met":
                 continue
             measured_at = kr.get("measured_at", "")
-            # Only flag as "newly met" if measurement happened in last 2h
-            if measured_at and _age_hours(measured_at) <= 2.0:
+            # Only flag as "newly met" if measurement happened in last 2h and KR not already closed
+            if measured_at and _age_hours(measured_at) <= 2.0 and not kr.get("closed_at"):
                 kr_id = kr.get("id")
                 summary["actions"].append({
                     "initiative": init_id, "step": 2, "action": "kr_newly_met",
@@ -397,7 +397,7 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                 })
                 _emit("initiative.at_risk", {
                     "initiative_id": init_id, "days_remaining": days_left,
-                    "unmet_krs": unmet, "channel": os.environ.get("HEX_ESCALATION_CHANNEL", "#from-hex"),
+                    "unmet_krs": unmet, "channel": os.environ.get("HEX_ESCALATION_CHANNEL", "#hex-announcements"),
                 }, dry_run=dry_run)
 
     return summary

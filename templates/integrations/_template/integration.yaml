@@ -6,7 +6,7 @@ tier: standard           # critical | standard | slow
 version: "1.0"
 
 # ─── Dependency graph ────────────────────────────────────────────────────────
-depends_on: []           # e.g. [slack-bot] if this integration needs slack-bot healthy
+depends_on: []           # e.g. [<service_name>] if this integration needs another integration healthy
 provides:
   - hex.integration.REPLACE_ME.probe_ok
   - hex.integration.REPLACE_ME.probe_fail

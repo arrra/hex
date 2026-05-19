@@ -1,12 +1,13 @@
 [package]
 name = "hex"
-# Keep in sync with /version.txt — that file is the source of truth.
-# build.rs reads version.txt and injects HEX_VERSION at compile time.
-version = "0.8.0"
+# Source of truth for hex version. Bumped by release.sh; build.rs
+# injects this via env!("CARGO_PKG_VERSION") at compile time.
+version = "0.16.0"
 edition = "2021"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
+clap_complete = "4"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 serde_yaml = "0.9"
@@ -14,10 +15,12 @@ chrono = { version = "0.4", features = ["serde"] }
 uuid = { version = "1", features = ["v4"] }
 shellexpand = "3"
 glob = "0.3"
+walkdir = "2"
 sha2 = "0.10"
 hex-bytes = { package = "hex", version = "0.4" }
 fs2 = "0.4"
-rusqlite = { version = "0.31", features = ["bundled"] }
+rusqlite = { version = "0.31", features = ["bundled-full"] }
+regex = "1"
 
 [dev-dependencies]
 tempfile = "3"

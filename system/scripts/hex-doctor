@@ -17,23 +17,23 @@
 
 set -uo pipefail
 
-# ─── Resolve AGENT_DIR ────────────────────────────────────────────────────────
-if [ -z "${AGENT_DIR:-}" ]; then
+# ─── Resolve HEX_DIR ────────────────────────────────────────────────────────
+if [ -z "${HEX_DIR:-}" ]; then
   SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
   candidate="$SCRIPT_DIR"
   while [ "$candidate" != "/" ]; do
     if [ -f "$candidate/CLAUDE.md" ]; then
-      AGENT_DIR="$candidate"
+      HEX_DIR="$candidate"
       break
     fi
     candidate="$(dirname "$candidate")"
   done
-  AGENT_DIR="${AGENT_DIR:-$HOME/mrap-hex}"
+  HEX_DIR="${HEX_DIR:-${HEX_DIR:-$HOME/hex}}"
 fi
 
-CLAUDE_DIR="$AGENT_DIR/.claude"
-SCRIPTS_DIR="$CLAUDE_DIR/scripts"
-HEX_CHECKS_DIR="$AGENT_DIR/scripts/doctor-checks"
+CLAUDE_DIR="$HEX_DIR/.hex"
+SCRIPTS_DIR="$HEX_DIR/.hex/scripts"
+HEX_CHECKS_DIR="$HEX_DIR/.hex/scripts/doctor-checks"
 
 # ─── Flags ────────────────────────────────────────────────────────────────────
 FIX=false
@@ -74,7 +74,8 @@ HAS_ERRORS=false
 HAS_WARNINGS=false
 
 CHECKS_FILE=$(mktemp /tmp/hex-doctor-checks.XXXXXX)
-trap 'rm -f "$CHECKS_FILE"' EXIT
+DOCTOR_TMP=$(mktemp -t hex-doctor-XXXXXX)
+trap 'rm -f "$CHECKS_FILE" "$DOCTOR_TMP"' EXIT
 
 # ─── Output helpers ───────────────────────────────────────────────────────────
 _pass() {
@@ -115,7 +116,7 @@ _rec() {
 echo ""
 echo -e "${BOLD}Hex Doctor — Full System Health Check${RESET}"
 echo "━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━"
-echo -e "${DIM}AGENT_DIR=$AGENT_DIR${RESET}"
+echo -e "${DIM}HEX_DIR=$HEX_DIR${RESET}"
 if $FIX;   then echo -e "${DIM}Mode: --fix enabled (auto-remediation on)${RESET}"; fi
 if $SMOKE; then echo -e "${DIM}Mode: --smoke enabled (end-to-end tests on)${RESET}"; fi
 
@@ -131,22 +132,27 @@ if [ -f "$DOCTOR_SH" ]; then
   echo -e "${BOLD}Installation Checks${RESET}"
   echo "  ─────────────────────────────────────────"
 
-  # Run doctor.sh and capture output (avoid empty array with -u)
+  # Stream doctor.sh output live to the terminal AND tee to a temp file so we
+  # can parse the summary line afterward. Capturing into a variable buffered the
+  # entire run — caused the appearance of hangs during integration checks.
+  # tail -n +5 strips doctor.sh's own header (4 lines) so it doesn't duplicate
+  # the bold "Installation Checks" header we just printed.
   if $FIX && $QUIET; then
-    doctor_output=$(bash "$DOCTOR_SH" --fix --quiet 2>&1) || true
+    bash "$DOCTOR_SH" --fix --quiet 2>&1 | tee "$DOCTOR_TMP" | tail -n +5
   elif $FIX; then
-    doctor_output=$(bash "$DOCTOR_SH" --fix 2>&1) || true
+    bash "$DOCTOR_SH" --fix 2>&1 | tee "$DOCTOR_TMP" | tail -n +5
   elif $QUIET; then
-    doctor_output=$(bash "$DOCTOR_SH" --quiet 2>&1) || true
+    bash "$DOCTOR_SH" --quiet 2>&1 | tee "$DOCTOR_TMP" | tail -n +5
   else
-    doctor_output=$(bash "$DOCTOR_SH" 2>&1) || true
+    bash "$DOCTOR_SH" 2>&1 | tee "$DOCTOR_TMP" | tail -n +5
   fi
-
-  # Print doctor.sh output (skip the header lines it already prints, show check results)
-  # Filter: remove the doctor.sh header (first 4 lines with title/separator/AGENT_DIR/blank)
-  echo "$doctor_output" | tail -n +5 | while IFS= read -r line; do
-    echo "$line"
-  done
+  # PIPESTATUS[0]=doctor.sh, [1]=tee, [2]=tail. Without -e we keep going on
+  # failure, so capture all three and surface explicitly. tee failing (disk full,
+  # permission, ENOSPC) while doctor.sh exits 0 was a silent-failure path.
+  doctor_sh_exit="${PIPESTATUS[0]}"
+  doctor_tee_exit="${PIPESTATUS[1]:-0}"
+  doctor_tail_exit="${PIPESTATUS[2]:-0}"
+  doctor_output="$(cat "$DOCTOR_TMP")"
 
   # Parse summary from doctor.sh output: "  Summary: N passed, N warnings, N errors, N fixed"
   summary_line=$(echo "$doctor_output" | grep "Summary:" | tail -1) || summary_line=""
@@ -162,6 +168,15 @@ if [ -f "$DOCTOR_SH" ]; then
     FIXED_COUNT=$((FIXED_COUNT + ${INSTALL_FIXED:-0}))
     [ "${INSTALL_ERRORS:-0}" -gt 0 ] && HAS_ERRORS=true
     [ "${INSTALL_WARNINGS:-0}" -gt 0 ] && HAS_WARNINGS=true
+  elif [ "${doctor_sh_exit:-1}" -ne 0 ]; then
+    _error "Installation checks crashed (doctor.sh exit $doctor_sh_exit) — no Summary line"
+    HAS_ERRORS=true
+  elif [ "${doctor_tee_exit:-0}" -ne 0 ] || [ "${doctor_tail_exit:-0}" -ne 0 ]; then
+    _error "Installation checks output pipeline failed (tee=$doctor_tee_exit tail=$doctor_tail_exit) — Summary may be incomplete"
+    HAS_ERRORS=true
+  else
+    _error "Installation checks produced no Summary line — counts unverified"
+    HAS_ERRORS=true
   fi
 else
   _warn "Installation checks skipped: doctor.sh not found at $DOCTOR_SH"
@@ -252,6 +267,201 @@ else
     check_65
   fi
 
+fi
+
+# ─── Alert Pipeline check ─────────────────────────────────────────────────────
+ALERT_PIPELINE_CHECK="$SCRIPTS_DIR/health/check-alert-pipeline.sh"
+if [ -f "$ALERT_PIPELINE_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}Alert Pipeline${RESET}"
+  echo "  ─────────────────────────────────────────"
+  alert_out=""
+  alert_exit=0
+  alert_out="$(bash "$ALERT_PIPELINE_CHECK" 2>&1)" || alert_exit=$?
+  if [ "$alert_exit" -eq 0 ]; then
+    _pass "$alert_out"
+  else
+    _error "$alert_out"
+  fi
+fi
+
+# ─── Reflection Liveness check ───────────────────────────────────────────────
+REFLECTION_LIVENESS_CHECK="$SCRIPTS_DIR/health/check-reflection-liveness.sh"
+if [ -f "$REFLECTION_LIVENESS_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}Reflection Liveness${RESET}"
+  echo "  ─────────────────────────────────────────"
+  rl_out=""
+  rl_exit=0
+  rl_out="$(bash "$REFLECTION_LIVENESS_CHECK" 2>&1)" || rl_exit=$?
+  if [ "$rl_exit" -eq 0 ]; then
+    _pass "$rl_out"
+  else
+    _error "$rl_out"
+  fi
+fi
+
+# ─── BOI DB Canonical check ───────────────────────────────────────────────────
+BOI_DB_CHECK="$SCRIPTS_DIR/health/check-boi-db-canonical.sh"
+if [ -f "$BOI_DB_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}BOI DB Canonical${RESET}"
+  echo "  ─────────────────────────────────────────"
+  boi_db_out=""
+  boi_db_exit=0
+  boi_db_out="$(bash "$BOI_DB_CHECK" 2>&1)" || boi_db_exit=$?
+  if [ "$boi_db_exit" -eq 0 ]; then
+    _pass "$boi_db_out"
+  else
+    _error "$boi_db_out"
+  fi
+fi
+
+# ─── Message Roundtrip check ─────────────────────────────────────────────────
+# Targets the `health-probe` agent (skip_llm) — exercises the wake plumbing
+# (inbox → mark_delivered → audit) without an LLM call. Fast and free.
+MSG_ROUNDTRIP_CHECK="$SCRIPTS_DIR/health/check-message-roundtrip.sh"
+if [ -f "$MSG_ROUNDTRIP_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}Message Roundtrip${RESET}"
+  echo "  ─────────────────────────────────────────"
+  bash "$MSG_ROUNDTRIP_CHECK" 2>&1 | tee "$DOCTOR_TMP.msgrt"
+  msg_rt_exit="${PIPESTATUS[0]}"
+  if [ "$msg_rt_exit" -eq 0 ]; then
+    PASS_COUNT=$((PASS_COUNT + 1))
+  else
+    ERROR_COUNT=$((ERROR_COUNT + 1))
+    HAS_ERRORS=true
+  fi
+  rm -f "$DOCTOR_TMP.msgrt"
+fi
+
+# ─── Vector Search check ─────────────────────────────────────────────────────
+# Surfaces sqlite-vec drift: if the vec0 module isn't loadable, semantic memory
+# search silently falls back to FTS keyword-only.
+VEC_CHECK="$SCRIPTS_DIR/health/check-vector-search.sh"
+if [ -f "$VEC_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}Memory Vector Search${RESET}"
+  echo "  ─────────────────────────────────────────"
+  vec_out=""
+  vec_exit=0
+  vec_out="$(SKIP_ALERT=1 bash "$VEC_CHECK" 2>&1)" || vec_exit=$?
+  if [ "$vec_exit" -eq 0 ]; then
+    _pass "$vec_out"
+  else
+    _error "$vec_out"
+  fi
+fi
+
+# ─── hex-events Policy Load Errors ───────────────────────────────────────────
+# Surfaces POLICY LOAD/VALIDATION ERROR entries from the daemon log that would
+# otherwise sit silently — legacy-schema policies, deprecated fields, etc.
+POLICY_LOAD_CHECK="$SCRIPTS_DIR/health/check-hex-events-policy-load.sh"
+if [ -f "$POLICY_LOAD_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}hex-events Policy Load${RESET}"
+  echo "  ─────────────────────────────────────────"
+  pol_out=""
+  pol_exit=0
+  pol_out="$(SKIP_ALERT=1 bash "$POLICY_LOAD_CHECK" 2>&1)" || pol_exit=$?
+  if [ "$pol_exit" -eq 0 ]; then
+    _pass "$pol_out"
+  else
+    _error "$pol_out"
+  fi
+fi
+
+# ─── Message Divergence check ────────────────────────────────────────────────
+MSG_DIVERGENCE_CHECK="$SCRIPTS_DIR/health/check-message-divergence.sh"
+if [ -f "$MSG_DIVERGENCE_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}Message Divergence${RESET}"
+  echo "  ─────────────────────────────────────────"
+  msg_div_out=""
+  msg_div_exit=0
+  msg_div_out="$(bash "$MSG_DIVERGENCE_CHECK" 2>&1)" || msg_div_exit=$?
+  if [ "$msg_div_exit" -eq 0 ]; then
+    _pass "$msg_div_out"
+  else
+    _error "$msg_div_out"
+  fi
+fi
+
+# ─── Career Auto-Send Pipeline check ─────────────────────────────────────────
+CAREER_PIPELINE_CHECK="$SCRIPTS_DIR/health/check-career-pipeline.sh"
+if [ -f "$CAREER_PIPELINE_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}Career Auto-Send Pipeline${RESET}"
+  echo "  ─────────────────────────────────────────"
+  career_out=""
+  career_exit=0
+  career_out="$(bash "$CAREER_PIPELINE_CHECK" --dry-run 2>&1)" || career_exit=$?
+  if [ "$career_exit" -eq 0 ]; then
+    _pass "$career_out"
+  else
+    _error "$career_out"
+  fi
+fi
+
+# ─── Fleet Pulse check ───────────────────────────────────────────────────────
+# Note: SCRIPTS_DIR may be overridden by sourced check files; use absolute path.
+FLEET_PULSE_CHECK="$HEX_DIR/.hex/scripts/health/check-fleet-pulse.sh"
+if [ -f "$FLEET_PULSE_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}Fleet Pulse${RESET}"
+  echo "  ─────────────────────────────────────────"
+  fleet_pulse_out=""
+  fleet_pulse_exit=0
+  fleet_pulse_out="$(bash "$FLEET_PULSE_CHECK" --dry-run 2>&1)" || fleet_pulse_exit=$?
+  if [ "$fleet_pulse_exit" -eq 0 ]; then
+    _pass "$fleet_pulse_out"
+  else
+    _error "$fleet_pulse_out"
+  fi
+fi
+
+# ─── Stalled Initiative Monitor check ────────────────────────────────────────
+STALLED_INIT_CHECK="$HEX_DIR/.hex/scripts/health/check-stalled-initiatives.sh"
+if [ -f "$STALLED_INIT_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}Stalled Initiative Monitor${RESET}"
+  echo "  ─────────────────────────────────────────"
+  stalled_out=""
+  stalled_exit=0
+  stalled_out="$(bash "$STALLED_INIT_CHECK" --dry-run 2>&1)" || stalled_exit=$?
+  if [ "$stalled_exit" -eq 0 ]; then
+    _pass "$stalled_out"
+  else
+    _error "$stalled_out"
+  fi
+fi
+
+# ─── Failure Routing Roundtrip check ─────────────────────────────────────────
+FAILURE_ROUTING_CHECK="$HEX_DIR/.hex/scripts/health/check-failure-routing-roundtrip.sh"
+if [ -f "$FAILURE_ROUTING_CHECK" ]; then
+  MODULE_COUNT=$((MODULE_COUNT + 1))
+  echo ""
+  echo -e "${BOLD}Failure Routing Roundtrip${RESET}"
+  echo "  ─────────────────────────────────────────"
+  fr_out=""
+  fr_exit=0
+  fr_out="$(bash "$FAILURE_ROUTING_CHECK" 2>&1)" || fr_exit=$?
+  if [ "$fr_exit" -eq 0 ]; then
+    _pass "$fr_out"
+  else
+    _error "$fr_out"
+  fi
 fi
 
 # ─── Summary ──────────────────────────────────────────────────────────────────

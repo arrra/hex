@@ -19,3 +19,15 @@ Thumbs.db
 
 # Test artifacts
 /tmp/
+system/scripts/health/test*.txt
+
+# Local runtime artifacts
+.hex/
+.agents/
+.codex/
+todo.md
+
+# Generated reports and local test artifacts
+AUDIT-REPORT.md
+pytest.ini
+tests/test_integration.py

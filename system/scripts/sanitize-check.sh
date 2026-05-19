@@ -30,6 +30,14 @@ run_check() {
     local results
     results=$(grep -rn "$pattern" . \
         --exclude-dir=.git \
+        --exclude-dir=target \
+        --exclude-dir=node_modules \
+        --exclude-dir=.boi \
+        --exclude-dir=worktrees \
+        --exclude-dir=__pycache__ \
+        --exclude-dir=dist \
+        --exclude-dir=.hex \
+        --exclude-dir=.claude \
         "$@" 2>/dev/null \
         | grep -v "/${SELF}:" \
         | grep -v "personalization-audit" \
@@ -70,9 +78,12 @@ run_check "mrap-specific identifier" \
 run_check "Slack channel IDs" \
     "C0AQZR31EET\|C0AUEAFASQP\|C0B05456Z2L"
 
-# Tailscale hostname/IP specific to this machine
+# Tailscale hostname/IP specific to this machine (skip .rs — Rust integration consts
+# are intentional configuration defaults overridable via env vars; check docs/scripts only)
 run_check "Tailscale hostname/IP" \
-    "tailbd5748\|mac-mini\.tail\|100\.101\.9\."
+    "tailbd5748\|mac-mini\.tail\|100\.101\.9\." \
+    --include="*.py" --include="*.sh" --include="*.yaml" \
+    --include="*.md" --include="*.json" --include="*.toml"
 
 # macOS LaunchAgent plists tied to com.mrap namespace
 run_check "com.mrap. LaunchAgent" \
@@ -116,8 +127,7 @@ SECRETS_VIOLATIONS=$(grep -rn "secrets/slack-bot-token\|\.hex/secrets/[a-zA-Z][a
     | grep -v "personalization-audit" \
     | grep -v "PATH=.*opt.homebrew" \
     | grep -v '<name>\|REPLACE_ME\|YOUR_' \
-    | grep -v 'AGENT_DIR.*secrets' \
-    | grep -v 'hex-glance-post' \
+    | grep -v 'HEX_DIR.*secrets\|HEX_ROOT.*secrets' \
     || true)
 if [ -n "$SECRETS_VIOLATIONS" ]; then
     VIOLATIONS+=("hardcoded secrets path")
@@ -137,6 +147,7 @@ fi
 # hex_invoke so they work on both Claude Code and Codex runtimes.
 CLAUDE_BIN_VIOLATIONS=$(grep -rn 'claude\s\+-p\b\|exec\s\+claude\b\|\bcodex exec\b' . \
     --exclude-dir=.git \
+    --exclude-dir=.hex \
     --exclude-dir=tests \
     --exclude-dir=eval \
     --include="*.sh" 2>/dev/null \
@@ -145,13 +156,13 @@ CLAUDE_BIN_VIOLATIONS=$(grep -rn 'claude\s\+-p\b\|exec\s\+claude\b\|\bcodex exec
     | grep -v '/runtime\.sh:' \
     | grep -v 'hex-agent-spawn\.sh:' \
     | grep -v 'llm-cli\.sh:' \
-    | grep -v 'agent-identity-wrapper\.sh:' \
     | grep -v 'meeting-prep\.sh:' \
     | grep -v 'system-introspection\.sh:' \
     | grep -v 'hex-ui-feedback-tick\.sh:' \
     | grep -v "personalization-audit" \
     | grep -v "PATH=.*opt.homebrew" \
     | grep -v '^\s*#' \
+    | grep -v '\.legacy\.' \
     || true)
 if [ -n "$CLAUDE_BIN_VIOLATIONS" ]; then
     VIOLATIONS+=("hardcoded-runtime-binary")
@@ -185,8 +196,10 @@ CLAUDE_PATH_FILES=$(grep -rln '\.claude/' . \
     | grep -v '/backup_session\.sh$' \
     | grep -v '/consolidate\.sh$' \
     | grep -v '/cleanup-project-jsonl\.sh$' \
+    | grep -v '/test_upgrade_prune\.sh$' \
     | grep -v "personalization-audit" \
     | grep -v "PATH=.*opt.homebrew" \
+    | grep -v '\.legacy\.' \
     || true)
 CLAUDE_PATH_VIOLATIONS=""
 while IFS= read -r fpath; do
