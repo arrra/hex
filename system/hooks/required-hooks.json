@@ -1,11 +1,1 @@
-{
-  "Stop": [
-    {
-      "id": "session-stop-persist",
-      "matcher": "",
-      "script": ".hex/hooks/scripts/session-stop-persist.sh",
-      "description": "Persist per-session summary (cc-connect) + emit session.stop event",
-      "required": true
-    }
-  ]
-}
+{}
