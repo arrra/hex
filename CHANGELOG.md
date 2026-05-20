@@ -2,7 +2,7 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
-## [2026-05-20] — TriggerSpec unification + truncation recovery (v0.17.0)
+## [2026-05-20] — TriggerSpec unification + truncation recovery + harness reliability (v0.17.0)
 
 ### Added
 - **Bare-string trigger syntax**: `WakeConfig.triggers` now accepts `"timer.tick.6h"` in addition to the full struct form `{ event: { name: "timer.tick.6h" } }`. Both forms are valid in charter YAML. `BlockedItem` gains the same dual-form acceptance. Eliminates boilerplate in every policy file.
@@ -10,11 +10,17 @@ All notable changes to hex-foundation will be documented in this file.
 - **Events disk-backed status**: `hex events status` now persists event state to disk, surviving daemon restarts. Daemon status is readable without the daemon running.
 - **Doctor check_16**: modernized doctor check for bare-string trigger coverage in active policies.
 - **Truncated response recovery (S6)**: harness salvages complete leading elements from truncated JSON agent responses via char-by-char depth scanning. Every truncation emits a loud eprintln warning, an audit entry (`response-truncated`), and a `hex.agent.response.truncated` event — no more silent partial data loss.
+- **Non-JSON retry**: harness retries agent wake once when the first response is non-JSON, appending a stern JSON-only reprompt. Prevents permanent failure from one malformed response.
+- **Upgrade restarts events daemon**: `hex upgrade` restarts the events daemon after binary swap, ensuring the new binary is immediately active without manual restart.
 
 ### Changed
 - `TriggerSpec` unified across `WakeConfig.triggers` and `BlockedItem` — single deserialization path handles both bare-string and struct forms.
+- Agent wake prompt instructs agents to keep response compact to prevent truncation.
+- Trail emitted last in agent response format so truncation always spares actionable fields (messages, queue updates).
+- Stale `.hex/scripts/*.sh` refs in commands updated to `hex` subcommands (hex-checkpoint, hex-doctor, hex-save, hex-scout, hex-sync-base, hex-upgrade).
 
 ### Fixed
+- **Atomic binary install** (vnode-poisoning fix): `hex upgrade` now writes to a temp file, codesigns it, then renames over the destination inode — safe even when the binary is currently executing (mmap'd). Prevents macOS code-signing vnode cache poisoning.
 - Stale test updated for bare-string `BlockedItem` deserialization.
 - `BOI(S8585)` spec tasks completed (internal).
 
