@@ -402,6 +402,26 @@ fn record_upgrade_sha(config_file: &Path, source_dir: &Path, repo_url: &str) {
     }
 }
 
+fn restart_events_daemon() {
+    let uid = Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .unwrap_or_default();
+    let target = format!("gui/{uid}/com.mrap.hex-eventd");
+    let result = Command::new("launchctl")
+        .args(["kickstart", "-k", &target])
+        .status();
+    match result {
+        Ok(s) if s.success() =>
+            println!("  [OK] events daemon restarted on new binary"),
+        _ =>
+            eprintln!("  [WARN] could not restart events daemon — run: launchctl kickstart -k {target}"),
+    }
+}
+
 fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
     let versions_file = hex_dir.join("VERSIONS");
     if !versions_file.exists() {
@@ -491,7 +511,10 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
             Ok(s) if s.success() => {
                 let release_bin = harness_dst.join("target/release/hex");
                 match atomic_install_binary(&release_bin, &installed_bin) {
-                    Ok(()) => println!("  [OK] hex binary rebuilt and swapped (atomic): v{cargo_ver}"),
+                    Ok(()) => {
+                        println!("  [OK] hex binary rebuilt and swapped (atomic): v{cargo_ver}");
+                        restart_events_daemon();
+                    }
                     Err(e) => { eprintln!("  [FAIL] atomic binary install failed: {e}"); return; }
                 }
             }
