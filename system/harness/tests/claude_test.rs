@@ -67,12 +67,12 @@ fn test_active_item_tolerates_missing_id() {
 }
 
 #[test]
-fn test_string_in_moved_to_blocked_is_skipped() {
-    // RED: before fix — "invalid type: string, expected struct BlockedItem" fails entire parse
-    // GREEN: after fix, malformed string item is skipped, response recovers
+fn test_string_in_moved_to_blocked_is_kept() {
+    // BlockedItem now accepts bare strings — "s-initiative-loop" parses to BlockedItem{id, ..Default}
     let json = r#"{"trail":[],"queue_updates":{"completed":[],"added_active":[],"moved_to_blocked":["s-initiative-loop"],"parked":[]},"memory_updates":null,"outbound_messages":[],"active_drained":true}"#;
     let response = claude::parse_agent_response(json).unwrap();
-    assert_eq!(response.queue_updates.moved_to_blocked.len(), 0, "malformed string item should be skipped");
+    assert_eq!(response.queue_updates.moved_to_blocked.len(), 1, "bare string should parse as BlockedItem");
+    assert_eq!(response.queue_updates.moved_to_blocked[0].id, "s-initiative-loop");
     assert!(response.active_drained);
 }
 
