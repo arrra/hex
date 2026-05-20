@@ -51,7 +51,7 @@ pub struct ActiveItem {
     pub source: String,
 }
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize)]
 pub struct BlockedItem {
     #[serde(default)]
     pub id: String,
@@ -66,6 +66,33 @@ pub struct BlockedItem {
     pub blocked_ref: Option<String>,
     #[serde(default = "default_now")]
     pub blocked_since: DateTime<Utc>,
+}
+
+impl<'de> Deserialize<'de> for BlockedItem {
+    fn deserialize<D>(d: D) -> Result<Self, D::Error>
+    where
+        D: Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Bare(String),
+            Full {
+                #[serde(default)] id: String,
+                #[serde(default)] summary: String,
+                #[serde(default)] priority: i32,
+                #[serde(default)] blocked_on: String,
+                #[serde(default)] blocked_type: String,
+                blocked_ref: Option<String>,
+                #[serde(default = "default_now")] blocked_since: DateTime<Utc>,
+            },
+        }
+        match Repr::deserialize(d)? {
+            Repr::Bare(s) => Ok(BlockedItem { id: s, ..Default::default() }),
+            Repr::Full { id, summary, priority, blocked_on, blocked_type, blocked_ref, blocked_since } =>
+                Ok(BlockedItem { id, summary, priority, blocked_on, blocked_type, blocked_ref, blocked_since }),
+        }
+    }
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -105,6 +132,7 @@ pub struct TrailEntry {
     pub ts: DateTime<Utc>,
     #[serde(rename = "type")]
     pub entry_type: String,
+    #[serde(default)]
     pub detail: serde_json::Value,
     pub queue_item: Option<String>,
 }
@@ -460,4 +488,63 @@ pub struct Charter {
     /// Empty = reactive-only agent; never auto-promotes from backlog.
     #[serde(default)]
     pub proactive_initiatives: Vec<String>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blocked_item_parses_bare_string() {
+        let v: BlockedItem = serde_json::from_str("\"s-release-staging\"").unwrap();
+        assert_eq!(v.id, "s-release-staging");
+        assert_eq!(v.summary, "");
+    }
+
+    #[test]
+    fn blocked_item_parses_full_struct() {
+        let j = r#"{"id":"x","summary":"s","priority":2,"blocked_on":"dep","blocked_type":"spec","blocked_ref":null}"#;
+        let v: BlockedItem = serde_json::from_str(j).unwrap();
+        assert_eq!(v.id, "x");
+        assert_eq!(v.priority, 2);
+    }
+
+    #[test]
+    fn lenient_vec_keeps_bare_string_blocked_items() {
+        #[derive(Deserialize)]
+        struct Wrap {
+            #[serde(deserialize_with = "deserialize_lenient_vec")]
+            blocked: Vec<BlockedItem>,
+        }
+        let j = r#"{"blocked":["s-a",{"id":"s-b"},"s-c"]}"#;
+        let w: Wrap = serde_json::from_str(j).unwrap();
+        assert_eq!(w.blocked.len(), 3);
+        assert_eq!(w.blocked[0].id, "s-a");
+        assert_eq!(w.blocked[2].id, "s-c");
+    }
+
+    #[test]
+    fn trail_entry_parses_without_detail() {
+        let j = r#"{"ts":"2026-05-20T00:00:00Z","type":"observe"}"#;
+        let e: TrailEntry = serde_json::from_str(j).unwrap();
+        assert!(e.detail.is_null());
+        assert_eq!(e.entry_type, "observe");
+    }
+
+    #[test]
+    fn trail_entry_parses_with_detail() {
+        let j = r#"{"ts":"2026-05-20T00:00:00Z","type":"act","detail":{"note":"did a thing"}}"#;
+        let e: TrailEntry = serde_json::from_str(j).unwrap();
+        assert_eq!(e.detail["note"], "did a thing");
+    }
+
+    #[test]
+    fn trail_vec_survives_missing_detail() {
+        let j = r#"[
+            {"ts":"2026-05-20T00:00:00Z","type":"observe"},
+            {"ts":"2026-05-20T00:01:00Z","type":"act","detail":{"x":1}}
+        ]"#;
+        let v: Vec<TrailEntry> = serde_json::from_str(j).unwrap();
+        assert_eq!(v.len(), 2);
+    }
 }
