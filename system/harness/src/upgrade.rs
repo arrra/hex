@@ -247,6 +247,40 @@ pub fn deletion_pass(dst_dir: &Path, src_dir: &Path, backup_dir: &Path) -> io::R
     Ok(deleted)
 }
 
+/// Atomically install an executable: write to a temp file in
+/// the destination directory, make it executable, ad-hoc
+/// codesign it, then rename it over `dst`. Never mutates the
+/// live destination inode — safe even if `dst` is currently
+/// being executed (mmap'd). Prevents code-signing vnode
+/// poisoning.
+fn atomic_install_binary(src: &Path, dst: &Path) -> io::Result<()> {
+    let dst_dir = dst.parent().ok_or_else(|| {
+        io::Error::new(io::ErrorKind::InvalidInput, "dst has no parent directory")
+    })?;
+    fs::create_dir_all(dst_dir)?;
+    let tmp = dst_dir.join(format!(".hex-install-{}.tmp", std::process::id()));
+
+    let result = (|| {
+        fs::copy(src, &tmp)?;
+        let mut perms = fs::metadata(&tmp)?.permissions();
+        perms.set_mode(0o755);
+        fs::set_permissions(&tmp, perms)?;
+        let cs = Command::new("codesign")
+            .args(["--force", "--sign", "-"])
+            .arg(&tmp)
+            .status()?;
+        if !cs.success() {
+            return Err(io::Error::new(io::ErrorKind::Other, "codesign failed on temp binary"));
+        }
+        fs::rename(&tmp, dst)
+    })();
+
+    if result.is_err() {
+        let _ = fs::remove_file(&tmp);
+    }
+    result
+}
+
 fn make_scripts_executable(dir: &Path) {
     for f in walk_files(dir) {
         if f.extension().and_then(|e| e.to_str()) == Some("sh") {
@@ -456,16 +490,10 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
         match build_status {
             Ok(s) if s.success() => {
                 let release_bin = harness_dst.join("target/release/hex");
-                if let Err(e) = fs::copy(&release_bin, &installed_bin) {
-                    eprintln!("  [FAIL] Failed to install hex binary: {e}");
-                    return;
+                match atomic_install_binary(&release_bin, &installed_bin) {
+                    Ok(()) => println!("  [OK] hex binary rebuilt and swapped (atomic): v{cargo_ver}"),
+                    Err(e) => { eprintln!("  [FAIL] atomic binary install failed: {e}"); return; }
                 }
-                let _ = Command::new("chmod").arg("+x").arg(&installed_bin).status();
-                let _ = Command::new("codesign")
-                    .args(["--force", "--sign", "-"])
-                    .arg(&installed_bin)
-                    .status();
-                println!("  [OK] hex binary rebuilt and swapped: v{cargo_ver}");
             }
             _ => {
                 eprintln!("  [FAIL] cargo build failed — install Rust and rerun upgrade");
@@ -737,6 +765,8 @@ pub fn run(args: &[String]) -> i32 {
 mod tests {
     use super::*;
     use std::fs;
+    #[cfg(unix)]
+    use std::os::unix::fs::MetadataExt;
 
     fn write_file(path: &Path, content: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
@@ -866,5 +896,75 @@ mod tests {
         assert!(files_differ(&a, &b));
         fs::write(&b, "hello").unwrap();
         assert!(!files_differ(&a, &b));
+    }
+
+    /// atomic_install_binary must: install to dst, make it executable, leave no temp behind.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_atomic_install_binary_basic() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let src = tmp.path().join("src_bin");
+        // Write a minimal valid Mach-O or any binary-ish content; codesign on macOS
+        // accepts any file for ad-hoc signing, so a simple ELF stub won't work.
+        // Use the current test binary as the source — it is already a real executable.
+        let self_path = std::env::current_exe().unwrap();
+        let dst = tmp.path().join("dst_bin");
+
+        atomic_install_binary(&self_path, &dst).unwrap();
+
+        assert!(dst.exists(), "dst must exist after atomic install");
+        let mode = fs::metadata(&dst).unwrap().permissions().mode();
+        assert!(mode & 0o111 != 0, "dst must be executable");
+
+        // No temp files should remain
+        let temps: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".hex-install-"))
+            .collect();
+        assert!(temps.is_empty(), "no temp files should remain after success");
+        drop(src);
+    }
+
+    /// Calling atomic_install_binary twice over the same dst must produce
+    /// a different inode each time — proving rename semantics, not in-place overwrite.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_atomic_install_binary_different_inode() {
+        let tmp = tempfile::tempdir().unwrap();
+        let self_path = std::env::current_exe().unwrap();
+        let dst = tmp.path().join("dst_inode");
+
+        atomic_install_binary(&self_path, &dst).unwrap();
+        let ino1 = fs::metadata(&dst).unwrap().ino();
+
+        atomic_install_binary(&self_path, &dst).unwrap();
+        let ino2 = fs::metadata(&dst).unwrap().ino();
+
+        assert_ne!(ino1, ino2, "each atomic install must produce a fresh inode");
+    }
+
+    /// After a successful atomic install, no .hex-install-*.tmp file must remain.
+    #[test]
+    #[cfg(target_os = "macos")]
+    fn test_atomic_install_binary_no_temp_on_success() {
+        let tmp = tempfile::tempdir().unwrap();
+        let self_path = std::env::current_exe().unwrap();
+        let dst = tmp.path().join("dst_cleanup");
+
+        atomic_install_binary(&self_path, &dst).unwrap();
+
+        let leftover: Vec<_> = fs::read_dir(tmp.path())
+            .unwrap()
+            .filter_map(|e| e.ok())
+            .filter(|e| e.file_name().to_string_lossy().starts_with(".hex-install-"))
+            .collect();
+        assert!(
+            leftover.is_empty(),
+            "no .hex-install-*.tmp must remain after success: {:?}",
+            leftover.iter().map(|e| e.file_name()).collect::<Vec<_>>()
+        );
     }
 }
