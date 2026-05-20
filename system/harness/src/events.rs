@@ -139,11 +139,37 @@ pub struct Action {
 // These types deserialize the `wake:` block from a project charter.yaml.
 // `id` is set by CharterLoader (derived from the project directory name).
 
-#[derive(Debug, Clone, Deserialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct TriggerSpec {
     pub event: String,
     #[serde(default)]
     pub condition: Option<String>,
+}
+
+// Accept either a bare string (`"timer.tick.6h"`) or a full struct
+// (`{event: "...", condition: "..."}`). The bare-string form sets
+// `condition = None`.
+impl<'de> Deserialize<'de> for TriggerSpec {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        #[derive(Deserialize)]
+        #[serde(untagged)]
+        enum Repr {
+            Short(String),
+            Full {
+                event: String,
+                #[serde(default)]
+                condition: Option<String>,
+            },
+        }
+
+        match Repr::deserialize(deserializer)? {
+            Repr::Short(event) => Ok(TriggerSpec { event, condition: None }),
+            Repr::Full { event, condition } => Ok(TriggerSpec { event, condition }),
+        }
+    }
 }
 
 /// Parsed from `wake.rate_limit` in a charter. `window` is a duration string
@@ -1453,29 +1479,88 @@ impl EventEngine {
     // ── CLI ───────────────────────────────────────────────────────────────────
 
     pub fn cli_status(&self) {
-        let policy_count = match self.policies.read() {
-            Ok(guard) => guard.len(),
-            Err(e) => {
-                eprintln!("events: policies lock poisoned: {e}");
-                0
+        // Query live state from shared on-disk artifacts so the CLI reports the
+        // running daemon's state, not this ephemeral CLI instance's state.
+        let home = PathBuf::from(shellexpand::tilde("~").as_ref());
+        let events_dir = home.join(".hex-events");
+        let policies_dir = events_dir.join("policies");
+        let db_path = events_dir.join("events.db");
+        let heartbeat_path = events_dir.join("last-heartbeat.json");
+
+        let policy_count = std::fs::read_dir(&policies_dir)
+            .map(|rd| {
+                rd.filter_map(|e| e.ok())
+                    .filter(|e| {
+                        e.path()
+                            .extension()
+                            .and_then(|s| s.to_str())
+                            .map(|s| s == "yaml" || s == "yml")
+                            .unwrap_or(false)
+                    })
+                    .count()
+            })
+            .unwrap_or(0);
+
+        let (total_events, processed, pending) = match Connection::open(&db_path) {
+            Ok(conn) => {
+                let total: i64 = conn
+                    .query_row("SELECT COUNT(*) FROM events", [], |r| r.get(0))
+                    .unwrap_or(0);
+                let proc_: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM events WHERE processed_at IS NOT NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                let pend: i64 = conn
+                    .query_row(
+                        "SELECT COUNT(*) FROM events WHERE processed_at IS NULL",
+                        [],
+                        |r| r.get(0),
+                    )
+                    .unwrap_or(0);
+                (total, proc_, pend)
             }
+            Err(_) => (0, 0, 0),
         };
-        let events_processed = match self.events_processed.lock() {
-            Ok(guard) => *guard,
-            Err(e) => {
-                eprintln!("events: events_processed lock poisoned: {e}");
-                0
-            }
-        };
-        let uptime_secs = self.start_time.elapsed().as_secs();
+
+        // Daemon liveness from heartbeat file mtime.
+        let (daemon_state, heartbeat_age_secs): (&str, Option<u64>) =
+            match heartbeat_path.metadata().and_then(|m| m.modified()) {
+                Ok(mtime) => match SystemTime::now().duration_since(mtime) {
+                    Ok(age) => {
+                        let secs = age.as_secs();
+                        if secs < 300 {
+                            ("running", Some(secs))
+                        } else {
+                            ("stale", Some(secs))
+                        }
+                    }
+                    Err(_) => ("unknown", None),
+                },
+                Err(_) => ("not-started", None),
+            };
 
         println!("hex events status");
-        println!("  uptime:           {uptime_secs}s");
+        println!("  daemon:           {daemon_state}");
+        match heartbeat_age_secs {
+            Some(s) => println!("  last heartbeat:   {s}s ago"),
+            None => println!("  last heartbeat:   (none)"),
+        }
         println!("  policies loaded:  {policy_count}");
-        println!("  events processed: {events_processed}");
-        println!("  policies dir:     {:?}", self.policies_dir);
-        if policy_count == 0 {
-            println!("  (server may not be running; showing local state)");
+        println!("  events total:     {total_events}");
+        println!("  events processed: {processed}");
+        println!("  events pending:   {pending}");
+        println!("  policies dir:     {}", policies_dir.display());
+        println!("  events db:        {}", db_path.display());
+
+        if daemon_state == "not-started" {
+            println!();
+            println!("  Daemon not running. Start with: hex events daemon");
+        } else if daemon_state == "stale" {
+            println!();
+            println!("  Heartbeat is stale (>5 min). Daemon may have crashed.");
         }
     }
 
