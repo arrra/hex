@@ -10,7 +10,6 @@ All notable changes to hex-foundation will be documented in this file.
 - **Events disk-backed status**: `hex events status` now persists event state to disk, surviving daemon restarts. Daemon status is readable without the daemon running.
 - **Doctor check_16**: modernized doctor check for bare-string trigger coverage in active policies.
 - **Truncated response recovery (S6)**: harness salvages complete leading elements from truncated JSON agent responses via char-by-char depth scanning. Every truncation emits a loud eprintln warning, an audit entry (`response-truncated`), and a `hex.agent.response.truncated` event — no more silent partial data loss.
-- **proposals-server.py**: brand proposal gallery server (port 8898) synced from mrap-hex to system/scripts/ per S1 layout mapping.
 
 ### Changed
 - `TriggerSpec` unified across `WakeConfig.triggers` and `BlockedItem` — single deserialization path handles both bare-string and struct forms.
