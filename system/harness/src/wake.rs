@@ -3,6 +3,48 @@ use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
 
+const NON_JSON_REPROMPT: &str = "\n\n⚠️ Your previous response was NOT valid JSON and was rejected. Respond with ONLY the JSON object specified in the Response format section — no prose, no markdown fences, no explanation before or after. Your entire response must start with { and end with }.";
+
+pub(crate) enum RetryOutcome {
+    Parsed { response: crate::types::AgentResponse, quality: claude::ResponseParseQuality, was_retried: bool },
+    BudgetExhausted,
+    Unrecoverable,
+    InvokeError(String),
+}
+
+/// Parse a first LLM result text. If it returns `Empty` quality (non-JSON, unsalvageable),
+/// attempt ONE retry with a stern JSON-only reprompt — but only when `budget_ok` is true.
+/// `retry_fn` is called with the augmented retry prompt and must return the result text or error.
+pub(crate) fn retry_if_empty<F>(
+    first_response: crate::types::AgentResponse,
+    first_quality: claude::ResponseParseQuality,
+    original_prompt: &str,
+    budget_ok: bool,
+    retry_fn: F,
+) -> RetryOutcome
+where
+    F: FnOnce(&str) -> Result<String, String>,
+{
+    if first_quality != claude::ResponseParseQuality::Empty {
+        return RetryOutcome::Parsed { response: first_response, quality: first_quality, was_retried: false };
+    }
+    if !budget_ok {
+        return RetryOutcome::BudgetExhausted;
+    }
+    let retry_prompt = format!("{original_prompt}{NON_JSON_REPROMPT}");
+    match retry_fn(&retry_prompt) {
+        Err(e) => RetryOutcome::InvokeError(e),
+        Ok(retry_text) => {
+            let (r2, q2) = claude::parse_agent_response(&retry_text);
+            if q2 == claude::ResponseParseQuality::Empty {
+                RetryOutcome::Unrecoverable
+            } else {
+                RetryOutcome::Parsed { response: r2, quality: q2, was_retried: true }
+            }
+        }
+    }
+}
+
 pub struct WakeConfig {
     pub hex_dir: PathBuf,
     pub agent_id: String,
@@ -261,37 +303,74 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
         cost::record_invocation(&mut agent_state.cost, &claude_output);
         cost::append_ledger(&cost_dir, &config.agent_id, &claude_output);
 
-        let (response, parse_quality) = claude::parse_agent_response(&claude_output.result);
+        let (first_response, first_quality) = claude::parse_agent_response(&claude_output.result);
 
-        match &parse_quality {
-            claude::ResponseParseQuality::Empty => {
+        let budget_ok_for_retry = shift_budget == 0.0
+            || cost::shift_budget_remaining(&agent_state.cost, shift_budget) > 0.0;
+
+        let mut retry_claude_output: Option<crate::types::ClaudeOutput> = None;
+        let retry_result = retry_if_empty(
+            first_response,
+            first_quality,
+            &prompt_text,
+            budget_ok_for_retry,
+            |retry_prompt| match claude::invoke(retry_prompt, "sonnet", &allowed_tools) {
+                Ok(out) => {
+                    let text = out.result.clone();
+                    retry_claude_output = Some(out);
+                    Ok(text)
+                }
+                Err(e) => Err(e.to_string()),
+            },
+        );
+
+        if let Some(ref out) = retry_claude_output {
+            cost::record_invocation(&mut agent_state.cost, out);
+            cost::append_ledger(&cost_dir, &config.agent_id, out);
+        }
+
+        let (response, parse_quality) = match retry_result {
+            RetryOutcome::Parsed { response, quality, was_retried } => {
+                if was_retried {
+                    eprintln!("[{}] non-JSON retry succeeded — response recovered", config.agent_id);
+                }
+                (response, quality)
+            }
+            RetryOutcome::BudgetExhausted | RetryOutcome::Unrecoverable => {
                 eprintln!(
-                    "[{}] WARNING: response produced no parseable content — all agent work LOST this wake",
+                    "[{}] WAKE RESPONSE UNRECOVERABLE after retry — shift work lost this iteration",
                     config.agent_id
                 );
                 audit::append(
                     &audit_dir,
                     &config.agent_id,
-                    "response-truncated",
-                    &serde_json::json!({
-                        "salvaged_trail": 0,
-                        "salvaged_messages": 0,
-                        "empty": true,
-                        "invocation": invocation,
-                    }),
+                    "wake-response-unrecoverable",
+                    &serde_json::json!({"wake": agent_state.wake_count}),
                 );
                 let emit_script = hex_dir.join(".hex/bin/hex-emit.sh");
                 let _ = std::process::Command::new(&emit_script)
-                    .arg("hex.agent.response.truncated")
+                    .arg("hex.agent.response.unrecoverable")
                     .arg(serde_json::json!({
                         "agent": config.agent_id,
                         "wake": agent_state.wake_count,
-                        "salvaged_trail": 0,
-                        "salvaged_messages": 0,
-                        "empty": true,
                     }).to_string())
                     .status();
                 break;
+            }
+            RetryOutcome::InvokeError(e) => {
+                audit::append(
+                    &audit_dir,
+                    &config.agent_id,
+                    "claude-error",
+                    &serde_json::json!({"error": e, "invocation": invocation}),
+                );
+                break;
+            }
+        };
+
+        match &parse_quality {
+            claude::ResponseParseQuality::Empty => {
+                unreachable!("Empty quality should have been handled by retry_if_empty above")
             }
             claude::ResponseParseQuality::Salvaged { recovered_trail, recovered_messages } => {
                 eprintln!(
@@ -731,4 +810,93 @@ pub fn check_and_handle_loop(
         }
     }
     false
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::claude::ResponseParseQuality;
+    use crate::types::AgentResponse;
+
+    fn valid_agent_response_json() -> String {
+        r#"{"trail":[],"queue_updates":{"completed":[],"added_active":[],"moved_to_blocked":[],"parked":[]},"memory_updates":null,"outbound_messages":[],"active_drained":false}"#.to_string()
+    }
+
+    #[test]
+    fn retry_non_json_first_then_valid_json() {
+        let mut call_count = 0usize;
+        let outcome = retry_if_empty(
+            AgentResponse::default(),
+            ResponseParseQuality::Empty,
+            "original prompt",
+            true,
+            |retry_prompt| {
+                call_count += 1;
+                assert!(
+                    retry_prompt.contains("Your previous response was NOT valid JSON"),
+                    "retry prompt must contain stern reprompt"
+                );
+                Ok(valid_agent_response_json())
+            },
+        );
+        assert_eq!(call_count, 1, "exactly one retry invocation");
+        match outcome {
+            RetryOutcome::Parsed { was_retried, quality, .. } => {
+                assert!(was_retried, "was_retried must be true");
+                assert_eq!(quality, ResponseParseQuality::Clean);
+            }
+            _ => panic!("expected Parsed outcome"),
+        }
+    }
+
+    #[test]
+    fn retry_non_json_first_non_json_second_gives_up() {
+        let mut call_count = 0usize;
+        let outcome = retry_if_empty(
+            AgentResponse::default(),
+            ResponseParseQuality::Empty,
+            "original prompt",
+            true,
+            |_| {
+                call_count += 1;
+                Ok("still not json at all".to_string())
+            },
+        );
+        assert_eq!(call_count, 1, "exactly one retry — no third invocation");
+        assert!(matches!(outcome, RetryOutcome::Unrecoverable));
+    }
+
+    #[test]
+    fn retry_no_retry_on_clean_response() {
+        let mut call_count = 0usize;
+        let outcome = retry_if_empty(
+            AgentResponse::default(),
+            ResponseParseQuality::Clean,
+            "original prompt",
+            true,
+            |_| {
+                call_count += 1;
+                Ok("this should never be called".to_string())
+            },
+        );
+        assert_eq!(call_count, 0, "zero retries for clean first response");
+        assert!(matches!(outcome, RetryOutcome::Parsed { was_retried: false, .. }));
+    }
+
+    #[test]
+    fn retry_budget_exhausted_no_retry() {
+        let mut call_count = 0usize;
+        let outcome = retry_if_empty(
+            AgentResponse::default(),
+            ResponseParseQuality::Empty,
+            "original prompt",
+            false, // budget exhausted
+            |_| {
+                call_count += 1;
+                Ok("this should never be called".to_string())
+            },
+        );
+        assert_eq!(call_count, 0, "no retry when budget is exhausted");
+        assert!(matches!(outcome, RetryOutcome::BudgetExhausted));
+    }
 }
