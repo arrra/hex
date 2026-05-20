@@ -670,6 +670,9 @@ enum EventsCommands {
     Emit {
         event_type: String,
         payload: String,
+        /// Source tag for the emitted event (e.g., "hex:checkpoint")
+        #[arg(long, default_value = "cli")]
+        source: String,
     },
     /// Show full action chain for an event
     Trace {
@@ -2043,7 +2046,7 @@ fn main() {
                 });
             match command {
                 EventsCommands::Status => engine.cli_status(),
-                EventsCommands::Emit { event_type, payload } => engine.cli_emit(&event_type, &payload),
+                EventsCommands::Emit { event_type, payload, source } => engine.cli_emit(&event_type, &payload, &source),
                 EventsCommands::Trace { event_id } => engine.cli_trace(event_id),
                 EventsCommands::Policies => engine.cli_policies(),
                 EventsCommands::Reload => engine.cli_reload(),

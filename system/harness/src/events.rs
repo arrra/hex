@@ -1479,7 +1479,7 @@ impl EventEngine {
         }
     }
 
-    pub fn cli_emit(&self, event_type: &str, payload_json: &str) {
+    pub fn cli_emit(&self, event_type: &str, payload_json: &str, source: &str) {
         let payload: Value = match serde_json::from_str(payload_json) {
             Ok(v) => v,
             Err(e) => {
@@ -1487,8 +1487,8 @@ impl EventEngine {
                 std::process::exit(1);
             }
         };
-        let event_id = self.ingest(event_type, &payload, "cli");
-        println!("Emitted {event_type} (id={event_id})");
+        let event_id = self.ingest(event_type, &payload, source);
+        println!("Emitted {event_type} (id={event_id}, source={source})");
     }
 
     pub fn cli_trace(&self, event_id: i64) {
