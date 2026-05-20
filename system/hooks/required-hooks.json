@@ -1,35 +1,10 @@
 {
   "Stop": [
     {
-      "id": "backup-session",
+      "id": "session-stop-persist",
       "matcher": "",
-      "script": ".hex/hooks/scripts/backup_session.sh",
-      "description": "Back up session transcript to raw/transcripts/",
-      "required": true
-    }
-  ],
-  "UserPromptSubmit": [
-    {
-      "id": "backup-session-prompt",
-      "matcher": "",
-      "script": ".hex/hooks/scripts/backup_session.sh",
-      "description": "Back up session transcript on each user message",
-      "required": true
-    }
-  ],
-  "PreToolUse": [
-    {
-      "id": "block-cron-create",
-      "matcher": "CronCreate",
-      "command": "echo 'BLOCKED: Use hex-events policies at ~/.hex-events/policies/*.yaml — never CronCreate. See CLAUDE.md hex-events section.' >&2; exit 2",
-      "description": "Prevent CronCreate tool use — use hex-events instead",
-      "required": true
-    },
-    {
-      "id": "block-schedule-wakeup",
-      "matcher": "ScheduleWakeup",
-      "command": "echo 'BLOCKED: Use hex-events policies at ~/.hex-events/policies/*.yaml — never ScheduleWakeup. See CLAUDE.md hex-events section.' >&2; exit 2",
-      "description": "Prevent ScheduleWakeup tool use — use hex-events instead",
+      "script": ".hex/hooks/scripts/session-stop-persist.sh",
+      "description": "Persist per-session summary (cc-connect) + emit session.stop event",
       "required": true
     }
   ]

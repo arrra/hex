@@ -18,7 +18,7 @@ HEX_DIR="${CLAUDE_PROJECT_DIR:-${HEX_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.
   _ch="${CC_SESSION_KEY:-local-dev}"
   _ts="$(date -u '+%Y-%m-%dT%H:%M:%SZ')"
   _payload=$(printf '{"channel":"%s","stop_ts":"%s","stop_reason":"hook"}' "$_ch" "$_ts")
-  bash "$HEX_DIR/.hex/bin/hex-emit.sh" "session.stop" "$_payload" "claude-code"
+  hex events emit "session.stop" "$_payload" --source "claude-code"
 } 2>/dev/null &
 
 SUMMARIES_DIR="${HEX_SESSIONS_DIR:-$HEX_DIR/.hex/sessions/summaries}"
