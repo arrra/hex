@@ -106,6 +106,14 @@ Each trail entry must have `type` and `detail` fields. Required detail fields pe
 | reframe | abandoned, reason, new_framing |
 | message_sent | to, subject, body |
 
+## Keeping the response compact
+
+A truncated response loses work — the harness salvages what it can, but compact responses never truncate. Be concise.
+
+- Each `detail` field value must be terse: ~1 sentence, 200 chars max. No multi-paragraph reasoning.
+- `alternatives` is a short list of brief phrases (≤1 line each), not paragraphs.
+- Emit at most 12 trail entries per response. If the shift produced more, keep decide/act/park/verify entries and collapse routine observe/find entries into a single summary observe entry.
+
 ## Messaging other agents
 
 Send messages via `outbound_messages`. Each message has these fields:
