@@ -261,22 +261,67 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
         cost::record_invocation(&mut agent_state.cost, &claude_output);
         cost::append_ledger(&cost_dir, &config.agent_id, &claude_output);
 
-        let response = match claude::parse_agent_response(&claude_output.result) {
-            Ok(r) => r,
-            Err(e) => {
+        let (response, parse_quality) = claude::parse_agent_response(&claude_output.result);
+
+        match &parse_quality {
+            claude::ResponseParseQuality::Empty => {
+                eprintln!(
+                    "[{}] WARNING: response produced no parseable content — all agent work LOST this wake",
+                    config.agent_id
+                );
                 audit::append(
                     &audit_dir,
                     &config.agent_id,
-                    "response-parse-error",
+                    "response-truncated",
                     &serde_json::json!({
-                        "error": e.to_string(),
+                        "salvaged_trail": 0,
+                        "salvaged_messages": 0,
+                        "empty": true,
                         "invocation": invocation,
-                        "raw_length": claude_output.result.len(),
                     }),
                 );
+                let emit_script = hex_dir.join(".hex/bin/hex-emit.sh");
+                let _ = std::process::Command::new(&emit_script)
+                    .arg("hex.agent.response.truncated")
+                    .arg(serde_json::json!({
+                        "agent": config.agent_id,
+                        "wake": agent_state.wake_count,
+                        "salvaged_trail": 0,
+                        "salvaged_messages": 0,
+                        "empty": true,
+                    }).to_string())
+                    .status();
                 break;
             }
-        };
+            claude::ResponseParseQuality::Salvaged { recovered_trail, recovered_messages } => {
+                eprintln!(
+                    "[{}] WARNING: response truncated — salvaged {} trail entries, {} messages; some agent work was LOST this wake",
+                    config.agent_id, recovered_trail, recovered_messages
+                );
+                audit::append(
+                    &audit_dir,
+                    &config.agent_id,
+                    "response-truncated",
+                    &serde_json::json!({
+                        "salvaged_trail": recovered_trail,
+                        "salvaged_messages": recovered_messages,
+                        "invocation": invocation,
+                    }),
+                );
+                let emit_script = hex_dir.join(".hex/bin/hex-emit.sh");
+                let payload = serde_json::json!({
+                    "agent": config.agent_id,
+                    "wake": agent_state.wake_count,
+                    "salvaged_trail": recovered_trail,
+                    "salvaged_messages": recovered_messages,
+                });
+                let _ = std::process::Command::new(&emit_script)
+                    .arg("hex.agent.response.truncated")
+                    .arg(payload.to_string())
+                    .status();
+            }
+            claude::ResponseParseQuality::Clean => {}
+        }
 
         // Validate and append trail entries
         let mut accepted_entries: Vec<crate::types::TrailEntry> = Vec::new();

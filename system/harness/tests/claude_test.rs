@@ -31,11 +31,12 @@ fn test_parse_claude_json_output() {
 #[test]
 fn test_parse_agent_response_from_result() {
     let result_json = r#"{"trail":[{"ts":"2026-04-22T12:00:00Z","type":"observe","detail":{"what":"log.jsonl","noted":"healthy"},"queue_item":"t-1"}],"queue_updates":{"completed":["t-1"],"added_active":[],"moved_to_blocked":[],"parked":[]},"memory_updates":{"last_pattern":"all healthy"},"outbound_messages":[],"active_drained":true}"#;
-    let response = claude::parse_agent_response(result_json).unwrap();
+    let (response, quality) = claude::parse_agent_response(result_json);
     assert_eq!(response.trail.len(), 1);
     assert_eq!(response.trail[0].entry_type, "observe");
     assert_eq!(response.queue_updates.completed, vec!["t-1"]);
     assert!(response.active_drained);
+    assert_eq!(quality, claude::ResponseParseQuality::Clean);
 }
 
 #[test]
@@ -60,7 +61,7 @@ fn test_active_item_tolerates_missing_id() {
     // RED: before fix this would fail — missing `id` field causes serde error
     // GREEN: after fix, `id` defaults to ""
     let json = r#"{"trail":[],"queue_updates":{"completed":[],"added_active":[{"summary":"orphan task","priority":0,"created":"2026-04-23T00:00:00Z","source":"test"}],"moved_to_blocked":[],"parked":[]},"memory_updates":null,"outbound_messages":[],"active_drained":false}"#;
-    let response = claude::parse_agent_response(json).unwrap();
+    let (response, _) = claude::parse_agent_response(json);
     assert_eq!(response.queue_updates.added_active.len(), 1);
     assert_eq!(response.queue_updates.added_active[0].id, "");
     assert_eq!(response.queue_updates.added_active[0].summary, "orphan task");
@@ -70,7 +71,7 @@ fn test_active_item_tolerates_missing_id() {
 fn test_string_in_moved_to_blocked_is_kept() {
     // BlockedItem now accepts bare strings — "s-initiative-loop" parses to BlockedItem{id, ..Default}
     let json = r#"{"trail":[],"queue_updates":{"completed":[],"added_active":[],"moved_to_blocked":["s-initiative-loop"],"parked":[]},"memory_updates":null,"outbound_messages":[],"active_drained":true}"#;
-    let response = claude::parse_agent_response(json).unwrap();
+    let (response, _) = claude::parse_agent_response(json);
     assert_eq!(response.queue_updates.moved_to_blocked.len(), 1, "bare string should parse as BlockedItem");
     assert_eq!(response.queue_updates.moved_to_blocked[0].id, "s-initiative-loop");
     assert!(response.active_drained);
@@ -81,14 +82,15 @@ fn test_partial_recovery_when_one_field_corrupt() {
     // RED: before fix — any field error drops entire response, losing trail
     // GREEN: after fix — trail and active_drained recovered even if added_active is malformed
     let json = r#"{"trail":[{"ts":"2026-04-23T00:00:00Z","type":"observe","detail":{"what":"test","noted":"ok"},"queue_item":"s-1"}],"queue_updates":{"completed":[],"added_active":"not_an_array","moved_to_blocked":[],"parked":[]},"memory_updates":null,"outbound_messages":[],"active_drained":true}"#;
-    let response = claude::parse_agent_response(json).unwrap();
+    let (response, _) = claude::parse_agent_response(json);
     assert_eq!(response.trail.len(), 1, "trail should be recovered");
     assert!(response.active_drained, "active_drained should be recovered");
 }
 
 #[test]
-fn test_not_json_still_errors() {
-    // Confirms truly unparseable output still returns Err (no infinite recovery loop)
-    let result = claude::parse_agent_response("complete garbage not json at all");
-    assert!(result.is_err(), "non-JSON should still return Err");
+fn test_not_json_returns_empty_quality() {
+    // Confirms truly unparseable output returns Empty quality (no longer Err — callers always get a result)
+    let (result, quality) = claude::parse_agent_response("complete garbage not json at all");
+    assert_eq!(quality, claude::ResponseParseQuality::Empty, "non-JSON should be Empty quality");
+    assert!(result.trail.is_empty());
 }

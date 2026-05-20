@@ -2,17 +2,26 @@ use crate::types::{AgentResponse, AssessmentResponse, ClaudeOutput, Message, Que
 use std::io::Write;
 use std::process::{Command, Stdio};
 
+/// Quality signal returned alongside every parsed agent response.
+#[derive(Debug, Clone, PartialEq)]
+pub enum ResponseParseQuality {
+    /// Response parsed cleanly with no recovery needed.
+    Clean,
+    /// Strict parse failed; partial/element-wise recovery was used.
+    Salvaged { recovered_trail: usize, recovered_messages: usize },
+    /// Response contained no parseable content at all.
+    Empty,
+}
+
 pub fn parse_output(raw: &str) -> Result<ClaudeOutput, Box<dyn std::error::Error>> {
     let output: ClaudeOutput = serde_json::from_str(raw)?;
     Ok(output)
 }
 
-pub fn parse_agent_response(
-    result_text: &str,
-) -> Result<AgentResponse, Box<dyn std::error::Error>> {
+pub fn parse_agent_response(result_text: &str) -> (AgentResponse, ResponseParseQuality) {
     let cleaned = extract_json(result_text);
     match serde_json::from_str::<AgentResponse>(&cleaned) {
-        Ok(response) => Ok(response),
+        Ok(response) => (response, ResponseParseQuality::Clean),
         Err(strict_err) => {
             eprintln!("[harness] parse_agent_response: strict parse failed ({strict_err}), attempting partial recovery");
             // Try to parse as raw JSON value and reconstruct field-by-field
@@ -23,22 +32,25 @@ pub fn parse_agent_response(
                     // Even without valid JSON, try to salvage trail and outbound_messages from raw text
                     let trail = salvage_typed_array::<TrailEntry>(&cleaned, "trail");
                     let outbound_messages = salvage_typed_array::<Message>(&cleaned, "outbound_messages");
-                    if trail.is_empty() && outbound_messages.is_empty() {
+                    let recovered_trail = trail.len();
+                    let recovered_messages = outbound_messages.len();
+                    if recovered_trail == 0 && recovered_messages == 0 {
                         eprintln!("[harness] parse_agent_response: not valid JSON ({json_err}), discarding response");
-                        return Err(json_err.into());
+                        return (AgentResponse::default(), ResponseParseQuality::Empty);
                     }
                     eprintln!(
-                        "[harness] parse_agent_response: salvaged {}/{} trail entries and {}/{} messages from unparseable response",
-                        trail.len(), trail.len(),
-                        outbound_messages.len(), outbound_messages.len()
+                        "[harness] parse_agent_response: salvaged {recovered_trail} trail entries and {recovered_messages} messages from unparseable response"
                     );
-                    return Ok(AgentResponse {
-                        trail,
-                        queue_updates: QueueUpdates::default(),
-                        memory_updates: None,
-                        outbound_messages,
-                        active_drained: false,
-                    });
+                    return (
+                        AgentResponse {
+                            trail,
+                            queue_updates: QueueUpdates::default(),
+                            memory_updates: None,
+                            outbound_messages,
+                            active_drained: false,
+                        },
+                        ResponseParseQuality::Salvaged { recovered_trail, recovered_messages },
+                    );
                 }
             };
 
@@ -80,18 +92,21 @@ pub fn parse_agent_response(
                 .get("active_drained")
                 .and_then(|v| v.as_bool())
                 .unwrap_or(false);
+            let recovered_trail = trail.len();
+            let recovered_messages = outbound_messages.len();
             eprintln!(
-                "[harness] parse_agent_response: partial recovery ({} trail entries, {} messages)",
-                trail.len(),
-                outbound_messages.len()
+                "[harness] parse_agent_response: partial recovery ({recovered_trail} trail entries, {recovered_messages} messages)",
             );
-            Ok(AgentResponse {
-                trail,
-                queue_updates,
-                memory_updates,
-                outbound_messages,
-                active_drained,
-            })
+            (
+                AgentResponse {
+                    trail,
+                    queue_updates,
+                    memory_updates,
+                    outbound_messages,
+                    active_drained,
+                },
+                ResponseParseQuality::Salvaged { recovered_trail, recovered_messages },
+            )
         }
     }
 }
@@ -369,10 +384,11 @@ mod tests {
             r#"{{"trail":[{e},{e}],"queue_updates":{{"completed":[],"added_active":[],"moved_to_blocked":[],"parked":[]}},"memory_updates":null,"outbound_messages":[],"active_drained":false}}"#,
             e = make_trail_entry_json(ts, "act")
         );
-        let result = parse_agent_response(&response).unwrap();
+        let (result, quality) = parse_agent_response(&response);
         assert_eq!(result.trail.len(), 2);
         assert_eq!(result.outbound_messages.len(), 0);
         assert!(!result.active_drained);
+        assert_eq!(quality, ResponseParseQuality::Clean, "well-formed response must be Clean");
     }
 
     #[test]
@@ -385,8 +401,12 @@ mod tests {
         let response = format!(
             r#"{{"trail":[{e1},{e2},{{"ts":"{ts}","type":"truncated"#
         );
-        let result = parse_agent_response(&response).unwrap();
+        let (result, quality) = parse_agent_response(&response);
         assert_eq!(result.trail.len(), 2, "should salvage 2 complete trail entries");
+        assert!(
+            matches!(quality, ResponseParseQuality::Salvaged { recovered_trail, .. } if recovered_trail == 2),
+            "truncated trail must be Salvaged"
+        );
     }
 
     #[test]
@@ -400,9 +420,33 @@ mod tests {
         let response = format!(
             r#"{{"outbound_messages":[{msg}],"trail":[{e1},{{"ts":"{ts}","type":"truncated"#
         );
-        let result = parse_agent_response(&response).unwrap();
+        let (result, quality) = parse_agent_response(&response);
         assert_eq!(result.outbound_messages.len(), 1, "intact outbound_messages should be recovered");
         // trail may be 0 or 1 depending on parse path — what matters is messages survived
         assert!(result.trail.len() <= 1);
+        assert!(
+            matches!(quality, ResponseParseQuality::Salvaged { .. }),
+            "truncated response must be Salvaged"
+        );
+    }
+
+    #[test]
+    fn parse_agent_response_totally_empty_returns_empty_quality() {
+        let (result, quality) = parse_agent_response("not json at all {{{");
+        assert_eq!(quality, ResponseParseQuality::Empty, "unparseable content with no salvageable data must be Empty");
+        assert!(result.trail.is_empty());
+        assert!(result.outbound_messages.is_empty());
+    }
+
+    #[test]
+    fn parse_agent_response_truncated_returns_salvaged_quality() {
+        // A response truncated after 2 complete trail entries
+        let ts = "2024-01-01T00:00:00Z";
+        let e1 = make_trail_entry_json(ts, "act");
+        let e2 = make_trail_entry_json(ts, "observe");
+        let response = format!(r#"{{"trail":[{e1},{e2},{{"ts":"{ts}","type":"trunc"#);
+        let (result, quality) = parse_agent_response(&response);
+        assert!(matches!(quality, ResponseParseQuality::Salvaged { .. }), "truncated response must be Salvaged");
+        assert_eq!(result.trail.len(), 2);
     }
 }
