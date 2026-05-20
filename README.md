@@ -391,6 +391,17 @@ bash tests/eval/run_eval_macos.sh            # macOS Tart
 
 ## Roadmap
 
+v0.17.0: **TriggerSpec unification + truncation recovery.**
+- **Bare-string trigger syntax**: charter YAML now accepts `"timer.tick.6h"` directly — no struct wrapper required. Both forms valid. Same for `BlockedItem`. Every existing policy continues to work.
+- **`hex events emit --source`**: tag emitted events with a source label for traceability.
+- **Events disk-backed status**: `hex events status` survives daemon restarts; state is readable offline.
+- **Truncated response recovery**: harness salvages complete leading elements from truncated agent JSON responses. Every truncation emits a loud audit entry + `hex.agent.response.truncated` event (S6 compliance — no more silent failures).
+
+v0.16.0: **Full rustification + S1 skills sync.**
+- **43 subcommands, zero Python required**: `hex events`, `hex hook`, `hex doctor`, `hex upgrade`, `hex agent evolution`, and 20+ more ported from Python/shell. 130 Python files reduced to ~22.
+- **S1 skills sync**: 9 new skills + `bet-status` command promoted from personal instance to foundation.
+- See [CHANGELOG.md](./CHANGELOG.md) for full details.
+
 v0.15.0: **Harness messaging + binary resolution fix.**
 - **Agent messaging deadlock fixed**: `cli_send()` now writes to per-agent JSONL inbox (`.hex/messages/{agent}.jsonl`). Prior behavior wrote only to `messages.json`, which the harness wake cycle doesn't read — messages were silently dropped.
 - **Daemon binary resolution**: `claude::invoke()` resolves the binary via `$CLAUDE_BIN` env var, then `$HOME/.local/bin/claude`, then PATH. Fixes "No such file or directory" on LaunchAgent/daemon wakes where `~/.local/bin` is not in PATH.

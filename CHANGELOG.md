@@ -2,6 +2,23 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-20] — TriggerSpec unification + truncation recovery (v0.17.0)
+
+### Added
+- **Bare-string trigger syntax**: `WakeConfig.triggers` now accepts `"timer.tick.6h"` in addition to the full struct form `{ event: { name: "timer.tick.6h" } }`. Both forms are valid in charter YAML. `BlockedItem` gains the same dual-form acceptance. Eliminates boilerplate in every policy file.
+- **`hex events emit --source`**: optional `--source <label>` flag tags emitted events with a source identifier, visible in the event log and disk-backed status.
+- **Events disk-backed status**: `hex events status` now persists event state to disk, surviving daemon restarts. Daemon status is readable without the daemon running.
+- **Doctor check_16**: modernized doctor check for bare-string trigger coverage in active policies.
+- **Truncated response recovery (S6)**: harness salvages complete leading elements from truncated JSON agent responses via char-by-char depth scanning. Every truncation emits a loud eprintln warning, an audit entry (`response-truncated`), and a `hex.agent.response.truncated` event — no more silent partial data loss.
+- **proposals-server.py**: brand proposal gallery server (port 8898) synced from mrap-hex to system/scripts/ per S1 layout mapping.
+
+### Changed
+- `TriggerSpec` unified across `WakeConfig.triggers` and `BlockedItem` — single deserialization path handles both bare-string and struct forms.
+
+### Fixed
+- Stale test updated for bare-string `BlockedItem` deserialization.
+- `BOI(S8585)` spec tasks completed (internal).
+
 ## [2026-05-17] — Full rustification + S1 skills sync (v0.16.0)
 
 ### Added
