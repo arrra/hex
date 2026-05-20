@@ -19,13 +19,13 @@ Execute a full research cycle:
 
 Run this in a terminal (not inside Claude):
 ```bash
-bash ~/hex/.hex/scripts/tech-scout.sh
+hex doctor tech-scout
 ```
 
 ### `/hex-scout dry-run`
 Show what would be searched without executing:
 ```bash
-bash ~/hex/.hex/scripts/tech-scout.sh --dry-run
+hex doctor tech-scout --dry-run
 ```
 
 ### `/hex-scout status`

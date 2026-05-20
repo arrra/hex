@@ -35,23 +35,43 @@ If the intent is ambiguous, ask: "Which workspace? (e.g. main, pitch-deck, resea
 
 ### Switch to a named workspace
 
+Update the context registry and open a tmux window:
+
+```python
+import json, os, subprocess
+path = os.path.join(os.environ.get('HEX_DIR',''), '.claude', 'hex-contexts.json')
+data = json.load(open(path))
+prev = data.get('active', '')
+data['previous'] = prev
+data['active'] = '<workspace-name>'
+data.setdefault('contexts', {}).setdefault('<workspace-name>', {})
+json.dump(data, open(path, 'w'), indent=2)
+```
+
 ```bash
-bash $HEX_DIR/.hex/scripts/hex-context-switch.sh <workspace-name>
+tmux new-window -n <workspace-name> 2>/dev/null || tmux select-window -t <workspace-name>
 ```
 
 ### Go back to previous workspace
 
+```python
+import json, os
+path = os.path.join(os.environ.get('HEX_DIR',''), '.claude', 'hex-contexts.json')
+data = json.load(open(path))
+prev = data.get('previous', '')
+data['previous'] = data.get('active', '')
+data['active'] = prev
+json.dump(data, open(path, 'w'), indent=2)
+print(prev)
+```
+
 ```bash
-bash $HEX_DIR/.hex/scripts/hex-context-switch.sh --back
+tmux select-window -t <previous-workspace>
 ```
 
 ### List workspaces
 
-```bash
-source $HEX_DIR/.hex/scripts/hex-context-lib.sh && ctx_list
-```
-
-Or read the registry directly:
+Read the registry directly:
 
 ```bash
 python3 -c "

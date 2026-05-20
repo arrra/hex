@@ -242,20 +242,19 @@ Signs a task is too large:
 
 When writing BOI specs that involve web research (surveys, competitive analysis, framework comparison, article ingestion):
 
-**Default: Exa Highlights** — use `exa-highlights.py` instead of `web_fetch_exa` for multi-page research. 96% fewer tokens, same retrieval quality. This prevents workers from hitting context ceiling mid-survey.
+**Default: web_fetch_exa** — use `web_fetch_exa` for web research. For multi-source surveys, fetch each URL separately and summarize before moving to the next to avoid context ceiling.
 
 Include this in research spec task blocks:
 ```
-For web research, use the token-efficient highlights wrapper:
-  python3 $HEX_DIR/.hex/scripts/exa-highlights.py --search "query" --query "focus topic" --num N --compact
-For known URLs:
-  python3 $HEX_DIR/.hex/scripts/exa-highlights.py <url> --query "what to extract" --compact
-Only use web_fetch_exa (full page) when highlights are insufficient for deep single-page analysis.
+For web research, use web_fetch_exa:
+  web_fetch_exa("<url>", query="focus topic")
+For search queries, use web_search or web_fetch_exa with a search query.
+Summarize each source before fetching the next to avoid context overload.
 ```
 
-**When to use full fetch (`web_fetch_exa`):** Single-page deep analysis where you need the complete document (reading a full spec, extracting all code examples, parsing an entire API reference).
+**When to use full fetch (`web_fetch_exa`):** Any web research — reading specs, extracting code examples, parsing API references, surveying sources for signal.
 
-**When to use highlights (`exa-highlights.py`):** Surveying 3+ sources, extracting key facts, comparing systems, ingesting articles for signal. This is the 90% case for research specs.
+**When to limit scope:** For multi-source surveys (3+ URLs), summarize each page incrementally rather than fetching all at once.
 
 ## Debugging BOI Failures
 

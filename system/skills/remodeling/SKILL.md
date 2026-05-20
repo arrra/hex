@@ -43,19 +43,13 @@ If Mike provides a file path, proceed. If the file doesn't exist, say so clearly
 
 ### Step 2: Parse and Save
 
-```bash
-# Parse the Excalidraw JSON to canonical markdown
-python3 ~/.hex/scripts/parse_excalidraw.py "<file_path>"
-```
+Read the Excalidraw `.excalidraw` file (it's JSON). Parse the elements array to extract text nodes and their content. Convert to canonical markdown:
+- Each top-level text node becomes a heading or bullet
+- Arrows and connections become nested lists or section groupings
+- Use the first prominent text as the document title
 
-Capture the output. Determine the title from the first `# ` heading in the output.
-Save to `me/remodeling/YYYY-MM-DD-<slugified-title>.md` using today's date.
-
-```bash
-# Example save path
-OUTFILE="me/remodeling/$(date +%Y-%m-%d)-<title-slug>.md"
-python3 .hex/scripts/parse_excalidraw.py "<file_path>" > "$OUTFILE.tmp" && mv "$OUTFILE.tmp" "$OUTFILE"
-```
+Determine the title from the first prominent heading in the output.
+Save to `me/remodeling/YYYY-MM-DD-<slugified-title>.md` using today's date — write atomically (to `.tmp` then `mv`).
 
 Confirm: "Saved to `<path>`."
 
@@ -109,7 +103,7 @@ After the conversation:
 4. Rebuild the memory index:
 
 ```bash
-bash .hex/scripts/startup.sh --step index
+hex startup --step index
 ```
 
 Confirm: "Memory index updated — new mental map is now searchable."
@@ -118,7 +112,6 @@ Confirm: "Memory index updated — new mental map is now searchable."
 
 ## Notes
 
-- Scripts live at `~/.hex/scripts/`
 - Maps live at `~/hex/me/remodeling/YYYY-MM-DD-title.md`
 - Format spec: `~/hex/me/remodeling/FORMAT.md`
 - Excalidraw Plus MCP support: add as an input source once the alpha API is available

@@ -12,7 +12,7 @@ description: >
 1. **Parse transcripts**: Convert raw .jsonl session data into readable daily markdown.
 
 ```bash
-python3 $HEX_DIR/.hex/scripts/parse_transcripts.py
+hex memory parse-transcripts
 ```
 
 2. **Rebuild memory index**: Update the search index with any new or changed files.

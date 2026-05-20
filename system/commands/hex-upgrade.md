@@ -7,15 +7,15 @@ description: Upgrade hex to the latest version from hex
 
 Pull the latest scripts, skills, commands, and hooks from hex.
 
-## Step 1: Run the upgrade script
+## Step 1: Run the upgrade command
 
 ```bash
-bash $HEX_DIR/.hex/scripts/upgrade.sh
+hex upgrade
 ```
 
 If the user passed arguments (e.g., `--dry-run`, `--local PATH`), forward them:
 ```bash
-bash $HEX_DIR/.hex/scripts/upgrade.sh ARGUMENTS
+hex upgrade ARGUMENTS
 ```
 
 ## Step 2: Handle CLAUDE.md template changes

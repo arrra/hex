@@ -58,23 +58,16 @@ Compare local hex against hex and push improvements upstream.
 
 ## Guards
 
-Three layers prevent personal data from leaking:
+Two layers prevent personal data from leaking:
 
-1. **Path allowlist** (`sync-guard.sh check-path`): Only approved paths can be synced. Deny by default.
-2. **Content scanner** (`sync-guard.sh scan-file`): Before copying, scan each file for personal data (names, emails, personal file references). Block if anything matches.
-3. **Pre-commit hook**: hex has a pre-commit hook that runs `sync-guard.sh scan-all` as the last line of defense.
+1. **Manual review**: Before copying any file, inspect its contents for personal data (names, emails, personal file references, project-specific paths). Do not copy if anything matches.
+2. **Pre-commit hook**: hex-foundation has a pre-commit hook (`system/scripts/sanitize-check.sh`) that runs as the last line of defense before commits land upstream.
 
-**Before copying any file**, run:
-```bash
-bash $HEX_DIR/.hex/scripts/sync-guard.sh check-path "dot-claude/scripts/foo.sh"
-bash $HEX_DIR/.hex/scripts/sync-guard.sh scan-file /path/to/file
-```
-
-If either check fails, DO NOT copy the file. Surface the issue to the user.
+**Before copying any file**, review it carefully. If in doubt, do not copy it and surface the concern to the user.
 
 ## Rules
 
-- Run sync-guard.sh on every file before copying. No exceptions.
+- Manually review every file for personal data before copying. No exceptions.
 - Never push personal data (me/, people/, projects/, landings/, evolution/, todo.md)
 - Never push settings.json (contains personal hooks and statusline config)
 - Always diff before copying. Show the diff to the user.

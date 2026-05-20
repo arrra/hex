@@ -21,7 +21,7 @@ Validates and repairs your hex agent installation.
 
 Run when the user invokes hex-doctor or when hex-startup detects issues.
 
-1. Run `bash $HEX_DIR/.hex/scripts/doctor.sh --fix` to auto-fix all scriptable issues
+1. Run `hex doctor run --fix` to auto-fix all scriptable issues
 2. Parse the output for any unfixed errors (checks that doctor.sh cannot fix: .hex/, skills/, CLAUDE.md, AGENTS.md)
 3. Handle LLM-fixable issues:
    - **AGENTS.md missing**: Generate from CLAUDE.md (requires understanding format differences between Claude and Codex)

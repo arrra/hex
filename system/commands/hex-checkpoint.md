@@ -2,7 +2,7 @@
 name: hex-checkpoint
 description: >
   Non-blocking checkpoint. Quick distill pass, handoff file, todo update, landings refresh. Suggest compact when done.
-  Reflection runs in the background via session-reflect.sh — never blocks the session.
+  Reflection runs in the background via `hex session reflect` — never blocks the session.
 ---
 # sync-safe
 

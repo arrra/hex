@@ -3,7 +3,7 @@
 Validate that the hex installation is healthy.
 
 ```bash
-bash .hex/scripts/doctor.sh
+hex doctor run
 ```
 
 If doctor finds issues, suggest fixes for each.

@@ -2,7 +2,7 @@
 name: hex-checkpoint
 description: >
   Non-blocking checkpoint. Quick distill pass, handoff file, todo update, then compact.
-  Reflection runs in the background via session-reflect.sh — never blocks the session.
+  Reflection runs in the background via `hex session reflect` — never blocks the session.
 ---
 <!-- # sync-safe -->
 
@@ -40,7 +40,7 @@ Task (run_in_background: true):
   subagent_type: general-purpose
   prompt: |
     Run the session reflection script. Execute:
-    bash $HEX_DIR/.hex/scripts/session-reflect.sh
+    hex session reflect
     This will process the current transcript and apply reflection fixes.
     Do not wait for or report the result.
 ```

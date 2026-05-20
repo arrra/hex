@@ -1072,8 +1072,7 @@ asynchronously.
 
 ### Script Location
 
-`$HEX_DIR/.hex/scripts/session-reflect.sh` — the shell script that orchestrates
-the post-session reflection.
+`hex session reflect` — the subcommand that orchestrates the post-session reflection.
 
 
 ## Configuration (reflect-config.yaml)

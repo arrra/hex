@@ -87,7 +87,7 @@ rules:                          # required, non-empty list
 
       - type: notify
         message: "Build done: {{ event.payload.result }}"
-        # delegates to ~/.hex/scripts/hex-notify.sh
+        # delegates to `hex alert send`
 
       - type: update-file
         target: "/path/to/file.yaml"

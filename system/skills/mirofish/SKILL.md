@@ -20,8 +20,8 @@ Mirofish simulates how audiences react to content/campaigns using multi-agent AI
 - **Frontend:** `http://mirofish:3000`
 - **Backend API:** `http://mirofish:5001/api`
 - **LLM:** OpenRouter (Gemma 3 27B main, 12B boost)
-- **Deploy:** `bash .hex/scripts/mirofish-deploy.sh`
-- **Status:** `bash .hex/scripts/mirofish-status.sh`
+- **Deploy:** `hex mirofish deploy`
+- **Status:** `hex mirofish status`
 
 ## API Flow (5 steps)
 
