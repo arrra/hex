@@ -313,15 +313,15 @@ pub struct ClaudeOutput {
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct AgentResponse {
-    #[serde(default)]
-    pub trail: Vec<TrailEntry>,
-    #[serde(default)]
-    pub queue_updates: QueueUpdates,
-    pub memory_updates: Option<serde_json::Value>,
     #[serde(default, deserialize_with = "deserialize_lenient_vec")]
     pub outbound_messages: Vec<Message>,
     #[serde(default)]
+    pub queue_updates: QueueUpdates,
+    #[serde(default)]
     pub active_drained: bool,
+    pub memory_updates: Option<serde_json::Value>,
+    #[serde(default)]
+    pub trail: Vec<TrailEntry>,
 }
 
 #[derive(Debug, Clone, Default, Serialize, Deserialize)]

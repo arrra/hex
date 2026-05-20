@@ -134,8 +134,8 @@ Return a single JSON object (AgentResponse) with exactly these fields:
 
 ```json
 {{
-  "trail": [
-    {{"ts": "ISO-8601", "type": "observe", "detail": {{"what": "...", "noted": "..."}}, "queue_item": "t-1"}}
+  "outbound_messages": [
+    {{"to": "agent-id", "subject": "...", "body": "...", "response_requested": false}}
   ],
   "queue_updates": {{
     "completed": ["t-1"],
@@ -143,13 +143,15 @@ Return a single JSON object (AgentResponse) with exactly these fields:
     "moved_to_blocked": [],
     "parked": []
   }},
+  "active_drained": true,
   "memory_updates": {{"key": "value"}},
-  "outbound_messages": [
-    {{"to": "agent-id", "subject": "...", "body": "...", "response_requested": false}}
-  ],
-  "active_drained": true
+  "trail": [
+    {{"ts": "ISO-8601", "type": "observe", "detail": {{"what": "...", "noted": "..."}}, "queue_item": "t-1"}}
+  ]
 }}
 ```
+
+Emit `trail` LAST. If your response is cut off, the fields above it (messages, queue changes) still take effect.
 
 Respond ONLY with the JSON object. No prose before or after.
 "#,
