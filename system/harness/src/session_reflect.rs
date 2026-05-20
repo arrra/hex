@@ -2,7 +2,7 @@ use std::fs;
 use std::io::Write;
 use std::path::PathBuf;
 
-/// Port of .hex/scripts/session-reflect.sh
+/// Post-session reflection — Rust port of the former session-reflect script.
 /// Post-session reflection orchestrator: appends a timestamped entry to
 /// evolution/reflection-log.md, then optionally runs session-delta.py.
 pub fn run(session_id: Option<&str>, quiet: bool) {

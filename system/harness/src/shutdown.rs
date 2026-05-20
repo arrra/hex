@@ -43,51 +43,29 @@ pub fn run(hex_dir: &Path, args: ShutdownArgs) -> i32 {
 
     // ── Step 2: Deregister session ───────────────────────────────────────────
     println!("\n  {}Step 2:{} Deregistering session…", BOLD, RESET);
-    let session_script = hex_dir.join(".hex/scripts/session.sh");
 
-    if !session_script.exists() {
-        println!(
-            "  {}[SKIP]{} session.sh not found at {} — skipping deregister",
-            YELLOW, RESET, session_script.display()
-        );
-    } else {
-        match &args.session_id {
-            Some(id) => {
-                let status = std::process::Command::new("bash")
-                    .arg(&session_script)
-                    .arg("stop")
-                    .arg(id)
-                    .env("HEX_DIR", hex_dir)
-                    .status();
-                match status {
-                    Ok(s) if s.success() => {
-                        println!("  {}[OK]{} session {} deregistered", GREEN, RESET, id);
-                    }
-                    Ok(s) => {
-                        let code = s.code().unwrap_or(1);
-                        eprintln!(
-                            "  {}[WARN]{} session.sh stop exited with code {}",
-                            YELLOW, RESET, code
-                        );
-                    }
+    let sessions_dir = hex_dir.join(".hex/sessions");
+    match &args.session_id {
+        Some(id) => {
+            let session_file = sessions_dir.join(id);
+            if session_file.exists() {
+                match std::fs::remove_file(&session_file) {
+                    Ok(_) => println!("  {}[OK]{} session {} deregistered", GREEN, RESET, id),
                     Err(e) => {
-                        eprintln!("  {}[WARN]{} failed to run session.sh: {}", YELLOW, RESET, e);
+                        eprintln!("  {}[WARN]{} failed to remove session file: {}", YELLOW, RESET, e);
                     }
                 }
+            } else {
+                println!("  {}[OK]{} session {} (already deregistered or not tracked)", GREEN, RESET, id);
             }
-            None => {
-                println!(
-                    "  {}[INFO]{} No session ID provided. To deregister manually:",
-                    DIM, RESET
-                );
-                println!(
-                    "    bash $HEX_DIR/.hex/scripts/session.sh check   # find your session",
-
-                );
-                println!(
-                    "    bash $HEX_DIR/.hex/scripts/session.sh stop <SESSION_ID>"
-                );
-            }
+        }
+        None => {
+            println!(
+                "  {}[INFO]{} No session ID provided. To deregister manually:",
+                DIM, RESET
+            );
+            println!("    ls $HEX_DIR/.hex/sessions/    # list active sessions");
+            println!("    hex shutdown --session-id <SESSION_ID>");
         }
     }
 
@@ -97,7 +75,7 @@ pub fn run(hex_dir: &Path, args: ShutdownArgs) -> i32 {
         GREEN, RESET
     );
     println!(
-        "{}Background (Stop hooks):{} backup_session.sh, session-reflect.sh",
+        "{}Background (Stop hooks):{} session-reflect, transcript parsing, memory index",
         DIM, RESET
     );
 

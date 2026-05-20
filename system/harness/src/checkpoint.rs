@@ -10,7 +10,7 @@
 use chrono::Local;
 use std::fs;
 use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 
 const GREEN: &str = "\x1b[32m";
 const YELLOW: &str = "\x1b[33m";
@@ -125,31 +125,13 @@ pub fn run(hex_dir: &Path, args: CheckpointArgs) -> i32 {
 }
 
 fn dispatch_background_reflection(hex_dir: &Path) -> bool {
-    // Try the legacy shell script first; if missing, use the hex binary itself.
-    let script = hex_dir.join(".hex/scripts/session-reflect.sh");
-    if script.exists() {
-        let _ = std::process::Command::new("bash")
-            .arg(&script)
-            .env("HEX_DIR", hex_dir)
-            .stdin(std::process::Stdio::null())
-            .stdout(std::process::Stdio::null())
-            .stderr(std::process::Stdio::null())
-            .spawn();
-        return true;
-    }
-    // Fall back to `hex session reflect` if the script is absent.
-    let hex_bin = std::env::current_exe().ok().unwrap_or_else(|| PathBuf::from("hex"));
-    match std::process::Command::new(&hex_bin)
-        .args(["session", "reflect", "--quiet"])
-        .env("HEX_DIR", hex_dir)
-        .stdin(std::process::Stdio::null())
-        .stdout(std::process::Stdio::null())
-        .stderr(std::process::Stdio::null())
-        .spawn()
-    {
-        Ok(_) => true,
-        Err(_) => false,
-    }
+    // Call session_reflect Rust module directly in a background thread.
+    let hex_dir = hex_dir.to_path_buf();
+    std::thread::spawn(move || {
+        std::env::set_var("HEX_DIR", &hex_dir);
+        crate::session_reflect::run(None, true);
+    });
+    true
 }
 
 fn atomic_write(path: &Path, content: &str) -> std::io::Result<()> {

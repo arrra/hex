@@ -1,35 +1,19 @@
 /// Port of .hex/scripts/lib/integration/telemetry.py
-/// CLI wrapper: emit a hex.integration.* event via hex_emit.py.
+/// Emit a hex.integration.* event via the Rust telemetry path (JSON to stderr).
 use std::path::Path;
 
-pub fn emit_event(hex_dir: &Path, event_type: &str, payload: &str, source: &str) -> i32 {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let hex_emit = std::path::PathBuf::from(&home).join(".hex-events/hex_emit.py");
-
-    if !hex_emit.is_file() {
-        eprintln!("hex integration telemetry: hex_emit.py not found at {}", hex_emit.display());
-        return 1;
-    }
-
+pub fn emit_event(_hex_dir: &Path, event_type: &str, payload: &str, source: &str) -> i32 {
     // Validate payload is valid JSON
     if serde_json::from_str::<serde_json::Value>(payload).is_err() {
         eprintln!("hex integration telemetry: payload must be valid JSON, got: {payload}");
         return 1;
     }
 
-    let status = std::process::Command::new("python3")
-        .arg(&hex_emit)
-        .arg(event_type)
-        .arg(payload)
-        .arg(source)
-        .env("HEX_DIR", hex_dir)
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!("hex integration telemetry: failed to exec hex_emit.py: {e}");
-            std::process::exit(1);
-        });
-
-    status.code().unwrap_or(1)
+    let ts = chrono::Utc::now().to_rfc3339();
+    eprintln!(
+        r#"{{"ts":"{ts}","event":"{event_type}","payload":{payload},"source":"{source}"}}"#
+    );
+    0
 }
 
 #[cfg(test)]

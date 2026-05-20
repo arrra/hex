@@ -2118,25 +2118,6 @@ fn deliver_notification(message: &str, tier: Option<&str>) -> (String, String) {
         _ => {}
     }
 
-    // Try hex-notify.sh first
-    let notify_sh = shellexpand::tilde("~/.hex/scripts/hex-notify.sh").into_owned();
-    if std::path::Path::new(&notify_sh).exists() {
-        match std::process::Command::new("bash")
-            .arg(&notify_sh)
-            .arg(message)
-            .output()
-        {
-            Ok(out) if out.status.success() => return ("ok".to_string(), String::new()),
-            Ok(out) => {
-                eprintln!(
-                    "events: hex-notify.sh failed: {}",
-                    String::from_utf8_lossy(&out.stderr)
-                );
-            }
-            Err(_) => {}
-        }
-    }
-
     // macOS osascript fallback
     #[cfg(target_os = "macos")]
     {

@@ -110,7 +110,7 @@ pub fn run(hex_dir: &Path, args: StartupArgs) -> i32 {
     step_env(hex_dir, &mut state);
 
     // Step 5: Session management
-    step_session(&scripts_dir, &mut state);
+    step_session(hex_dir, &mut state);
 
     // Step 6: Doctor alert check (no header — runs between session and transcripts)
     step_doctor_alert(&hex_system_dir, &mut state);
@@ -193,64 +193,54 @@ fn step_env(hex_dir: &Path, state: &mut State) {
     info(&format!("HEX_DIR: {}", hex_dir.display()));
 }
 
-fn step_session(scripts_dir: &Path, state: &mut State) {
+fn step_session(hex_dir: &Path, state: &mut State) {
     header("2. Session Management");
 
-    let script = scripts_dir.join("session.sh");
-    if !script.exists() {
-        info("session.sh not found — skipping session management");
-        return;
+    let sessions_dir = hex_dir.join(".hex/sessions");
+    let _ = std::fs::create_dir_all(&sessions_dir);
+
+    // (a) Cleanup stale sessions (older than 24h)
+    let mut cleaned = 0u32;
+    if let Ok(entries) = std::fs::read_dir(&sessions_dir) {
+        for entry in entries.flatten() {
+            if let Ok(meta) = entry.metadata() {
+                if let Ok(modified) = meta.modified() {
+                    let age = std::time::SystemTime::now()
+                        .duration_since(modified)
+                        .unwrap_or_default();
+                    if age.as_secs() > 86400 {
+                        let _ = std::fs::remove_file(entry.path());
+                        cleaned += 1;
+                    }
+                }
+            }
+        }
+    }
+    if cleaned > 0 {
+        info(&format!("Cleaned up {} stale session(s)", cleaned));
     }
 
-    // (a) Cleanup stale sessions — || true semantics
-    let _ = Command::new("bash")
-        .arg(&script)
-        .arg("cleanup")
-        .env("SCRIPTS_DIR", scripts_dir)
-        .status();
-    info("Cleaned up stale sessions");
-
     // (b) Check for other active sessions
-    let check = Command::new("bash")
-        .arg(&script)
-        .arg("check")
-        .env("SCRIPTS_DIR", scripts_dir)
-        .output();
-    match check {
-        Ok(out) if out.status.success() => {
-            pass("Solo session");
-            // is_solo stays true
-        }
-        Ok(_) => {
-            warn_line("Multiple sessions active", state);
-            state.is_solo = false;
-        }
-        Err(_) => {
-            // treat error as solo — best effort
-            pass("Solo session (check skipped)");
-        }
+    let active_count = std::fs::read_dir(&sessions_dir)
+        .map(|entries| entries.count())
+        .unwrap_or(0);
+    if active_count > 0 {
+        warn_line("Multiple sessions active", state);
+        state.is_solo = false;
+    } else {
+        pass("Solo session");
     }
 
     // (c) Register this session
-    let start = Command::new("bash")
-        .arg(&script)
-        .arg("start")
-        .arg("startup-script")
-        .env("SCRIPTS_DIR", scripts_dir)
-        .output();
-    match start {
-        Ok(out) if out.status.success() => {
-            let sid = String::from_utf8_lossy(&out.stdout).trim().to_string();
-            if !sid.is_empty() {
-                state.session_id = sid.clone();
-                pass(&format!("Session registered: {}", sid));
-            } else {
-                pass("Session registered");
-            }
-        }
-        Ok(_) => info("Session registration skipped"),
-        Err(_) => info("Session registration unavailable"),
-    }
+    let session_id = format!(
+        "{}-{}",
+        chrono::Local::now().format("%Y%m%d-%H%M%S"),
+        std::process::id()
+    );
+    let session_file = sessions_dir.join(&session_id);
+    let _ = std::fs::write(&session_file, "startup-script\n");
+    state.session_id = session_id.clone();
+    pass(&format!("Session registered: {}", session_id));
 }
 
 fn step_doctor_alert(hex_system_dir: &Path, state: &mut State) {
@@ -590,19 +580,10 @@ fn step_hex_events(state: &mut State) {
 }
 
 fn step_emit_session_started(hex_dir: &Path, today: &str) {
-    let home = std::env::var("HOME").unwrap_or_default();
-    let emit_path = PathBuf::from(&home).join(".hex-events/hex_emit.py");
-    let venv_python = PathBuf::from(&home).join(".hex-events/venv/bin/python");
-
-    if !emit_path.exists() {
+    let emit_script = hex_dir.join(".hex/bin/hex-emit.sh");
+    if !emit_script.exists() {
         return;
     }
-
-    let python_bin = if venv_python.exists() {
-        venv_python
-    } else {
-        PathBuf::from("python3")
-    };
 
     let payload = format!(
         "{{\"hex_dir\":\"{}\",\"today\":\"{}\"}}",
@@ -611,11 +592,10 @@ fn step_emit_session_started(hex_dir: &Path, today: &str) {
     );
 
     // || true — always tolerated
-    let _ = Command::new(&python_bin)
-        .arg(&emit_path)
+    let _ = Command::new(&emit_script)
         .arg("session.started")
         .arg(&payload)
-        .arg("startup.sh")
+        .arg("startup")
         .stderr(Stdio::null())
         .stdout(Stdio::null())
         .status();
@@ -671,7 +651,7 @@ fn run_single_step(
 ) -> i32 {
     match step_name {
         "env" => step_env(hex_dir, state),
-        "session" => step_session(scripts_dir, state),
+        "session" => step_session(hex_dir, state),
         "transcripts" => step_transcripts(scripts_dir),
         "index" => step_index(memory_scripts, hex_dir, state),
         "health" => step_health(memory_scripts, state),
