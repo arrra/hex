@@ -21,6 +21,9 @@ hex-bytes = { package = "hex", version = "0.4" }
 fs2 = "0.4"
 rusqlite = { version = "0.31", features = ["bundled-full"] }
 regex = "1"
+sqlite-vec = "0.1"
+fastembed = "4"
+anyhow = "1"
 
 [dev-dependencies]
 tempfile = "3"
