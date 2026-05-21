@@ -276,9 +276,9 @@ hex ships a Quality Antagonist: an adversarial checker that validates completed 
 **How it works:**
 
 ```
-boi.spec.completed → quality-spec-audit policy → quality-check.py --spec <id>
-initiative.kr.met  → quality-kr-check policy   → quality-check.py --kr <init>/<kr>
-timer.tick.6h      → quality-sweep policy       → quality-check.py --sweep
+boi.spec.completed → quality-spec-audit policy → hex doctor quality-check --spec <id>
+initiative.kr.met  → quality-kr-check policy   → hex doctor quality-check --kr <init>/<kr>
+timer.tick.6h      → quality-sweep policy       → hex doctor quality-check --sweep
                                                      ↓
                                           hex.quality.gaming.detected
                                           hex.quality.kr.reverted
@@ -290,9 +290,9 @@ The antagonist runs independently — it does not trust the metric command the w
 **CLI:**
 
 ```bash
-python3 .hex/scripts/quality-check.py --spec q-123      # audit one spec
-python3 .hex/scripts/quality-check.py --kr init-foo/kr-1 # reality-check a KR
-python3 .hex/scripts/quality-check.py --sweep           # scan last 24h
+hex doctor quality-check --spec q-123      # audit one spec
+hex doctor quality-check --kr init-foo/kr-1 # reality-check a KR
+hex doctor quality-check --sweep           # scan last 24h
 ```
 
 ---
@@ -333,7 +333,7 @@ hex-foundation/
 │   │                    hex-shutdown, hex-startup, hex-triage, hex-event, hex-save,
 │   │                    hex-switch, x-twitter, imessage, mirofish, remodeling,
 │   │                    conjecture-criticism, vibe-to-prod
-│   ├── policies/        quality-spec-audit, quality-kr-check, quality-sweep,
+│   ├── events/policies/ quality-spec-audit, quality-kr-check, quality-sweep,
 │   │                    quality-gaming-alert — event-driven quality gates
 │   └── reference/       core-agents/ — quality-antagonist and fleet agent charters
 ├── adapter/
