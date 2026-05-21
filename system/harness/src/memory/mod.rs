@@ -1,3 +1,4 @@
+pub mod embed;
 pub mod index;
 pub mod parse_transcripts;
 pub mod search;
