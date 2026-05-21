@@ -111,11 +111,10 @@ These are Claude Code slash commands, not shell CLIs. Use them inside a `claude`
 | `/hex-checkpoint` | Mid-session save. Distill pass, handoff file, landings update. |
 | `/hex-shutdown` | Session close. Quick distill, deregister session. |
 | `/hex-reflect` | Session reflection. Extract learnings, identify failures, propose standing order candidates. |
-| `/hex-consolidate` | System hygiene. Audit operating model for contradictions, staleness, orphaned refs. |
 | `/hex-debrief` | Weekly walk-through of projects, org signals, relationships, career. |
 | `/hex-decide` | Structured decision framework — context, options, reasoning, impact. |
 | `/hex-triage` | Route untriaged content from `raw/` to the right files. |
-| `/hex-doctor` | Health check. 20-point validation across env, memory, structure, config, and companions. Use `--fix` to repair auto-fixable issues, `--json` for machine-readable output. |
+| `/hex-doctor` | Health check. 20-point validation across env, memory, structure, config, and companions. Use `--fix` to repair auto-fixable issues, `--json` for machine-readable output. `hex doctor consolidate` audits for contradictions, staleness, and orphaned refs. |
 | `/hex-upgrade` | Pull latest system files from hex-foundation. Handles v1→v2 layout migration. Runs doctor after. |
 
 ---
@@ -197,7 +196,7 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 - **HTTP/SSE server** (`hex server`) — serves all web surfaces, real-time event bus with namespaced topics
 - **Asset registry** (`hex asset`) — unified `{type}:{id}` namespace for all hex artifacts
 - **Message routing** (`hex message`) — unified messaging: comments, agent messages, notifications
-- **System health** (`hex doctor`) — 55+ checks across env, memory, structure, config, companions
+- **System health** (`hex doctor`) — 55+ checks across env, memory, structure, config, companions; `hex doctor consolidate` audits operating model for contradictions, staleness, orphaned refs (native Rust, replaces consolidate.legacy.sh)
 - **Integration lifecycle** (`hex integration`) — native Rust integration bundle management
 
 43 subcommands:
