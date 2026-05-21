@@ -19,7 +19,7 @@ action:
       template: >
         Gaming detected in spec {spec_id}.
         Evidence: {evidence_summary}.
-        Run: quality-check.py --spec {spec_id} for full report.
+        Run: hex doctor quality-check --spec {spec_id} for full report.
 
 on_failure:
   log: true

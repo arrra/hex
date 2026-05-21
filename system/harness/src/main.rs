@@ -2405,23 +2405,23 @@ fn main() {
                     std::process::exit(doctor::consolidate::run(&hex_dir));
                 }
                 DoctorCommands::Introspect => {
-                    let script = hex_dir.join("system/scripts/system-introspection.sh");
+                    let script = hex_dir.join(".hex/scripts/system-introspection.legacy.sh");
                     std::process::exit(exec_script(&script, &[]));
                 }
                 DoctorCommands::TechScout { dry_run, verbose } => {
-                    let script = hex_dir.join("system/scripts/tech-scout.sh");
+                    let script = hex_dir.join(".hex/scripts/tech-scout.legacy.sh");
                     let mut args: Vec<&str> = vec![];
                     if dry_run { args.push("--dry-run"); }
                     if verbose { args.push("--verbose"); }
                     std::process::exit(exec_script(&script, &args));
                 }
                 DoctorCommands::GoalAlignment { dry_run } => {
-                    let script = hex_dir.join("system/scripts/goal-alignment.sh");
+                    let script = hex_dir.join(".hex/scripts/goal-alignment.legacy.sh");
                     let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
                     std::process::exit(exec_script(&script, args));
                 }
                 DoctorCommands::CleanupProjects { days } => {
-                    let script = hex_dir.join("system/scripts/cleanup-project-jsonl.sh");
+                    let script = hex_dir.join(".hex/scripts/cleanup-project-jsonl.legacy.sh");
                     let days_s = days.to_string();
                     std::process::exit(exec_script(&script, &[&days_s]));
                 }
