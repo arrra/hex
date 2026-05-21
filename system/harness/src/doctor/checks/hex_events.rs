@@ -45,7 +45,9 @@ impl DoctorCheck for HexEventsReachable {
             return CheckResult::warn("~/.hex-events/events.db not found");
         }
 
-        // Heartbeat: daemon writes ~/.hex-events/last-heartbeat.json on each tick.
+        // Heartbeat liveness: the `hex events daemon` loop writes
+        // ~/.hex-events/last-heartbeat.json atomically on each 60s heartbeat
+        // tick (and once at startup); we treat a <5min-old mtime as healthy.
         let heartbeat_path = events_dir.join("last-heartbeat.json");
         let heartbeat_age = match heartbeat_path.metadata().and_then(|m| m.modified()) {
             Ok(mtime) => SystemTime::now().duration_since(mtime).ok(),

@@ -918,6 +918,12 @@ impl EventEngine {
             if shadow { ", shadow-mode" } else { "" }
         );
 
+        // Write heartbeat file at startup so `hex events status` sees `running`
+        // immediately rather than waiting up to 60s for the first tick.
+        if let Some(events_dir) = self.policies_dir.parent() {
+            write_heartbeat_file(events_dir, std::process::id(), 0, 0);
+        }
+
         while running.load(Ordering::SeqCst) {
             // Drain unprocessed events from DB (inserted by external tools).
             let batch = self.get_unprocessed_batch(100);
@@ -935,6 +941,9 @@ impl EventEngine {
                     hb_events,
                     hb_actions,
                 );
+                if let Some(events_dir) = self.policies_dir.parent() {
+                    write_heartbeat_file(events_dir, std::process::id(), hb_events, hb_actions);
+                }
                 hb_events = 0;
                 hb_actions = 0;
                 last_heartbeat = Instant::now();
@@ -2255,6 +2264,40 @@ fn json_error(status: u16, msg: &str) -> Response {
     }
 }
 
+/// Atomically write the daemon heartbeat file so `hex events status` and the
+/// doctor check can confirm the daemon is alive from the file's mtime.
+/// Writes to a `.tmp` sibling first then renames for atomicity (Standing Order S6:
+/// errors are logged to stderr, never silently swallowed).
+fn write_heartbeat_file(events_dir: &Path, pid: u32, events: u64, actions: u64) {
+    let heartbeat_path = events_dir.join("last-heartbeat.json");
+    let tmp_path = events_dir.join("last-heartbeat.json.tmp");
+
+    let content = serde_json::json!({
+        "pid": pid,
+        "state": "healthy",
+        "ts": Utc::now().to_rfc3339(),
+        "events": events,
+        "actions": actions,
+    });
+
+    let bytes = match serde_json::to_vec(&content) {
+        Ok(b) => b,
+        Err(e) => {
+            eprintln!("heartbeat: failed to write {}: {e}", heartbeat_path.display());
+            return;
+        }
+    };
+
+    if let Err(e) = std::fs::write(&tmp_path, &bytes) {
+        eprintln!("heartbeat: failed to write {}: {e}", heartbeat_path.display());
+        return;
+    }
+
+    if let Err(e) = std::fs::rename(&tmp_path, &heartbeat_path) {
+        eprintln!("heartbeat: failed to write {}: {e}", heartbeat_path.display());
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -2989,5 +3032,49 @@ rules:
         assert_eq!(v.len(), 2);
         assert!(v[0].condition.is_none());
         assert!(v[1].condition.is_some());
+    }
+
+    #[test]
+    fn heartbeat_file_write_makes_status_running() {
+        use std::time::{Duration, SystemTime};
+
+        // Set up a temp dir mirroring ~/.hex-events/policies layout.
+        let tmp = TempDir::new().unwrap();
+        let events_dir = tmp.path().to_path_buf();
+        let policies_dir = events_dir.join("policies");
+        std::fs::create_dir_all(&policies_dir).unwrap();
+
+        // Derive events_dir via the same path the daemon uses: policies_dir.parent().
+        let derived_events_dir = policies_dir.parent().expect("policies_dir must have parent");
+        assert_eq!(derived_events_dir, events_dir);
+
+        // Exercise the real write path from T4080.
+        write_heartbeat_file(derived_events_dir, std::process::id(), 7, 3);
+
+        // 1. File must exist.
+        let heartbeat_path = derived_events_dir.join("last-heartbeat.json");
+        assert!(heartbeat_path.exists(), "last-heartbeat.json was not created");
+
+        // 2. File must be valid JSON with state == "healthy".
+        let contents = std::fs::read_to_string(&heartbeat_path).unwrap();
+        let parsed: serde_json::Value = serde_json::from_str(&contents)
+            .expect("last-heartbeat.json is not valid JSON");
+        assert_eq!(parsed["state"], "healthy");
+
+        // 3. Replicate the read-path liveness decision from cli_status.
+        //    mtime < 300s old => daemon_state = "running".
+        let mtime = heartbeat_path
+            .metadata()
+            .and_then(|m| m.modified())
+            .expect("mtime must be readable on a just-written file");
+        let age = SystemTime::now()
+            .duration_since(mtime)
+            .expect("mtime must not be in the future");
+        assert!(
+            age < Duration::from_secs(300),
+            "read-path would classify file as stale/not-started: age={age:?}"
+        );
+
+        // Cleanup is handled by TempDir drop.
     }
 }
