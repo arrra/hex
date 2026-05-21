@@ -2,7 +2,7 @@
 //! table, and vector insert / delete / KNN.
 
 use rusqlite::ffi::sqlite3_auto_extension;
-use rusqlite::Connection;
+use rusqlite::{params, Connection};
 use sqlite_vec::sqlite3_vec_init;
 use std::sync::Once;
 
@@ -21,6 +21,58 @@ pub fn register_sqlite_vec() {
     });
 }
 
+/// Pack f32s as little-endian bytes — the compact BLOB form sqlite-vec wants.
+pub fn f32s_to_le_bytes(v: &[f32]) -> Vec<u8> {
+    let mut out = Vec::with_capacity(v.len() * 4);
+    for x in v {
+        out.extend_from_slice(&x.to_le_bytes());
+    }
+    out
+}
+
+/// Create the `vec_chunks` vec0 table. Each row's rowid mirrors the
+/// corresponding `chunks` FTS5 rowid — that is the join key.
+pub fn init_vec_table(conn: &Connection) -> rusqlite::Result<()> {
+    conn.execute_batch(&format!(
+        "CREATE VIRTUAL TABLE IF NOT EXISTS vec_chunks USING vec0(
+            embedding float[{EMBED_DIM}]
+        );"
+    ))
+}
+
+pub fn insert_vec(conn: &Connection, rowid: i64, embedding: &[f32]) -> rusqlite::Result<()> {
+    conn.execute(
+        "INSERT INTO vec_chunks(rowid, embedding) VALUES (?1, ?2)",
+        params![rowid, f32s_to_le_bytes(embedding)],
+    )?;
+    Ok(())
+}
+
+/// Delete vec rows by rowid, in batches (mirrors `delete_chunks_for_file`).
+pub fn delete_vecs(conn: &Connection, rowids: &[i64]) -> rusqlite::Result<()> {
+    for batch in rowids.chunks(500) {
+        let ph: String = batch.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+        let mut stmt = conn.prepare(&format!("DELETE FROM vec_chunks WHERE rowid IN ({ph})"))?;
+        for (i, id) in batch.iter().enumerate() {
+            stmt.raw_bind_parameter(i + 1, *id)?;
+        }
+        stmt.raw_execute()?;
+    }
+    Ok(())
+}
+
+/// K-nearest-neighbour search. Returns (chunk_rowid, distance), nearest first.
+pub fn knn(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(i64, f64)>> {
+    let mut stmt = conn.prepare(
+        "SELECT rowid, distance FROM vec_chunks \
+         WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2",
+    )?;
+    let rows = stmt.query_map(params![f32s_to_le_bytes(query), k as i64], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+    })?;
+    rows.collect()
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -33,5 +85,25 @@ mod tests {
             .query_row("SELECT vec_version()", [], |r| r.get(0))
             .expect("vec_version() must work once sqlite-vec is registered");
         assert!(ver.starts_with('v'), "unexpected vec_version: {ver}");
+    }
+
+    #[test]
+    fn vec_table_insert_and_knn() {
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        init_vec_table(&conn).unwrap();
+
+        for id in 1..=5i64 {
+            let v: Vec<f32> = (0..EMBED_DIM).map(|i| (id as f32 + i as f32) * 0.001).collect();
+            insert_vec(&conn, id, &v).unwrap();
+        }
+        let query: Vec<f32> = (0..EMBED_DIM).map(|i| (3.0 + i as f32) * 0.001).collect();
+        let hits = knn(&conn, &query, 3).unwrap();
+        assert_eq!(hits.len(), 3);
+        assert_eq!(hits[0].0, 3, "row 3 is its own nearest neighbour");
+
+        delete_vecs(&conn, &[3]).unwrap();
+        let hits = knn(&conn, &query, 3).unwrap();
+        assert!(!hits.iter().any(|(id, _)| *id == 3), "row 3 was deleted");
     }
 }
