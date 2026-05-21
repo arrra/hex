@@ -1,6 +1,7 @@
 pub mod backup_session;
 pub mod post_tool_use;
 pub mod session_start;
+pub mod user_prompt_submit;
 
 use clap::Subcommand;
 
@@ -15,6 +16,9 @@ pub enum HookCommands {
     /// Claude Code PostToolUse hook — emit tool.post_use events (filtered)
     #[command(name = "post-tool-use")]
     PostToolUse,
+    /// Claude Code UserPromptSubmit hook — inject relevant workspace memory
+    #[command(name = "user-prompt-submit")]
+    UserPromptSubmit,
 }
 
 pub fn run(command: HookCommands) {
@@ -22,5 +26,6 @@ pub fn run(command: HookCommands) {
         HookCommands::SessionStart => session_start::run(),
         HookCommands::BackupSession => backup_session::run(),
         HookCommands::PostToolUse => post_tool_use::run(),
+        HookCommands::UserPromptSubmit => user_prompt_submit::run(),
     }
 }
