@@ -2400,9 +2400,7 @@ fn main() {
                     std::process::exit(doctor::introspect::run(&hex_dir));
                 }
                 DoctorCommands::GoalAlignment { dry_run } => {
-                    let script = hex_dir.join(".hex/scripts/goal-alignment.legacy.sh");
-                    let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
-                    std::process::exit(exec_script(&script, args));
+                    std::process::exit(doctor::goal_alignment::run(&hex_dir, dry_run));
                 }
                 DoctorCommands::CleanupProjects { days } => {
                     std::process::exit(doctor::cleanup_projects::run(&hex_dir, days as u64));
