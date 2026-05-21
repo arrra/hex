@@ -196,15 +196,15 @@ fn find_stale_refs(hex_dir: &Path, targets: &[PathBuf]) -> Vec<String> {
 }
 
 fn extract_relative_links(content: &str) -> Vec<String> {
-    // Match markdown links: [text](path) where path ends in .md/.yaml/.sh/.py/.rs
-    // and doesn't start with http/https
+    // Match only genuine markdown links: ](path) — the `]` before `(` is required.
+    // Reject: whitespace in target, http/https/mailto/# schemes.
     let mut links = Vec::new();
     let extensions = [".md", ".yaml", ".sh", ".py", ".rs"];
     let bytes = content.as_bytes();
     let mut i = 0;
     while i < bytes.len() {
-        if bytes[i] == b'(' {
-            // Find the closing paren
+        // Require `](` pattern — skip bare `(`
+        if i > 0 && bytes[i] == b'(' && bytes[i - 1] == b']' {
             let start = i + 1;
             let mut end = start;
             let mut depth = 1usize;
@@ -220,8 +220,12 @@ fn extract_relative_links(content: &str) -> Vec<String> {
                 let candidate = &content[start..end];
                 // Strip trailing anchors
                 let candidate = candidate.split('#').next().unwrap_or(candidate).trim();
-                if !candidate.starts_with("http://") && !candidate.starts_with("https://")
-                    && !candidate.is_empty()
+                if !candidate.is_empty()
+                    && !candidate.contains(char::is_whitespace)
+                    && !candidate.starts_with("http://")
+                    && !candidate.starts_with("https://")
+                    && !candidate.starts_with('#')
+                    && !candidate.starts_with("mailto:")
                     && extensions.iter().any(|ext| candidate.ends_with(ext))
                 {
                     links.push(candidate.to_string());
@@ -233,6 +237,46 @@ fn extract_relative_links(content: &str) -> Vec<String> {
         }
     }
     links
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consolidate_prose_parens_not_extracted() {
+        let content = "git tag must match (enforced by release.sh) here";
+        let links = extract_relative_links(content);
+        assert!(links.is_empty(), "prose parens should not be extracted: {links:?}");
+    }
+
+    #[test]
+    fn consolidate_real_link_is_extracted() {
+        let content = "See [the guide](docs/guide.md) for details.";
+        let links = extract_relative_links(content);
+        assert_eq!(links, vec!["docs/guide.md"]);
+    }
+
+    #[test]
+    fn consolidate_https_url_is_skipped() {
+        let content = "See [external](https://example.com/page.md) link.";
+        let links = extract_relative_links(content);
+        assert!(links.is_empty(), "https URLs should be skipped: {links:?}");
+    }
+
+    #[test]
+    fn consolidate_http_url_is_skipped() {
+        let content = "See [external](http://example.com/page.md) link.";
+        let links = extract_relative_links(content);
+        assert!(links.is_empty(), "http URLs should be skipped: {links:?}");
+    }
+
+    #[test]
+    fn consolidate_anchor_only_is_skipped() {
+        let content = "See [section](#heading) here.";
+        let links = extract_relative_links(content);
+        assert!(links.is_empty(), "anchor-only links should be skipped: {links:?}");
+    }
 }
 
 fn normalize_path(path: &Path) -> PathBuf {
