@@ -116,7 +116,7 @@ pub fn run(hex_dir: &Path, args: StartupArgs) -> i32 {
     step_doctor_alert(&hex_system_dir, &mut state);
 
     // Step 7: Parse transcripts
-    step_transcripts(&scripts_dir);
+    step_transcripts(hex_dir);
 
     // Step 8: Memory index (solo or quick)
     if state.is_solo || args.quick {
@@ -256,40 +256,18 @@ fn step_doctor_alert(hex_system_dir: &Path, state: &mut State) {
     }
 }
 
-fn step_transcripts(scripts_dir: &Path) {
+fn step_transcripts(hex_dir: &Path) {
     header("3. Parse Transcripts");
 
-    let emit_script = scripts_dir.join("parse-transcripts-and-emit.sh");
-    let py_script = scripts_dir.join("parse_transcripts.py");
-
-    let output = if emit_script.exists() && is_executable(&emit_script) {
-        Command::new("bash")
-            .arg(&emit_script)
-            .output()
-            .ok()
-    } else if py_script.exists() {
-        Command::new("python3")
-            .arg(&py_script)
-            .output()
-            .ok()
-    } else {
-        info("Transcript parser not found — skipping");
-        return;
+    let args = crate::memory::parse_transcripts::ParseArgs {
+        file: None,
+        dry_run: false,
+        force: false,
     };
-
-    match output {
-        Some(out) => {
-            let stdout = String::from_utf8_lossy(&out.stdout);
-            for line in stdout.lines() {
-                info(line);
-            }
-            if stdout.contains("No new transcripts") || stdout.contains("No .jsonl files") {
-                pass("Transcripts: no new files");
-            } else {
-                pass("Transcripts parsed");
-            }
-        }
-        None => info("Transcript parser unavailable"),
+    if crate::memory::parse_transcripts::run(hex_dir, &args) == 0 {
+        pass("Transcripts parsed");
+    } else {
+        info("Transcript parsing reported issues");
     }
 }
 
@@ -652,7 +630,7 @@ fn run_single_step(
     match step_name {
         "env" => step_env(hex_dir, state),
         "session" => step_session(hex_dir, state),
-        "transcripts" => step_transcripts(scripts_dir),
+        "transcripts" => step_transcripts(hex_dir),
         "index" => step_index(memory_scripts, hex_dir, state),
         "health" => step_health(memory_scripts, state),
         "integrations" => step_integrations(hex_dir, state),
