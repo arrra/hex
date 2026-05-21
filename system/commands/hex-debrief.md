@@ -50,7 +50,7 @@ For each project in todo.md "Now" section, ask:
 - Write distilled notes to the appropriate files.
 - Rebuild memory index:
 ```bash
-python3 $HEX_DIR/.hex/skills/memory/scripts/memory_index.py
+hex memory index
 ```
 
 ### 8. Reminder

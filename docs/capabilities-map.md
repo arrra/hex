@@ -40,16 +40,16 @@
 ## 🧠 Memory & Knowledge
 *How hex remembers and retrieves*
 
-- 🟢 **FTS5 Memory Search** — SQLite FTS5 full-text search across all markdown files with BM25 ranking
-  _via script · [.claude/skills/memory/scripts/memory_search.py]_
+- 🟢 **Hybrid Memory Search** — FTS5 BM25 + vector (nomic-embed-text-v1.5, 768-d) hybrid search fused with RRF across all indexed files
+  _via binary · [hex memory search "q"]_
 - 🟢 **Fact Store** — Entity-linked facts with trust scoring, contradiction detection, and compositional queries
   _via built-in · [fact_store tool]_
 - 🟢 **Holographic Memory** — Deep structured memory with entity resolution, trust scoring, and algebraic reasoning
   _via built-in · [~/.hex/legacy-skills/memory_store.db]_
 - 🟢 **Memory** — >
   _via hex-skill · [~/.claude/skills/memory/SKILL.md]_
-- 🟢 **Memory Index Builder** — Incremental and full re-indexing of workspace markdown into SQLite FTS5
-  _via script · [.claude/skills/memory/scripts/memory_index.py]_
+- 🟢 **Memory Index Builder** — Incremental and full re-indexing of workspace markdown into `.hex/memory.db` (schema v3)
+  _via binary · [hex memory index]_
 - 🟢 **Session Search** — Search past conversation transcripts across all sessions
   _via built-in · [session_search tool]_
 - 🟢 **Workspace File Memory** — Structured file-based knowledge in me/, projects/, people/, evolution/

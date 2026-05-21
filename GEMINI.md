@@ -131,9 +131,9 @@ See AGENTS.md for the full spec template and mode descriptions.
 ## Memory System
 
 ```bash
-python3 .hex/skills/memory/scripts/memory_search.py "query"
-python3 .hex/skills/memory/scripts/memory_save.py "content" --tags "tag"
-python3 .hex/skills/memory/scripts/memory_index.py
+hex memory search "query"
+hex memory recall "query"          # FTS5 contextual recall (used by the hook)
+hex memory index                   # Rebuild index
 ```
 
 ---

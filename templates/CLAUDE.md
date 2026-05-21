@@ -505,21 +505,17 @@ hex has persistent, searchable memory stored in `.hex/memory.db`.
 
 ### Search (before answering questions about past context)
 ```
-python3 .hex/skills/memory/scripts/memory_search.py "query terms"
-python3 .hex/skills/memory/scripts/memory_search.py --compact "keyword"
-python3 .hex/skills/memory/scripts/memory_search.py --file people "name"
-```
-
-### Save (important facts, observations, decisions)
-```
-python3 .hex/skills/memory/scripts/memory_save.py "content" --tags "tag1,tag2" --source "file.md"
+hex memory search "query terms"
+hex memory search --compact "keyword"
+hex memory search --file people "name"
+hex memory recall "query"          # FTS5 contextual recall (used by the hook)
 ```
 
 ### Index (rebuild after adding files)
 ```
-python3 .hex/skills/memory/scripts/memory_index.py          # Incremental
-python3 .hex/skills/memory/scripts/memory_index.py --full    # Full rebuild
-python3 .hex/skills/memory/scripts/memory_index.py --stats   # Show stats
+hex memory index                   # Incremental
+hex memory index --full            # Full rebuild
+hex memory index --stats           # Show stats
 ```
 
 **Rule:** Search memory before guessing. Don't rely on what's in the current context window.

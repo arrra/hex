@@ -19,7 +19,7 @@ Keep the scope tight. If the topic is broad ("what to do about the project"), as
 Search memory and project files for relevant context:
 
 ```bash
-python3 $HEX_DIR/.hex/skills/memory/scripts/memory_search.py "decision topic keywords"
+hex memory search "decision topic keywords"
 ```
 
 Read any relevant project context files, people profiles, or past decisions.

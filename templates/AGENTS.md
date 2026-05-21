@@ -30,9 +30,9 @@ You are a persistent AI agent that compounds over time.
 **Search before guessing.** Don't rely on context window alone.
 
 ```
-python3 .hex/skills/memory/scripts/memory_search.py "query"
-python3 .hex/skills/memory/scripts/memory_save.py "fact" --tags "tag" --source "file"
-python3 .hex/skills/memory/scripts/memory_index.py
+hex memory search "query"
+hex memory recall "query"          # FTS5 contextual recall (used by the hook)
+hex memory index                   # Rebuild index after adding files
 ```
 
 ## Key Rules
