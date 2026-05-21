@@ -2406,9 +2406,7 @@ fn main() {
                     std::process::exit(exec_script(&script, args));
                 }
                 DoctorCommands::CleanupProjects { days } => {
-                    let script = hex_dir.join(".hex/scripts/cleanup-project-jsonl.legacy.sh");
-                    let days_s = days.to_string();
-                    std::process::exit(exec_script(&script, &[&days_s]));
+                    std::process::exit(doctor::cleanup_projects::run(&hex_dir, days as u64));
                 }
                 DoctorCommands::CharterTriggers { mode } => {
                     std::process::exit(charter_triggers::run(&hex_dir, &mode));
