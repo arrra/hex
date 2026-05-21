@@ -48,6 +48,7 @@ mod hook;
 mod upgrade;
 mod initiative;
 mod learnings;
+mod release;
 use hex::route;
 
 #[derive(Parser)]
@@ -262,6 +263,18 @@ enum Commands {
         /// Extra arguments forwarded to upgrade.sh
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Deterministic LLM-free release pipeline (wraps system/scripts/release.sh)
+    Release {
+        /// Explicit release version (e.g. 1.2.3); if omitted uses Cargo.toml version
+        #[arg(long)]
+        version: Option<String>,
+        /// Skip Docker E2E and Codex parity gates (emergency bypass)
+        #[arg(long)]
+        skip_e2e: bool,
+        /// Run gates only — no push, no tag, no GitHub release
+        #[arg(long)]
+        dry_run: bool,
     },
     /// Claude Code hook runners (port of .hex/hooks/scripts/*.sh)
     Hook {
@@ -2819,6 +2832,11 @@ fn main() {
         }
         Commands::Upgrade { args } => {
             std::process::exit(upgrade::run(&args));
+        }
+        Commands::Release { version, skip_e2e, dry_run } => {
+            let hex_dir = get_hex_dir();
+            let code = release::run(&hex_dir, release::ReleaseArgs { version, skip_e2e, dry_run });
+            std::process::exit(code);
         }
         Commands::Hook { command } => hook::run(command),
         Commands::Version => {
