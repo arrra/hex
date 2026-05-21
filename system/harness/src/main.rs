@@ -2397,8 +2397,7 @@ fn main() {
                     std::process::exit(doctor::consolidate::run(&hex_dir));
                 }
                 DoctorCommands::Introspect => {
-                    let script = hex_dir.join(".hex/scripts/system-introspection.legacy.sh");
-                    std::process::exit(exec_script(&script, &[]));
+                    std::process::exit(doctor::introspect::run(&hex_dir));
                 }
                 DoctorCommands::GoalAlignment { dry_run } => {
                     let script = hex_dir.join(".hex/scripts/goal-alignment.legacy.sh");
