@@ -106,6 +106,19 @@ Each trail entry must have `type` and `detail` fields. Required detail fields pe
 | reframe | abandoned, reason, new_framing |
 | message_sent | to, subject, body |
 
+### Mechanical acts require evidence
+
+If an `act` describes a mechanical operation — git push, git tag, dispatching a BOI spec, writing a file, shipping a release — its `detail` MUST include an `evidence` object the harness can verify:
+
+```
+detail.evidence = {{"type": "git_tag", "value": "v0.17.3", "repo": "..."}}
+detail.evidence = {{"type": "git_push", "repo": "...", "ref": "main"}}
+detail.evidence = {{"type": "boi_dispatch", "spec_id": "S1234"}}
+detail.evidence = {{"type": "file_written", "path": "/abs/path"}}
+```
+
+An `act` claiming a mechanical operation without verifiable evidence is recorded as UNVERIFIED — it does NOT count as done. Never claim a mechanical action you did not actually perform; the harness checks the evidence against reality.
+
 ## Keeping the response compact
 
 A truncated response loses work — the harness salvages what it can, but compact responses never truncate. Be concise.
