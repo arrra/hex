@@ -22,6 +22,10 @@ fs2 = "0.4"
 rusqlite = { version = "0.31", features = ["bundled-full"] }
 regex = "1"
 sqlite-vec = "0.1"
+# Tree-trim attempted (2026-05-21): `default-features = false, features = ["ort-download-binaries"]`
+# broke the build — `TextEmbedding::try_new` is only available with default features enabled
+# (error[E0599]: no function or associated item named `try_new` found for struct `TextEmbedding`).
+# The image/codec stack is not separately feature-gated in fastembed 4. Keeping defaults.
 fastembed = "4"
 anyhow = "1"
 
