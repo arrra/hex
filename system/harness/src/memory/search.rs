@@ -130,15 +130,18 @@ fn search_fts(
         return Ok(vec![]);
     }
 
-    // Build FTS5 query variants: phrase then AND (mirror Python)
+    // FTS5 query variants, tried in order until one yields a match (see the
+    // loop below): exact phrase → all terms AND-ed → any term OR-ed. The OR
+    // fallback is what lets a natural-language prompt retrieve anything — the
+    // recall hook and the nightly eval depend on it. Each term is quoted, so a
+    // term that looks like an FTS5 keyword stays a literal; BM25 (ORDER BY
+    // score) ranks the OR matches, so chunks hitting more/rarer terms still win.
     let queries_to_try: Vec<String> = if terms.len() > 1 {
+        let quoted: Vec<String> = terms.iter().map(|t| format!("\"{}\"", t)).collect();
         vec![
             format!("\"{}\"", terms.join(" ")),
-            terms
-                .iter()
-                .map(|t| format!("\"{}\"", t))
-                .collect::<Vec<_>>()
-                .join(" "),
+            quoted.join(" "),
+            quoted.join(" OR "),
         ]
     } else {
         vec![format!("\"{}\"", terms[0])]
@@ -469,6 +472,24 @@ mod tests {
         let results = search_fts(&conn, "Rust programming", 10, None).unwrap();
         assert!(!results.is_empty());
         assert_eq!(results[0].source_path, "projects/foo.md");
+    }
+
+    #[test]
+    fn search_fts_or_fallback_matches_scattered_terms() {
+        let conn = setup_db();
+        // No chunk contains every query term, and the query is not a verbatim
+        // phrase anywhere — the exact-phrase and all-terms-AND variants both
+        // miss. Only an OR fallback can surface these. This is the natural-
+        // language recall case the UserPromptSubmit hook actually sees.
+        insert_chunk(&conn, "a.md", "Deploy", "the deployment pipeline runs nightly", 1.0);
+        insert_chunk(&conn, "b.md", "Schema", "we chose a vector schema for embeddings", 1.0);
+
+        let results =
+            search_fts(&conn, "what schema did we pick for deployment", 10, None).unwrap();
+        assert!(
+            !results.is_empty(),
+            "OR fallback should surface chunks matching only some query terms"
+        );
     }
 
     #[test]
