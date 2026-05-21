@@ -352,13 +352,18 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
                 > 0;
             if !migration_done {
                 eprintln!("  NOTE: Upgrading chunks schema (→ v3: private column + vectors). Files will be re-indexed.");
+                // Run the destructive steps + the completion marker atomically so a
+                // crash between them cannot leave the DB in a half-migrated state.
+                // The FTS5 CREATE VIRTUAL TABLE that follows is intentionally outside
+                // this transaction — SQLite cannot roll back FTS5 virtual-table DDL.
                 conn.execute_batch(
-                    "DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS vec_chunks; \
-                     DELETE FROM files; DELETE FROM chunk_meta;",
-                )?;
-                conn.execute(
-                    "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_migrated_chunks_v3', '1')",
-                    [],
+                    "BEGIN;
+                     DROP TABLE IF EXISTS chunks;
+                     DROP TABLE IF EXISTS vec_chunks;
+                     DELETE FROM files;
+                     DELETE FROM chunk_meta;
+                     INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_migrated_chunks_v3', '1');
+                     COMMIT;",
                 )?;
             }
         }
@@ -642,10 +647,12 @@ pub fn get_indexable_files(hex_root: &Path) -> Vec<(PathBuf, String)> {
 // ── Main indexer ──────────────────────────────────────────────────────────────
 
 fn set_metadata(conn: &Connection, key: &str, value: &str) {
-    let _ = conn.execute(
+    if let Err(e) = conn.execute(
         "INSERT OR REPLACE INTO metadata (key, value) VALUES (?, ?)",
         params![key, value],
-    );
+    ) {
+        eprintln!("[memory index] metadata write failed ({key}): {e}");
+    }
 }
 
 fn get_metadata(conn: &Connection, key: &str) -> Option<String> {
@@ -748,10 +755,12 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
             if let Some((_, prev_hash)) = prev {
                 if !prev_hash.is_empty() && *prev_hash == chash {
                     // Content identical — update mtime only
-                    let _ = conn.execute(
+                    if let Err(e) = conn.execute(
                         "UPDATE files SET mtime = ? WHERE path = ?",
                         params![mtime, rel_path],
-                    );
+                    ) {
+                        eprintln!("[memory index] mtime refresh failed for {rel_path}: {e}");
+                    }
                     skipped_hash += 1;
                     continue;
                 }
@@ -832,10 +841,14 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
                 )
                 .ok();
             if let Some(fid) = existing_id {
-                let _ = delete_chunks_for_file(&conn, fid);
-                let _ = conn.execute("DELETE FROM files WHERE id = ?", params![fid]);
-                removed += 1;
-                println!("  Removed: {db_path_str}");
+                if let Err(e) = delete_chunks_for_file(&conn, fid) {
+                    eprintln!("  ERROR removing chunks for {db_path_str}: {e}");
+                } else if let Err(e) = conn.execute("DELETE FROM files WHERE id = ?", params![fid]) {
+                    eprintln!("  ERROR removing file record {db_path_str}: {e}");
+                } else {
+                    removed += 1;
+                    println!("  Removed: {db_path_str}");
+                }
             }
         }
     }

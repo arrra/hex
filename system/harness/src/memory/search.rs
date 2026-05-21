@@ -25,15 +25,17 @@ pub struct SearchResult {
 }
 
 // Mirror Python's truncate(): trim to max_chars at a word boundary.
+// Uses char-safe slicing — text.len() is bytes, not chars; byte-slicing
+// panics on any multibyte character (é, em-dash, curly quotes, CJK, …).
 fn truncate(text: &str, max_chars: usize) -> String {
-    if text.len() <= max_chars {
+    if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let slice = &text[..max_chars];
-    if let Some(pos) = slice.rfind(' ') {
-        format!("{}...", &slice[..pos])
-    } else {
-        format!("{}...", slice)
+    let end = text.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(text.len());
+    let slice = &text[..end];
+    match slice.rfind(' ') {
+        Some(pos) => format!("{}...", &slice[..pos]),
+        None => format!("{}...", slice),
     }
 }
 
@@ -526,6 +528,31 @@ mod tests {
         let results = search_fts(&conn, "shared topic", 10, Some("alpha")).unwrap();
         assert_eq!(results.len(), 1);
         assert!(results[0].source_path.contains("alpha"));
+    }
+
+    #[test]
+    fn test_truncate_multibyte_unicode() {
+        // "café" is 4 chars but 5 bytes (é = 2 bytes, at byte indices 3-4).
+        // The old code's `&text[..max_chars]` byte-slice panics when max_chars
+        // lands inside a multibyte char. Verify no panic + sane output.
+        let s = "café menu items";
+        // max_chars=4 makes the old `&text[..4]` end inside 'é' (bytes 3-4) —
+        // this subcase panics against the pre-fix code. (max_chars=5 would not:
+        // byte 5 is the space, a valid boundary.)
+        let t = truncate(s, 4);
+        assert!(t.ends_with("..."), "expected trailing '...', got: {:?}", t);
+        // Result is valid UTF-8 (round-tripping through String proves it) and
+        // no longer than max_chars characters.
+        let char_count = t.trim_end_matches("...").chars().count();
+        assert!(char_count <= 4, "char_count={char_count}");
+
+        // Em-dash (3 bytes): max_chars=4 puts the old byte cut mid-em-dash too.
+        let em = "foo\u{2014}bar baz"; // em-dash = U+2014 = 3 bytes
+        let te = truncate(em, 4); // 4 chars: 'f','o','o','—'
+        assert!(te.ends_with("...") || te == "foo\u{2014}bar baz");
+
+        // Strings short enough must be returned unchanged (no '...').
+        assert_eq!(truncate("hi", 10), "hi");
     }
 
     #[test]
