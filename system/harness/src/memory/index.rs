@@ -80,6 +80,14 @@ fn parse_heading(line: &str) -> Option<(usize, &str)> {
     None
 }
 
+const PRIVATE_PREFIXES: &[&str] = &["me/", "people/", "raw/"];
+
+/// Index-time privacy flag (spec §7) — true if the file lives under a
+/// sensitive prefix. Stored on each chunk so retrieval can filter by column.
+pub fn is_private(rel_path: &str) -> bool {
+    PRIVATE_PREFIXES.iter().any(|p| rel_path.starts_with(p))
+}
+
 pub fn get_source_weight(rel_path: &str, is_old_transcript: bool) -> f64 {
     if rel_path.starts_with("raw/transcripts") {
         return if is_old_transcript { 0.3 } else { 0.5 };
@@ -321,7 +329,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         ",
     )?;
 
-    // Schema migration: chunks FTS5 v0.1.0 → v0.2.0 (add file_id column)
+    // Schema migration: chunks FTS5 → v3 (private column + vec_chunks)
     let chunks_exists: bool = conn
         .query_row(
             "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='chunks'",
@@ -332,34 +340,31 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
         > 0;
 
     if chunks_exists {
-        // Check for file_id column by preparing the query; prepare validates
-        // column names on FTS5 virtual tables at prepare time.
-        let file_id_ok = conn
-            .prepare("SELECT file_id FROM chunks LIMIT 0")
-            .is_ok();
-        if !file_id_ok {
+        let private_ok = conn.prepare("SELECT private FROM chunks LIMIT 0").is_ok();
+        if !private_ok {
             let migration_done: bool = conn
                 .query_row(
-                    "SELECT COUNT(*) FROM metadata WHERE key='schema_migrated_chunks_v2'",
+                    "SELECT COUNT(*) FROM metadata WHERE key='schema_migrated_chunks_v3'",
                     [],
                     |r| r.get::<_, i64>(0),
                 )
                 .unwrap_or(0)
                 > 0;
             if !migration_done {
-                eprintln!("  NOTE: Upgrading chunks table schema (v0.1.0 → v0.2.0). Files will be re-indexed.");
+                eprintln!("  NOTE: Upgrading chunks schema (→ v3: private column + vectors). Files will be re-indexed.");
                 conn.execute_batch(
-                    "DROP TABLE IF EXISTS chunks; DELETE FROM files; DELETE FROM chunk_meta;",
+                    "DROP TABLE IF EXISTS chunks; DROP TABLE IF EXISTS vec_chunks; \
+                     DELETE FROM files; DELETE FROM chunk_meta;",
                 )?;
                 conn.execute(
-                    "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_migrated_chunks_v2', '1')",
+                    "INSERT OR REPLACE INTO metadata (key, value) VALUES ('schema_migrated_chunks_v3', '1')",
                     [],
                 )?;
             }
         }
     } else {
         conn.execute(
-            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_migrated_chunks_v2', '1')",
+            "INSERT OR IGNORE INTO metadata (key, value) VALUES ('schema_migrated_chunks_v3', '1')",
             [],
         )?;
     }
@@ -372,6 +377,7 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             heading,
             chunk_index,
             content,
+            private,
             tokenize='unicode61'
         );
         ",
@@ -392,6 +398,8 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+
+    super::vector::init_vec_table(conn)?;
 
     Ok(())
 }
@@ -421,6 +429,10 @@ fn delete_chunks_for_file(conn: &Connection, file_id: i64) -> rusqlite::Result<(
             }
             stmt.raw_execute()?;
         }
+
+        // Delete the matching vec_chunks rows — V1's 74k-orphan bug was a missing
+        // DELETE here (spec §5.2).
+        super::vector::delete_vecs(conn, &rowids)?;
     }
 
     // FTS5 delete by file_id (stored as text)
@@ -441,12 +453,14 @@ pub fn index_file(
     content: &str,
     mtime: f64,
     strategy: &str,
+    embedder: &super::embed::Embedder,
 ) -> rusqlite::Result<usize> {
     let rel_path = filepath
         .strip_prefix(hex_root)
         .map(|p| p.to_string_lossy().to_string())
         .unwrap_or_else(|_| filepath.to_string_lossy().to_string());
     let chash = content_hash(content);
+    let private_flag: i64 = if is_private(&rel_path) { 1 } else { 0 };
 
     let is_old_tr = strategy == "summary";
 
@@ -501,23 +515,53 @@ pub fn index_file(
 
     let weight = get_source_weight(&rel_path, is_old_tr);
 
+    // Insert FTS5 chunk rows, collecting rowids for the vector pass.
+    let mut chunk_rowids: Vec<i64> = Vec::with_capacity(chunks.len());
     for (i, chunk) in chunks.iter().enumerate() {
         conn.execute(
-            "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content) VALUES (?, ?, ?, ?, ?)",
+            "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
+             VALUES (?, ?, ?, ?, ?, ?)",
             params![
                 file_id.to_string(),
                 rel_path,
                 chunk.heading,
                 i.to_string(),
-                chunk.content
+                chunk.content,
+                private_flag
             ],
         )?;
-        let chunk_rowid: i64 =
-            conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+        let chunk_rowid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+        chunk_rowids.push(chunk_rowid);
         conn.execute(
             "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, ?)",
             params![chunk_rowid, weight],
         )?;
+    }
+
+    // Vector pass: batch-embed all chunk contents, store one vec row per chunk.
+    // An embed failure is loud but non-fatal — the file keeps its FTS5 rows
+    // (searchable), only the vector arm misses it. `hex memory stats` surfaces
+    // any vec/chunk count gap.
+    let contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+    match embedder.embed_documents(&contents) {
+        Ok(vectors) if vectors.len() == chunk_rowids.len() => {
+            for (rowid, vec) in chunk_rowids.iter().zip(vectors.iter()) {
+                if let Err(e) = super::vector::insert_vec(conn, *rowid, vec) {
+                    eprintln!("  ERROR storing vector for chunk {rowid} of {rel_path}: {e}");
+                }
+            }
+        }
+        Ok(vectors) => {
+            // S6 — never silently drop chunks: a count mismatch is loud.
+            eprintln!(
+                "  ERROR embedding {rel_path}: expected {} vectors, got {} (FTS5-only for this file)",
+                chunk_rowids.len(),
+                vectors.len()
+            );
+        }
+        Err(e) => {
+            eprintln!("  ERROR embedding {rel_path} (FTS5-only for this file): {e}");
+        }
     }
 
     Ok(chunks.len())
@@ -624,7 +668,7 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
         }
     }
 
-    let conn = match Connection::open(&db_path) {
+    let conn = match super::open_db(&db_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("hex memory index: cannot open {}: {e}", db_path.display());
@@ -636,6 +680,14 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
         eprintln!("hex memory index: schema init failed: {e}");
         return 1;
     }
+
+    let embedder = match super::embed::Embedder::new() {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("hex memory index: embedding model failed to load: {e}");
+            return 1;
+        }
+    };
 
     // Build lookup of existing records: path → (mtime, content_hash)
     let existing: std::collections::HashMap<String, (f64, String)> = {
@@ -706,7 +758,7 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
             }
 
             // Actually re-index
-            match index_file(&conn, filepath, hex_root, &content, mtime, strategy) {
+            match index_file(&conn, filepath, hex_root, &content, mtime, strategy, &embedder) {
                 Ok(n) => {
                     if n > 0 {
                         indexed += 1;
@@ -739,7 +791,7 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
             if content.trim().is_empty() {
                 continue;
             }
-            match index_file(&conn, filepath, hex_root, &content, mtime, strategy) {
+            match index_file(&conn, filepath, hex_root, &content, mtime, strategy, &embedder) {
                 Ok(n) => {
                     if n > 0 {
                         indexed += 1;
@@ -814,7 +866,7 @@ pub fn show_stats(hex_root: &Path) -> i32 {
         return 1;
     }
 
-    let conn = match Connection::open(&db_path) {
+    let conn = match super::open_db(&db_path) {
         Ok(c) => c,
         Err(e) => {
             eprintln!("hex memory stats: cannot open db: {e}");
@@ -842,7 +894,13 @@ pub fn show_stats(hex_root: &Path) -> i32 {
     println!("Size: {db_size_kb:.1} KB");
     println!("Files indexed: {file_count} ({hashed} with content hash)");
     println!("Total chunks: {chunk_count}");
-    println!("Vector embeddings: disabled (FTS5-only mode)");
+    let vec_count: i64 = conn
+        .query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))
+        .unwrap_or(0);
+    println!("Vector embeddings: {vec_count} (sqlite-vec, nomic 768-d)");
+    if vec_count != chunk_count {
+        println!("  WARNING: {} chunk(s) without a vector", chunk_count - vec_count);
+    }
 
     let last_run = get_metadata(&conn, "last_run");
     let last_mode = get_metadata(&conn, "last_run_mode");
@@ -968,10 +1026,61 @@ mod tests {
     }
 
     #[test]
+    fn test_init_db_creates_vec_and_private_schema() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        // chunks FTS5 now has a `private` column (prepare validates it).
+        assert!(conn.prepare("SELECT private FROM chunks LIMIT 0").is_ok());
+        // vec_chunks vec0 table exists.
+        let _: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))
+            .unwrap();
+    }
+
+    #[test]
+    fn test_is_private_paths() {
+        assert!(is_private("me/decisions/foo.md"));
+        assert!(is_private("people/alice/profile.md"));
+        assert!(is_private("raw/transcripts/2026-05-01.md"));
+        assert!(!is_private("projects/foo/context.md"));
+        assert!(!is_private("CLAUDE.md"));
+    }
+
+    #[test]
+    #[ignore] // model-dependent — run with --ignored
+    fn test_index_file_writes_vectors() {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        std::fs::create_dir_all(hex_root.join(".hex")).unwrap();
+        let conn = super::super::open_db(&hex_root.join(".hex/memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let embedder = super::super::embed::Embedder::new().unwrap();
+
+        let f = hex_root.join("me/decisions/x.md");
+        std::fs::create_dir_all(f.parent().unwrap()).unwrap();
+        let content = "# Decision\nWe chose sqlite-vec for the vector store.";
+        std::fs::write(&f, content).unwrap();
+
+        let n = index_file(&conn, &f, hex_root, content, 0.0, "full", &embedder).unwrap();
+        assert!(n >= 1);
+        let vec_count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(vec_count, n as i64, "every chunk gets a vector");
+        // private flag was stored
+        let priv_flag: i64 = conn
+            .query_row("SELECT private FROM chunks LIMIT 1", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(priv_flag, 1, "me/decisions/ is private");
+    }
+
+    #[test]
     fn test_init_db_creates_schema() {
         let tmp = TempDir::new().unwrap();
         let db_path = tmp.path().join("memory.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = super::super::open_db(&db_path).unwrap();
         init_db(&conn).unwrap();
 
         // Verify files table
@@ -989,7 +1098,7 @@ mod tests {
         // Verify metadata table
         let val: Option<String> = conn
             .query_row(
-                "SELECT value FROM metadata WHERE key='schema_migrated_chunks_v2'",
+                "SELECT value FROM metadata WHERE key='schema_migrated_chunks_v3'",
                 [],
                 |r| r.get(0),
             )
@@ -998,6 +1107,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // run_index now builds an embedder and loads the model
     fn test_incremental_index_skips_unchanged() {
         let tmp = TempDir::new().unwrap();
         let hex_root = tmp.path();
@@ -1037,6 +1147,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore] // now requires the embedding model
     fn test_index_file_inserts_chunks_and_meta() {
         let tmp = TempDir::new().unwrap();
         let hex_root = tmp.path();
@@ -1044,14 +1155,15 @@ mod tests {
         std::fs::create_dir_all(&hex_dir).unwrap();
 
         let db_path = hex_dir.join("memory.db");
-        let conn = Connection::open(&db_path).unwrap();
+        let conn = super::super::open_db(&db_path).unwrap();
         init_db(&conn).unwrap();
 
         let test_file = hex_root.join("test.md");
         let content = "# Hello\nWorld content here.\n## More\nExtra info.";
         std::fs::write(&test_file, content).unwrap();
 
-        let n = index_file(&conn, &test_file, hex_root, content, 0.0, "full").unwrap();
+        let embedder = super::super::embed::Embedder::new().unwrap();
+        let n = index_file(&conn, &test_file, hex_root, content, 0.0, "full", &embedder).unwrap();
         assert!(n >= 2);
 
         let chunk_count: i64 = conn
