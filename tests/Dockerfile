@@ -1,3 +1,10 @@
+# Stage 1: Build hex binary from source (rusqlite "bundled" needs gcc, present in rust:slim)
+FROM rust:1-slim AS hex-builder
+WORKDIR /build
+COPY system/harness/ .
+RUN cargo build 2>&1
+
+# Stage 2: Test runner
 FROM python:3.10-slim
 
 RUN apt-get update && apt-get install -y --no-install-recommends git && \
@@ -7,6 +14,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends git && \
 # Git needs a user for commits (not used, but prevents warnings)
 RUN git config --global user.email "test@test.com" && \
     git config --global user.name "Test"
+
+# Install hex binary so tests can drive native commands
+COPY --from=hex-builder /build/target/debug/hex /usr/local/bin/hex
 
 COPY . /tmp/hex-setup
 COPY tests/test_e2e.sh /test_e2e.sh

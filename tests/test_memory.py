@@ -15,6 +15,23 @@ from unittest.mock import patch
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "system" / "skills" / "memory" / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
 
+# memory_index and memory_search were renamed to *.legacy.py during rustification.
+# Pre-load them under their original module names so `import memory_index` works.
+import importlib.util as _ilu
+
+
+def _load_legacy(name: str, filename: str) -> None:
+    spec = _ilu.spec_from_file_location(name, SCRIPT_DIR / filename)
+    if spec is None:
+        return
+    mod = _ilu.module_from_spec(spec)
+    sys.modules[name] = mod
+    spec.loader.exec_module(mod)  # type: ignore[union-attr]
+
+
+_load_legacy("memory_index", "memory_index.legacy.py")
+_load_legacy("memory_search", "memory_search.legacy.py")
+
 
 def _create_db(db_path):
     """Create memory.db with the full schema."""

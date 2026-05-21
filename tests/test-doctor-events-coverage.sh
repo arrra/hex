@@ -20,7 +20,7 @@ TOTAL=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HEX_DOCTOR="$SCRIPT_DIR/../system/scripts/hex-doctor"
-POLICY_LOAD_SCRIPT="$SCRIPT_DIR/../system/scripts/health/check-hex-events-policy-load.sh"
+POLICY_LOAD_SCRIPT="$SCRIPT_DIR/../system/scripts/health/check-hex-events-policy-load.legacy.sh"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
