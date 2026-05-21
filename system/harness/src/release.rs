@@ -1,4 +1,4 @@
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 pub struct ReleaseArgs {
@@ -20,6 +20,58 @@ fn read_cargo_version(hex_dir: &Path) -> Result<String, String> {
         }
     }
     Err(format!("cannot find version in {}", cargo_toml.display()))
+}
+
+/// Bump Cargo.toml version, rebuild (updates Cargo.lock), and commit both files.
+/// Does NOT create a git tag — the release pipeline creates the tag after push.
+fn bump_version_and_commit(hex_dir: &Path, from: &str, to: &str) -> Result<(), String> {
+    let cargo_toml_path = hex_dir.join("system/harness/Cargo.toml");
+    let text = std::fs::read_to_string(&cargo_toml_path)
+        .map_err(|e| format!("cannot read Cargo.toml: {e}"))?;
+    let new_text = text.replace(
+        &format!("version = \"{from}\""),
+        &format!("version = \"{to}\""),
+    );
+    if new_text == text {
+        return Err(format!("version string 'version = \"{from}\"' not found in Cargo.toml"));
+    }
+    std::fs::write(&cargo_toml_path, &new_text)
+        .map_err(|e| format!("cannot write Cargo.toml: {e}"))?;
+
+    println!("[hex release] Bumping {from} → {to} and rebuilding...");
+    let harness_dir = hex_dir.join("system/harness");
+    let cargo = std::env::var("CARGO").unwrap_or_else(|_| "cargo".to_string());
+    let status = Command::new(&cargo)
+        .args(["build", "--release"])
+        .current_dir(&harness_dir)
+        .stdout(Stdio::inherit())
+        .stderr(Stdio::inherit())
+        .status()
+        .map_err(|e| format!("cargo build failed: {e}"))?;
+    if !status.success() {
+        std::fs::write(&cargo_toml_path, text).ok();
+        return Err("cargo build --release failed — Cargo.toml reverted".to_string());
+    }
+
+    let add = Command::new("git")
+        .args(["add", "system/harness/Cargo.toml", "system/harness/Cargo.lock"])
+        .current_dir(hex_dir)
+        .status()
+        .map_err(|e| format!("git add failed: {e}"))?;
+    if !add.success() {
+        return Err("git add Cargo.toml Cargo.lock failed".to_string());
+    }
+
+    let commit = Command::new("git")
+        .args(["commit", "-m", &format!("bump: v{to}")])
+        .current_dir(hex_dir)
+        .status()
+        .map_err(|e| format!("git commit failed: {e}"))?;
+    if !commit.success() {
+        return Err("git commit for version bump failed".to_string());
+    }
+    println!("[hex release] Bumped and committed v{to} ✓");
+    Ok(())
 }
 
 fn run_script(hex_dir: &Path, args: &[&str], env_vars: &[(&str, &str)]) -> i32 {
@@ -130,18 +182,15 @@ pub fn run(hex_dir: &Path, args: ReleaseArgs) -> i32 {
         None => current_version.clone(),
     };
 
-    // Run bump-version if the requested version differs from Cargo.toml
+    // Bump version inline if the requested version differs from Cargo.toml.
+    // We do NOT call release.sh bump-version because it creates a local tag that
+    // confuses Gate 2 ("VERSION matches LATEST_TAG"), and it leaves Cargo.lock
+    // dirty (only Cargo.toml is staged) which fails Gate 1.
     if let Some(ref v) = args.version {
         if *v != current_version {
-            println!("[hex release] Bumping version {} → {v}...", current_version);
-            let bump_code = run_script(
-                hex_dir,
-                &["bump-version", v],
-                &[("HEX_RELEASE_PIPELINE", "1")],
-            );
-            if bump_code != 0 {
-                eprintln!("[hex release] FAILED: bump-version exited {bump_code}");
-                return bump_code;
+            if let Err(e) = bump_version_and_commit(hex_dir, &current_version, v) {
+                eprintln!("[hex release] FAILED: {e}");
+                return 1;
             }
         }
     }
