@@ -347,7 +347,7 @@ mod tests {
 
     fn insert_chunk(conn: &Connection, path: &str, heading: &str, content: &str, weight: f64) {
         conn.execute(
-            "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content) VALUES (1, ?, ?, 0, ?)",
+            "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content) VALUES ('1', ?, ?, '0', ?)",
             params![path, heading, content],
         )
         .unwrap();
