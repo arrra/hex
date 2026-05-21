@@ -260,8 +260,12 @@ if git rev-parse "v$VERSION" >/dev/null 2>&1; then
   green "  Tag v$VERSION already exists ✓"
 else
   git tag "v$VERSION" "$FULL_SHA"
-  git push origin "v$VERSION" 2>&1
-  green "  Tagged and pushed v$VERSION ✓"
+  if HEX_RELEASE_PIPELINE=1 git push origin "v$VERSION" 2>&1; then
+    green "  Tagged and pushed v$VERSION ✓"
+  else
+    red "  Tag push failed for v$VERSION — check pre-push hook output above"
+    exit 1
+  fi
 fi
 
 # ── Fleet notification ───────────────────────────────────────────────────────
