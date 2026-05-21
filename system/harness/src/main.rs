@@ -1121,14 +1121,6 @@ enum DoctorCommands {
     Consolidate,
     /// Nightly system health audit via claude -p (port of system-introspection.sh)
     Introspect,
-    /// Proactive tech research agent: generate queries, search, write briefs (port of tech-scout.sh)
-    #[command(name = "tech-scout")]
-    TechScout {
-        #[arg(long)]
-        dry_run: bool,
-        #[arg(long)]
-        verbose: bool,
-    },
     /// Map agent activity to OKRs, assess coverage, write report (port of goal-alignment.sh)
     #[command(name = "goal-alignment")]
     GoalAlignment {
@@ -2407,13 +2399,6 @@ fn main() {
                 DoctorCommands::Introspect => {
                     let script = hex_dir.join(".hex/scripts/system-introspection.legacy.sh");
                     std::process::exit(exec_script(&script, &[]));
-                }
-                DoctorCommands::TechScout { dry_run, verbose } => {
-                    let script = hex_dir.join(".hex/scripts/tech-scout.legacy.sh");
-                    let mut args: Vec<&str> = vec![];
-                    if dry_run { args.push("--dry-run"); }
-                    if verbose { args.push("--verbose"); }
-                    std::process::exit(exec_script(&script, &args));
                 }
                 DoctorCommands::GoalAlignment { dry_run } => {
                     let script = hex_dir.join(".hex/scripts/goal-alignment.legacy.sh");

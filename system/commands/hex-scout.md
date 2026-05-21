@@ -17,16 +17,8 @@ Execute a full research cycle:
 5. Write top 3-5 findings to `~/hex/raw/research/scout/YYYY-MM-DD.md`
 6. Update `~/hex/raw/research/scout/index.md`
 
-Run this in a terminal (not inside Claude):
-```bash
-hex doctor tech-scout
-```
-
 ### `/hex-scout dry-run`
-Show what would be searched without executing:
-```bash
-hex doctor tech-scout --dry-run
-```
+Show what would be searched without executing.
 
 ### `/hex-scout status`
 Check recent scout output:
