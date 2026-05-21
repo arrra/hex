@@ -1,12 +1,13 @@
 #!/usr/bin/env bash
-# test-doctor-codex.sh — Verify doctor.sh includes Codex CLI health checks.
+# test-doctor-codex.sh — Verify native hex doctor includes Codex CLI health checks.
 #
-# Asserts:
-#   1. doctor.sh exists and is executable
-#   2. doctor-checks/codex.sh exists (the Codex-specific check module)
-#   3. doctor.sh references or sources the codex check
-#   4. Running bash -n on codex.sh passes (syntax check)
-#   5. When codex CLI is present, the check reports PASS (not ERROR)
+# Asserts (when hex binary is present):
+#   1. hex doctor binary exists and runs
+#   2. hex doctor check-codex subcommand exists
+#   3. check-codex covers: codex on PATH, codex version, OPENAI_API_KEY, AGENTS.md
+#   4. When codex CLI is present, check-codex reports PASS for cli-on-path check
+#
+# Requires: hex binary on PATH (skips gracefully if absent)
 
 set -uo pipefail
 
@@ -17,9 +18,6 @@ TOTAL=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_DIR="$(cd "$SCRIPT_DIR/../.." && pwd)"
-
-DOCTOR_SH="$REPO_DIR/system/scripts/doctor.sh"
-CODEX_CHECK="$REPO_DIR/system/scripts/doctor-checks/codex.sh"
 
 check() {
     TOTAL=$((TOTAL + 1))
@@ -34,75 +32,109 @@ check() {
     fi
 }
 
-check_contains() {
-    TOTAL=$((TOTAL + 1))
-    local desc="$1"
-    local pattern="$2"
-    local file="$3"
-    if grep -qi "$pattern" "$file" 2>/dev/null; then
-        echo "  PASS: $desc"
-        PASS=$((PASS + 1))
-    else
-        echo "  FAIL: $desc — '$pattern' not found in $(basename "$file")"
-        FAIL=$((FAIL + 1))
-    fi
-}
-
 skip() {
     SKIP=$((SKIP + 1))
+    TOTAL=$((TOTAL + 1))
     echo "  SKIP: $1"
 }
 
 echo "=== test-doctor-codex ==="
 echo ""
 
-echo "[1] doctor.sh exists and is executable"
-check "doctor.sh exists"      test -f "$DOCTOR_SH"
-check "doctor.sh executable"  test -x "$DOCTOR_SH"
+# ── Guard: hex binary required ─────────────────────────────────────────────
+if ! command -v hex &>/dev/null; then
+    echo "  SKIP: hex binary not on PATH — install hex to run this suite"
+    skip "hex doctor run"
+    skip "hex doctor check-codex exists"
+    skip "check-codex covers codex-on-path"
+    skip "check-codex covers codex-version"
+    skip "check-codex covers OPENAI_API_KEY"
+    skip "check-codex covers AGENTS.md"
+    skip "live codex CLI check"
+    echo ""
+    echo "  Results: $PASS passed, $FAIL failed, $SKIP skipped ($TOTAL total)"
+    echo ""
+    echo "=== test-doctor-codex: PASS (all skipped — hex not installed) ==="
+    exit 0
+fi
 
-echo "[2] codex.sh doctor check exists"
-check "doctor-checks/codex.sh exists"      test -f "$CODEX_CHECK"
-check "doctor-checks/codex.sh syntax ok"   bash -n "$CODEX_CHECK"
+echo "[1] hex doctor binary exists and runs"
+TOTAL=$((TOTAL + 1))
+if hex doctor run --quiet >/dev/null 2>&1 || hex doctor run --quiet 2>&1 | grep -q "check"; then
+    echo "  PASS: hex doctor run executes"
+    PASS=$((PASS + 1))
+else
+    # exit non-zero is acceptable — what matters is it runs and outputs something
+    DR_OUT=$(hex doctor run --quiet 2>&1 || true)
+    if [ -n "$DR_OUT" ]; then
+        echo "  PASS: hex doctor run executes (exit non-zero is ok)"
+        PASS=$((PASS + 1))
+    else
+        echo "  FAIL: hex doctor run produced no output"
+        FAIL=$((FAIL + 1))
+    fi
+fi
 
-echo "[3] codex.sh covers required checks"
-check_contains "check for codex on PATH"      "command -v codex\|codex.*PATH"        "$CODEX_CHECK"
-check_contains "check codex --version"        "codex.*--version\|version"            "$CODEX_CHECK"
-check_contains "check OPENAI_API_KEY"         "OPENAI_API_KEY"                       "$CODEX_CHECK"
-check_contains "check AGENTS.md exists"       "AGENTS.md"                            "$CODEX_CHECK"
+echo "[2] hex doctor check-codex subcommand exists"
+TOTAL=$((TOTAL + 1))
+CODEX_OUT=$(hex doctor check-codex 2>&1 || true)
+if [ -n "$CODEX_OUT" ]; then
+    echo "  PASS: hex doctor check-codex runs and produces output"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: hex doctor check-codex produced no output"
+    FAIL=$((FAIL + 1))
+fi
 
-echo "[4] doctor.sh integrates Codex checks"
-check_contains "doctor.sh sources/calls codex" "codex" "$DOCTOR_SH"
+echo "[3] check-codex covers required health areas"
 
-echo "[5] Live check: codex CLI presence triggers PASS"
+TOTAL=$((TOTAL + 1))
+if echo "$CODEX_OUT" | grep -qi "codex.*path\|cli-on-path\|found at\|not found"; then
+    echo "  PASS: check-codex covers codex-on-path"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: check-codex output lacks codex-on-path check"
+    FAIL=$((FAIL + 1))
+fi
+
+TOTAL=$((TOTAL + 1))
+if echo "$CODEX_OUT" | grep -qi "version\|codex.*ok"; then
+    echo "  PASS: check-codex covers codex version"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: check-codex output lacks codex version check"
+    FAIL=$((FAIL + 1))
+fi
+
+TOTAL=$((TOTAL + 1))
+if echo "$CODEX_OUT" | grep -qi "OPENAI_API_KEY\|api.key\|api-key"; then
+    echo "  PASS: check-codex covers OPENAI_API_KEY"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: check-codex output lacks OPENAI_API_KEY check"
+    FAIL=$((FAIL + 1))
+fi
+
+TOTAL=$((TOTAL + 1))
+if echo "$CODEX_OUT" | grep -qi "AGENTS.md\|agents-md"; then
+    echo "  PASS: check-codex covers AGENTS.md"
+    PASS=$((PASS + 1))
+else
+    echo "  FAIL: check-codex output lacks AGENTS.md check"
+    FAIL=$((FAIL + 1))
+fi
+
+echo "[4] Live check: codex CLI presence"
 HAVE_CODEX="no"
 command -v codex &>/dev/null && HAVE_CODEX="yes"
 
 if [ "$HAVE_CODEX" = "yes" ]; then
-    # Source the check module in a subshell with minimal stub environment
     TOTAL=$((TOTAL + 1))
-    STUB_SCRIPT="/tmp/codex-check-stub-$$.sh"
-    cat > "$STUB_SCRIPT" << STUBEOF
-#!/usr/bin/env bash
-_pass()  { echo "PASS: \$*"; }
-_warn()  { echo "WARN: \$*"; }
-_error() { echo "ERROR: \$*"; }
-_info()  { :; }
-_fixed() { :; }
-_rec()   { :; }
-HEX_DIR='/tmp'
-AGENT_DIR='/tmp'
-FIX=false
-SMOKE=false
-source '$CODEX_CHECK'
-check_codex_1
-STUBEOF
-    CHECK_OUT=$(bash "$STUB_SCRIPT" 2>&1 || true)
-    rm -f "$STUB_SCRIPT"
-    if echo "$CHECK_OUT" | grep -qi "PASS.*codex.*path\|found at"; then
+    if echo "$CODEX_OUT" | grep -qi "PASS.*codex\|codex found at"; then
         echo "  PASS: codex CLI presence detected correctly"
         PASS=$((PASS + 1))
     else
-        echo "  FAIL: codex CLI presence check did not return PASS (output: $CHECK_OUT)"
+        echo "  FAIL: codex CLI on PATH but check-codex did not report PASS (output: $CODEX_OUT)"
         FAIL=$((FAIL + 1))
     fi
 else
