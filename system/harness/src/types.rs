@@ -127,6 +127,17 @@ pub struct Queue {
 
 // ── Trail ───────────────────────────────────────────────────────────────────
 
+/// Typed evidence attached to a mechanical `act` trail entry.
+/// The harness parses this out of `detail["evidence"]` and verifies it.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum ActEvidence {
+    GitTag { value: String, repo: String },
+    GitPush { repo: String, #[serde(rename = "ref")] git_ref: String },
+    BoiDispatch { spec_id: String },
+    FileWritten { path: String },
+}
+
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct TrailEntry {
     pub ts: DateTime<Utc>,

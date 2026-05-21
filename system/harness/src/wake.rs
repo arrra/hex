@@ -1,4 +1,4 @@
-use crate::{audit, charter, claude, cost, gate, message, prompt, queue, state};
+use crate::{act_evidence, audit, charter, claude, cost, gate, message, prompt, queue, state};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -407,8 +407,69 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
         for entry in &response.trail {
             match gate::validate(entry) {
                 Ok(()) => {
-                    agent_state.trail.push(entry.clone());
-                    accepted_entries.push(entry.clone());
+                    let mut entry_to_persist = entry.clone();
+
+                    // For "act" entries that carry an evidence field, verify the claim.
+                    // Non-mechanical acts (no evidence field) are persisted as-is.
+                    if entry.entry_type == "act" {
+                        if let Some(ev_val) = entry.detail.get("evidence") {
+                            let action = entry
+                                .detail
+                                .get("action")
+                                .and_then(|v| v.as_str())
+                                .unwrap_or("unknown");
+
+                            let verify_result =
+                                match serde_json::from_value::<crate::types::ActEvidence>(
+                                    ev_val.clone(),
+                                ) {
+                                    Ok(ev) => act_evidence::verify(&ev).map_err(|e| e),
+                                    Err(e) => Err(format!("unparseable evidence: {e}")),
+                                };
+
+                            if let Err(reason) = verify_result {
+                                eprintln!(
+                                    "[{}] UNVERIFIED ACT: claimed '{}' — evidence failed: {}",
+                                    config.agent_id, action, reason
+                                );
+                                if let Some(obj) = entry_to_persist.detail.as_object_mut() {
+                                    obj.insert(
+                                        "verified".to_string(),
+                                        serde_json::json!(false),
+                                    );
+                                    obj.insert(
+                                        "evidence_error".to_string(),
+                                        serde_json::json!(reason.clone()),
+                                    );
+                                }
+                                audit::append(
+                                    &audit_dir,
+                                    &config.agent_id,
+                                    "act-unverified",
+                                    &serde_json::json!({
+                                        "action": action,
+                                        "evidence": ev_val,
+                                        "error": reason,
+                                    }),
+                                );
+                                let emit_script = hex_dir.join(".hex/bin/hex-emit.sh");
+                                let _ = std::process::Command::new(&emit_script)
+                                    .arg("hex.agent.act.unverified")
+                                    .arg(
+                                        serde_json::json!({
+                                            "agent": &config.agent_id,
+                                            "action": action,
+                                            "evidence": ev_val,
+                                        })
+                                        .to_string(),
+                                    )
+                                    .status();
+                            }
+                        }
+                    }
+
+                    agent_state.trail.push(entry_to_persist.clone());
+                    accepted_entries.push(entry_to_persist);
                     audit::append(
                         &audit_dir,
                         &config.agent_id,
