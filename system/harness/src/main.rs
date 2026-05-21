@@ -865,6 +865,8 @@ enum MemoryCommands {
         #[arg(long)]
         agent: bool,
     },
+    /// Run the memory smoke-eval + consumption-rate check (nightly)
+    Eval,
 }
 
 #[derive(Subcommand)]
@@ -2225,6 +2227,7 @@ fn main() {
                 }
                 MemoryCommands::ParseTranscripts { .. } => "parse-transcripts",
                 MemoryCommands::Recall { .. } => "recall",
+                MemoryCommands::Eval => "eval",
             };
             let start = std::time::Instant::now();
             let exit_code = match &command {
@@ -2253,6 +2256,7 @@ fn main() {
                 MemoryCommands::Recall { query, agent } => {
                     memory::recall::run(&hex_dir, query, *agent)
                 }
+                MemoryCommands::Eval => memory::eval::run(&hex_dir),
                 _ => {
                     let hex_memory = hex_dir.join(".hex/scripts/bin/hex-memory");
                     let mut cmd = std::process::Command::new("bash");

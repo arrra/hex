@@ -1,4 +1,5 @@
 pub mod embed;
+pub mod eval;
 pub mod index;
 pub mod parse_transcripts;
 pub mod recall;
