@@ -2,7 +2,19 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
-## [2026-05-20] — TriggerSpec unification + truncation recovery + harness reliability (v0.17.0)
+## [2026-05-21] — Act evidence verification (v0.17.3)
+
+### Added
+- **`act_evidence.rs`**: harness verifies `detail.evidence` on every `act` trail entry claiming a mechanical operation (git push, BOI dispatch, file write, tag creation). Unverifiable claims are recorded as `UNVERIFIED` and do not count as completed work.
+- **Evidence types**: `git_tag`, `git_push`, `boi_dispatch`, `file_written` — each matched against observable system state.
+- **`tests/act_evidence_test.rs`**: 162-line test suite covering all evidence types, missing-evidence detection, and UNVERIFIED recording.
+
+### Changed
+- **Agent prompt hardened** (`prompt.rs`): mechanical act entries now require verifiable `evidence` object. Prompt explicitly states that claims without evidence are recorded as UNVERIFIED. Prevents claim-without-action loops.
+- **`types.rs`**: `TrailEntry` gains `evidence` and `verified` fields.
+- **`wake.rs`**: post-trail processing calls `act_evidence::verify_trail` — runs after each shift and flags UNVERIFIED entries in the audit log.
+
+## [2026-05-21] — TriggerSpec unification + truncation recovery + harness reliability (v0.17.0)
 
 ### Added
 - **Bare-string trigger syntax**: `WakeConfig.triggers` now accepts `"timer.tick.6h"` in addition to the full struct form `{ event: { name: "timer.tick.6h" } }`. Both forms are valid in charter YAML. `BlockedItem` gains the same dual-form acceptance. Eliminates boilerplate in every policy file.

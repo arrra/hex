@@ -390,6 +390,19 @@ bash tests/eval/run_eval_macos.sh            # macOS Tart
 
 ## Roadmap
 
+v0.17.3: **Act evidence verification.**
+- **Mechanical act evidence gate**: harness now verifies `detail.evidence` on every `act` trail entry that claims a mechanical operation (git push, BOI dispatch, file write, etc.). Unverifiable claims are recorded as `UNVERIFIED` — they do not count as done.
+- **Agent prompt hardened**: agents are now explicitly instructed that mechanical acts without verifiable evidence are not accepted. Prevents claim-without-action loops.
+
+v0.17.2: **Doctor ports + release.rs native module.**
+- **4 doctor commands native**: `hex doctor introspect`, `goal-alignment`, `cleanup-projects`, `tech-scout` ported to Rust. 4 `.legacy.sh` stubs removed.
+- **`release.rs` native module**: deterministic LLM-free release command replaces manual `release.sh` steps. The tool that ships hex is now Rust.
+- **Quality policies migrated**: `system/policies/` → `system/events/policies/`. Commands repointed to `hex doctor quality-check`.
+
+v0.17.1: **Doctor consolidate + startup cleanup.**
+- **`hex doctor consolidate` native**: consolidation subcommand ported to Rust. `/hex-consolidate` command deleted.
+- **Startup shell-out removal**: startup sequence no longer shells out to Python scripts. Regression test added.
+
 v0.17.0: **TriggerSpec unification + truncation recovery.**
 - **Bare-string trigger syntax**: charter YAML now accepts `"timer.tick.6h"` directly — no struct wrapper required. Both forms valid. Same for `BlockedItem`. Every existing policy continues to work.
 - **`hex events emit --source`**: tag emitted events with a source label for traceability.
