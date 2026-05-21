@@ -205,20 +205,24 @@ pub fn run(hex_dir: &Path, args: ReleaseArgs) -> i32 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::fs;
 
     #[test]
     fn read_cargo_version_finds_version() {
-        // Use the actual repo root if available
-        let repo = if let Ok(v) = std::env::var("HEX_DIR") {
-            PathBuf::from(v)
-        } else {
-            // Derive from the source file location: src/release.rs → repo root
-            let manifest = PathBuf::from(env!("CARGO_MANIFEST_DIR"));
-            manifest.parent().unwrap().parent().unwrap().to_path_buf()
-        };
-        let v = read_cargo_version(&repo);
+        // Build a minimal fake repo root in a temp dir so the test is
+        // path-independent (env!("CARGO_MANIFEST_DIR") is unreliable in
+        // cargo test --release due to temp-dir compilation paths).
+        let tmp = std::env::temp_dir().join(format!("hex-release-test-{}", std::process::id()));
+        let harness_dir = tmp.join("system/harness");
+        fs::create_dir_all(&harness_dir).unwrap();
+        let cargo_toml = harness_dir.join("Cargo.toml");
+        fs::write(&cargo_toml, "[package]\nversion = \"1.2.3\"\n").unwrap();
+
+        let v = read_cargo_version(&tmp);
         assert!(v.is_ok(), "should find version: {:?}", v);
         let ver = v.unwrap();
-        assert!(ver.contains('.'), "version should look like X.Y.Z, got: {ver}");
+        assert_eq!(ver, "1.2.3");
+
+        fs::remove_dir_all(&tmp).ok();
     }
 }
