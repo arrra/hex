@@ -4,8 +4,6 @@ use std::path::Path;
 
 use super::db_path;
 
-const PRIVATE_PREFIXES: &[&str] = &["me/", "people/", "raw/"];
-
 pub struct SearchArgs {
     pub query: String,
     pub top: usize,
@@ -16,11 +14,13 @@ pub struct SearchArgs {
 }
 
 struct SearchResult {
+    rowid: i64,
     source_path: String,
     heading: String,
     #[allow(dead_code)]
     chunk_index: String,
     content: String,
+    private: bool,
     score: f64,
 }
 
@@ -154,7 +154,8 @@ fn search_fts(
 
     let (sql_base, col_prefix) = if has_meta {
         (
-            "SELECT chunks.source_path, chunks.heading, chunks.chunk_index, chunks.content, \
+            "SELECT chunks.rowid, chunks.source_path, chunks.heading, chunks.chunk_index, \
+             chunks.content, chunks.private, \
              bm25(chunks) * COALESCE(cm.source_weight, 1.0) as score \
              FROM chunks \
              LEFT JOIN chunk_meta cm ON chunks.rowid = cm.chunk_rowid \
@@ -163,9 +164,8 @@ fn search_fts(
         )
     } else {
         (
-            "SELECT source_path, heading, chunk_index, content, bm25(chunks) as score \
-             FROM chunks \
-             WHERE chunks MATCH ?",
+            "SELECT rowid, source_path, heading, chunk_index, content, private, \
+             bm25(chunks) as score FROM chunks WHERE chunks MATCH ?",
             "",
         )
     };
@@ -187,11 +187,13 @@ fn search_fts(
                 let rows: rusqlite::Result<Vec<SearchResult>> = stmt
                     .query_map(params![fts_q, filter_pattern, top as i64], |row| {
                         Ok(SearchResult {
-                            source_path: row.get(0)?,
-                            heading: row.get(1)?,
-                            chunk_index: row.get(2)?,
-                            content: row.get(3)?,
-                            score: row.get(4)?,
+                            rowid: row.get(0)?,
+                            source_path: row.get(1)?,
+                            heading: row.get(2)?,
+                            chunk_index: row.get(3)?,
+                            content: row.get(4)?,
+                            private: row.get::<_, i64>(5)? != 0,
+                            score: row.get(6)?,
                         })
                     })?
                     .collect();
@@ -202,11 +204,13 @@ fn search_fts(
                 let rows: rusqlite::Result<Vec<SearchResult>> = stmt
                     .query_map(params![fts_q, top as i64], |row| {
                         Ok(SearchResult {
-                            source_path: row.get(0)?,
-                            heading: row.get(1)?,
-                            chunk_index: row.get(2)?,
-                            content: row.get(3)?,
-                            score: row.get(4)?,
+                            rowid: row.get(0)?,
+                            source_path: row.get(1)?,
+                            heading: row.get(2)?,
+                            chunk_index: row.get(3)?,
+                            content: row.get(4)?,
+                            private: row.get::<_, i64>(5)? != 0,
+                            score: row.get(6)?,
                         })
                     })?
                     .collect();
@@ -228,6 +232,39 @@ fn search_fts(
     }
 
     Ok(results)
+}
+
+/// Fetch chunk rows by rowid, returned in the exact order of `rowids`.
+/// No `bm25()` here — it is only valid inside a `MATCH` query. Post-fusion the
+/// RRF score is what matters; `run` attaches it after this call.
+fn fetch_chunks_by_rowid(conn: &Connection, rowids: &[i64]) -> rusqlite::Result<Vec<SearchResult>> {
+    if rowids.is_empty() {
+        return Ok(vec![]);
+    }
+    let ph: String = rowids.iter().map(|_| "?").collect::<Vec<_>>().join(",");
+    let sql = format!(
+        "SELECT rowid, source_path, heading, chunk_index, content, private \
+         FROM chunks WHERE rowid IN ({ph})"
+    );
+    let mut stmt = conn.prepare(&sql)?;
+    let mut by_rowid: std::collections::HashMap<i64, SearchResult> =
+        std::collections::HashMap::new();
+    let rows = stmt.query_map(rusqlite::params_from_iter(rowids.iter()), |r| {
+        Ok(SearchResult {
+            rowid: r.get(0)?,
+            source_path: r.get(1)?,
+            heading: r.get(2)?,
+            chunk_index: r.get(3)?,
+            content: r.get(4)?,
+            private: r.get::<_, i64>(5)? != 0,
+            score: 0.0,
+        })
+    })?;
+    for row in rows {
+        let r = row?;
+        by_rowid.insert(r.rowid, r);
+    }
+    Ok(rowids.iter().filter_map(|id| by_rowid.remove(id)).collect())
 }
 
 // Mirror Python's format_results().
@@ -281,38 +318,54 @@ fn format_results(results: &[SearchResult], args: &SearchArgs, query: &str) {
 pub fn run(hex_root: &Path, args: &SearchArgs) -> i32 {
     let db = db_path(hex_root);
     if !db.exists() {
-        println!("No index found. Run memory_index.py first.");
+        println!("No index found. Run `hex memory index` first.");
         return 1;
     }
-
-    let conn = match Connection::open(&db) {
+    let conn = match super::open_db(&db) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("Failed to open database: {}", e);
+            eprintln!("Failed to open database: {e}");
             return 1;
         }
     };
 
-    let rows = match search_fts(&conn, &args.query, args.top, args.file.as_deref()) {
-        Ok(r) => r,
+    // FTS5 arm — keeps bm25 * source_weight as its pre-RRF rank input (spec §7).
+    let fts = search_fts(&conn, &args.query, args.top.max(20), args.file.as_deref())
+        .unwrap_or_default();
+    let fts_rowids: Vec<i64> = fts.iter().map(|r| r.rowid).collect();
+
+    // Vector arm — best-effort. If the model or KNN fails, log loud and fall
+    // back to FTS5-only (never silently degrade to nothing).
+    let vec_rowids: Vec<i64> = match super::embed::Embedder::new()
+        .and_then(|e| e.embed_query(&args.query))
+    {
+        Ok(qv) => super::vector::knn(&conn, &qv, args.top.max(20))
+            .map(|hits| hits.into_iter().map(|(id, _)| id).collect())
+            .unwrap_or_else(|e| {
+                eprintln!("vector arm failed: {e}");
+                vec![]
+            }),
         Err(e) => {
-            eprintln!("Search failed: {}", e);
-            return 1;
+            eprintln!("query embedding failed, FTS5-only: {e}");
+            vec![]
         }
     };
 
-    // Privacy filter: exclude me/, people/, raw/ prefixes.
-    let results: Vec<SearchResult> = if args.private {
-        rows.into_iter()
-            .filter(|r| {
-                !PRIVATE_PREFIXES
-                    .iter()
-                    .any(|p| r.source_path.starts_with(p))
-            })
-            .collect()
-    } else {
-        rows
-    };
+    let fused = super::rrf::rrf_fuse(&[fts_rowids, vec_rowids], super::rrf::RRF_K);
+    let fused_rowids: Vec<i64> = fused.iter().map(|(id, _)| *id).collect();
+    let mut results = fetch_chunks_by_rowid(&conn, &fused_rowids).unwrap_or_default();
+
+    // Attach the RRF score to each result for display.
+    let scores: std::collections::HashMap<i64, f64> = fused.iter().copied().collect();
+    for r in &mut results {
+        r.score = scores.get(&r.rowid).copied().unwrap_or(0.0);
+    }
+
+    // Privacy filter — the index-time `private` column (spec §7).
+    if args.private {
+        results.retain(|r| !r.private);
+    }
+    results.truncate(args.top);
 
     format_results(&results, args, &args.query);
     0
@@ -334,6 +387,7 @@ mod tests {
                 heading,
                 chunk_index UNINDEXED,
                 content,
+                private UNINDEXED,
                 tokenize='unicode61'
             );
             CREATE TABLE chunk_meta (
@@ -347,7 +401,7 @@ mod tests {
 
     fn insert_chunk(conn: &Connection, path: &str, heading: &str, content: &str, weight: f64) {
         conn.execute(
-            "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content) VALUES ('1', ?, ?, '0', ?)",
+            "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) VALUES ('1', ?, ?, '0', ?, 0)",
             params![path, heading, content],
         )
         .unwrap();
@@ -419,41 +473,38 @@ mod tests {
         let score_a = results.iter().find(|r| r.source_path == "a.md").unwrap().score;
         let score_b = results.iter().find(|r| r.source_path == "b.md").unwrap().score;
         // b score should be ~2x more negative than a score.
-        assert!((score_b / score_a - 2.0).abs() < 0.01, "scores: a={}, b={}", score_a, score_b);
+        assert!(
+            (score_b / score_a - 2.0).abs() < 0.01,
+            "scores: a={}, b={}",
+            score_a,
+            score_b
+        );
     }
 
     #[test]
     fn test_privacy_filter() {
         let conn = setup_db();
-        insert_chunk(&conn, "me/journal.md", "Notes", "private personal notes here", 1.0);
-        insert_chunk(&conn, "projects/work.md", "Work", "private work project details", 1.0);
-        insert_chunk(&conn, "people/alice.md", "Alice", "private contact information", 1.0);
+        // Insert one private row (private=1) and one public row (private=0).
+        conn.execute(
+            "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
+             VALUES (1, ?, ?, '0', ?, ?)",
+            params!["me/journal.md", "Notes", "private personal notes here", 1i64],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
+             VALUES (1, ?, ?, '0', ?, ?)",
+            params!["projects/work.md", "Work", "private work project details", 0i64],
+        )
+        .unwrap();
 
-        let rows = search_fts(&conn, "private", 10, None).unwrap();
-        let args = SearchArgs {
-            query: "private".to_string(),
-            top: 10,
-            file: None,
-            compact: false,
-            context: None,
-            private: true,
-        };
+        let mut results = search_fts(&conn, "private", 10, None).unwrap();
+        // Apply column-based privacy filter (same logic as `run`).
+        results.retain(|r| !r.private);
 
-        let filtered: Vec<SearchResult> = rows
-            .into_iter()
-            .filter(|r| {
-                !PRIVATE_PREFIXES
-                    .iter()
-                    .any(|p| r.source_path.starts_with(p))
-            })
-            .collect();
-
-        // me/ and people/ filtered out, projects/ kept.
-        assert_eq!(filtered.len(), 1);
-        assert_eq!(filtered[0].source_path, "projects/work.md");
-
-        // Suppress unused warning on args.
-        drop(args);
+        // private=1 row dropped, private=0 row kept.
+        assert_eq!(results.len(), 1);
+        assert_eq!(results[0].source_path, "projects/work.md");
     }
 
     #[test]
@@ -479,5 +530,18 @@ mod tests {
             private: false,
         };
         format_results(&[], &args, "test");
+    }
+
+    #[test]
+    fn test_fetch_chunks_by_rowid_preserves_order() {
+        let conn = setup_db();
+        insert_chunk(&conn, "a.md", "A", "alpha", 1.0);
+        insert_chunk(&conn, "b.md", "B", "beta", 1.0);
+        insert_chunk(&conn, "c.md", "C", "gamma", 1.0);
+        // request rowids out of natural order
+        let got = fetch_chunks_by_rowid(&conn, &[3, 1]).unwrap();
+        assert_eq!(got.len(), 2);
+        assert_eq!(got[0].source_path, "c.md");
+        assert_eq!(got[1].source_path, "a.md");
     }
 }
