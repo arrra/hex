@@ -1117,7 +1117,7 @@ enum DoctorCommands {
         #[arg(long)]
         kr: Option<String>,
     },
-    /// Deterministic dedup, stale reference pruning, memory reindex (port of consolidate.sh)
+    /// Deterministic dedup, stale reference pruning, memory reindex
     Consolidate,
     /// Nightly system health audit via claude -p (port of system-introspection.sh)
     Introspect,
@@ -2402,8 +2402,7 @@ fn main() {
                     std::process::exit(code);
                 }
                 DoctorCommands::Consolidate => {
-                    let script = hex_dir.join("system/scripts/consolidate.sh");
-                    std::process::exit(exec_script(&script, &[]));
+                    std::process::exit(doctor::consolidate::run(&hex_dir));
                 }
                 DoctorCommands::Introspect => {
                     let script = hex_dir.join("system/scripts/system-introspection.sh");

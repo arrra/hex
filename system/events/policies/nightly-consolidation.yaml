@@ -23,14 +23,15 @@ rules:
     actions:
       - type: shell
         command: |
-          AGENT_DIR="${AGENT_DIR:-$HOME/hex}"
-          bash "$AGENT_DIR/.hex/scripts/consolidate.sh"
+          "${HEX_DIR:-$HOME/hex}/.hex/bin/hex" doctor consolidate
         timeout: 120
         on_success:
           - type: emit
             event: hex.consolidation.clean
             source: "hex:consolidation"
         on_failure:
+          - type: notify
+            message: "Nightly consolidation failed — run 'hex doctor consolidate' to inspect issues."
           - type: emit
             event: hex.consolidation.issues_found
             source: "hex:consolidation"

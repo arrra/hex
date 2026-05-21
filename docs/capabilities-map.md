@@ -263,7 +263,7 @@
 *Model serving, fine-tuning, evaluation*
 
 - 🟢 **Hex Consolidate** — Consolidate and sharpen hex's operating model. Removes contradictions, deduplicates, updates outdated entries, and ensures nothing important is lost. Run periodically or before promoting changes to th
-  _via hex-skill · [~/.claude/skills/hex-consolidate/SKILL.md]_
+  _via hex-skill · [~/.hex/skills/hex-consolidate/SKILL.md]_
 - 🟢 **Remodeling** — >
   _via hex-skill · [~/.claude/skills/remodeling/SKILL.md]_
 - 🔵 **Audiocraft** — PyTorch library for audio generation including text-to-music (MusicGen) and text-to-sound (AudioGen). Use when you need to generate music from text descriptions, create sound effects, or perform melod
