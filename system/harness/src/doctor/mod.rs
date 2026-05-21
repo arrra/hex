@@ -1,5 +1,6 @@
 pub mod check;
 pub mod checks;
+pub mod consolidate;
 pub mod legacy;
 pub mod reporter;
 pub mod runner;
