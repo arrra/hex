@@ -858,6 +858,13 @@ enum MemoryCommands {
         #[arg(long)]
         force: bool,
     },
+    /// Retrieve workspace memory relevant to a query (FTS5 contextual recall)
+    Recall {
+        query: String,
+        /// Apply the private filter (for fleet-agent / BOI consumers)
+        #[arg(long)]
+        agent: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2217,6 +2224,7 @@ fn main() {
                     if *stats { "index-stats" } else { "index" }
                 }
                 MemoryCommands::ParseTranscripts { .. } => "parse-transcripts",
+                MemoryCommands::Recall { .. } => "recall",
             };
             let start = std::time::Instant::now();
             let exit_code = match &command {
@@ -2241,6 +2249,9 @@ fn main() {
                         force: *force,
                     };
                     memory::parse_transcripts::run(&hex_dir, &args)
+                }
+                MemoryCommands::Recall { query, agent } => {
+                    memory::recall::run(&hex_dir, query, *agent)
                 }
                 _ => {
                     let hex_memory = hex_dir.join(".hex/scripts/bin/hex-memory");

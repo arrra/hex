@@ -13,15 +13,15 @@ pub struct SearchArgs {
     pub private: bool,
 }
 
-struct SearchResult {
-    rowid: i64,
-    source_path: String,
-    heading: String,
+pub struct SearchResult {
+    pub rowid: i64,
+    pub source_path: String,
+    pub heading: String,
     #[allow(dead_code)]
-    chunk_index: String,
-    content: String,
-    private: bool,
-    score: f64,
+    pub chunk_index: String,
+    pub content: String,
+    pub private: bool,
+    pub score: f64,
 }
 
 // Mirror Python's truncate(): trim to max_chars at a word boundary.
@@ -232,6 +232,16 @@ fn search_fts(
     }
 
     Ok(results)
+}
+
+/// Public entry to the FTS5 arm for other memory modules (e.g. recall).
+pub fn search_fts_public(
+    conn: &Connection,
+    query: &str,
+    top: usize,
+    file_filter: Option<&str>,
+) -> rusqlite::Result<Vec<SearchResult>> {
+    search_fts(conn, query, top, file_filter)
 }
 
 /// Fetch chunk rows by rowid, returned in the exact order of `rowids`.
