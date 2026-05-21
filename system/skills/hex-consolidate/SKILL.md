@@ -6,6 +6,24 @@ description: Consolidate and sharpen hex's operating model. Removes contradictio
 
 # /hex-consolidate — Operating Model Cleanup
 
+## Two Consolidation Mechanisms
+
+Hex has two consolidation paths — do not confuse them:
+
+| | `hex doctor consolidate` | `/hex-consolidate` (this skill) |
+|---|---|---|
+| **Mode** | Deterministic, no-LLM | LLM-assisted |
+| **Trigger** | Nightly (unattended) | Manual, on demand |
+| **What it checks** | Stale links, missing evolution files, orphan project dirs, audit freshness | Operating model health — contradictions, duplication, stale rules |
+| **Output** | Machine-readable log | Human-reviewed consolidation log |
+| **User involvement** | None | Required for Phase 4 review |
+
+`hex doctor consolidate` is the automated counterpart to this skill. Run it via
+`hex doctor consolidate` to get a quick structural health report without LLM cost.
+
+> **Note:** The standalone `/hex-consolidate` *command* (`system/commands/hex-consolidate.md`)
+> has been removed. This skill (`/hex-consolidate`) is the canonical entry point.
+
 ## When to Run
 
 - Before promoting changes to the hex template repo

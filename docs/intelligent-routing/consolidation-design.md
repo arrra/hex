@@ -1,3 +1,9 @@
+> **STATUS: DEFERRED (2026-05-20).** The autonomous "dreaming" consolidation
+> system described below is not built and not scheduled. Deferred — not killed.
+> Deterministic nightly hygiene is covered by `hex doctor consolidate`.
+> See the decision record in mrap-hex:
+> `projects/system-improvement/decisions/consolidation-subsystem-repair-2026-05-20.md`
+
 # Autonomous Consolidation ("Dreaming") — Design
 
 > Part of the Intelligent Session Routing initiative.
