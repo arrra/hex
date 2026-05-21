@@ -27,7 +27,7 @@ rules:
     actions:
       - type: shell
         command: >
-          AGENT_DIR="$AGENT_DIR" bash "$AGENT_DIR/.claude/scripts/system-introspection.sh"
+          "${HEX_DIR:-$HOME/hex}/.hex/bin/hex" doctor introspect
         timeout: 600
         on_success:
           - type: emit
@@ -35,6 +35,8 @@ rules:
             payload:
               date: "{{ now.strftime('%Y-%m-%d') }}"
         on_failure:
+          - type: notify
+            message: "nightly-introspection failed — hex doctor introspect exited non-zero"
           - type: emit
             event: introspection.completed
             payload:

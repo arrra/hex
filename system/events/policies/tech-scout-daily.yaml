@@ -22,13 +22,8 @@ rules:
       event: timer.tick.daily.6am
     actions:
       - type: shell
-        command: |
-          SCRIPT="$AGENT_DIR/.claude/scripts/tech-scout.sh"
-          if [ ! -f "$SCRIPT" ]; then
-            echo "tech-scout.sh not found at $SCRIPT — skipping"
-            exit 0
-          fi
-          bash "$SCRIPT"
+        command: >
+          "${HEX_DIR:-$HOME/hex}/.hex/bin/hex" doctor tech-scout
         timeout: 900
         on_success:
           - type: emit
@@ -36,6 +31,8 @@ rules:
             payload:
               triggered_by: timer.tick.daily.6am
         on_failure:
+          - type: notify
+            message: "tech-scout-daily failed — hex doctor tech-scout exited non-zero"
           - type: emit
             event: tech-scout.scan.completed
             payload:
