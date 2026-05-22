@@ -1,4 +1,7 @@
-use crate::{act_evidence, audit, charter, claude, cost, gate, message, prompt, queue, state};
+use crate::{
+    act_evidence, audit, capability_exec, capability_guard, charter, claude, cost, gate, message,
+    prompt, queue, registry, state,
+};
 use chrono::Utc;
 use sha2::{Digest, Sha256};
 use std::path::{Path, PathBuf};
@@ -45,6 +48,191 @@ where
     }
 }
 
+/// Process a single `capability_add` or `capability_call` trail entry.
+///
+/// For `capability_add`: runs allowlist check → body scan → immutability guard → persists to
+/// registry. Returns `Ok(None)` on success.
+///
+/// For `capability_call`: runs allowlist check → looks up `created_by` → executes inside the
+/// sandbox at `sandbox_dir/run-test.sh`. Returns `Ok(Some(result_entry))` on success, where the
+/// result entry is an `act` TrailEntry with stdout/stderr/exit_code in its detail.
+///
+/// A guard failure (not allowed, dangerous body, write-once violation) returns `Err(String)`.
+/// The caller is responsible for treating this as a gate violation (audit + skip persisting).
+pub fn apply_capability_entry(
+    entry: &crate::types::TrailEntry,
+    agent_id: &str,
+    hex_dir: &Path,
+    wake_n: u64,
+    call_count: &mut u32,
+    sandbox_dir: &Path,
+) -> Result<Option<crate::types::TrailEntry>, String> {
+    let registry_dir = hex_dir.join(".hex/registry");
+
+    match entry.entry_type.as_str() {
+        "capability_add" => {
+            capability_guard::check_allowed(hex_dir, agent_id, "add")?;
+
+            let detail = entry
+                .detail
+                .as_object()
+                .ok_or("capability_add detail must be a JSON object")?;
+
+            let cap_kind = detail
+                .get("capability_kind")
+                .and_then(|v| v.as_str())
+                .ok_or("capability_add: missing capability_kind")?;
+            let cap_id = detail
+                .get("capability_id")
+                .and_then(|v| v.as_str())
+                .ok_or("capability_add: missing capability_id")?;
+            let description = detail
+                .get("description")
+                .and_then(|v| v.as_str())
+                .ok_or("capability_add: missing description")?;
+            let exec_or_event = detail
+                .get("exec_or_event")
+                .and_then(|v| v.as_str())
+                .ok_or("capability_add: missing exec_or_event")?;
+
+            capability_guard::check_body_safe(exec_or_event)?;
+            capability_guard::check_immutable(&registry_dir, cap_id)?;
+
+            let now = Utc::now().to_rfc3339();
+            let input_schema = detail
+                .get("input_schema")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+
+            if cap_kind == "trigger" {
+                let cap = registry::TriggerCapability {
+                    id: cap_id.to_string(),
+                    kind: cap_kind.to_string(),
+                    created_by: agent_id.to_string(),
+                    created_at: now,
+                    created_in_wake: wake_n,
+                    unprompted: false,
+                    description: description.to_string(),
+                    event: exec_or_event.to_string(),
+                    input_schema,
+                    callable_by: vec![],
+                };
+                registry::add_trigger(&registry_dir, &cap)?;
+            } else {
+                let cap = registry::FunctionCapability {
+                    id: cap_id.to_string(),
+                    kind: cap_kind.to_string(),
+                    created_by: agent_id.to_string(),
+                    created_at: now,
+                    created_in_wake: wake_n,
+                    unprompted: false,
+                    description: description.to_string(),
+                    exec: exec_or_event.to_string(),
+                    input_schema,
+                    callable_by: vec![],
+                };
+                registry::add_function(&registry_dir, &cap, exec_or_event.as_bytes())?;
+            }
+
+            // Emit ordering signal AFTER capability is fully persisted.
+            // Sibling pilots wake on this event (not timer.tick.daily fan-out), so
+            // build_catalog on receipt always observes the new capability.
+            let _ = registry::emit_capability_added(&registry_dir, cap_id, agent_id);
+
+            Ok(None)
+        }
+
+        "capability_call" => {
+            capability_guard::check_allowed(hex_dir, agent_id, "call")?;
+
+            let detail = entry
+                .detail
+                .as_object()
+                .ok_or("capability_call detail must be a JSON object")?;
+
+            let cap_id = detail
+                .get("capability_id")
+                .and_then(|v| v.as_str())
+                .ok_or("capability_call: missing capability_id")?;
+
+            let args_val = detail
+                .get("args")
+                .cloned()
+                .unwrap_or(serde_json::Value::Null);
+
+            // Look up the function definition to get the original creator.
+            let fn_json_path = registry_dir
+                .join("functions")
+                .join(format!("{cap_id}.json"));
+            if !fn_json_path.exists() {
+                return Err(format!(
+                    "capability_call: function '{cap_id}' is not registered"
+                ));
+            }
+            let fn_data = std::fs::read_to_string(&fn_json_path)
+                .map_err(|e| format!("capability_call: read function def for '{cap_id}': {e}"))?;
+            let fn_val: serde_json::Value = serde_json::from_str(&fn_data)
+                .map_err(|e| format!("capability_call: parse function def for '{cap_id}': {e}"))?;
+            let created_by = fn_val["created_by"]
+                .as_str()
+                .unwrap_or("")
+                .to_string();
+
+            // Convert args to a Vec<String> for the executor.
+            let args: Vec<String> = match &args_val {
+                serde_json::Value::Array(arr) => arr
+                    .iter()
+                    .filter_map(|v| v.as_str().map(|s| s.to_string()))
+                    .collect(),
+                serde_json::Value::Object(_) => {
+                    vec![serde_json::to_string(&args_val).unwrap_or_default()]
+                }
+                _ => vec![],
+            };
+
+            let ctx = capability_exec::ExecContext {
+                caller: agent_id.to_string(),
+                created_by,
+                wake_n,
+                timeout_secs: 30,
+                output_cap_bytes: 65_536,
+                calls_per_wake_cap: 10,
+            };
+
+            let exec_result = capability_exec::execute_capability(
+                &registry_dir,
+                cap_id,
+                &args,
+                &ctx,
+                sandbox_dir,
+                call_count,
+            )?;
+
+            let result_entry = crate::types::TrailEntry {
+                ts: Utc::now(),
+                entry_type: "act".to_string(),
+                detail: serde_json::json!({
+                    "action": format!("capability_call:{cap_id}"),
+                    "result": {
+                        "exit_code": exec_result.exit_code,
+                        "stdout": exec_result.stdout,
+                        "stderr": exec_result.stderr,
+                        "timed_out": exec_result.timed_out,
+                        "output_truncated": exec_result.output_truncated,
+                    }
+                }),
+                queue_item: entry.queue_item.clone(),
+            };
+
+            Ok(Some(result_entry))
+        }
+
+        other => Err(format!(
+            "apply_capability_entry: not a capability entry type: '{other}'"
+        )),
+    }
+}
+
 pub struct WakeConfig {
     pub hex_dir: PathBuf,
     pub agent_id: String,
@@ -81,7 +269,21 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     let principles_path = hex_dir.join(".hex/principles.md");
     let principles_text = std::fs::read_to_string(&principles_path).ok();
 
-    // 1c. Load context_files declared in charter (injected into prompt)
+    // 1c. Build capability catalog for allowlisted pilot agents (ordered before charter context).
+    let registry_dir = hex_dir.join(".hex/registry");
+    let catalog_json: Option<String> = if registry::is_allowed(hex_dir, &config.agent_id) {
+        match registry::build_catalog(&registry_dir) {
+            Ok(entries) => serde_json::to_string_pretty(&entries).ok(),
+            Err(e) => {
+                eprintln!("[{}] capability catalog build failed: {e}", config.agent_id);
+                None
+            }
+        }
+    } else {
+        None
+    };
+
+    // 1d. Load context_files declared in charter (injected into prompt)
     let mut context_files_content = String::new();
     for pattern in &charter_data.context_files {
         let expanded = shellexpand::tilde(pattern).to_string();
@@ -282,6 +484,7 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
             &config.payload,
             principles_text.as_deref(),
             ctx_files,
+            catalog_json.as_deref(),
         );
 
         let claude_output = match claude::invoke(&prompt_text, "sonnet", &allowed_tools) {
@@ -404,6 +607,8 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
 
         // Validate and append trail entries
         let mut accepted_entries: Vec<crate::types::TrailEntry> = Vec::new();
+        // Per-wake call counter for capability_call budget enforcement.
+        let mut capability_call_count: u32 = 0;
         for entry in &response.trail {
             match gate::validate(entry) {
                 Ok(()) => {
@@ -468,14 +673,63 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
                         }
                     }
 
-                    agent_state.trail.push(entry_to_persist.clone());
-                    accepted_entries.push(entry_to_persist);
-                    audit::append(
-                        &audit_dir,
-                        &config.agent_id,
-                        &format!("gate:{}", entry.entry_type),
-                        &entry.detail,
-                    );
+                    // For capability entries, run guard + processing before persisting to trail.
+                    // A guard failure is treated as a gate violation: the entry is not persisted.
+                    let mut capability_result: Option<crate::types::TrailEntry> = None;
+                    let capability_guard_failed =
+                        if entry.entry_type == "capability_add"
+                            || entry.entry_type == "capability_call"
+                        {
+                            let sandbox_dir = hex_dir.join(".hex/containers");
+                            match apply_capability_entry(
+                                entry,
+                                &config.agent_id,
+                                hex_dir,
+                                agent_state.wake_count,
+                                &mut capability_call_count,
+                                &sandbox_dir,
+                            ) {
+                                Ok(maybe_result) => {
+                                    capability_result = maybe_result;
+                                    false
+                                }
+                                Err(e) => {
+                                    eprintln!(
+                                        "[{}] CAPABILITY REJECTED ({}): {e}",
+                                        config.agent_id, entry.entry_type
+                                    );
+                                    audit::append(
+                                        &audit_dir,
+                                        &config.agent_id,
+                                        "capability-rejected",
+                                        &serde_json::json!({
+                                            "type": entry.entry_type,
+                                            "agent": &config.agent_id,
+                                            "error": e,
+                                        }),
+                                    );
+                                    true
+                                }
+                            }
+                        } else {
+                            false
+                        };
+
+                    if !capability_guard_failed {
+                        agent_state.trail.push(entry_to_persist.clone());
+                        accepted_entries.push(entry_to_persist);
+                        audit::append(
+                            &audit_dir,
+                            &config.agent_id,
+                            &format!("gate:{}", entry.entry_type),
+                            &entry.detail,
+                        );
+                        // For capability_call, also inject the execution result into the trail.
+                        if let Some(result_entry) = capability_result {
+                            agent_state.trail.push(result_entry.clone());
+                            accepted_entries.push(result_entry);
+                        }
+                    }
                 }
                 Err(violation) => {
                     audit::append(

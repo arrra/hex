@@ -93,3 +93,138 @@ fn test_reject_empty_required_field() {
     assert!(result.is_err());
     assert!(result.unwrap_err().contains("finding"));
 }
+
+// capability_add tests
+#[test]
+fn test_valid_capability_add() {
+    let entry = make_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "capability_id": "my-fn",
+            "description": "does a thing",
+            "wall_hit": "60s",
+            "exec_or_event": "#!/bin/sh\necho hello"
+        }),
+    );
+    assert!(gate::validate(&entry).is_ok());
+}
+
+#[test]
+fn test_capability_add_missing_wall_hit() {
+    let entry = make_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "capability_id": "my-fn",
+            "description": "does a thing",
+            "exec_or_event": "#!/bin/sh\necho hello"
+        }),
+    );
+    let result = gate::validate(&entry);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("wall_hit"));
+}
+
+#[test]
+fn test_capability_add_missing_capability_kind() {
+    let entry = make_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_id": "my-fn",
+            "description": "does a thing",
+            "wall_hit": "60s",
+            "exec_or_event": "#!/bin/sh\necho hello"
+        }),
+    );
+    let result = gate::validate(&entry);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("capability_kind"));
+}
+
+#[test]
+fn test_capability_add_missing_capability_id() {
+    let entry = make_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "description": "does a thing",
+            "wall_hit": "60s",
+            "exec_or_event": "#!/bin/sh\necho hello"
+        }),
+    );
+    let result = gate::validate(&entry);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("capability_id"));
+}
+
+#[test]
+fn test_capability_add_missing_description() {
+    let entry = make_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "capability_id": "my-fn",
+            "wall_hit": "60s",
+            "exec_or_event": "#!/bin/sh\necho hello"
+        }),
+    );
+    let result = gate::validate(&entry);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("description"));
+}
+
+#[test]
+fn test_capability_add_missing_exec_or_event() {
+    let entry = make_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "capability_id": "my-fn",
+            "description": "does a thing",
+            "wall_hit": "60s"
+        }),
+    );
+    let result = gate::validate(&entry);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("exec_or_event"));
+}
+
+// capability_call tests
+#[test]
+fn test_valid_capability_call() {
+    let entry = make_entry(
+        "capability_call",
+        serde_json::json!({
+            "capability_id": "my-fn",
+            "args": {"key": "value"}
+        }),
+    );
+    assert!(gate::validate(&entry).is_ok());
+}
+
+#[test]
+fn test_capability_call_missing_capability_id() {
+    let entry = make_entry(
+        "capability_call",
+        serde_json::json!({
+            "args": {"key": "value"}
+        }),
+    );
+    let result = gate::validate(&entry);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("capability_id"));
+}
+
+#[test]
+fn test_capability_call_missing_args() {
+    let entry = make_entry(
+        "capability_call",
+        serde_json::json!({
+            "capability_id": "my-fn"
+        }),
+    );
+    let result = gate::validate(&entry);
+    assert!(result.is_err());
+    assert!(result.unwrap_err().contains("args"));
+}

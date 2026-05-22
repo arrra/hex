@@ -39,6 +39,18 @@ fn schema_for(entry_type: &str) -> Option<GateSchema> {
         "assess" => Some(GateSchema {
             required_fields: &["area", "finding", "adjustment"],
         }),
+        "capability_add" => Some(GateSchema {
+            required_fields: &[
+                "capability_kind",
+                "capability_id",
+                "description",
+                "wall_hit",
+                "exec_or_event",
+            ],
+        }),
+        "capability_call" => Some(GateSchema {
+            required_fields: &["capability_id", "args"],
+        }),
         _ => None,
     }
 }

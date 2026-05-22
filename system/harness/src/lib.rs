@@ -1,6 +1,8 @@
 pub mod act_evidence;
 pub mod assets;
+pub mod capability_exec;
 pub mod audit;
+pub mod capability_guard;
 pub mod route;
 pub mod charter_triggers;
 pub mod extensions;
@@ -13,6 +15,7 @@ pub mod message;
 pub mod messaging;
 pub mod prompt;
 pub mod queue;
+pub mod registry;
 pub mod server;
 pub mod state;
 pub mod sse;

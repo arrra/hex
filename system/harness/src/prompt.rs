@@ -14,6 +14,7 @@ pub fn build(
     payload: &str,
     principles_text: Option<&str>,
     context_files: Option<&str>,
+    catalog: Option<&str>,
 ) -> String {
     let trail_recent: Vec<_> = state.trail.iter().rev().take(20).collect();
     let trail_json = serialize_or_loud("trail", &trail_recent);
@@ -27,10 +28,18 @@ pub fn build(
         .map(|p| format!("\n---\n\n{p}\n"))
         .unwrap_or_else(String::new);
 
-    let context_section = context_files
+    // Catalog section is prepended before charter context files when present.
+    let catalog_block = catalog
         .filter(|s| !s.is_empty())
-        .map(|c| format!("\n---\n\n# Context Files\n{c}\n"))
-        .unwrap_or_else(String::new);
+        .map(|c| format!("\n## Capability Catalog\n\n```json\n{c}\n```\n"))
+        .unwrap_or_default();
+
+    let ctx_body = context_files.filter(|s| !s.is_empty()).unwrap_or("");
+    let context_section = if catalog_block.is_empty() && ctx_body.is_empty() {
+        String::new()
+    } else {
+        format!("\n---\n\n# Context Files\n{catalog_block}{ctx_body}\n")
+    };
 
     format!(
         r#"# Charter

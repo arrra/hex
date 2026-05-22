@@ -1,10 +1,46 @@
 use hex::prompt;
 
+// --- T5258: catalog injection tests (failing until implementation is complete) ---
+
+#[test]
+fn test_prompt_catalog_injected_for_allowlisted_agent() {
+    let state = hex::state::initialize("test", 2.0);
+    let catalog_json = r#"[{"id":"my-fn","kind":"function","description":"Does things","input_schema":null,"created_by":"agent-a"}]"#;
+    let charter_ctx = "\n## charter-file.md\n\ncharter content here\n";
+    let p = prompt::build(
+        "id: test",
+        &state,
+        "manual",
+        "{}",
+        None,
+        Some(charter_ctx),
+        Some(catalog_json),
+    );
+    assert!(p.contains("Capability Catalog"), "catalog section must appear when catalog is Some");
+    assert!(p.contains("my-fn"), "catalog entry id must appear");
+    // catalog must appear before charter context
+    let catalog_pos = p.find("Capability Catalog").expect("catalog section must be present");
+    let charter_pos = p.find("charter content here").expect("charter context must be present");
+    assert!(catalog_pos < charter_pos, "catalog must be ordered before charter context files");
+}
+
+#[test]
+fn test_prompt_unchanged_without_catalog() {
+    let state = hex::state::initialize("test", 2.0);
+    let p_with_catalog = prompt::build("id: test", &state, "manual", "{}", None, None, Some("[]"));
+    let p_without_catalog = prompt::build("id: test", &state, "manual", "{}", None, None, None);
+    // catalog=None should produce identical output to before T5258 (no catalog section)
+    assert!(!p_without_catalog.contains("Capability Catalog"), "no catalog section when catalog is None");
+    let _ = p_with_catalog; // compiles
+}
+
+// --- existing tests below (all updated to pass catalog=None) ---
+
 #[test]
 fn test_prompt_contains_charter_and_state() {
     let charter_text = "id: test\nrole: Test Agent\nobjective: Be useful";
     let state = hex::state::initialize("test", 2.0);
-    let p = prompt::build(charter_text, &state, "timer.tick.30m", "{}", None, None);
+    let p = prompt::build(charter_text, &state, "timer.tick.30m", "{}", None, None, None);
     assert!(
         p.contains("Test Agent"),
         "prompt should contain charter text"
@@ -23,7 +59,7 @@ fn test_prompt_contains_charter_and_state() {
 #[test]
 fn test_prompt_includes_response_schema() {
     let state = hex::state::initialize("test", 2.0);
-    let p = prompt::build("id: test", &state, "manual", "{}", None, None);
+    let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
     assert!(p.contains("trail"), "must describe trail");
     assert!(p.contains("queue_updates"), "must describe queue_updates");
     assert!(p.contains("active_drained"), "must describe active_drained");
@@ -42,6 +78,7 @@ fn test_prompt_includes_principles_when_provided() {
         "{}",
         Some("## Self-Tuning Cadence\nYou own the tempo."),
         None,
+        None,
     );
     assert!(
         p.contains("Self-Tuning Cadence"),
@@ -56,7 +93,7 @@ fn test_prompt_includes_principles_when_provided() {
 #[test]
 fn test_prompt_works_without_principles() {
     let state = hex::state::initialize("test", 2.0);
-    let p = prompt::build("id: test", &state, "manual", "{}", None, None);
+    let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
     assert!(!p.contains("Self-Tuning"), "no principles text when None");
 }
 
@@ -87,7 +124,7 @@ fn test_assessment_prompt_structure() {
 #[test]
 fn test_prompt_includes_live_messaging_guidance() {
     let state = hex::state::initialize("test", 2.0);
-    let p = prompt::build("id: test", &state, "manual", "{}", None, None);
+    let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
     assert!(
         p.contains("response_requested"),
         "prompt must teach agents about response_requested field"
@@ -105,7 +142,7 @@ fn test_prompt_includes_live_messaging_guidance() {
 #[test]
 fn test_prompt_message_schema_includes_response_requested() {
     let state = hex::state::initialize("test", 2.0);
-    let p = prompt::build("id: test", &state, "manual", "{}", None, None);
+    let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
     let msg_schema_region = p.find("outbound_messages").expect("must have outbound_messages in schema");
     let after_schema = &p[msg_schema_region..];
     assert!(
@@ -118,7 +155,7 @@ fn test_prompt_message_schema_includes_response_requested() {
 fn test_principles_live_collaboration_injected() {
     let state = hex::state::initialize("test", 2.0);
     let principles = "## Live Collaboration by Default\n\nWhen you send a message to another agent, default to response_requested: true.";
-    let p = prompt::build("id: test", &state, "manual", "{}", Some(principles), None);
+    let p = prompt::build("id: test", &state, "manual", "{}", Some(principles), None, None);
     assert!(
         p.contains("Live Collaboration by Default"),
         "principles with live collaboration guidance must appear in prompt"
