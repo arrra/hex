@@ -2,6 +2,12 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-22] — V2 memory command references (v0.17.5)
+
+### Changed
+- **Documentation updated**: All operational V1 memory script invocations (`python3 .hex/skills/memory/scripts/memory_search.py`, `memory_index.py`) replaced with V2 `hex` binary subcommands (`hex memory search`, `hex memory recall`, `hex memory index`) across `AGENTS.md`, `GEMINI.md`, `templates/CLAUDE.md`, `templates/AGENTS.md`, `system/commands/`, and `docs/capabilities-map.md`.
+- **Capabilities map**: `docs/capabilities-map.md` updated to describe hybrid FTS5+vector retrieval instead of V1 Python scripts. Stale `memory_save.py` sections removed.
+
 ## [2026-05-21] — Act evidence verification (v0.17.3)
 
 ### Added
