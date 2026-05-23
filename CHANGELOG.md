@@ -2,6 +2,21 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-23] — Capability system: agent-registered functions with security guard (v0.18.0)
+
+### Added
+- **`capability_exec.rs`**: sandbox executor for agent-registered capabilities. Enforces per-wake call caps (`calls_per_wake_cap`), wall-clock timeout, and output byte limits. Returns structured `ExecResult` (stdout, stderr, exit_code, timed_out, output_truncated).
+- **`capability_guard.rs`**: static security guard for capability bodies before they are persisted. Hard-denies network egress (`curl`, `wget`, `nc`, `http://`, `https://`), secrets access (`.hex/secrets`), destructive patterns (`rm -rf`), and pipe-to-shell (`| sh`, `| bash`). Also enforces per-agent allowlist and write-once immutability (registered capabilities cannot be overwritten).
+- **`registry.rs`**: capability registry — persists `FunctionCapability` and `TriggerCapability` structs to `.hex/registry/`. Manages allowlist (`pilot_agents.json`), build catalog, and atomic add/remove operations. Capabilities are executable scripts with typed input schemas.
+- **`doctor/checks/registry_health.rs`**: new doctor check verifying registry directory structure, file integrity, and allowlist consistency.
+- **`capability_add` / `capability_call` trail entry types**: agents can now register (`capability_add`) and invoke (`capability_call`) capabilities from trail entries. Gate schema enforces required fields. Wake cycle processes both entry types via `apply_capability_entry()`.
+- **Comprehensive test suites**: `capability_exec_test.rs` (328 lines), `capability_guard_test.rs` (203 lines), `capability_lifecycle_test.rs` (371 lines), `gate_test.rs` (135 lines), `registry_test.rs` (429 lines) — 1466 lines of new test coverage.
+
+### Changed
+- **`wake.rs`**: wake cycle now handles `capability_add` and `capability_call` trail entries, routing them through the capability guard and executor before persisting results to the audit log.
+- **`gate.rs`**: `validate()` extended with schemas for `capability_add` (required: `capability_kind`, `capability_id`, `description`, `wall_hit`, `exec_or_event`) and `capability_call` (required: `capability_id`, `args`).
+- **`prompt.rs`**: agent prompt updated to document `capability_add` and `capability_call` trail entry types and their required fields.
+
 ## [2026-05-22] — V2 memory command references (v0.17.5)
 
 ### Changed

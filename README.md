@@ -198,6 +198,7 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 - **Message routing** (`hex message`) — unified messaging: comments, agent messages, notifications
 - **System health** (`hex doctor`) — 55+ checks across env, memory, structure, config, companions; `hex doctor consolidate` audits operating model for contradictions, staleness, orphaned refs (native Rust, replaces consolidate.legacy.sh)
 - **Integration lifecycle** (`hex integration`) — native Rust integration bundle management
+- **Capability system** — agents register executable functions (`capability_add`) and invoke them (`capability_call`) from trail entries. A static security guard hard-denies network egress, secrets access, `rm -rf`, and pipe-to-shell before any script is persisted. Capabilities are write-once (immutable after registration), scoped to an allowlist of pilot agents, and sandboxed with per-wake call caps, wall-clock timeouts, and output byte limits.
 
 43 subcommands:
 
@@ -310,7 +311,10 @@ hex-foundation/
 │   │   ├── src/hook.rs     Claude Code hook runners (session-start, post-tool-use, backup-session)
 │   │   ├── src/server.rs   HTTP server + reverse proxy
 │   │   ├── src/sse.rs      SSE bus (topics, subscriptions, publish)
-│   │   ├── src/wake.rs     agent wake cycle
+│   │   ├── src/wake.rs              agent wake cycle
+│   │   ├── src/capability_exec.rs   sandboxed executor for agent-registered capabilities
+│   │   ├── src/capability_guard.rs  static security guard (network/secrets/destructive denies)
+│   │   ├── src/registry.rs          capability registry (FunctionCapability, TriggerCapability)
 │   │   ├── src/doctor.rs   DoctorCheck trait + 55+ checks (replaces doctor.sh)
 │   │   ├── src/upgrade.rs  upgrade pipeline (replaces upgrade.sh)
 │   │   └── build.rs        injects git SHA; Cargo.toml is version source
@@ -389,6 +393,13 @@ bash tests/eval/run_eval_macos.sh            # macOS Tart
 ---
 
 ## Roadmap
+
+v0.18.0: **Capability system — agent-registered functions with security guard.**
+- **`capability_add` / `capability_call` trail entry types**: agents can register executable functions and invoke them from trail entries. Gate schema enforces required fields.
+- **Security guard**: static body-scan hard-denies network egress (`curl`, `wget`, `nc`), secrets access, `rm -rf`, and pipe-to-shell before any script is persisted. Capabilities are write-once after registration.
+- **Sandboxed execution**: per-wake call caps, wall-clock timeouts, and output byte limits enforced by `capability_exec.rs`.
+- **Registry**: `FunctionCapability` and `TriggerCapability` structs persisted to `.hex/registry/`. Pilot-agent allowlist controls who can register.
+- **1466 lines of new tests**: `capability_exec_test.rs`, `capability_guard_test.rs`, `capability_lifecycle_test.rs`, `gate_test.rs`, `registry_test.rs`.
 
 v0.17.3: **Act evidence verification.**
 - **Mechanical act evidence gate**: harness now verifies `detail.evidence` on every `act` trail entry that claims a mechanical operation (git push, BOI dispatch, file write, etc.). Unverifiable claims are recorded as `UNVERIFIED` — they do not count as done.
