@@ -51,7 +51,8 @@ _boi_queue_lock = Lock()
 _tests_cache: dict = {"data": None, "ts": 0.0}
 _tests_lock = Lock()
 
-BOI_BIN = os.path.expanduser("~/.boi/boi")
+# v2: use ~/.boi/bin/boi shim (resolves to v2 binary after cutover)
+BOI_BIN = os.path.expanduser("~/.boi/bin/boi")
 _sse_counter = 0
 _sse_clients: list = []
 _sse_clients_lock = Lock()

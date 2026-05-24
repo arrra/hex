@@ -13,7 +13,8 @@ from datetime import datetime, timezone, timedelta
 from glob import glob
 
 # ── Paths ──────────────────────────────────────────────────────────────────
-BOI_DB = os.path.expanduser("~/.boi/boi.db")
+# v2: DB moved to ~/.boi/v2/boi.db
+BOI_DB = os.path.expanduser("~/.boi/v2/boi.db")
 FEEDBACK_GLOB = os.path.expanduser(
     os.path.join(_CLAUDE_PROJECT, "feedback_*.md")
 )
@@ -74,52 +75,12 @@ def collect_boi_signals() -> dict:
         result["_error"] = f"boi.db not found at {BOI_DB}"
         return result
 
-    try:
-        conn = sqlite3.connect(f"file:{BOI_DB}?mode=ro", uri=True)
-        conn.row_factory = sqlite3.Row
-        cur = conn.cursor()
-
-        # Completion rate: terminal specs in rolling 24h
-        cur.execute(
-            """
-            SELECT
-                COUNT(*) FILTER (WHERE status = 'completed') AS completed,
-                COUNT(*) FILTER (WHERE status = 'failed')    AS failed,
-                SUM(tasks_done)                               AS throughput
-            FROM specs
-            WHERE submitted_at >= ? AND status IN ('completed', 'failed')
-            """,
-            (cutoff,),
-        )
-        row = cur.fetchone()
-        completed = row["completed"] or 0
-        failed = row["failed"] or 0
-        terminal = completed + failed
-        result["task_throughput"] = int(row["throughput"] or 0)
-        result["sample_size"] = terminal
-
-        if terminal >= 2:  # avoid single-spec noise
-            result["completion_rate"] = round(completed / terminal, 4)
-        else:
-            result["completion_rate"] = None  # not enough data
-
-        # Zero-task failures: specs that failed having never completed a task
-        cur.execute(
-            """
-            SELECT COUNT(*) AS cnt
-            FROM specs
-            WHERE submitted_at >= ?
-              AND status = 'failed'
-              AND tasks_done = 0
-              AND tasks_total > 0
-            """,
-            (cutoff,),
-        )
-        result["zero_task_failures"] = cur.fetchone()["cnt"] or 0
-
-        conn.close()
-    except Exception as exc:
-        result["_error"] = str(exc)
+    # TODO: hex-vitals schema not migrated to v2
+    # v2 specs table only has (spec_id, created_at) — no status/tasks_done/
+    # tasks_total/submitted_at columns. Queries below would fail. Stub empty
+    # until hex-vitals is rewritten against v2's phase_runs / task_runtime tables.
+    result["_error"] = "hex-vitals DB queries not yet migrated to v2 schema (stub)"
+    return result
 
     return result
 

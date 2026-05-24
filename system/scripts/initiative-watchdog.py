@@ -58,7 +58,9 @@ HEARTBEAT_LOG = os.path.join(AUDIT_DIR, "watchdog-heartbeat.jsonl")
 KR_SNAPSHOTS = os.path.join(AUDIT_DIR, "kr-snapshots.jsonl")
 LOOP_HISTORY = os.path.join(AUDIT_DIR, "initiative-loop-history.jsonl")
 
-BOI_QUEUE_DB = os.path.expanduser("~/.boi/push_queue.db")
+# v2: push_queue.db does not exist; v2 status is in ~/.boi/v2/boi.db
+# TODO: hex-vitals schema not migrated to v2 — BOI_QUEUE_DB queries below will no-op until migrated
+BOI_QUEUE_DB = os.path.expanduser("~/.boi/v2/boi.db")
 
 
 def _now():
