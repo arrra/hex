@@ -239,17 +239,6 @@ impl CommentsHandler {
         self.telemetry
             .emit("hex.comment.created", &serde_json::json!({ "id": id }));
 
-        // Route comment to matching agents in background (port of route-comment.py)
-        {
-            let hex_dir = self.hex_dir.clone();
-            let comment_id = id.clone();
-            let asset = comment.asset.clone();
-            let text = comment.text.clone();
-            std::thread::spawn(move || {
-                crate::route::run_comment(&hex_dir, &comment_id, &asset, &text);
-            });
-        }
-
         json_created(&comment)
     }
 
