@@ -48,14 +48,26 @@ fn facts_recall(
     query: &str,
     k: usize,
 ) -> rusqlite::Result<Vec<FactHit>> {
-    let mut hits: Vec<FactHit> = conn
-        .prepare(
+    // FTS5 default-ANDs tokens — for natural-language queries we want any-match.
+    // Drop stopwords and OR the remaining alphanumerics so "who is whitney" hits
+    // facts mentioning whitney.
+    let fts_query = query
+        .to_lowercase()
+        .split(|c: char| !c.is_alphanumeric())
+        .filter(|t| t.len() >= 3 && !matches!(*t, "the" | "and" | "for" | "are" | "was" | "who" | "what" | "how" | "does" | "did" | "is"))
+        .collect::<Vec<_>>()
+        .join(" OR ");
+
+    let mut hits: Vec<FactHit> = if fts_query.is_empty() {
+        Vec::new()
+    } else {
+        conn.prepare(
             "SELECT f.subject, f.predicate, f.object, f.importance
              FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
              WHERE facts_fts MATCH ?1 AND f.tombstone = 0
              ORDER BY bm25(facts_fts), f.importance DESC LIMIT ?2",
         )?
-        .query_map(rusqlite::params![query, k as i64], |r| {
+        .query_map(rusqlite::params![fts_query, k as i64], |r| {
             Ok(FactHit {
                 subject: r.get(0)?,
                 predicate: r.get(1)?,
@@ -64,12 +76,15 @@ fn facts_recall(
             })
         })?
         .filter_map(Result::ok)
-        .collect();
+        .collect()
+    };
 
-    // Slug boost: for each token in the query, surface facts whose subject ends
-    // with `:<token>` (e.g. "whitney" → subject LIKE '%:whitney').
+    // Slug boost: for each token in the query, surface facts whose subject
+    // contains `:<token>` after the type prefix (e.g. "whitney" → subject
+    // LIKE '%:whitney%' matches both `person:whitney` and `person:whitney-chew`).
     for tok in query.to_lowercase().split_whitespace() {
-        let pattern = format!("%:{tok}");
+        if tok.len() < 3 { continue; }
+        let pattern = format!("%:{tok}%");
         let mut q = conn.prepare(
             "SELECT subject, predicate, object, importance FROM facts
              WHERE subject LIKE ?1 AND tombstone = 0
