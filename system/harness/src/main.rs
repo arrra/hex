@@ -801,9 +801,6 @@ enum IntegrationCommands {
         /// Integration name to check
         name: String,
     },
-    /// Keep the xmcp OAuth2 access token alive by rotating it in .env (port of x-oauth2-refresh.sh)
-    #[command(name = "x-refresh")]
-    XRefresh,
 }
 
 #[derive(Subcommand)]
@@ -2135,11 +2132,6 @@ fn main() {
                 let script = hex_dir.join("system/scripts/hex-integration-check.sh");
                 std::process::exit(exec_script(&script, &[name]));
             }
-            if let IntegrationCommands::XRefresh = command {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/x-oauth2-refresh.sh");
-                std::process::exit(exec_script(&script, &[]));
-            }
             // Native Rust ports of Python integration commands
             if let IntegrationCommands::List = command {
                 let hex_dir = get_hex_dir();
@@ -2189,7 +2181,6 @@ fn main() {
                 IntegrationCommands::Telemetry { .. } => unreachable!(),
                 IntegrationCommands::Digest => unreachable!(),
                 IntegrationCommands::RunCheck { .. } => unreachable!(),
-                IntegrationCommands::XRefresh => unreachable!(),
             };
             let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
