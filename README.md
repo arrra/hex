@@ -80,7 +80,7 @@ Companion systems installed alongside:
 
 ## Core ideas
 
-**Persistent memory.** Every observation, decision, and learning gets written to a file — not summarized into a chat bubble that disappears. A SQLite FTS5 index at `.hex/memory.db` makes all of it searchable. With `fastembed` + `sqlite-vec` installed, the indexer upgrades to hybrid semantic + keyword search automatically; FTS5-only is the default when those libraries aren't present.
+**Persistent memory.** Every observation, decision, and learning gets written to a file — not summarized into a chat bubble that disappears. A SQLite FTS5 index at `.hex/memory.db` makes all of it searchable. With `fastembed` + `sqlite-vec` installed, the indexer upgrades to hybrid semantic + keyword search automatically; FTS5-only is the default when those libraries aren't present. A distill pipeline (`hex memory distill`) extracts structured facts from session transcripts using a two-phase LLM process (extract → judge), and a nightly consolidate pass (`hex memory consolidate`) prunes contradictions, staleness, and orphaned references automatically.
 
 **Operating model.** `CLAUDE.md` ships with 20 core standing orders, a learning engine that records observations to `me/learnings.md` with evidence and dates, and an improvement engine that detects friction, proposes fixes after 3+ occurrences, and tracks what ships.
 
@@ -212,7 +212,7 @@ hex asset        — asset registry (resolve, list, search, types)
 hex message      — unified messaging (send, list, comments, notifications)
 hex sse          — SSE bus operations (publish, topics)
 hex integration  — integration bundle lifecycle (install, check-all, telemetry)
-hex memory       — behavioral and indexed memory operations
+hex memory       — behavioral and indexed memory operations (recall, distill, consolidate, llm-check)
 hex health       — agent health checks (run-tier, fleet-pulse, stalled-initiative)
 hex metrics      — user-outcome metrics
 hex session      — session lifecycle (start, resume, stop)
@@ -393,6 +393,13 @@ bash tests/eval/run_eval_macos.sh            # macOS Tart
 ---
 
 ## Roadmap
+
+v0.19.0: **V2 Memory Plan 2 — facts layer, distill pipeline, nightly consolidate.**
+- **Facts layer**: six new tables (`facts`, `fact_history`, `sessions`, `topics`, `transcript_files`, `vec0`, FTS5). Structured facts with full history, typed by 24-predicate vocabulary.
+- **Distill pipeline** (`hex memory distill`): two-phase LLM process — Phase 1 extracts candidate facts from transcripts; Phase 2 judges each as ADD/UPDATE/NOOP/FLAG with embedding dedup and per-file watermarking.
+- **Nightly consolidate** (`hex memory consolidate`): 6-op consolidation pass — contradiction detection, staleness pruning, orphan cleanup, dedup, topic reorg, summary refresh. Runs on a nightly hex-events policy.
+- **Consumption-floor alert**: hex-events policy fires when facts count drops to zero, catching silent distill failures before they compound.
+- **Recall extended**: `hex memory recall` now searches the facts table alongside indexed memory entries.
 
 v0.18.0: **Capability system — agent-registered functions with security guard.**
 - **`capability_add` / `capability_call` trail entry types**: agents can register executable functions and invoke them from trail entries. Gate schema enforces required fields.

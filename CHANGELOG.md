@@ -2,6 +2,31 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-23] — V2 Memory Plan 2: facts layer, distill pipeline, nightly consolidate (v0.19.0)
+
+### Added
+- **Memory facts schema** (`memory/schema.rs`): six new tables — `facts`, `fact_history`, `sessions`, `topics`, `transcript_files`, `vec0`, plus FTS5 index. Persistent structured facts with full history.
+- **24-predicate vocabulary** (`memory/predicates.rs`): typed predicates for fact extraction covering preferences, decisions, blockers, goals, and more. Drives LLM extraction fidelity.
+- **Distill pipeline** (`memory/distill/`): four-stage pipeline — `extract.rs` (Phase 1 LLM extractor with prompt), `judge.rs` (Phase 2 LLM ADD/UPDATE/NOOP/FLAG decisions), `dedup.rs` (deterministic + embedding deduplication), `watermark.rs` (per-file progress tracking). Triggered by `hex.session.parsed` event.
+- **`hex memory distill` CLI**: run distill pipeline on demand over session transcripts.
+- **`hex memory consolidate`** (`memory/consolidate.rs`): 6-op consolidation with per-op isolation (contradiction detection, staleness pruning, orphaned-ref cleanup, dedup, topic reorg, summary refresh).
+- **Nightly consolidate policy** (`hex-events/policies/memory-consolidate.yaml`): runs `hex memory consolidate` nightly; replaces removed `nightly-consolidation.yaml`.
+- **Memory consumption floor policy** (`hex-events/policies/memory-consumption-floor.yaml`): alerts when memory facts drop below configured floor — early warning for silent distill failures.
+- **`hex memory distill` event policy** (`hex-events/policies/memory-distill.yaml`): auto-distills new sessions on `hex.session.parsed`.
+- **Provider module** (`memory/provider.rs`): extracted from `route.rs`, defer-not-degrade pattern — LLM provider abstraction for distill/judge phases.
+- **`facts_injected` telemetry + consumption-floor alert** (`memory/eval.rs`): T17 — facts injected count in memory eval output; consumption-floor alert fires if facts count at zero.
+- **`hex-integration-check.sh`**: unified integration health check script covering all companion integrations (BOI, hex-events, MCP, router).
+- **`shellout_paths` integration test** (`tests/shellout_paths.rs`): verifies all shell-out targets exist at install paths.
+- **Pre-commit hooks** (`.githooks/pre-commit`, `.githooks/pre-commit-ci.sh`): local pre-commit validation and CI-mode variant.
+- **Legacy rename guard** (`.github/workflows/legacy-rename-guard.yml`): CI guard against accidental legacy naming patterns.
+
+### Changed
+- **`budget_reset.rs`** re-homed from `health/` to top-level module (`src/budget_reset.rs`). Import path updated in `lib.rs`.
+- **`memory/recall.rs`** extended with facts arm — recall queries now search the facts table alongside memory entries.
+- **`system/scripts/hex-router/router.py`** updated to support additional routing cases.
+- **`system/scripts/spec-tool/server.py`** minor updates.
+- **README.md**: updated to reflect distill and nightly consolidate in the memory subsystem description.
+
 ## [2026-05-23] — Capability system: agent-registered functions with security guard (v0.18.0)
 
 ### Added
