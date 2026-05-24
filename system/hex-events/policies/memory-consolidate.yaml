@@ -26,7 +26,6 @@ rules:
       - type: shell
         command: |
           export PATH="/opt/homebrew/bin:$PATH"
-          HEX_DIR="${HEX_DIR:-$HOME/hex}"
           "$HEX_DIR/.hex/bin/hex" memory consolidate
         timeout: 300
         on_success:

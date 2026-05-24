@@ -2,7 +2,7 @@
 # integrations-digest.sh — Post weekly integrations summary to #integrations
 set -uo pipefail
 
-STATE_DIR="${HEX_DIR:-$HOME/hex}/projects/integrations/_state"
+STATE_DIR="$HEX_DIR/projects/integrations/_state"
 
 DIGEST=$(python3 - "$STATE_DIR" <<'PYEOF'
 import json, os, sys, datetime
