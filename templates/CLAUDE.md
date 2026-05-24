@@ -413,7 +413,9 @@ Always write the actual YAML or point to `~/.hex-events/policies/` as the destin
 
 ## BOI: Delegation System
 
-BOI is the **ONLY** delegation system in hex. Multi-step work, research, generation, refactoring, implementation — dispatched to BOI workers. You plan; BOI executes.
+_BOI v2 contract — updated 2026-05-24._
+
+BOI is the **ONLY** delegation system in hex. Multi-step work, research, generation, refactoring, implementation — dispatched to BOI workers. You plan; BOI executes. Binary is `~/.boi/bin/boi` (shim); v2 data lives under `~/.boi/v2/`.
 
 ### MUST dispatch to BOI (hard triggers)
 
@@ -433,67 +435,72 @@ BOI is the **ONLY** delegation system in hex. Multi-step work, research, generat
 
 ### How BOI Works
 
-1. Write a spec — a markdown file with numbered `### t-N` task headings
-2. Dispatch: `boi dispatch <spec.md>`
-3. Worker picks it up from queue, executes task, critic reviews, moves to next task
-4. Check status: `boi status`
+1. Write a spec — a **TOML** file with `title`, a `[contract]` block, and one or more `[[tasks]]`.
+2. Dispatch: `boi dispatch <spec.toml>`
+3. Worker picks it up, executes the task, the critic reviews, the next task runs.
+4. Inspect with `boi dashboard` or `boi log <spec-id>`.
 
 ### Spec Template (copy this)
 
-```markdown
-# {Spec title}
+```toml
+title = "{Spec title}"
 
-**Mode:** execute
+[contract]
+scope = "{Why this work is needed, what the end state looks like}"
+base_branch = "main"
+workspace = "~/github.com/mrap/{repo}"
 
-## Context
+[[tasks]]
+ref = "first-task"
+behavior = "{What to do. Be specific about files, functions, acceptance criteria.}"
+verifications = [
+  { intent = "{What success looks like}" },
+  { command = "{shell command that returns 0 on success}" },
+]
 
-{Why this work is needed, what the end state looks like}
-
-### t-1: {First task} (PENDING)
-
-{What to do. Be specific about files, functions, acceptance criteria.}
-
-**Verify:** `test -f /expected/output.md`
-
-### t-2: {Second task} (PENDING)
-
-{...}
-
-**Verify:** `{command that returns 0 on success}`
-
-### t-3: {Third task} (PENDING)
-
-{...}
-
-**Verify:** `{...}`
+[[tasks]]
+ref = "second-task"
+behavior = "{...}"
+blocked_by = ["first-task"]
+verifications = [
+  { command = "{...}" },
+]
 ```
 
-### Modes
+Optional blocks: `[[decision]]` for authored decisions, `[[skill]]` to declare skill references the worker may invoke.
 
-- `execute` — complete tasks exactly as specified
-- `challenge` — execute but question assumptions along the way
-- `discover` — execute; append new tasks if unexpected work is found
-- `generate` — full creative authority; add/modify tasks as needed (for research, design, generation)
+### Rejected v1 fields (typed errors)
+
+The v2 parser rejects these with typed errors (see `boi-v2/src/config/spec.rs:180-191`). Do NOT include them:
+
+- `mode` — modes were removed; behavior is implied by the spec
+- `initiative` — field removed
+- `max_iterations` — caps are hard-coded
+- `clean_state` — strict-only at v1.0
 
 ### CLI
 
 ```bash
-boi dispatch <spec.md>          # enqueue a spec
-boi status                      # queue + worker status
-boi log <queue-id>              # iteration history
-boi cancel <queue-id>           # stop a spec
+boi dispatch <spec.toml>             # parse, validate, persist, start
+boi dashboard [spec-id]              # observability TUI
+boi log <spec-id>                    # phase-run history
+boi cancel <id> --reason "..."       # cancel spec or task (--reason MANDATORY)
+boi fail <spec-id> --reason "..."    # mark spec failed (--reason MANDATORY)
+boi unblock <task-id>                # force a blocked task back to active
+boi clean <spec-id>                  # delete spec + cascade (retention)
+boi spec show <spec-id>              # print stored spec snapshot
 ```
 
 ### Dependencies (DAG)
 
-Specs can depend on each other. `boi dispatch --after q-NNN <spec.md>` blocks until `q-NNN` completes.
+Within a spec, set `blocked_by = ["other-task-ref"]` on a `[[tasks]]` entry. Cross-spec dependencies go through `[contract]` constraints, not a CLI flag.
 
 ### When a user asks for multi-step work, respond with a BOI spec
 
 - "Refactor the auth module across 8 files" → write spec, dispatch
-- "Build the REST API with CRUD + auth + tests" → write spec (mode: execute), dispatch
-- "Research the top 5 AI frameworks" → write spec (mode: generate), dispatch
-- "Analyze the competitive landscape" → write spec (mode: generate), dispatch
+- "Build the REST API with CRUD + auth + tests" → write spec, dispatch
+- "Research the top 5 AI frameworks" → write spec, dispatch
+- "Analyze the competitive landscape" → write spec, dispatch
 
 ALWAYS write the spec inline in your response and give the exact `boi dispatch` command. Do NOT start coding/researching inline.
 
