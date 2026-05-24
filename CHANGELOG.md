@@ -2,6 +2,18 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-24] — Wave 2 dead-code purge + Rust daemon canonical (v0.19.3)
+
+### Removed
+- **Python events engine** (`system/events/`): entire Python hex_eventd/hex_emit/hex_events_cli tree deleted — 16,589 lines. Rust daemon (`hex_eventd` binary) is now the sole canonical implementation.
+- **Orphaned Rust modules** (`src/capture.rs`, `src/health/`, `src/route.rs`): 1,586 lines of dead modules removed post wave-2a call-site strip.
+- **Dead call sites** (`src/comments.rs`, `src/lib.rs`, `src/main.rs`, `src/messaging.rs`): 156 lines of dispatch arms for capture::, health::, route:: removed; Health::BudgetReset correctly delegates to budget_reset::.
+
+### Fixed
+- **`install.sh`**: stopped copying `system/events/` to target (Python daemon no longer ships); added `templates/hex-events-policies/.gitkeep` placeholder.
+
+---
+
 ## [2026-05-24] — Capability lifecycle: callable_by/unprompted, boi-web improvements, memory sanitize (v0.19.3)
 
 ### Added
