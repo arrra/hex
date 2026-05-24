@@ -374,48 +374,11 @@ BOISH
 }
 install_or_upgrade_boi
 
-# hex-events — reactive event system (now inline at system/events/)
-install_hex_events_from_source() {
-    local src_dir="$SCRIPT_DIR/system/events"
-    local dst_dir="$HOME/.hex-events"
-    mkdir -p "$dst_dir"
-    # Copy core source files; policies are deployed separately below (non-overwriting)
-    for item in "$src_dir"/*; do
-        name="$(basename "$item")"
-        [ "$name" = "policies" ] && continue
-        dst="$dst_dir/$name"
-        # Remove stale symlinks so cp writes a real file instead of following them
-        [ -L "$dst" ] && rm -f "$dst"
-        cp -R "$item" "$dst_dir/"
-    done
-    echo "  hex-events installed from system/events/  ✓"
-}
-install_hex_events_from_source
-
-# ── Phase 5b: Deploy default policies ─────────────────────────────
-
-POLICIES_SRC="$SCRIPT_DIR/system/events/policies"
-if [ -d "$POLICIES_SRC" ] && ls "$POLICIES_SRC"/*.yaml &>/dev/null; then
-    if [ -d "$HOME/.hex-events" ]; then
-        POLICIES_DST="$HOME/.hex-events/policies"
-        mkdir -p "$POLICIES_DST"
-        copied=0
-        skipped=0
-        for policy_file in "$POLICIES_SRC"/*.yaml; do
-            policy_name="$(basename "$policy_file")"
-            dst="$POLICIES_DST/$policy_name"
-            if [ -f "$dst" ]; then
-                skipped=$((skipped + 1))
-            else
-                cp "$policy_file" "$dst"
-                copied=$((copied + 1))
-            fi
-        done
-        echo "  Default policies    ✓ (copied: $copied, skipped existing: $skipped)"
-    else
-        echo "  hex-events not found, skipping default policy installation."
-    fi
-fi
+# ── Phase 5: Ensure ~/.hex-events/policies/ directory exists ──────
+# The Rust hex-events daemon is canonical; install.sh no longer copies
+# system/events/ source. Just ensure the policies dir exists for the user.
+mkdir -p "$HOME/.hex-events/policies"
+echo "  ~/.hex-events/policies/  ✓"
 
 # ── Phase 6: Register install ──────────────────────────────────────
 
