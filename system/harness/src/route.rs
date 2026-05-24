@@ -109,36 +109,9 @@ fn load_openrouter_key(hex_dir: &Path) -> String {
     std::env::var("OPENROUTER_API_KEY").unwrap_or_default()
 }
 
-fn call_openrouter(api_key: &str, model: &str, prompt: &str) -> Result<String, String> {
-    let payload = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "temperature": 0.1,
-        "max_tokens": 512,
-    })
-    .to_string();
-
-    let output = Command::new("curl")
-        .args([
-            "-s", "-X", "POST",
-            "https://openrouter.ai/api/v1/chat/completions",
-            "-H", "Content-Type: application/json",
-            "-H", &format!("Authorization: Bearer {api_key}"),
-            "-d", &payload,
-            "--max-time", "15",
-        ])
-        .output()
-        .map_err(|e| format!("curl failed: {e}"))?;
-
-    if !output.status.success() {
-        return Err(format!("curl exit {}", output.status.code().unwrap_or(1)));
-    }
-    let resp: serde_json::Value = serde_json::from_slice(&output.stdout)
-        .map_err(|e| format!("json parse: {e}"))?;
-    Ok(resp["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("")
-        .to_string())
+fn call_openrouter(_api_key: &str, model: &str, prompt: &str) -> Result<String, String> {
+    crate::memory::provider::generate(prompt, model, 512)
+        .map_err(|e| format!("{e:?}"))
 }
 
 fn call_ollama(host: &str, model: &str, prompt: &str) -> Result<String, String> {

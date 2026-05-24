@@ -1,9 +1,14 @@
+pub mod consolidate;
+pub mod distill;
 pub mod embed;
 pub mod eval;
 pub mod index;
 pub mod parse_transcripts;
+pub mod predicates;
+pub mod provider;
 pub mod recall;
 pub mod rrf;
+pub mod schema;
 pub mod search;
 pub mod vector;
 

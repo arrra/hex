@@ -17,7 +17,6 @@ shellexpand = "3"
 glob = "0.3"
 walkdir = "2"
 sha2 = "0.10"
-hex-bytes = { package = "hex", version = "0.4" }
 fs2 = "0.4"
 rusqlite = { version = "0.31", features = ["bundled-full"] }
 regex = "1"
@@ -28,6 +27,8 @@ sqlite-vec = "0.1"
 # The image/codec stack is not separately feature-gated in fastembed 4. Keeping defaults.
 fastembed = "4"
 anyhow = "1"
+ureq = { version = "2", features = ["json"] }
+ulid = "1"
 
 [dev-dependencies]
 tempfile = "3"

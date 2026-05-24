@@ -11,6 +11,93 @@ const MIN_QUERY_CHARS: usize = 12;
 const MAX_CONTEXT_CHARS: usize = 10_000; // spec §8 hard cap
 const TOP_K: usize = 6;
 
+pub type Hit = super::search::SearchResult;
+
+#[derive(Debug)]
+pub struct FactHit {
+    pub subject: String,
+    pub predicate: String,
+    pub object: String,
+    pub importance: f32,
+}
+
+pub struct RecallV2 {
+    pub chunks: Vec<Hit>,
+    pub facts: Vec<FactHit>,
+}
+
+pub fn recall_with_facts(
+    conn: &rusqlite::Connection,
+    query: &str,
+) -> rusqlite::Result<RecallV2> {
+    let chunks = chunks_recall(conn, query, 5).unwrap_or_default();
+    let facts = facts_recall(conn, query, 5)?;
+    Ok(RecallV2 { chunks, facts })
+}
+
+fn chunks_recall(
+    conn: &rusqlite::Connection,
+    query: &str,
+    k: usize,
+) -> rusqlite::Result<Vec<Hit>> {
+    super::search::search_fts_public(conn, query, k, None)
+}
+
+fn facts_recall(
+    conn: &rusqlite::Connection,
+    query: &str,
+    k: usize,
+) -> rusqlite::Result<Vec<FactHit>> {
+    let mut hits: Vec<FactHit> = conn
+        .prepare(
+            "SELECT f.subject, f.predicate, f.object, f.importance
+             FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
+             WHERE facts_fts MATCH ?1 AND f.tombstone = 0
+             ORDER BY bm25(facts_fts), f.importance DESC LIMIT ?2",
+        )?
+        .query_map(rusqlite::params![query, k as i64], |r| {
+            Ok(FactHit {
+                subject: r.get(0)?,
+                predicate: r.get(1)?,
+                object: r.get(2)?,
+                importance: r.get(3)?,
+            })
+        })?
+        .filter_map(Result::ok)
+        .collect();
+
+    // Slug boost: for each token in the query, surface facts whose subject ends
+    // with `:<token>` (e.g. "whitney" → subject LIKE '%:whitney').
+    for tok in query.to_lowercase().split_whitespace() {
+        let pattern = format!("%:{tok}");
+        let mut q = conn.prepare(
+            "SELECT subject, predicate, object, importance FROM facts
+             WHERE subject LIKE ?1 AND tombstone = 0
+             ORDER BY importance DESC LIMIT 3",
+        )?;
+        for hit in q
+            .query_map([&pattern], |r| {
+                Ok(FactHit {
+                    subject: r.get(0)?,
+                    predicate: r.get(1)?,
+                    object: r.get(2)?,
+                    importance: r.get(3)?,
+                })
+            })?
+            .filter_map(Result::ok)
+        {
+            if !hits
+                .iter()
+                .any(|h| h.subject == hit.subject && h.predicate == hit.predicate)
+            {
+                hits.push(hit);
+            }
+        }
+    }
+    hits.truncate(k);
+    Ok(hits)
+}
+
 pub struct RecallOutcome {
     pub injected: bool,
     pub gated: bool,
@@ -43,13 +130,17 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
     }
 
     let db = super::db_path(hex_root);
-    let results = match super::open_db(&db) {
-        Ok(conn) => super::search::search_fts_public(&conn, query, TOP_K * 3, None)
-            .unwrap_or_default(),
+    let (results, facts) = match super::open_db(&db) {
+        Ok(conn) => {
+            let chunks = super::search::search_fts_public(&conn, query, TOP_K * 3, None)
+                .unwrap_or_default();
+            let f = facts_recall(&conn, query, TOP_K).unwrap_or_default();
+            (chunks, f)
+        }
         Err(e) => {
             // Fail-fast: dependency unreachable → inject nothing, loudly.
             eprintln!("[memory recall] cannot open {}: {e}", db.display());
-            vec![]
+            (vec![], vec![])
         }
     };
 
@@ -59,18 +150,19 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
         .take(TOP_K)
         .collect();
 
-    let outcome = if filtered.is_empty() {
-        RecallOutcome {
-            injected: false, gated: false, result_count: 0,
-            latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
-        }
-    } else {
+    let injected = !filtered.is_empty() || !facts.is_empty();
+    let outcome = if injected {
         RecallOutcome {
             injected: true,
             gated: false,
-            result_count: filtered.len(),
+            result_count: filtered.len() + facts.len(),
             latency_ms: t0.elapsed().as_millis() as u64,
-            context: format_context(&filtered),
+            context: format_context_v2(&filtered, &facts),
+        }
+    } else {
+        RecallOutcome {
+            injected: false, gated: false, result_count: 0,
+            latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
         }
     };
     log_and_emit(hex_root, &outcome);
@@ -78,17 +170,45 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
 }
 
 fn format_context(results: &[super::search::SearchResult]) -> String {
+    format_context_v2(results, &[])
+}
+
+fn format_context_v2(results: &[super::search::SearchResult], facts: &[FactHit]) -> String {
     let mut out = String::from(
         "## Relevant workspace memory\n\nThe following may be relevant to the current request \
          (retrieved from hex's memory index — verify before relying on it):\n\n",
     );
-    for r in results {
-        let snippet: String = r.content.chars().take(600).collect();
-        out.push_str(&format!("### {} — {}\n{}\n\n", r.source_path, r.heading, snippet.trim()));
-        if out.len() >= MAX_CONTEXT_CHARS {
-            break;
+
+    if !facts.is_empty() {
+        out.push_str("### Facts\n\n");
+        for f in facts {
+            out.push_str(&format!(
+                "- **{}** {} {}\n",
+                f.subject, f.predicate, f.object
+            ));
+            if out.len() >= MAX_CONTEXT_CHARS {
+                break;
+            }
+        }
+        out.push('\n');
+    }
+
+    if !results.is_empty() {
+        out.push_str("### Chunks\n\n");
+        for r in results {
+            let snippet: String = r.content.chars().take(600).collect();
+            out.push_str(&format!(
+                "#### {} — {}\n{}\n\n",
+                r.source_path,
+                r.heading,
+                snippet.trim()
+            ));
+            if out.len() >= MAX_CONTEXT_CHARS {
+                break;
+            }
         }
     }
+
     // Char-safe hard cap — String::truncate panics on a non-char-boundary index.
     if out.len() > MAX_CONTEXT_CHARS {
         let mut end = MAX_CONTEXT_CHARS;
@@ -125,9 +245,9 @@ fn log_and_emit(hex_root: &Path, o: &RecallOutcome) {
     // The JSONL append above is the eval's complete data source for both injected
     // and non-injected recalls — do NOT gate that write on o.injected.
     if o.injected {
-        let bus = hex::sse::SseBus::new();
-        let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(hex_root));
-        match hex::events::EventEngine::new(hex_root, telemetry, bus) {
+        let bus = crate::sse::SseBus::new();
+        let telemetry = std::sync::Arc::new(crate::telemetry::Telemetry::new(hex_root));
+        match crate::events::EventEngine::new(hex_root, telemetry, bus) {
             Ok(engine) => {
                 engine.ingest(
                     "memory.recall",
@@ -177,5 +297,30 @@ mod tests {
         // Non-trivial query, but no DB — must not panic, must not inject.
         let o = recall(tmp.path(), "what did we decide about the memory schema", false);
         assert!(!o.injected);
+    }
+}
+
+#[cfg(test)]
+mod plan2_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    #[test]
+    fn recall_returns_facts_alongside_chunks() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('f1','person:whitney','is','Mike''s wife',0.95,'2026-05-23','2026-05-23')",
+            [],
+        )
+        .unwrap();
+        let recall = recall_with_facts(&c, "who is whitney").unwrap();
+        assert!(
+            recall.facts.iter().any(|f| f.subject == "person:whitney"),
+            "expected person:whitney fact in recall results"
+        );
     }
 }

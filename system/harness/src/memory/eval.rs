@@ -119,9 +119,9 @@ fn consumption_rate(hex_root: &Path, days: i64) -> Option<(f64, usize)> {
 }
 
 fn emit_result(hex_root: &Path, failures: &[String]) {
-    let bus = hex::sse::SseBus::new();
-    let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(hex_root));
-    match hex::events::EventEngine::new(hex_root, telemetry, bus) {
+    let bus = crate::sse::SseBus::new();
+    let telemetry = std::sync::Arc::new(crate::telemetry::Telemetry::new(hex_root));
+    match crate::events::EventEngine::new(hex_root, telemetry, bus) {
         Ok(engine) => {
             let (event, payload) = if failures.is_empty() {
                 ("memory.eval.ok", json!({}))
