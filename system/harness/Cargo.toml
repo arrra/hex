@@ -39,6 +39,9 @@ hyper = { version = "1", features = ["full"] }
 hyper-util = { version = "0.1", features = ["tokio", "server-auto"] }
 tower = "0.4"
 
+[features]
+personal = []
+
 [dev-dependencies]
 tempfile = "3"
 filetime = "0.2"

@@ -1,6 +1,7 @@
 pub mod backup_session;
 pub mod post_tool_use;
 pub mod session_start;
+pub mod title_nudge;
 pub mod user_prompt_submit;
 
 use clap::Subcommand;

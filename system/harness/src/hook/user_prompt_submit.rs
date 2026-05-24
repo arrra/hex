@@ -48,8 +48,15 @@ pub fn run() {
 
     // Mike's interactive session — not a fleet agent — so for_agent = false.
     let outcome = crate::memory::recall::recall(&hex_dir, prompt, false);
+    let mut parts: Vec<String> = Vec::new();
     if outcome.injected {
-        emit_context(&outcome.context);
+        parts.push(outcome.context);
+    }
+    if let Some(nudge) = super::title_nudge::maybe_nudge(prompt) {
+        parts.push(nudge);
+    }
+    if !parts.is_empty() {
+        emit_context(&parts.join("\n\n---\n\n"));
     }
     std::process::exit(0);
 }
