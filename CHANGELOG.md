@@ -2,6 +2,14 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-24] — Wave 2c/3b: dead script dirs + personal skill/command purge (v0.19.3)
+
+### Removed
+- **Wave-2c dead script subdirs** (`system/scripts/`): 5 wholesale-dead subdirs (D3 finding) removed — pulse-dashboard v1, `.legacy.*` remnants, Mike-batch dead scripts, 3.5MB binary asset, and `__pycache__` junk. Continuation of wave-2 surface reduction.
+- **Wave-3b personal skill/command dirs** (`system/skills/`, `system/commands/`): 5 personal skill dirs, `bet-status.md`, `hex-scout.md` personal commands, and `e2e-guard` personal scripts directory removed. Personal content does not belong in foundation — these lived only in `hex-mrap`.
+
+---
+
 ## [2026-05-24] — Wave 2 dead-code purge + Rust daemon canonical (v0.19.3)
 
 ### Removed
