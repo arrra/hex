@@ -2,6 +2,23 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-24] — BOI v2 path cutover, audit-closure hardcode sweep, E2E fix (v0.19.7)
+
+### Changed
+- **BOI v2 path cutover** (`system/scripts/`, `templates/CLAUDE.md`, `system/skills/boi-delegation/SKILL.md`): all active scripts and templates migrated from v1 `.boi` paths to v2 canonical paths. `boi-delegation` SKILL.md rewritten for v2 contract.
+- **Charter docs** (`system/reference/core-agents/`): `quality-antagonist` and `boi-optimizer` updated for v2 surface.
+- **Harness hardcode parameterization** (`src/budget_reset.rs`, `src/doctor/legacy.rs`, `src/upgrade.rs`): 2 remaining personal hardcoded paths replaced with `$HOME`/env-var resolution. `hex-integration` personal-path fallback replaced with `$HOME/hex`.
+- **`.gitignore`**: added `.serena/` to prevent IDE metadata commits.
+
+### Removed
+- **Dead health scripts** (`system/scripts/health/`): `surfaces.yaml`, `test-write.txt`, `test2.txt` removed — directory was dead after Rust daemon cutover.
+- **Dead events tree** (`system/events/`): stale Python events remnant removed.
+
+### Fixed
+- **Docker E2E suites** (`tests/Dockerfile`, `tests/Dockerfile.env`, `tests/test-doctor-events-coverage.sh`): unblocked both Docker test suites; `bump-version` now syncs `system/version.txt` correctly.
+
+---
+
 ## [2026-05-24] — title_nudge hook, HEX_DIR path sweep, harness cleanup (v0.19.4)
 
 ### Added
