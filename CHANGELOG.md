@@ -2,6 +2,21 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-24] — title_nudge hook, HEX_DIR path sweep, harness cleanup (v0.19.4)
+
+### Added
+- **`title_nudge` hook** (`system/harness/src/hook/title_nudge.rs`): `UserPromptSubmit` hook that emits `hex.session.title.set` when the session title stamp is stale. Prompts Claude to apply a meaningful session title so transcripts are identifiable without manual labeling.
+
+### Fixed
+- **`title_nudge` session_id source** (`src/hook/user_prompt_submit.rs`): hook now reads `session_id` from the hook's stdin JSON payload instead of `CLAUDE_SESSION_ID` env var, which Claude Code does not set. Hook now fires correctly in production.
+- **Harness mod refs** (`src/`): removed dead `mod` declarations pointing to deleted personal integration files. Eliminates compile-time dead-code warnings.
+
+### Changed
+- **HEX_DIR path sweep** (`src/main.rs`, `src/charter.rs`, `src/events.rs`, `src/backup_session.rs`, `build.rs`, `comments-service/server.py`, `system/scripts/meeting-prep.sh`): 7+ hardcoded `/Users/mrap/mrap-hex/...` paths replaced with `get_hex_dir()` / `$HEX_DIR` resolver. `charter.rs` test fallback chain: `MRAP_HEX_PROJECTS` → `HEX_DIR` → `$HOME/hex`.
+- **`sanitize-check.sh` hardening**: scan now includes `*.rs` and `*.toml` files in addition to shell scripts — catches hardcoded paths in Rust source before they land.
+
+---
+
 ## [2026-05-24] — Wave 2c/3b: dead script dirs + personal skill/command purge (v0.19.3)
 
 ### Removed
