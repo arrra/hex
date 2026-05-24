@@ -49,8 +49,8 @@ fn facts_recall(
     k: usize,
 ) -> rusqlite::Result<Vec<FactHit>> {
     // FTS5 default-ANDs tokens — for natural-language queries we want any-match.
-    // Drop stopwords and OR the remaining alphanumerics so "who is whitney" hits
-    // facts mentioning whitney.
+    // Drop stopwords and OR the remaining alphanumerics so "who is alice" hits
+    // facts mentioning the slug.
     let fts_query = query
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
@@ -80,8 +80,8 @@ fn facts_recall(
     };
 
     // Slug boost: for each token in the query, surface facts whose subject
-    // contains `:<token>` after the type prefix (e.g. "whitney" → subject
-    // LIKE '%:whitney%' matches both `person:whitney` and `person:whitney-chew`).
+    // contains `:<token>` after the type prefix (e.g. "alice" → subject
+    // LIKE '%:alice%' matches both `person:alice` and `person:alice-chew`).
     for tok in query.to_lowercase().split_whitespace() {
         if tok.len() < 3 { continue; }
         let pattern = format!("%:{tok}%");
@@ -335,14 +335,14 @@ mod plan2_tests {
         crate::memory::schema::apply_plan2(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
-             VALUES ('f1','person:whitney','is','Mike''s wife',0.95,'2026-05-23','2026-05-23')",
+             VALUES ('f1','person:alice','is','a sample person',0.95,'2026-05-23','2026-05-23')",
             [],
         )
         .unwrap();
-        let recall = recall_with_facts(&c, "who is whitney").unwrap();
+        let recall = recall_with_facts(&c, "who is alice").unwrap();
         assert!(
-            recall.facts.iter().any(|f| f.subject == "person:whitney"),
-            "expected person:whitney fact in recall results"
+            recall.facts.iter().any(|f| f.subject == "person:alice"),
+            "expected person:alice fact in recall results"
         );
     }
 }

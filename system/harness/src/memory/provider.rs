@@ -23,7 +23,7 @@ impl std::error::Error for ProviderError {}
 pub fn hex_root() -> PathBuf {
     env::var("HEX_DIR")
         .map(PathBuf::from)
-        .unwrap_or_else(|_| PathBuf::from("/Users/mrap/hex"))
+        .unwrap_or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join("hex")).unwrap_or_else(|_| PathBuf::from("/tmp/hex")))
 }
 
 pub fn load_openrouter_key() -> Option<String> {
