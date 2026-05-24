@@ -122,6 +122,15 @@ fn test_assessment_prompt_structure() {
 }
 
 #[test]
+fn test_prompt_includes_capability_action_types() {
+    let state = hex::state::initialize("test", 2.0);
+    let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
+    assert!(p.contains("capability_call"), "must list capability_call action type");
+    assert!(p.contains("capability_add"), "must list capability_add action type");
+    assert!(p.contains("calls.jsonl"), "must explain calls.jsonl bookkeeping");
+}
+
+#[test]
 fn test_prompt_includes_live_messaging_guidance() {
     let state = hex::state::initialize("test", 2.0);
     let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
