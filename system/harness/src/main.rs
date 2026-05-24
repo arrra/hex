@@ -51,109 +51,129 @@ struct Cli {
 #[derive(Subcommand)]
 enum Commands {
     /// Agent fleet management
+    #[command(display_order = 1)]
     Agent {
         #[command(subcommand)]
         command: AgentCommands,
     },
     /// HTTP/SSE server
+    #[command(display_order = 34)]
     Server {
         #[command(subcommand)]
         command: ServerCommands,
     },
     /// Asset registry
+    #[command(display_order = 20)]
     Asset {
         #[command(subcommand)]
         command: AssetCommands,
     },
     /// Unified messaging (comments, agent messages, notifications)
+    #[command(display_order = 31)]
     Message {
         #[command(subcommand)]
         command: MessageCommands,
     },
     /// Event engine
+    #[command(display_order = 25)]
     Events {
         #[command(subcommand)]
         command: EventsCommands,
     },
     /// SSE bus operations
+    #[command(display_order = 37)]
     Sse {
         #[command(subcommand)]
         command: SseCommands,
     },
     /// Integration bundle lifecycle management
+    #[command(display_order = 9)]
     Integration {
         #[command(subcommand)]
         command: IntegrationCommands,
     },
     /// Behavioral and indexed memory operations
+    #[command(display_order = 2)]
     Memory {
         #[command(subcommand)]
         command: MemoryCommands,
     },
     /// Extension management
+    #[command(display_order = 26)]
     Extension {
         #[command(subcommand)]
         command: ExtensionCommands,
     },
     /// User-outcome metrics (port of .hex/scripts/metrics/run-all.sh)
+    #[command(display_order = 32)]
     Metrics {
         #[command(subcommand)]
         command: MetricsCommands,
     },
     /// Agent health checks (port of .hex/scripts/health/)
+    #[command(display_order = 6)]
     Health {
         #[command(subcommand)]
         command: HealthCommands,
     },
     /// System health checks
+    #[command(display_order = 5)]
     Doctor {
         #[command(subcommand)]
         command: DoctorCommands,
     },
     /// Translate paths between v1 and v2 hex layouts (port of .hex/scripts/path-mapping.sh)
-    #[command(name = "path-map")]
+    #[command(name = "path-map", display_order = 33)]
     PathMap {
         #[command(subcommand)]
         command: PathMapCommands,
     },
     /// Mirofish VM and service health (port of .hex/scripts/mirofish-status.sh)
     #[cfg(feature = "personal")]
+    #[command(display_order = 17)]
     Mirofish {
         #[command(subcommand)]
         command: MirofishCommands,
     },
     /// Kalshi prediction market integration
     #[cfg(feature = "personal")]
+    #[command(display_order = 16)]
     Kalshi {
         #[command(subcommand)]
         command: KalshiCommands,
     },
     /// Pulse server lifecycle (port of .hex/scripts/pulse/start.sh)
+    #[command(display_order = 7)]
     Pulse {
         #[command(subcommand)]
         command: PulseCommands,
     },
     /// Session lifecycle commands
+    #[command(display_order = 3)]
     Session {
         #[command(subcommand)]
         command: SessionCommands,
     },
     /// Print today's date (port of .hex/scripts/today.sh)
+    #[command(display_order = 4)]
     Today {
         /// Optional date format, e.g. +%a (passed to strftime; mirrors shell's $1)
         format: Option<String>,
     },
     /// MCP utilities
+    #[command(display_order = 30)]
     Mcp {
         #[command(subcommand)]
         command: McpCommands,
     },
     /// Hex tmux workspace launcher (port of .hex/scripts/workspace.sh)
+    #[command(display_order = 41)]
     Workspace {
         #[command(subcommand)]
         command: WorkspaceCommands,
     },
     /// Run the hex session startup checklist (port of .hex/scripts/startup.sh)
+    #[command(display_order = 38)]
     Startup {
         /// Skip slow steps (integration pulls, evolution engine, priority scoring)
         #[arg(long)]
@@ -166,81 +186,94 @@ enum Commands {
         status: bool,
     },
     /// Checkpoint the current session (port of /hex-checkpoint slash command)
+    #[command(display_order = 23)]
     Checkpoint {
         /// What to work on next (used in compact suggestion and handoff)
         focus: Option<String>,
     },
     /// Close the current session (port of /hex-shutdown slash command)
+    #[command(display_order = 35)]
     Shutdown {
         /// Session ID to deregister (from startup output); omit to get manual instructions
         session_id: Option<String>,
     },
     /// Hex Fleet Manager service management (port of .hex/scripts/hex-fleet/install.sh)
+    #[command(display_order = 27)]
     Fleet {
         #[command(subcommand)]
         command: FleetCommands,
     },
     /// BOI Process Manager service management (port of .hex/scripts/boi-pm/install.sh)
-    #[command(name = "boi-pm")]
+    #[command(name = "boi-pm", display_order = 21)]
     BoiPm {
         #[command(subcommand)]
         command: BoiPmCommands,
     },
     /// BOI live status web view launcher (native Rust SSE server)
-    #[command(name = "boi-web")]
+    #[command(name = "boi-web", display_order = 22)]
     BoiWeb {
         #[command(subcommand)]
         command: BoiWebCommands,
     },
     /// Spec-tool server launcher (port of .hex/scripts/spec-tool/run.sh)
-    #[command(name = "spec-tool")]
+    #[command(name = "spec-tool", display_order = 36)]
     SpecTool {
         #[command(subcommand)]
         command: SpecToolCommands,
     },
     /// Hex-router reverse proxy launcher (port of .hex/scripts/hex-router/serve.sh)
+    #[command(display_order = 11)]
     Router {
         #[command(subcommand)]
         command: RouterCommands,
     },
     /// iMessage alert sender (port of .hex/scripts/hex-alert.sh)
+    #[command(display_order = 19)]
     Alert {
         #[command(subcommand)]
         command: AlertCommands,
     },
     /// Weekly and on-demand synthesis pipeline (port of system/scripts/weekly-synthesis-digest.sh, synthesis-trigger.sh)
+    #[command(display_order = 39)]
     Synthesis {
         #[command(subcommand)]
         command: SynthesisCommands,
     },
     /// Environment setup utilities (Phase 5: port of env.sh non-shell logic)
+    #[command(display_order = 24)]
     Env {
         #[command(subcommand)]
         command: env::EnvCommands,
     },
     /// Validate BOI specs, hex extensions, and E2E test guards
+    #[command(display_order = 40)]
     Validate {
         #[command(subcommand)]
         command: ValidateCommands,
     },
     /// Initiative CRUD (port of system/scripts/hex-initiative.py)
+    #[command(display_order = 28)]
     Initiative {
         #[command(subcommand)]
         command: InitiativeCommands,
     },
     /// Learnings analysis and promotion (port of system/scripts/promote-learnings.py)
+    #[command(display_order = 29)]
     Learnings {
         #[command(subcommand)]
         command: LearningsCommands,
     },
     /// Telemetry file rotation and management (port of rotate-telemetry.sh)
+    #[command(display_order = 8)]
     Telemetry {
         #[command(subcommand)]
         command: TelemetryCommands,
     },
     /// Interactive workspace picker (port of hex-picker.sh)
+    #[command(display_order = 10)]
     Picker,
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
+    #[command(display_order = 14)]
     Upgrade {
         /// Extra arguments forwarded to upgrade.sh
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
@@ -248,6 +281,7 @@ enum Commands {
     },
     /// Deterministic LLM-free release pipeline (wraps system/scripts/release.sh)
     #[cfg(feature = "personal")]
+    #[command(display_order = 18)]
     Release {
         /// Explicit release version (e.g. 1.2.3); if omitted uses Cargo.toml version
         #[arg(long)]
@@ -260,13 +294,16 @@ enum Commands {
         dry_run: bool,
     },
     /// Claude Code hook runners (port of .hex/hooks/scripts/*.sh)
+    #[command(display_order = 13)]
     Hook {
         #[command(subcommand)]
         command: hook::HookCommands,
     },
     /// Print version
+    #[command(display_order = 15)]
     Version,
     /// Generate shell completions
+    #[command(display_order = 12)]
     Completions {
         shell: clap_complete::Shell,
     },
