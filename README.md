@@ -543,6 +543,12 @@ source <(hex completions zsh)    # zsh
 
 ---
 
+## Pre-commit hooks
+
+Run once: `git config core.hooksPath .githooks`
+
+---
+
 ## License
 
 MIT. See [LICENSE](./LICENSE).
