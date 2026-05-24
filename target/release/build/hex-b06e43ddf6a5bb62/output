@@ -1,0 +1,3 @@
+cargo:rustc-env=HEX_GIT_SHA=97d77ac2
+cargo:rerun-if-env-changed=HEX_DIR
+cargo:rerun-if-env-changed=HOME

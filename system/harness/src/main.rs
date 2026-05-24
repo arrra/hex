@@ -5,14 +5,10 @@ use std::path::{Path, PathBuf};
 use hex::{state, wake};
 
 mod alert;
-mod boi_pm;
 mod synthesis;
 mod boi_web;
-mod router;
-mod spec_tool;
 mod charter_triggers;
 mod doctor;
-mod fleet;
 mod budget_reset;
 mod paths;
 mod integration;
@@ -175,33 +171,11 @@ enum Commands {
         /// Session ID to deregister (from startup output); omit to get manual instructions
         session_id: Option<String>,
     },
-    /// Hex Fleet Manager service management (port of .hex/scripts/hex-fleet/install.sh)
-    Fleet {
-        #[command(subcommand)]
-        command: FleetCommands,
-    },
-    /// BOI Process Manager service management (port of .hex/scripts/boi-pm/install.sh)
-    #[command(name = "boi-pm")]
-    BoiPm {
-        #[command(subcommand)]
-        command: BoiPmCommands,
-    },
     /// BOI live status web view launcher (native Rust SSE server)
     #[command(name = "boi-web")]
     BoiWeb {
         #[command(subcommand)]
         command: BoiWebCommands,
-    },
-    /// Spec-tool server launcher (port of .hex/scripts/spec-tool/run.sh)
-    #[command(name = "spec-tool")]
-    SpecTool {
-        #[command(subcommand)]
-        command: SpecToolCommands,
-    },
-    /// Hex-router reverse proxy launcher (port of .hex/scripts/hex-router/serve.sh)
-    Router {
-        #[command(subcommand)]
-        command: RouterCommands,
     },
     /// iMessage alert sender (port of .hex/scripts/hex-alert.sh)
     Alert {
@@ -355,105 +329,9 @@ enum AgentCommands {
 }
 
 #[derive(Subcommand)]
-enum FleetCommands {
-    /// Install and register the Hex Fleet Manager LaunchAgent (port of hex-fleet/install.sh)
-    Install,
-}
-
-#[derive(Subcommand)]
-enum BoiPmCommands {
-    /// Install and register the BOI Process Manager LaunchAgent (port of boi-pm/install.sh)
-    Install,
-    /// Verify a BOI spec's completion claims (port of boi-completion-verify.sh)
-    Verify {
-        /// Spec ID to verify
-        spec_id: String,
-    },
-    /// Archive a completed BOI spec as JSON (port of boi-completion-to-archive.sh)
-    Archive {
-        /// Spec ID to archive
-        spec_id: String,
-        /// Target repo path (optional)
-        #[arg(long)]
-        target_repo: Option<String>,
-    },
-    /// Auto-commit BOI spec output to target repo (port of auto-commit-boi-output.sh)
-    #[command(name = "auto-commit")]
-    AutoCommit {
-        /// Spec ID
-        spec_id: String,
-        /// Target repo path (optional)
-        #[arg(long)]
-        target_repo: Option<String>,
-        /// Manifest path (optional)
-        #[arg(long)]
-        manifest: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
 enum BoiWebCommands {
     /// Launch the BOI live status web server
     Serve,
-}
-
-#[derive(Subcommand)]
-enum SpecToolCommands {
-    /// Launch the spec-tool server.py (port of spec-tool/run.sh)
-    Run,
-    /// Verify concrete claims in a BOI spec against the codebase (port of verify-spec-claims.py)
-    #[command(name = "verify-claims")]
-    VerifyClaims {
-        /// Spec file path to verify
-        spec_file: String,
-        /// Workspace directory to scan
-        #[arg(long)]
-        workspace: Option<String>,
-        /// Verbose output
-        #[arg(long)]
-        verbose: bool,
-    },
-    /// Resolve a spec's owning agent (port of spec-owner-resolver.py)
-    #[command(name = "resolve-owner")]
-    ResolveOwner {
-        /// Spec ID or spec YAML path
-        spec: String,
-    },
-    /// Build a structured failure brief for a failed BOI spec (port of build-failure-brief.py)
-    #[command(name = "failure-brief")]
-    FailureBrief {
-        /// Spec ID
-        spec_id: String,
-    },
-    /// Verify that work traces to active initiatives (port of check-cohesion.py)
-    #[command(name = "check-cohesion")]
-    CheckCohesion {
-        /// Check a specific spec file
-        #[arg(long)]
-        spec: Option<String>,
-        /// Check all active specs
-        #[arg(long)]
-        all: bool,
-        /// Show initiative coverage map
-        #[arg(long)]
-        map: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum RouterCommands {
-    /// Launch the hex-router reverse proxy (port of hex-router/serve.sh)
-    Serve,
-    /// Route a comment to matching agents via charter classification (port of route-comment.py)
-    #[command(name = "route-comment")]
-    RouteComment {
-        /// Comment ID
-        comment_id: String,
-        /// Asset identifier
-        asset: String,
-        /// Comment text
-        text: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -2548,89 +2426,10 @@ fn main() {
             let code = shutdown::run(&hex_dir, shutdown::ShutdownArgs { session_id });
             std::process::exit(code);
         }
-        Commands::Fleet { command } => match command {
-            FleetCommands::Install => {
-                let hex_dir = get_hex_dir();
-                fleet::run_install(&hex_dir);
-            }
-        },
-        Commands::BoiPm { command } => match command {
-            BoiPmCommands::Install => {
-                let hex_dir = get_hex_dir();
-                boi_pm::run_install(&hex_dir);
-            }
-            BoiPmCommands::Verify { spec_id } => {
-                let script = get_hex_dir().join(".hex/scripts/boi-completion-verify.sh");
-                std::process::exit(exec_script(&script, &[&spec_id]));
-            }
-            BoiPmCommands::Archive { spec_id, target_repo } => {
-                let home = std::env::var("HOME").unwrap_or_default();
-                let script = std::path::PathBuf::from(&home).join(".boi/scripts/boi-completion-to-archive.sh");
-                let mut args: Vec<String> = vec![spec_id];
-                if let Some(r) = target_repo { args.push(r); }
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                std::process::exit(exec_script(&script, &arg_refs));
-            }
-            BoiPmCommands::AutoCommit { spec_id, target_repo, manifest } => {
-                let home = std::env::var("HOME").unwrap_or_default();
-                let script = std::path::PathBuf::from(&home).join(".hex-events/scripts/auto-commit-boi-output.sh");
-                let mut args: Vec<String> = vec![spec_id];
-                if let Some(r) = target_repo { args.push(r); } else { args.push(String::new()); }
-                if let Some(m) = manifest { args.push(m); }
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                std::process::exit(exec_script(&script, &arg_refs));
-            }
-        },
         Commands::BoiWeb { command } => match command {
             BoiWebCommands::Serve => {
                 let hex_dir = get_hex_dir();
                 boi_web::run_serve(&hex_dir);
-            }
-        },
-        Commands::SpecTool { command } => match command {
-            SpecToolCommands::Run => {
-                let hex_dir = get_hex_dir();
-                spec_tool::run_run(&hex_dir);
-            }
-            SpecToolCommands::VerifyClaims { spec_file, workspace, verbose } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/verify-spec-claims.py");
-                let mut args: Vec<String> = vec![spec_file];
-                if let Some(w) = workspace { args.push("--workspace".into()); args.push(w); }
-                if verbose { args.push("--verbose".into()); }
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                std::process::exit(exec_script(&script, &arg_refs));
-            }
-            SpecToolCommands::ResolveOwner { spec } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/spec-owner-resolver.py");
-                std::process::exit(exec_script(&script, &[&spec]));
-            }
-            SpecToolCommands::FailureBrief { spec_id } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/build-failure-brief.py");
-                std::process::exit(exec_script(&script, &[&spec_id]));
-            }
-            SpecToolCommands::CheckCohesion { spec, all, map } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/check-cohesion.py");
-                let mut args: Vec<&str> = vec![];
-                let spec_s;
-                if let Some(ref s) = spec { spec_s = s.clone(); args.push("--spec"); args.push(&spec_s); }
-                if all { args.push("--all"); }
-                if map { args.push("--map"); }
-                std::process::exit(exec_script(&script, &args));
-            }
-        },
-        Commands::Router { command } => match command {
-            RouterCommands::Serve => {
-                let hex_dir = get_hex_dir();
-                router::run_serve(&hex_dir);
-            }
-            RouterCommands::RouteComment { comment_id, asset, text } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/route-comment.py");
-                std::process::exit(exec_script(&script, &[&comment_id, &asset, &text]));
             }
         },
         Commands::Alert { command } => match command {
