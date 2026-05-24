@@ -21,6 +21,13 @@ RUN git config --global user.email "test@test.com" && \
 # Install hex binary so tests can drive native commands
 COPY --from=hex-builder /build/target/debug/hex /usr/local/bin/hex
 
+# OBS-019 fix: cap ONNX Runtime threads at process startup. ORT reads
+# these at dylib load — setting them from inside the binary via
+# std::env::set_var is too late. Without the cap, a 70-chunk embed call
+# allocates per-thread × per-layer activations that OOM in the 4 GB
+# Docker Desktop VM. See evolution/obs-019-diagnosis.md.
+ENV ORT_NUM_THREADS=1 OMP_NUM_THREADS=1
+
 COPY . /tmp/hex-setup
 COPY tests/test_e2e.sh /test_e2e.sh
 RUN chmod +x /test_e2e.sh

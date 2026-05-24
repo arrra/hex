@@ -548,7 +548,35 @@ pub fn index_file(
     // (searchable), only the vector arm misses it. `hex memory stats` surfaces
     // any vec/chunk count gap.
     let contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-    match embedder.embed_documents(&contents) {
+    super::embed::log_rss(&format!(
+        "pre-embed {} ({} chunks)",
+        rel_path,
+        contents.len()
+    ));
+    // OBS-019: chunk the embed call to bound peak working set per forward
+    // pass. A single embed_documents(N) call allocates per-layer activation
+    // tensors proportional to N; for nomic-v1.5 (768-dim, transformer), at
+    // N=70 this overflows a 4 GB container (post-load baseline ~1 GB + per-
+    // call working set blows the rest). EMBED_BATCH=8 keeps each call
+    // bounded; verified to survive the 4 GB Docker E2E container.
+    const EMBED_BATCH: usize = 8;
+    let mut all_vectors: Vec<Vec<f32>> = Vec::with_capacity(contents.len());
+    let mut embed_err: Option<anyhow::Error> = None;
+    for batch in contents.chunks(EMBED_BATCH) {
+        match embedder.embed_documents(batch) {
+            Ok(mut v) => all_vectors.append(&mut v),
+            Err(e) => {
+                embed_err = Some(e);
+                break;
+            }
+        }
+    }
+    let _embed_result: anyhow::Result<Vec<Vec<f32>>> = match embed_err {
+        Some(e) => Err(e),
+        None => Ok(all_vectors),
+    };
+    super::embed::log_rss(&format!("post-embed {}", rel_path));
+    match _embed_result {
         Ok(vectors) if vectors.len() == chunk_rowids.len() => {
             for (rowid, vec) in chunk_rowids.iter().zip(vectors.iter()) {
                 if let Err(e) = super::vector::insert_vec(conn, *rowid, vec) {
