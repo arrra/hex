@@ -2497,9 +2497,13 @@ rules:
 
     #[test]
     fn events_parse_real_policies() {
-        let policies_dir = std::path::Path::new("/Users/mrap/.hex-events/policies");
+        // Smoke-test against live policies if present on this machine; harmless skip otherwise.
+        let home = match std::env::var_os("HOME") {
+            Some(h) => h,
+            None => return,
+        };
+        let policies_dir = std::path::PathBuf::from(home).join(".hex-events/policies");
         if !policies_dir.exists() {
-            // CI or different machine — skip gracefully
             return;
         }
         let pattern = policies_dir.join("*.yaml");

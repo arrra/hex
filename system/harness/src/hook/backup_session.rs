@@ -131,19 +131,19 @@ mod tests {
 
     #[test]
     fn slug_replaces_slashes() {
-        assert_eq!(dir_to_slug("/Users/mrap/mrap-hex"), "-Users-mrap-mrap-hex");
+        assert_eq!(dir_to_slug("/Users/test/hex"), "-Users-test-hex");
     }
 
     #[test]
     fn fast_path_derives_correct_path() {
         let tmp = TempDir::new().unwrap();
         let projects_dir = tmp.path();
-        let project_dir = "/Users/mrap/mrap-hex";
+        let project_dir = "/Users/test/hex";
         let session_id = "abc123";
 
         let got = fast_path_source(projects_dir, project_dir, session_id);
         let expected = projects_dir
-            .join("-Users-mrap-mrap-hex")
+            .join("-Users-test-hex")
             .join("abc123.jsonl");
         assert_eq!(got, expected);
     }

@@ -62,17 +62,90 @@ run_check() {
 echo "Scanning for personalization violations..."
 echo ""
 
-# Absolute user home paths (hardcoded, not via $HOME or ~)
-run_check "hardcoded /Users/ path" "/Users/[a-zA-Z]" \
+# Absolute user home paths (hardcoded, not via $HOME or ~).
+# Allowed: "/Users/test/..." as a deliberately-fake test fixture path;
+# CHANGELOG entries that document past fixes.
+USERS_PATH_VIOLATIONS=$(grep -rnE '/Users/[a-zA-Z]' . \
+    --exclude-dir=.git \
+    --exclude-dir=target \
+    --exclude-dir=node_modules \
+    --exclude-dir=.boi \
+    --exclude-dir=worktrees \
+    --exclude-dir=__pycache__ \
+    --exclude-dir=dist \
+    --exclude-dir=.hex \
+    --exclude-dir=.claude \
     --include="*.py" --include="*.sh" --include="*.yaml" \
-    --include="*.md" --include="*.json" --include="*.toml"
+    --include="*.md" --include="*.json" --include="*.toml" \
+    --include="*.rs" 2>/dev/null \
+    | grep -v "/${SELF}:" \
+    | grep -v "personalization-audit" \
+    | grep -v "PATH=.*opt.homebrew" \
+    | grep -v "Co-Authored" \
+    | grep -v -i "# example\|# e\.g\.\|example:\|# Example" \
+    | grep -vE '/Users/test(/|"|$)' \
+    | grep -v "^./CHANGELOG.md:" \
+    || true)
+if [ -n "$USERS_PATH_VIOLATIONS" ]; then
+    VIOLATIONS+=("hardcoded /Users/ path")
+    COUNT=$(echo "$USERS_PATH_VIOLATIONS" | wc -l | tr -d ' ')
+    if $VERBOSE; then
+        red "  [hardcoded /Users/ path] $COUNT violation(s):"
+        echo "$USERS_PATH_VIOLATIONS" | while IFS= read -r line; do
+            printf '    %s\n' "$line" >&2
+        done
+    else
+        red "  [hardcoded /Users/ path] $COUNT violation(s)"
+    fi
+fi
 
 # mrap-specific identifiers (exclude projects/ — development workspace, not distributed content)
 run_check "mrap-specific identifier" \
     "mrap-hex\|mrap-mrap\|mike@mrap\|mrap\.me\|Mike Rapadas" \
     --exclude-dir=projects \
     --include="*.py" --include="*.sh" --include="*.yaml" \
-    --include="*.md" --include="*.json"
+    --include="*.md" --include="*.json" --include="*.toml" \
+    --include="*.rs"
+
+# Hardcoded ~/hex or $HOME/hex in CODE without an HEX_DIR fallback.
+# Allowed: lines that also reference HEX_DIR (e.g. ${HEX_DIR:-$HOME/hex},
+# os.environ.get("HEX_DIR", os.path.expanduser("~/hex"))); install.sh
+# (installer's default destination); .md docs (descriptive references);
+# doc comments inside source.
+HEX_PATH_VIOLATIONS=$(grep -rnE '(\$HOME/hex|~/hex)([^a-zA-Z_/-]|$)' . \
+    --exclude-dir=.git \
+    --exclude-dir=target \
+    --exclude-dir=node_modules \
+    --exclude-dir=.boi \
+    --exclude-dir=worktrees \
+    --exclude-dir=__pycache__ \
+    --exclude-dir=dist \
+    --exclude-dir=.hex \
+    --exclude-dir=.claude \
+    --exclude-dir=projects \
+    --include="*.py" --include="*.sh" --include="*.yaml" \
+    --include="*.json" --include="*.toml" \
+    --include="*.rs" 2>/dev/null \
+    | grep -v "/${SELF}:" \
+    | grep -v "personalization-audit" \
+    | grep -v "no-hardcoded-hex-paths" \
+    | grep -v "HEX_DIR" \
+    | grep -v "/install\.sh:" \
+    | grep -v -E '^[^:]+:[0-9]+:\s*///' \
+    | grep -v -i "# example\|# e\.g\.\|example:\|# Example" \
+    || true)
+if [ -n "$HEX_PATH_VIOLATIONS" ]; then
+    VIOLATIONS+=("hardcoded ~/hex or \$HOME/hex (use HEX_DIR)")
+    COUNT=$(echo "$HEX_PATH_VIOLATIONS" | wc -l | tr -d ' ')
+    if $VERBOSE; then
+        red "  [hardcoded ~/hex or \$HOME/hex (use HEX_DIR)] $COUNT violation(s):"
+        echo "$HEX_PATH_VIOLATIONS" | while IFS= read -r line; do
+            printf '    %s\n' "$line" >&2
+        done
+    else
+        red "  [hardcoded ~/hex or \$HOME/hex (use HEX_DIR)] $COUNT violation(s) — use \${HEX_DIR:-\$HOME/hex} or get_hex_dir()"
+    fi
+fi
 
 # Slack-specific channel IDs
 run_check "Slack channel IDs" \
