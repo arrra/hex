@@ -8,7 +8,6 @@ mod alert;
 mod boi_pm;
 mod synthesis;
 mod boi_web;
-mod capture;
 mod router;
 mod spec_tool;
 mod charter_triggers;
@@ -16,7 +15,6 @@ mod doctor;
 mod fleet;
 mod budget_reset;
 mod paths;
-mod health;
 mod integration;
 mod integration_cmd;
 mod integration_apple_addressbook;
@@ -51,8 +49,6 @@ mod upgrade;
 mod initiative;
 mod learnings;
 mod release;
-use hex::route;
-
 #[derive(Parser)]
 #[command(name = "hex", about = "Hex multi-agent harness", version)]
 struct Cli {
@@ -213,11 +209,6 @@ enum Commands {
         #[command(subcommand)]
         command: RouterCommands,
     },
-    /// Zero-friction context capture (port of .hex/scripts/capture.sh)
-    Capture {
-        #[command(subcommand)]
-        command: CaptureCommands,
-    },
     /// iMessage alert sender (port of .hex/scripts/hex-alert.sh)
     Alert {
         #[command(subcommand)]
@@ -232,11 +223,6 @@ enum Commands {
     Env {
         #[command(subcommand)]
         command: env::EnvCommands,
-    },
-    /// Message routing: classify messages and route comments to agent charters
-    Route {
-        #[command(subcommand)]
-        command: RouteCommands,
     },
     /// Validate BOI specs, hex extensions, and E2E test guards
     Validate {
@@ -472,39 +458,6 @@ enum RouterCommands {
         asset: String,
         /// Comment text
         text: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum RouteCommands {
-    /// Route a message against agent charters via LLM (port of route-message-llm.py)
-    Message {
-        /// Message text to classify
-        message: Vec<String>,
-        /// Confidence threshold (default 0.4)
-        #[arg(long, default_value = "0.4")]
-        threshold: f64,
-        /// Return all agents regardless of threshold
-        #[arg(long)]
-        all: bool,
-        /// LLM provider: openrouter (default) | ollama
-        #[arg(long, default_value = "openrouter")]
-        provider: String,
-    },
-    /// Route a comment to matching agents.
-    Comment {
-        /// Comment ID
-        comment_id: String,
-        /// Asset identifier
-        asset: String,
-        /// Comment text
-        text: Vec<String>,
-    },
-    /// Detect routing context via heuristic fingerprint (port of context_router/)
-    #[command(name = "detect-context")]
-    DetectContext {
-        /// Message text to classify
-        message: Vec<String>,
     },
 }
 
@@ -957,30 +910,6 @@ enum KalshiCommands {
 }
 
 #[derive(Subcommand)]
-enum CaptureCommands {
-    /// Capture text (port of .hex/scripts/capture.sh)
-    Text {
-        /// Text to capture; omit to read from stdin or $EDITOR
-        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
-        args: Vec<String>,
-    },
-    /// Ingest hex-ui feedback messages into the feedback log (port of hex-ui-feedback-ingest.sh)
-    Ingest,
-    /// Dispatch triaged captures as BOI specs (port of capture-to-dispatch.sh)
-    Dispatch {
-        /// Show what would happen without dispatching
-        #[arg(long)]
-        dry_run: bool,
-        /// Max specs to dispatch per run
-        #[arg(long, default_value = "3")]
-        max: u32,
-        /// Path to a specific triage report
-        #[arg(long)]
-        triage: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
 enum PulseCommands {
     /// Load API key from secrets and start the pulse server.py (port of pulse/start.sh)
     Start {
@@ -1053,21 +982,12 @@ enum TelemetryCommands {
 
 #[derive(Subcommand)]
 enum HealthCommands {
-    /// Check agent memory system health (port of health/check-agent-memory.sh)
-    #[command(name = "check-agent-memory")]
-    CheckAgentMemory,
     /// Auto-reset agent budget periods with tiered safety gate (port of health/budget-period-reset.py)
     #[command(name = "budget-reset")]
     BudgetReset {
         /// Report what would happen without writing any state
         #[arg(long)]
         dry_run: bool,
-    },
-    /// Run health checks for a tier, emit integrations.health.* events (port of run-health-tier.sh)
-    #[command(name = "run-tier")]
-    RunTier {
-        /// Tier to check: critical, important, or standard
-        tier: String,
     },
     /// Verify sqlite-vec is loadable and memory.db has vectors (port of health/check-vector-search.sh)
     #[command(name = "check-vector-search")]
@@ -1111,12 +1031,6 @@ enum HealthCommands {
     /// Run the initiative watchdog full check (port of watchdog-run-full.sh)
     #[command(name = "watchdog-run")]
     WatchdogRun,
-    /// Compute mean time-to-detect for integration failures (port of health/compute-mttd.py)
-    #[command(name = "compute-mttd")]
-    ComputeMttd,
-    /// Verify required secret files exist and are non-empty (port of health/check-secrets.sh)
-    #[command(name = "check-secrets")]
-    CheckSecrets,
 }
 
 #[derive(Subcommand)]
@@ -2415,20 +2329,12 @@ fn main() {
             }
         },
         Commands::Health { command } => match command {
-            HealthCommands::CheckAgentMemory => {
-                health::check_agent_memory();
-            }
             HealthCommands::BudgetReset { dry_run } => {
                 let hex_dir = get_hex_dir();
                 let code = budget_reset::run(&budget_reset::BudgetResetConfig {
                     hex_dir,
                     dry_run,
                 });
-                std::process::exit(code);
-            }
-            HealthCommands::RunTier { tier } => {
-                let hex_dir = get_hex_dir();
-                let code = health::run_tier(&hex_dir, &tier);
                 std::process::exit(code);
             }
             HealthCommands::CheckVectorSearch => {
@@ -2481,14 +2387,6 @@ fn main() {
                 let hex_dir = get_hex_dir();
                 let script = hex_dir.join("system/scripts/watchdog-run-full.sh");
                 std::process::exit(exec_script(&script, &[]));
-            }
-            HealthCommands::ComputeMttd => {
-                let code = health::compute_mttd();
-                std::process::exit(code);
-            }
-            HealthCommands::CheckSecrets => {
-                let code = health::check_secrets();
-                std::process::exit(code);
             }
         },
         Commands::Doctor { command } => {
@@ -2717,20 +2615,6 @@ fn main() {
                 std::process::exit(exec_script(&script, &[&comment_id, &asset, &text]));
             }
         },
-        Commands::Capture { command } => {
-            let hex_dir = get_hex_dir();
-            match command {
-                CaptureCommands::Text { args } => {
-                    capture::run_capture(&hex_dir, &args);
-                }
-                CaptureCommands::Ingest => {
-                    capture::run_ingest(&hex_dir);
-                }
-                CaptureCommands::Dispatch { dry_run, max, triage } => {
-                    capture::run_dispatch(&hex_dir, dry_run, max, triage);
-                }
-            }
-        }
         Commands::Alert { command } => match command {
             AlertCommands::Send { severity, agent_id, message } => {
                 let hex_dir = get_hex_dir();
@@ -2751,23 +2635,6 @@ fn main() {
                     let script = hex_dir.join("system/scripts/synthesis-trigger.sh");
                     let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
                     std::process::exit(exec_script(&script, args));
-                }
-            }
-        }
-        Commands::Route { command } => {
-            let hex_dir = get_hex_dir();
-            match command {
-                RouteCommands::Message { message, threshold, all, provider } => {
-                    let text = message.join(" ");
-                    std::process::exit(route::run_message(&hex_dir, &text, threshold, all, &provider));
-                }
-                RouteCommands::Comment { comment_id, asset, text } => {
-                    let text_str = text.join(" ");
-                    std::process::exit(route::run_comment(&hex_dir, &comment_id, &asset, &text_str));
-                }
-                RouteCommands::DetectContext { message } => {
-                    let text = message.join(" ");
-                    std::process::exit(route::run_detect_context(&hex_dir, &text));
                 }
             }
         }

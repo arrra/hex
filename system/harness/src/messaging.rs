@@ -427,17 +427,6 @@ impl MessagingHandler {
             &serde_json::json!({ "id": id, "msg_type": mt.to_string() }),
         );
 
-        if mt == MessageType::Comment {
-            // Route comment-type messages in background (port of route-comment.py; fixes live bug)
-            let hex_dir = self.hex_dir.clone();
-            let comment_id = id.clone();
-            let asset = message.anchor.as_deref().unwrap_or("").to_string();
-            let text = message.content.clone();
-            std::thread::spawn(move || {
-                crate::route::run_comment(&hex_dir, &comment_id, &asset, &text);
-            });
-        }
-
         json_created(&message)
     }
 

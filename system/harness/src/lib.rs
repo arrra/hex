@@ -4,7 +4,6 @@ pub mod capability_exec;
 pub mod audit;
 pub mod capability_guard;
 pub mod memory;
-pub mod route;
 pub mod charter_triggers;
 pub mod extensions;
 pub mod charter;
