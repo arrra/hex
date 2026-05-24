@@ -31,3 +31,6 @@ todo.md
 AUDIT-REPORT.md
 pytest.ini
 tests/test_integration.py
+
+# Compiled binaries and bytecache
+system/scripts/bin/
