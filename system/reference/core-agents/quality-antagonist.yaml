@@ -148,5 +148,5 @@ integration:
       - hex.quality.gaming.detected
       - hex.quality.kr.reverted
   boi:
-    queue_dir: "~/.boi/queue"
+    # v2: no queue dir; specs dispatch via the boi shim (~/.boi/bin/boi).
     log_cmd: "boi log {spec_id}"

@@ -9,8 +9,12 @@ scope: >
   selection, convergence detection), runs them through BOI itself, and implements
   proven improvements. The optimizer optimizes itself.
 
-  Surfaces: ~/.boi/ (database, config, phases, lib, logs, queue), BOI telemetry
-  in .hex/telemetry/events.db, and completed spec artifacts in ~/.boi/projects/.
+  v2 (2026-05-24): surfaces are now ~/.boi/v2/ (boi.db, phases/, pipelines/,
+  recipes/, worktrees/, daemon.sock), boi-v2 source under
+  ~/github.com/mrap/boi-v2/ (READ-ONLY — propose changes via BOI spec; do
+  not mutate v2 src directly), and OTel/DuckDB telemetry as v2's observability
+  surface. The v1 surfaces (~/.boi/phases/ phase TOMLs, ~/.boi/lib/prompts/,
+  ~/.boi/config.json, ~/.boi/queue/) no longer exist post-cutover.
 
 parent: cos
 objective: >
@@ -74,18 +78,22 @@ wake:
 
 authority:
   green:
-    - Read ~/.boi/boi.db (all tables)
-    - Read ~/.boi/logs/, ~/.boi/queue/, ~/.boi/projects/
+    - Read ~/.boi/v2/boi.db (read-only access to v2's spec/phase_run tables)
+    - Read ~/.boi/v2/worktrees/ (post-mortem inspection)
+    - Read boi-v2 source at ~/github.com/mrap/boi-v2/ (READ-ONLY)
     - Read/write projects/boi-optimizer/ (own state directory)
     - Query .hex/telemetry/events.db
     - Dispatch research/experiment BOI specs
     - Send messages to cos, hex-ops, fleet-lead agents
-    - Run boi status, boi log, boi queue commands
+    - Run boi log, boi dashboard, boi spec show
   yellow:
-    - Modify ~/.boi/phases/ (phase config files) — notify slack
-    - Modify ~/.boi/lib/prompts/ or prompt templates — notify slack
-    - Modify ~/.boi/config.json (worker config) — notify slack
-    - Dispatch implementation specs that modify BOI lib code — notify slack
+    # v2 has no separate phase config or prompt template directories — phases
+    # are codified in Rust source. Optimizer proposals against v2 must go
+    # through a BOI spec that touches boi-v2 source (read-only from optimizer).
+    - DEPRECATED — Modify ~/.boi/phases/ (no v2 analogue)
+    - DEPRECATED — Modify ~/.boi/lib/prompts/ (no v2 analogue)
+    - DEPRECATED — Modify ~/.boi/config.json (no v2 analogue)
+    - Dispatch implementation specs that modify BOI lib code (workspace: boi-v2) — notify slack
   red:
     - Modify CLAUDE.md
     - Modify .hex/bin/hex-agent (harness binary)
