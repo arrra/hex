@@ -1,6 +1,11 @@
 use rusqlite::{Connection, Result};
 
 pub const PLAN2_DDL: &str = r#"
+CREATE TABLE IF NOT EXISTS schema_version (
+    version    INTEGER PRIMARY KEY,
+    applied_at TEXT
+);
+
 CREATE TABLE IF NOT EXISTS facts (
     id            TEXT PRIMARY KEY,
     subject       TEXT NOT NULL,
@@ -145,6 +150,23 @@ mod tests {
                 "missing table: {expected}"
             );
         }
+    }
+
+    #[test]
+    fn apply_plan2_idempotent_without_preexisting_schema_version() {
+        // Simulates a production DB that came from Plan 1 without a schema_version table.
+        crate::memory::vector::register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        // No schema_version table created — bare DB, like a real Plan 1 production DB.
+        apply_plan2(&conn).unwrap();
+        let version: i64 = conn
+            .query_row(
+                "SELECT MAX(version) FROM schema_version",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(version, 4, "schema_version should record version=4 after apply_plan2");
     }
 
     #[test]

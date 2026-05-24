@@ -874,6 +874,12 @@ enum MemoryCommands {
     },
     /// Run the 6-op nightly consolidation (dedup, contradiction-sweep, prune, topic-rollup)
     Consolidate,
+    /// Show memory database statistics (facts, files, predicates, schema version)
+    Stats {
+        /// Output as JSON
+        #[arg(long)]
+        json: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -2210,6 +2216,7 @@ fn main() {
                 MemoryCommands::LlmCheck => "llm-check",
                 MemoryCommands::Distill { .. } => "distill",
                 MemoryCommands::Consolidate => "consolidate",
+                MemoryCommands::Stats { .. } => "stats",
             };
             let start = std::time::Instant::now();
             let exit_code = match &command {
@@ -2307,6 +2314,9 @@ fn main() {
                             1
                         }
                     }
+                }
+                MemoryCommands::Stats { json } => {
+                    memory::stats::run(&hex_dir, *json)
                 }
                 _ => {
                     let hex_memory = hex_dir.join(".hex/scripts/bin/hex-memory");

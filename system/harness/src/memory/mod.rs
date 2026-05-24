@@ -10,6 +10,7 @@ pub mod recall;
 pub mod rrf;
 pub mod schema;
 pub mod search;
+pub mod stats;
 pub mod vector;
 
 use rusqlite::Connection;

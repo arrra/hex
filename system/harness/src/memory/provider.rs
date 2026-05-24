@@ -52,6 +52,24 @@ pub fn load_openrouter_key() -> Option<String> {
     None
 }
 
+/// Build the JSON request body for an OpenRouter chat completion request.
+/// When the model starts with "anthropic/", forces Anthropic-direct routing
+/// to avoid AWS Bedrock/GCP Vertex content filter rejections on personal content.
+pub fn build_request_body(prompt: &str, model: &str, max_tokens: u32) -> serde_json::Value {
+    let mut body = serde_json::json!({
+        "model": model,
+        "messages": [{"role": "user", "content": prompt}],
+        "max_tokens": max_tokens,
+    });
+    if model.starts_with("anthropic/") {
+        body["provider"] = serde_json::json!({
+            "order": ["anthropic"],
+            "allow_fallbacks": false,
+        });
+    }
+    body
+}
+
 pub fn generate(prompt: &str, model: &str, max_tokens: u32) -> Result<String, ProviderError> {
     let key = load_openrouter_key().ok_or_else(|| {
         ProviderError::Deferred(
@@ -59,11 +77,7 @@ pub fn generate(prompt: &str, model: &str, max_tokens: u32) -> Result<String, Pr
         )
     })?;
 
-    let body = serde_json::json!({
-        "model": model,
-        "messages": [{"role": "user", "content": prompt}],
-        "max_tokens": max_tokens,
-    });
+    let body = build_request_body(prompt, model, max_tokens);
 
     let resp = ureq::post("https://openrouter.ai/api/v1/chat/completions")
         .set("Authorization", &format!("Bearer {key}"))
@@ -101,5 +115,34 @@ mod tests {
             Err(ProviderError::Deferred(_)) => {}
             _ => panic!("expected Deferred"),
         }
+    }
+
+    #[test]
+    fn anthropic_model_includes_provider_routing() {
+        let body = build_request_body("hello", "anthropic/claude-sonnet-4-5", 100);
+        let provider = &body["provider"];
+        assert!(!provider.is_null(), "provider field must be present for anthropic/* models");
+        assert_eq!(provider["allow_fallbacks"], serde_json::json!(false));
+        let order = provider["order"].as_array().expect("order must be an array");
+        assert_eq!(order.len(), 1);
+        assert_eq!(order[0], serde_json::json!("anthropic"));
+    }
+
+    #[test]
+    fn openai_model_excludes_provider_routing() {
+        let body = build_request_body("hello", "openai/gpt-4o", 100);
+        assert!(
+            body["provider"].is_null(),
+            "provider field must NOT be present for non-anthropic models"
+        );
+    }
+
+    #[test]
+    fn non_prefixed_model_excludes_provider_routing() {
+        let body = build_request_body("hello", "meta-llama/llama-3", 100);
+        assert!(
+            body["provider"].is_null(),
+            "provider field must NOT be present for non-anthropic models"
+        );
     }
 }
