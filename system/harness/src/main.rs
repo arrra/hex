@@ -14,6 +14,7 @@ mod spec_tool;
 mod charter_triggers;
 mod doctor;
 mod fleet;
+mod budget_reset;
 mod health;
 mod integration;
 mod integration_cmd;
@@ -2340,7 +2341,7 @@ fn main() {
             }
             HealthCommands::BudgetReset { dry_run } => {
                 let hex_dir = get_hex_dir();
-                let code = health::budget_reset::run(&health::budget_reset::BudgetResetConfig {
+                let code = budget_reset::run(&budget_reset::BudgetResetConfig {
                     hex_dir,
                     dry_run,
                 });

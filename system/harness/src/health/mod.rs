@@ -1,5 +1,3 @@
-pub mod budget_reset;
-
 /// Port of .hex/scripts/run-health-tier.sh
 /// Runs health/check-*.sh scripts for a tier, emits integrations.health.* events.
 pub fn run_tier(hex_dir: &std::path::Path, tier: &str) -> i32 {
