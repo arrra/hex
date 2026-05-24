@@ -2,7 +2,7 @@
 name = "hex"
 # Source of truth for hex version. Bumped by release.sh; build.rs
 # injects this via env!("CARGO_PKG_VERSION") at compile time.
-version = "0.19.2"
+version = "0.19.3"
 edition = "2021"
 
 [dependencies]
@@ -41,6 +41,7 @@ tower = "0.4"
 
 [dev-dependencies]
 tempfile = "3"
+filetime = "0.2"
 
 [profile.release]
 strip = true

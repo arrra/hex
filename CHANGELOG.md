@@ -2,6 +2,19 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-24] — Capability lifecycle: callable_by/unprompted, boi-web improvements, memory sanitize (v0.19.3)
+
+### Added
+- **`capability_add` `callable_by` field** (`src/wake.rs`): agents can now specify which agents may call a registered capability. If omitted, defaults to the registry allowlist. Prompt docs updated.
+- **`capability_add` `unprompted` field** (`src/wake.rs`, `src/prompt.rs`): agents declare whether a capability registration was self-initiated (`unprompted: true`) or explicitly directed by a task. Enables fleet-level audit of autonomous capability growth.
+- **Capability lifecycle test suite** (`tests/capability_lifecycle_test.rs`): 235+ lines covering `capability_add` → `capability_call` roundtrip, `callable_by` enforcement, `unprompted` flag propagation.
+
+### Changed
+- **`boi_web.rs`** (`src/boi_web.rs`): SSE server improvements — 116-line delta covering connection handling, status streaming, and stability.
+- **`charter.rs` test guard**: `all_live_charters_parse` now skips gracefully with `eprintln!` if no charter files found in test environment instead of failing.
+- **`memory/provider.rs`**: `hex_root()` fallback changed from hardcoded `/Users/mrap/hex` to `$HOME/hex` (or `/tmp/hex` last resort). Fixes LOW-V16-3 category finding.
+- **`memory/recall.rs`**: test fixtures anonymized — `person:whitney` / `'Mike's wife'` renamed to `person:alice` / `'a sample person'`. Slug-boost examples updated to `alice-johnson`.
+
 ## [2026-05-24] — Python→Rust ports, paths helper, capability prompt, memory Plan 2 runtime fix (v0.19.2)
 
 ### Added
