@@ -5,14 +5,10 @@ use std::path::{Path, PathBuf};
 use hex::{state, wake};
 
 mod alert;
-mod boi_pm;
 mod synthesis;
 mod boi_web;
-mod router;
-mod spec_tool;
 mod charter_triggers;
 mod doctor;
-mod fleet;
 mod budget_reset;
 mod paths;
 mod integration;
@@ -197,13 +193,7 @@ enum Commands {
         /// Session ID to deregister (from startup output); omit to get manual instructions
         session_id: Option<String>,
     },
-    /// Hex Fleet Manager service management (port of .hex/scripts/hex-fleet/install.sh)
-    #[command(display_order = 27)]
-    Fleet {
-        #[command(subcommand)]
-        command: FleetCommands,
-    },
-    /// BOI Process Manager service management (port of .hex/scripts/boi-pm/install.sh)
+    /// BOI Process Manager subcommands (verify, archive, auto-commit)
     #[command(name = "boi-pm", display_order = 21)]
     BoiPm {
         #[command(subcommand)]
@@ -392,15 +382,7 @@ enum AgentCommands {
 }
 
 #[derive(Subcommand)]
-enum FleetCommands {
-    /// Install and register the Hex Fleet Manager LaunchAgent (port of hex-fleet/install.sh)
-    Install,
-}
-
-#[derive(Subcommand)]
 enum BoiPmCommands {
-    /// Install and register the BOI Process Manager LaunchAgent (port of boi-pm/install.sh)
-    Install,
     /// Verify a BOI spec's completion claims (port of boi-completion-verify.sh)
     Verify {
         /// Spec ID to verify
@@ -436,8 +418,6 @@ enum BoiWebCommands {
 
 #[derive(Subcommand)]
 enum SpecToolCommands {
-    /// Launch the spec-tool server.py (port of spec-tool/run.sh)
-    Run,
     /// Verify concrete claims in a BOI spec against the codebase (port of verify-spec-claims.py)
     #[command(name = "verify-claims")]
     VerifyClaims {
@@ -479,8 +459,6 @@ enum SpecToolCommands {
 
 #[derive(Subcommand)]
 enum RouterCommands {
-    /// Launch the hex-router reverse proxy (port of hex-router/serve.sh)
-    Serve,
     /// Route a comment to matching agents via charter classification (port of route-comment.py)
     #[command(name = "route-comment")]
     RouteComment {
@@ -2595,17 +2573,7 @@ fn main() {
             let code = shutdown::run(&hex_dir, shutdown::ShutdownArgs { session_id });
             std::process::exit(code);
         }
-        Commands::Fleet { command } => match command {
-            FleetCommands::Install => {
-                let hex_dir = get_hex_dir();
-                fleet::run_install(&hex_dir);
-            }
-        },
         Commands::BoiPm { command } => match command {
-            BoiPmCommands::Install => {
-                let hex_dir = get_hex_dir();
-                boi_pm::run_install(&hex_dir);
-            }
             BoiPmCommands::Verify { spec_id } => {
                 let script = get_hex_dir().join(".hex/scripts/boi-completion-verify.sh");
                 std::process::exit(exec_script(&script, &[&spec_id]));
@@ -2635,10 +2603,6 @@ fn main() {
             }
         },
         Commands::SpecTool { command } => match command {
-            SpecToolCommands::Run => {
-                let hex_dir = get_hex_dir();
-                spec_tool::run_run(&hex_dir);
-            }
             SpecToolCommands::VerifyClaims { spec_file, workspace, verbose } => {
                 let hex_dir = get_hex_dir();
                 let script = hex_dir.join("system/scripts/verify-spec-claims.py");
@@ -2670,10 +2634,6 @@ fn main() {
             }
         },
         Commands::Router { command } => match command {
-            RouterCommands::Serve => {
-                let hex_dir = get_hex_dir();
-                router::run_serve(&hex_dir);
-            }
             RouterCommands::RouteComment { comment_id, asset, text } => {
                 let hex_dir = get_hex_dir();
                 let script = hex_dir.join("system/scripts/route-comment.py");
