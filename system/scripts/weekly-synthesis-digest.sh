@@ -17,7 +17,8 @@ CAPTURES_DIR="$WORKSPACE/raw/captures"
 RESEARCH_DIR="$WORKSPACE/raw/research"
 PROJECTS_DIR="$WORKSPACE/projects"
 LANDINGS_DIR="$WORKSPACE/landings/weekly"
-BOI_QUEUE="$HOME/.boi/queue"
+# v2: no queue dir; use boi log to list recent dispatches
+BOI_BIN="$HOME/.boi/bin/boi"
 FORCE=false
 DRY_RUN=false
 
@@ -75,24 +76,26 @@ if [ -d "$CAPTURES_DIR" ]; then
   done < <(find "$CAPTURES_DIR" -maxdepth 1 -name "*.md" ! -name "TRIAGE-*" 2>/dev/null | sort)
 fi
 
-# ── 2. BOI specs that originated from captures (have "Source capture:" line) ──
+# ── 2. BOI specs dispatched this week (v2: via boi log, no queue dir) ────────
+# v2: source-capture provenance is not tracked in spec files; list recent
+#     dispatches from the daemon log instead.
 boi_from_captures=0
 boi_completed=0
 boi_list=""
-if [ -d "$BOI_QUEUE" ]; then
-  while IFS= read -r f; do
-    if grep -q 'Source capture:' "$f" 2>/dev/null; then
-      boi_from_captures=$((boi_from_captures + 1))
-      spec_title="$(head -1 "$f" | sed 's/^# //')"
-      status_line="$(grep -E '^(DONE|PENDING|FAILED)' "$f" 2>/dev/null | head -1 || echo "PENDING")"
-      if echo "$status_line" | grep -q 'DONE'; then
-        boi_completed=$((boi_completed + 1))
-        boi_list+="  - [done]    $spec_title"$'\n'
-      else
-        boi_list+="  - [active]  $spec_title"$'\n'
-      fi
+if command -v "$BOI_BIN" >/dev/null 2>&1 || [ -x "$BOI_BIN" ]; then
+  while IFS= read -r line; do
+    # boi log emits lines like: <spec-id>  <status>  <title>
+    spec_id="$(echo "$line" | awk '{print $1}')"
+    status_word="$(echo "$line" | awk '{print $2}')"
+    spec_title="$(echo "$line" | cut -d' ' -f3-)"
+    boi_from_captures=$((boi_from_captures + 1))
+    if echo "$status_word" | grep -qi 'completed\|done'; then
+      boi_completed=$((boi_completed + 1))
+      boi_list+="  - [done]    $spec_title ($spec_id)"$'\n'
+    else
+      boi_list+="  - [active]  $spec_title ($spec_id)"$'\n'
     fi
-  done < <(find "$BOI_QUEUE" -maxdepth 1 -name "*.spec.md" -newer "$CAPTURES_DIR" 2>/dev/null | sort)
+  done < <("$BOI_BIN" log --since "$WEEK_AGO" 2>/dev/null || true)
 fi
 
 # ── 3. Synthesis outputs produced this week ───────────────────────────────────

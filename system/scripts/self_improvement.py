@@ -469,11 +469,11 @@ def _classify_kr(description):
 
 
 def _dispatch_spec(spec_content, init_id, kr_id):
-    os.makedirs(os.path.expanduser("~/.boi/queue"), exist_ok=True)
+    # v2: no queue dir; write to /tmp then dispatch via shim
     with tempfile.NamedTemporaryFile(
         mode="w", suffix=".md",
         prefix=f"pivot-{init_id}-{kr_id}-",
-        dir=os.path.expanduser("~/.boi/queue"),
+        dir="/tmp",
         delete=False,
     ) as fh:
         fh.write(spec_content)
@@ -603,7 +603,8 @@ tasks:
         fh.write(spec_content)
 
     # Dispatch via BOI
-    boi_path = os.path.expanduser("~/.boi/boi")
+    # v2: use ~/.boi/bin/boi shim (resolves to v2 binary after cutover)
+    boi_path = os.path.expanduser("~/.boi/bin/boi")
     try:
         result = subprocess.run(
             ["bash", boi_path, "dispatch", spec_path],

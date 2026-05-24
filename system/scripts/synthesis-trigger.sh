@@ -17,7 +17,8 @@ WORKSPACE="$(cd "$SCRIPT_DIR/../.." && pwd)"
 CAPTURES_DIR="$WORKSPACE/raw/captures"
 PROJECTS_DIR="$WORKSPACE/projects"
 RESEARCH_DIR="$WORKSPACE/raw/research"
-BOI="$HOME/.boi/boi"
+# v2: use the shim path (resolves to v2 binary after cutover)
+BOI="$HOME/.boi/bin/boi"
 SPEC_STAGING_DIR="$CAPTURES_DIR/.dispatch-staging"
 DRY_RUN=false
 LOOKBACK_DAYS=7

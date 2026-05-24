@@ -10,7 +10,8 @@
 set -uo pipefail
 
 HEX_DIR="${HEX_DIR:-$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd | sed 's|/\.hex$||')}"
-BOI_CMD="${BOI_CMD:-bash $HOME/.boi/boi}"
+# v2: use shim directly (v2 is a native binary, not a bash script)
+BOI_CMD="${BOI_CMD:-$HOME/.boi/bin/boi}"
 INTERVAL="${HEX_WATCHER_INTERVAL:-5}"
 
 print_once() {
