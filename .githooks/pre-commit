@@ -1,0 +1,16 @@
+#!/usr/bin/env bash
+set -uo pipefail
+
+# For each .legacy.{sh,py} file staged as a rename FROM a non-legacy name,
+# grep system/harness/src/ for the pre-legacy basename.
+# If any caller references it, fail with a clear error.
+for f in $(git diff --cached --name-only --diff-filter=R); do
+  if [[ "$f" =~ \.legacy\.(sh|py)$ ]]; then
+    base=$(basename "$f" | sed 's/\.legacy\././')
+    if grep -rqE "scripts/${base}([^.]|$)" system/harness/src/; then
+      echo "ERROR: ${f} renamed to .legacy but Rust callers still reference ${base}"
+      echo "Update all callers in system/harness/src/ before renaming to .legacy.*"
+      exit 1
+    fi
+  fi
+done
