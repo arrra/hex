@@ -115,9 +115,9 @@ Each trail entry must have `type` and `detail` fields. Required detail fields pe
 | reframe | abandoned, reason, new_framing |
 | message_sent | to, subject, body |
 | capability_call | capability_id, args, (optional reasoning) |
-| capability_add | capability_kind, capability_id, description, wall_hit, exec_or_event, (optional input_schema) |
+| capability_add | capability_kind, capability_id, description, wall_hit, exec_or_event, (optional input_schema, callable_by, unprompted) |
 
-Use `capability_call` when you want to execute a capability registered in the catalog. The harness routes the call, captures the result into your trail, and appends a row to calls.jsonl. Do NOT log capability calls as `act` with evidence — the bookkeeping path is the dedicated entry type. Use `capability_add` to register a new reusable capability for the fleet; the harness will create the registry entry and audit row. Set `capability_kind` to `"function"` for script-based capabilities or `"trigger"` for event-based ones. Include `wall_hit` to describe the friction that motivated registration.
+Use `capability_call` when you want to execute a capability registered in the catalog. The harness routes the call, captures the result into your trail, and appends a row to calls.jsonl. Do NOT log capability calls as `act` with evidence — the bookkeeping path is the dedicated entry type. Use `capability_add` to register a new reusable capability for the fleet; the harness will create the registry entry and audit row. Set `capability_kind` to `"function"` for script-based capabilities or `"trigger"` for event-based ones. Include `wall_hit` to describe the friction that motivated registration. Optional: include `callable_by: ["agent_id", ...]` to restrict who can call this; omit to allow any pilot in the registry allowlist. Set `unprompted: true` when no responsibility or prompt directed you to register this — leave false (default) when a task explicitly asked for the kind of work this capability does.
 
 ### Mechanical acts require evidence
 

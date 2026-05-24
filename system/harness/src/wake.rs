@@ -109,13 +109,16 @@ pub fn apply_capability_entry(
                     id: cap_id.to_string(),
                     kind: cap_kind.to_string(),
                     created_by: agent_id.to_string(),
-                    created_at: now,
+                    created_at: now.clone(),
                     created_in_wake: wake_n,
-                    unprompted: false,
+                    unprompted: detail.get("unprompted").and_then(|v| v.as_bool()).unwrap_or(false),
                     description: description.to_string(),
                     event: exec_or_event.to_string(),
                     input_schema,
-                    callable_by: vec![],
+                    callable_by: detail.get("callable_by")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .unwrap_or_else(|| registry::load_allowlist(hex_dir).unwrap_or_default()),
                 };
                 registry::add_trigger(&registry_dir, &cap)?;
             } else {
@@ -123,16 +126,33 @@ pub fn apply_capability_entry(
                     id: cap_id.to_string(),
                     kind: cap_kind.to_string(),
                     created_by: agent_id.to_string(),
-                    created_at: now,
+                    created_at: now.clone(),
                     created_in_wake: wake_n,
-                    unprompted: false,
+                    unprompted: detail.get("unprompted").and_then(|v| v.as_bool()).unwrap_or(false),
                     description: description.to_string(),
                     exec: exec_or_event.to_string(),
                     input_schema,
-                    callable_by: vec![],
+                    callable_by: detail.get("callable_by")
+                        .and_then(|v| v.as_array())
+                        .map(|arr| arr.iter().filter_map(|x| x.as_str().map(String::from)).collect())
+                        .unwrap_or_else(|| registry::load_allowlist(hex_dir).unwrap_or_default()),
                 };
                 registry::add_function(&registry_dir, &cap, exec_or_event.as_bytes())?;
             }
+
+            // Append audit row to audit.jsonl — read agent-supplied fields from detail.
+            let unprompted_for_audit = detail.get("unprompted").and_then(|v| v.as_bool()).unwrap_or(false);
+            let wall_hit_for_audit = detail.get("wall_hit").and_then(|v| v.as_str()).unwrap_or("").to_string();
+            let audit_record = serde_json::json!({
+                "ts": now,
+                "capability_id": cap_id,
+                "capability_kind": cap_kind,
+                "created_by": agent_id,
+                "unprompted": unprompted_for_audit,
+                "wall_hit": wall_hit_for_audit,
+                "exec_or_event": exec_or_event,
+            });
+            let _ = registry::append_audit(&registry_dir, &audit_record);
 
             // Emit ordering signal AFTER capability is fully persisted.
             // Sibling pilots wake on this event (not timer.tick.daily fan-out), so
@@ -177,6 +197,17 @@ pub fn apply_capability_entry(
                 .as_str()
                 .unwrap_or("")
                 .to_string();
+
+            // Callable-by gate: verify the caller is authorized for this specific capability.
+            let callable_by: Vec<String> = fn_val["callable_by"]
+                .as_array()
+                .map(|arr| arr.iter().filter_map(|v| v.as_str().map(String::from)).collect())
+                .unwrap_or_default();
+            if !callable_by.iter().any(|a| a == agent_id) {
+                return Err(format!(
+                    "capability_call: agent '{agent_id}' is not in callable_by list for '{cap_id}'"
+                ));
+            }
 
             // Convert args to a Vec<String> for the executor.
             let args: Vec<String> = match &args_val {
