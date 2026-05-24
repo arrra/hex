@@ -1,0 +1,40 @@
+name: memory-distill-on-session-parsed
+description: >
+  Phase 1 distill on per-day transcript modification.
+  When the session-watcher writes a new transcript span, distill it into facts.
+
+provides:
+  events:
+    - hex.memory.distill.complete
+    - hex.memory.distill.failed
+
+requires:
+  events:
+    - hex.session.parsed
+
+rules:
+  - name: distill-on-session-parsed
+    trigger:
+      event: hex.session.parsed
+      conditions:
+        - field: "event.payload.source"
+          op: eq
+          value: "transcript"
+    rate_limit: 1/5min/path
+    actions:
+      - type: shell
+        command: |
+          export PATH="/opt/homebrew/bin:$PATH"
+          HEX_BIN="${HEX_DIR:-$HOME/hex}/.hex/bin/hex"
+          FILE_PATH="{{ event.payload.path }}"
+          "$HEX_BIN" memory distill "$FILE_PATH" \
+            || echo "memory-distill failed for $FILE_PATH" >&2
+        timeout: 120
+        on_success:
+          - type: emit
+            event: hex.memory.distill.complete
+            source: "hex:memory-distill"
+        on_failure:
+          - type: emit
+            event: hex.memory.distill.failed
+            source: "hex:memory-distill"

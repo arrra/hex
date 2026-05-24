@@ -1,0 +1,39 @@
+name: memory-consolidate-nightly
+description: Nightly facts-layer consolidation (Plan 2 Pillar E)
+
+provides:
+  events:
+    - hex.memory.consolidated
+    - hex.memory.consolidate.failed
+
+requires:
+  events:
+    - timer.tick.daily
+
+rate_limit:
+  max_fires: 2
+  window: 24h
+
+rules:
+  - name: run-memory-consolidate
+    trigger:
+      event: timer.tick.daily
+      conditions:
+        - field: "event.payload.hour"
+          op: eq
+          value: "3"
+    actions:
+      - type: shell
+        command: |
+          export PATH="/opt/homebrew/bin:$PATH"
+          HEX_DIR="${HEX_DIR:-$HOME/hex}"
+          "$HEX_DIR/.hex/bin/hex" memory consolidate
+        timeout: 300
+        on_success:
+          - type: emit
+            event: hex.memory.consolidated
+            source: "hex:memory-consolidate"
+        on_failure:
+          - type: emit
+            event: hex.memory.consolidate.failed
+            source: "hex:memory-consolidate"

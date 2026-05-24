@@ -35,7 +35,7 @@ mod integration_check_all;
 mod integration_telemetry;
 mod kalshi;
 mod mcp;
-mod memory;
+use hex::memory;
 mod mirofish;
 mod path_map;
 mod pulse;
@@ -867,7 +867,22 @@ enum MemoryCommands {
         agent: bool,
     },
     /// Run the memory smoke-eval + consumption-rate check (nightly)
-    Eval,
+    Eval {
+        /// Print only the 7-day consumption rate (decimal) and exit 0.
+        /// For the memory-consumption-floor hex-events policy.
+        #[arg(long = "rate-only")]
+        rate_only: bool,
+    },
+    /// Check LLM provider reachability (exits 0 ok, 2 deferred, 3 upstream)
+    #[command(name = "llm-check")]
+    LlmCheck,
+    /// Distill facts from a file into the memory facts layer
+    Distill {
+        /// Path to the file to distill
+        path: PathBuf,
+    },
+    /// Run the 6-op nightly consolidation (dedup, contradiction-sweep, prune, topic-rollup)
+    Consolidate,
 }
 
 #[derive(Subcommand)]
@@ -2228,7 +2243,10 @@ fn main() {
                 }
                 MemoryCommands::ParseTranscripts { .. } => "parse-transcripts",
                 MemoryCommands::Recall { .. } => "recall",
-                MemoryCommands::Eval => "eval",
+                MemoryCommands::Eval { .. } => "eval",
+                MemoryCommands::LlmCheck => "llm-check",
+                MemoryCommands::Distill { .. } => "distill",
+                MemoryCommands::Consolidate => "consolidate",
             };
             let start = std::time::Instant::now();
             let exit_code = match &command {
@@ -2257,7 +2275,76 @@ fn main() {
                 MemoryCommands::Recall { query, agent } => {
                     memory::recall::run(&hex_dir, query, *agent)
                 }
-                MemoryCommands::Eval => memory::eval::run(&hex_dir),
+                MemoryCommands::Eval { rate_only } => {
+                    if *rate_only { memory::eval::run_rate_only(&hex_dir) }
+                    else { memory::eval::run(&hex_dir) }
+                }
+                MemoryCommands::LlmCheck => {
+                    match memory::provider::health_check() {
+                        Ok(_) => {
+                            println!("provider OK");
+                            0
+                        }
+                        Err(memory::provider::ProviderError::Deferred(msg)) => {
+                            eprintln!("provider DEFERRED: {}", msg);
+                            2
+                        }
+                        Err(memory::provider::ProviderError::Upstream(msg)) => {
+                            eprintln!("provider UPSTREAM error: {}", msg);
+                            3
+                        }
+                    }
+                }
+                MemoryCommands::Distill { path } => {
+                    let db_path = memory::db_path(&hex_dir);
+                    match memory::open_db(&db_path) {
+                        Ok(mut conn) => {
+                            let path_str = path.to_string_lossy().to_string();
+                            match memory::distill::run_on_file(&mut conn, &path_str, 500) {
+                                Ok(report) => {
+                                    println!(
+                                        "distill: adds={} updates={} noops={} flags={}",
+                                        report.adds, report.updates, report.noops, report.flags
+                                    );
+                                    0
+                                }
+                                Err(e) => {
+                                    eprintln!("distill error: {}", e);
+                                    1
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("open_db error: {}", e);
+                            1
+                        }
+                    }
+                }
+                MemoryCommands::Consolidate => {
+                    let db_path = memory::db_path(&hex_dir);
+                    match memory::open_db(&db_path) {
+                        Ok(mut conn) => {
+                            match memory::consolidate::run(&mut conn) {
+                                Ok(report) => {
+                                    println!(
+                                        "consolidate ok={} failed={}",
+                                        report.ok.len(),
+                                        report.failed.len()
+                                    );
+                                    if !report.failed.is_empty() { 1 } else { 0 }
+                                }
+                                Err(e) => {
+                                    eprintln!("consolidate error: {}", e);
+                                    1
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("open_db error: {}", e);
+                            1
+                        }
+                    }
+                }
                 _ => {
                     let hex_memory = hex_dir.join(".hex/scripts/bin/hex-memory");
                     let mut cmd = std::process::Command::new("bash");
