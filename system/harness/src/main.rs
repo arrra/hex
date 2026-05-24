@@ -23,7 +23,6 @@ mod integration_telemetry;
 mod mcp;
 use hex::memory;
 mod path_map;
-mod pulse;
 mod session_reflect;
 mod today;
 mod workspace;
@@ -137,12 +136,6 @@ enum Commands {
     Kalshi {
         #[command(subcommand)]
         command: KalshiCommands,
-    },
-    /// Pulse server lifecycle (port of .hex/scripts/pulse/start.sh)
-    #[command(display_order = 7)]
-    Pulse {
-        #[command(subcommand)]
-        command: PulseCommands,
     },
     /// Session lifecycle commands
     #[command(display_order = 3)]
@@ -932,16 +925,6 @@ enum KalshiCommands {
         /// Override the secrets directory (default: $HEX_DIR/.hex/secrets)
         #[arg(long)]
         secrets_dir: Option<std::path::PathBuf>,
-    },
-}
-
-#[derive(Subcommand)]
-enum PulseCommands {
-    /// Load API key from secrets and start the pulse server.py (port of pulse/start.sh)
-    Start {
-        /// Extra arguments forwarded to server.py
-        #[arg(trailing_var_arg = true)]
-        args: Vec<String>,
     },
 }
 
@@ -2523,12 +2506,6 @@ fn main() {
                 let dir = secrets_dir.unwrap_or_else(|| kalshi::secrets_dir_from_hex(&hex_dir));
                 let sign_script = hex_dir.join(".hex/scripts/integrations/lib/kalshi_sign.py");
                 std::process::exit(kalshi::run_probe(&dir, &sign_script));
-            }
-        },
-        Commands::Pulse { command } => match command {
-            PulseCommands::Start { args } => {
-                let hex_dir = get_hex_dir();
-                pulse::run_start(&hex_dir, &args);
             }
         },
         Commands::Session { command } => match command {
