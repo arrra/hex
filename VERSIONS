@@ -5,7 +5,7 @@
 #   HEX_BOI_REPO=https://github.com/youruser/boi.git
 #
 # To bump: tag new releases in boi, then update these values.
-# hex-events is now inline at system/events/ (merged v0.2.0 → v0.8.0)
+# hex-events tree removed 2026-05-24; Rust daemon is canonical, policies live at ~/.hex-events/policies/.
 
 BOI_VERSION=v1.3.0
 HARNESS_VERSION=v0.8.0

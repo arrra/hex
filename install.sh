@@ -376,8 +376,8 @@ BOISH
 install_or_upgrade_boi
 
 # ── Phase 5: Ensure ~/.hex-events/policies/ directory exists ──────
-# The Rust hex-events daemon is canonical; install.sh no longer copies
-# system/events/ source. Just ensure the policies dir exists for the user.
+# system/events/ was removed (Rust hex-events daemon is canonical).
+# Just ensure the user's policies dir exists at ~/.hex-events/policies/.
 mkdir -p "$HOME/.hex-events/policies"
 echo "  ~/.hex-events/policies/  ✓"
 

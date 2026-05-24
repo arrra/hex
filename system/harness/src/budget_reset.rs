@@ -1,4 +1,4 @@
-/// Port of system/scripts/health/budget-period-reset.py
+/// Originally ported from system/scripts/health/budget-period-reset.py (dir removed; see git history).
 ///
 /// Auto-resets agent budget periods with a tiered safety gate:
 ///   ratio ≤ 1.0       → auto-reset (within budget)
