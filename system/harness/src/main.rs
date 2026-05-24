@@ -17,25 +17,15 @@ mod budget_reset;
 mod paths;
 mod integration;
 mod integration_cmd;
-mod integration_apple_addressbook;
 mod metrics;
 mod checkpoint;
 mod shutdown;
 mod startup;
 mod validate;
-mod integration_tailscale;
-mod integration_mcp_exa;
-mod integration_mcp_excalidraw;
-mod integration_mcp_plugin_ecc;
-mod integration_x_twitter;
-mod integration_publer;
-mod integration_granola_mcp;
 mod integration_check_all;
 mod integration_telemetry;
-mod kalshi;
 mod mcp;
 use hex::memory;
-mod mirofish;
 mod path_map;
 mod pulse;
 mod session_reflect;
@@ -48,7 +38,9 @@ mod hook;
 mod upgrade;
 mod initiative;
 mod learnings;
-mod release;
+// Personal modules (mrap-only overlay). Resolved via build.rs → OUT_DIR/personal_mods.rs.
+#[cfg(feature = "personal")]
+include!(concat!(env!("OUT_DIR"), "/personal_mods.rs"));
 #[derive(Parser)]
 #[command(name = "hex", about = "Hex multi-agent harness", version)]
 struct Cli {
@@ -125,11 +117,13 @@ enum Commands {
         command: PathMapCommands,
     },
     /// Mirofish VM and service health (port of .hex/scripts/mirofish-status.sh)
+    #[cfg(feature = "personal")]
     Mirofish {
         #[command(subcommand)]
         command: MirofishCommands,
     },
     /// Kalshi prediction market integration
+    #[cfg(feature = "personal")]
     Kalshi {
         #[command(subcommand)]
         command: KalshiCommands,
@@ -253,6 +247,7 @@ enum Commands {
         args: Vec<String>,
     },
     /// Deterministic LLM-free release pipeline (wraps system/scripts/release.sh)
+    #[cfg(feature = "personal")]
     Release {
         /// Explicit release version (e.g. 1.2.3); if omitted uses Cargo.toml version
         #[arg(long)]
@@ -706,27 +701,35 @@ enum IntegrationCommands {
     /// Print integration health-check template to stdout (port of integrations/_template.sh)
     Template,
     /// Run Exa MCP health probe (port of integrations/mcp-exa.sh)
+    #[cfg(feature = "personal")]
     #[command(name = "mcp-exa")]
     McpExa,
     /// Run Excalidraw MCP health probe (port of integrations/mcp-excalidraw.sh)
+    #[cfg(feature = "personal")]
     #[command(name = "mcp-excalidraw")]
     McpExcalidraw,
     /// Run ECC plugin health probe (port of integrations/mcp-plugin-ecc.sh)
+    #[cfg(feature = "personal")]
     #[command(name = "mcp-plugin-ecc")]
     McpPluginEcc,
     /// Run X (Twitter) API bearer token probe (port of integrations/x-twitter.sh)
+    #[cfg(feature = "personal")]
     #[command(name = "x-twitter")]
     XTwitter,
     /// Run Apple Contacts TCC access probe (port of integrations/apple-addressbook.sh)
+    #[cfg(feature = "personal")]
     #[command(name = "apple-addressbook")]
     AppleAddressbook,
     /// Run Tailscale daemon and peer connectivity probe (port of integrations/tailscale.sh)
+    #[cfg(feature = "personal")]
     #[command(name = "tailscale")]
     Tailscale,
     /// Run Publer API health probe (port of integrations/publer.sh)
+    #[cfg(feature = "personal")]
     #[command(name = "publer")]
     Publer,
     /// Run Granola MCP health probe (port of integrations/granola-mcp.sh)
+    #[cfg(feature = "personal")]
     #[command(name = "granola-mcp")]
     GranolaMcp,
     /// Run integration checks for a tier in parallel (port of hex-integration-check-all.sh)
@@ -885,6 +888,7 @@ enum SessionCommands {
     },
 }
 
+#[cfg(feature = "personal")]
 #[derive(Subcommand)]
 enum MirofishCommands {
     /// Check VM status and service health
@@ -893,6 +897,7 @@ enum MirofishCommands {
     Deploy,
 }
 
+#[cfg(feature = "personal")]
 #[derive(Subcommand)]
 enum KalshiCommands {
     /// Generate RSA keypair for Kalshi API authentication (port of kalshi-keygen.sh)
@@ -2019,27 +2024,35 @@ fn main() {
                 integration::template();
                 return;
             }
+            #[cfg(feature = "personal")]
             if let IntegrationCommands::McpExa = command {
                 std::process::exit(integration_mcp_exa::run_probe());
             }
+            #[cfg(feature = "personal")]
             if let IntegrationCommands::McpExcalidraw = command {
                 std::process::exit(integration_mcp_excalidraw::run_probe());
             }
+            #[cfg(feature = "personal")]
             if let IntegrationCommands::McpPluginEcc = command {
                 std::process::exit(integration_mcp_plugin_ecc::run_probe());
             }
+            #[cfg(feature = "personal")]
             if let IntegrationCommands::XTwitter = command {
                 std::process::exit(integration_x_twitter::run_probe());
             }
+            #[cfg(feature = "personal")]
             if let IntegrationCommands::AppleAddressbook = command {
                 std::process::exit(integration_apple_addressbook::run_probe());
             }
+            #[cfg(feature = "personal")]
             if let IntegrationCommands::Tailscale = command {
                 std::process::exit(integration_tailscale::run_probe());
             }
+            #[cfg(feature = "personal")]
             if let IntegrationCommands::Publer = command {
                 std::process::exit(integration_publer::run_probe());
             }
+            #[cfg(feature = "personal")]
             if let IntegrationCommands::GranolaMcp = command {
                 std::process::exit(integration_granola_mcp::run_probe());
             }
@@ -2100,13 +2113,21 @@ fn main() {
                 IntegrationCommands::Probe { .. } => unreachable!(),
                 IntegrationCommands::Rotate { .. } => unreachable!(),
                 IntegrationCommands::Template => unreachable!(),
+                #[cfg(feature = "personal")]
                 IntegrationCommands::McpExa => unreachable!(),
+                #[cfg(feature = "personal")]
                 IntegrationCommands::McpExcalidraw => unreachable!(),
+                #[cfg(feature = "personal")]
                 IntegrationCommands::McpPluginEcc => unreachable!(),
+                #[cfg(feature = "personal")]
                 IntegrationCommands::XTwitter => unreachable!(),
+                #[cfg(feature = "personal")]
                 IntegrationCommands::AppleAddressbook => unreachable!(),
+                #[cfg(feature = "personal")]
                 IntegrationCommands::Tailscale => unreachable!(),
+                #[cfg(feature = "personal")]
                 IntegrationCommands::Publer => unreachable!(),
+                #[cfg(feature = "personal")]
                 IntegrationCommands::GranolaMcp => unreachable!(),
                 IntegrationCommands::CheckAll { .. } => unreachable!(),
                 IntegrationCommands::Telemetry { .. } => unreachable!(),
@@ -2459,10 +2480,12 @@ fn main() {
                 }
             }
         }
+        #[cfg(feature = "personal")]
         Commands::Mirofish { command } => match command {
             MirofishCommands::Status => mirofish::run_status(),
             MirofishCommands::Deploy => mirofish::run_deploy(),
         },
+        #[cfg(feature = "personal")]
         Commands::Kalshi { command } => match command {
             KalshiCommands::Keygen { secrets_dir } => {
                 let dir = match secrets_dir {
@@ -2795,6 +2818,7 @@ fn main() {
         Commands::Upgrade { args } => {
             std::process::exit(upgrade::run(&args));
         }
+        #[cfg(feature = "personal")]
         Commands::Release { version, skip_e2e, dry_run } => {
             let hex_dir = get_hex_dir();
             let code = release::run(&hex_dir, release::ReleaseArgs { version, skip_e2e, dry_run });
