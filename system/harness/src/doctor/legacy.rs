@@ -194,7 +194,13 @@ fn qc_boi_queue() -> PathBuf { dirs_home().join(".boi/queue") }
 fn qc_workspace() -> PathBuf { dirs_home().join("hex") }
 fn qc_initiatives_dir() -> PathBuf { qc_workspace().join("initiatives") }
 fn qc_events_dir() -> PathBuf { dirs_home().join(".hex-events/events") }
-fn qc_github_mrap_base() -> PathBuf { dirs_home().join("github.com/mrap") }
+fn qc_github_mrap_base() -> PathBuf {
+    // Mike's checkout convention is ~/github.com/mrap/; users with a different
+    // layout can override with HEX_GITHUB_BASE.
+    std::env::var("HEX_GITHUB_BASE")
+        .map(PathBuf::from)
+        .unwrap_or_else(|_| dirs_home().join("github.com/mrap"))
+}
 
 const QC_ADMIN_KEYWORDS: &[&str] = &[
     "close", "add closed_at", "update status", "mark complete",

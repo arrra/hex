@@ -410,16 +410,25 @@ fn restart_events_daemon() {
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .unwrap_or_default();
-    let target = format!("gui/{uid}/com.mrap.hex-eventd");
-    let result = Command::new("launchctl")
-        .args(["kickstart", "-k", &target])
-        .status();
-    match result {
-        Ok(s) if s.success() =>
-            println!("  [OK] events daemon restarted on new binary"),
-        _ =>
-            eprintln!("  [WARN] could not restart events daemon — run: launchctl kickstart -k {target}"),
+    // Try the generic label first (templates/com.hex.hex-eventd.plist), then
+    // fall back to the legacy mrap-named label (Mike's instance still uses it).
+    // Override via HEX_EVENTS_LAUNCH_LABEL if neither matches.
+    let candidates: Vec<String> = if let Ok(custom) = std::env::var("HEX_EVENTS_LAUNCH_LABEL") {
+        vec![custom]
+    } else {
+        vec!["com.hex.hex-eventd".to_string(), "com.mrap.hex-eventd".to_string()]
+    };
+    for label in &candidates {
+        let target = format!("gui/{uid}/{label}");
+        if let Ok(s) = Command::new("launchctl").args(["kickstart", "-k", &target]).status() {
+            if s.success() {
+                println!("  [OK] events daemon restarted on new binary ({label})");
+                return;
+            }
+        }
     }
+    let last = candidates.last().cloned().unwrap_or_default();
+    eprintln!("  [WARN] could not restart events daemon — tried {:?}; run manually: launchctl kickstart -k gui/{uid}/{last}", candidates);
 }
 
 fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
