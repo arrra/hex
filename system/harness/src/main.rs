@@ -907,7 +907,7 @@ enum PathMapCommands {
 
 #[derive(Subcommand)]
 enum SessionCommands {
-    /// Post-session reflection: update reflection-log.md and run session-delta.py (port of session-reflect.sh)
+    /// Post-session reflection: update reflection-log.md and persist eval_records to memory.db
     Reflect {
         /// Session identifier to record in the reflection log
         #[arg(long)]
