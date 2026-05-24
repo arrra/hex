@@ -110,7 +110,7 @@ fn test_capability_call_result_entry() {
         description: "echoes text".to_string(),
         exec: "#!/bin/sh\necho hello-from-fn\n".to_string(),
         input_schema: serde_json::json!({}),
-        callable_by: vec![],
+        callable_by: vec!["agent-beta".to_string()],
     };
     registry::add_function(&reg_dir, &cap, b"#!/bin/sh\necho hello-from-fn\n").unwrap();
 
@@ -279,6 +279,239 @@ fn test_sibling_catalog_ordered_after_capability_added_event() {
     assert!(
         found,
         "sibling catalog at wake time must contain the newly added capability"
+    );
+}
+
+// ── Test (a): capability_add writes a row to audit.jsonl ─────────────────────
+
+#[test]
+fn test_capability_add_writes_audit_jsonl() {
+    let dir = TempDir::new().unwrap();
+    let hex_dir = dir.path();
+
+    make_allowlist(hex_dir, &["agent-alpha"]);
+    let sandbox = make_sandbox(hex_dir);
+
+    let entry = make_trail_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "capability_id": "audit-fn",
+            "description": "test audit write",
+            "wall_hit": "slow log scanning",
+            "exec_or_event": "#!/bin/sh\necho ok\n"
+        }),
+    );
+
+    let mut call_count = 0u32;
+    let result = hex::wake::apply_capability_entry(
+        &entry,
+        "agent-alpha",
+        hex_dir,
+        1,
+        &mut call_count,
+        &sandbox,
+    );
+    assert!(result.is_ok(), "capability_add must succeed: {:?}", result.err());
+
+    let audit_path = hex_dir.join(".hex/registry/audit.jsonl");
+    assert!(audit_path.exists(), "audit.jsonl must be created after capability_add");
+
+    let content = fs::read_to_string(&audit_path).unwrap();
+    let row: serde_json::Value = serde_json::from_str(content.trim()).unwrap();
+
+    assert_eq!(row["capability_id"].as_str().unwrap(), "audit-fn");
+    assert_eq!(row["capability_kind"].as_str().unwrap(), "function");
+    assert_eq!(row["created_by"].as_str().unwrap(), "agent-alpha");
+    assert!(row["ts"].as_str().is_some(), "audit row must have ts");
+    assert!(row.get("unprompted").is_some(), "audit row must have unprompted field");
+    assert!(row.get("exec_or_event").is_some(), "audit row must have exec_or_event field");
+}
+
+// ── Test (b): unprompted field is honored ─────────────────────────────────────
+
+#[test]
+fn test_capability_add_unprompted_honored() {
+    let dir = TempDir::new().unwrap();
+    let hex_dir = dir.path();
+
+    make_allowlist(hex_dir, &["agent-alpha"]);
+    let sandbox = make_sandbox(hex_dir);
+
+    // With unprompted: true
+    let entry_unprompted = make_trail_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "capability_id": "unprompted-fn",
+            "description": "spontaneous capability",
+            "wall_hit": "noticed a gap",
+            "exec_or_event": "#!/bin/sh\necho unprompted\n",
+            "unprompted": true
+        }),
+    );
+
+    let mut call_count = 0u32;
+    hex::wake::apply_capability_entry(
+        &entry_unprompted, "agent-alpha", hex_dir, 1, &mut call_count, &sandbox,
+    ).unwrap();
+
+    let audit_path = hex_dir.join(".hex/registry/audit.jsonl");
+    let content = fs::read_to_string(&audit_path).unwrap();
+    let row: serde_json::Value = serde_json::from_str(content.lines().next().unwrap()).unwrap();
+    assert_eq!(row["unprompted"].as_bool().unwrap(), true, "unprompted:true must be in audit row");
+
+    // Check function JSON also has unprompted:true
+    let fn_json = hex_dir.join(".hex/registry/functions/unprompted-fn.json");
+    let fn_val: serde_json::Value = serde_json::from_str(&fs::read_to_string(fn_json).unwrap()).unwrap();
+    assert_eq!(fn_val["unprompted"].as_bool().unwrap(), true, "function JSON must record unprompted:true");
+
+    // Without unprompted (should default to false)
+    let entry_default = make_trail_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "capability_id": "prompted-fn",
+            "description": "prompted capability",
+            "wall_hit": "task required it",
+            "exec_or_event": "#!/bin/sh\necho prompted\n"
+        }),
+    );
+
+    hex::wake::apply_capability_entry(
+        &entry_default, "agent-alpha", hex_dir, 2, &mut call_count, &sandbox,
+    ).unwrap();
+
+    let fn_json2 = hex_dir.join(".hex/registry/functions/prompted-fn.json");
+    let fn_val2: serde_json::Value = serde_json::from_str(&fs::read_to_string(fn_json2).unwrap()).unwrap();
+    assert_eq!(fn_val2["unprompted"].as_bool().unwrap(), false, "missing unprompted must default to false");
+}
+
+// ── Test (c): callable_by explicit vs. allowlist default ─────────────────────
+
+#[test]
+fn test_capability_add_callable_by_explicit_and_default() {
+    let dir = TempDir::new().unwrap();
+    let hex_dir = dir.path();
+
+    make_allowlist(hex_dir, &["scanner", "repairer", "monitor"]);
+    let sandbox = make_sandbox(hex_dir);
+
+    // Explicit callable_by
+    let entry_explicit = make_trail_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "capability_id": "restricted-fn",
+            "description": "restricted to two agents",
+            "wall_hit": "needs access control",
+            "exec_or_event": "#!/bin/sh\necho restricted\n",
+            "callable_by": ["scanner", "repairer"]
+        }),
+    );
+
+    let mut call_count = 0u32;
+    hex::wake::apply_capability_entry(
+        &entry_explicit, "scanner", hex_dir, 1, &mut call_count, &sandbox,
+    ).unwrap();
+
+    let fn_json = hex_dir.join(".hex/registry/functions/restricted-fn.json");
+    let fn_val: serde_json::Value = serde_json::from_str(&fs::read_to_string(fn_json).unwrap()).unwrap();
+    let callable: Vec<String> = fn_val["callable_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    assert_eq!(callable, vec!["scanner".to_string(), "repairer".to_string()],
+        "explicit callable_by must be stored exactly");
+
+    // Omitted callable_by — should default to full allowlist
+    let entry_default = make_trail_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "capability_id": "open-fn",
+            "description": "open to all pilots",
+            "wall_hit": "general utility",
+            "exec_or_event": "#!/bin/sh\necho open\n"
+        }),
+    );
+
+    hex::wake::apply_capability_entry(
+        &entry_default, "scanner", hex_dir, 2, &mut call_count, &sandbox,
+    ).unwrap();
+
+    let fn_json2 = hex_dir.join(".hex/registry/functions/open-fn.json");
+    let fn_val2: serde_json::Value = serde_json::from_str(&fs::read_to_string(fn_json2).unwrap()).unwrap();
+    let callable2: Vec<String> = fn_val2["callable_by"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|v| v.as_str().map(String::from))
+        .collect();
+    assert!(callable2.contains(&"scanner".to_string()), "default callable_by must include all allowlist members");
+    assert!(callable2.contains(&"repairer".to_string()), "default callable_by must include all allowlist members");
+    assert!(callable2.contains(&"monitor".to_string()), "default callable_by must include all allowlist members");
+}
+
+// ── Test (d): callable_by gate enforced during capability_call ───────────────
+
+#[test]
+fn test_capability_call_callable_by_gate() {
+    let dir = TempDir::new().unwrap();
+    let hex_dir = dir.path();
+
+    // Both agents in global allowlist; only allowed-agent in capability callable_by
+    make_allowlist(hex_dir, &["allowed-agent", "blocked-agent"]);
+    let sandbox = make_sandbox(hex_dir);
+
+    // Register capability with explicit callable_by = ["allowed-agent"] only
+    let add_entry = make_trail_entry(
+        "capability_add",
+        serde_json::json!({
+            "capability_kind": "function",
+            "capability_id": "guarded-fn",
+            "description": "only allowed-agent can call",
+            "wall_hit": "access control needed",
+            "exec_or_event": "#!/bin/sh\necho guarded\n",
+            "callable_by": ["allowed-agent"]
+        }),
+    );
+
+    let mut call_count = 0u32;
+    hex::wake::apply_capability_entry(
+        &add_entry, "allowed-agent", hex_dir, 1, &mut call_count, &sandbox,
+    ).unwrap();
+
+    // allowed-agent can call it
+    let call_allowed = make_trail_entry(
+        "capability_call",
+        serde_json::json!({"capability_id": "guarded-fn", "args": {}}),
+    );
+    let mut cc = 0u32;
+    let ok = hex::wake::apply_capability_entry(
+        &call_allowed, "allowed-agent", hex_dir, 2, &mut cc, &sandbox,
+    );
+    assert!(ok.is_ok(), "allowed-agent must be able to call guarded-fn, got: {:?}", ok.err());
+    let result_entry = ok.unwrap().expect("capability_call must return a result entry");
+    assert_eq!(result_entry.detail["result"]["exit_code"].as_i64().unwrap(), 0,
+        "exit_code must be 0 for a successful call");
+
+    // blocked-agent is in global allowlist but NOT in callable_by — must be rejected
+    let call_blocked = make_trail_entry(
+        "capability_call",
+        serde_json::json!({"capability_id": "guarded-fn", "args": {}}),
+    );
+    let mut cc2 = 0u32;
+    let err = hex::wake::apply_capability_entry(
+        &call_blocked, "blocked-agent", hex_dir, 2, &mut cc2, &sandbox,
+    );
+    assert!(err.is_err(), "blocked-agent must be rejected by callable_by gate");
+    let msg = err.unwrap_err();
+    assert!(
+        msg.contains("blocked-agent") && msg.contains("callable_by"),
+        "rejection message must name the agent and callable_by, got: '{msg}'"
     );
 }
 
