@@ -17,6 +17,15 @@ struct EvalQuery {
     expect_path_contains: String,
 }
 
+/// Print just the 7-day consumption rate as a decimal ("0.99") and exit 0.
+/// Used by the memory-consumption-floor hex-events policy.
+pub fn run_rate_only(hex_root: &Path) -> i32 {
+    match consumption_rate(hex_root, 7) {
+        Some((rate, _)) => { println!("{:.2}", rate); 0 }
+        None => { println!("0.00"); 0 }
+    }
+}
+
 pub fn run(hex_root: &Path) -> i32 {
     let mut failures: Vec<String> = Vec::new();
 

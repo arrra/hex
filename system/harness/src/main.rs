@@ -866,7 +866,12 @@ enum MemoryCommands {
         agent: bool,
     },
     /// Run the memory smoke-eval + consumption-rate check (nightly)
-    Eval,
+    Eval {
+        /// Print only the 7-day consumption rate (decimal) and exit 0.
+        /// For the memory-consumption-floor hex-events policy.
+        #[arg(long = "rate-only")]
+        rate_only: bool,
+    },
     /// Check LLM provider reachability (exits 0 ok, 2 deferred, 3 upstream)
     #[command(name = "llm-check")]
     LlmCheck,
@@ -2237,7 +2242,7 @@ fn main() {
                 }
                 MemoryCommands::ParseTranscripts { .. } => "parse-transcripts",
                 MemoryCommands::Recall { .. } => "recall",
-                MemoryCommands::Eval => "eval",
+                MemoryCommands::Eval { .. } => "eval",
                 MemoryCommands::LlmCheck => "llm-check",
                 MemoryCommands::Distill { .. } => "distill",
                 MemoryCommands::Consolidate => "consolidate",
@@ -2269,7 +2274,10 @@ fn main() {
                 MemoryCommands::Recall { query, agent } => {
                     memory::recall::run(&hex_dir, query, *agent)
                 }
-                MemoryCommands::Eval => memory::eval::run(&hex_dir),
+                MemoryCommands::Eval { rate_only } => {
+                    if *rate_only { memory::eval::run_rate_only(&hex_dir) }
+                    else { memory::eval::run(&hex_dir) }
+                }
                 MemoryCommands::LlmCheck => {
                     match memory::provider::health_check() {
                         Ok(_) => {

@@ -102,6 +102,8 @@ pub struct RecallOutcome {
     pub injected: bool,
     pub gated: bool,
     pub result_count: usize,
+    pub facts_injected: usize,
+    pub chunks_injected: usize,
     pub latency_ms: u64,
     /// The formatted context block, ready for `additionalContext`. Empty when
     /// `injected` is false.
@@ -123,6 +125,7 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
     if is_trivial(query) {
         let outcome = RecallOutcome {
             injected: false, gated: true, result_count: 0,
+            facts_injected: 0, chunks_injected: 0,
             latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
         };
         log_and_emit(hex_root, &outcome);
@@ -156,12 +159,15 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
             injected: true,
             gated: false,
             result_count: filtered.len() + facts.len(),
+            facts_injected: facts.len(),
+            chunks_injected: filtered.len(),
             latency_ms: t0.elapsed().as_millis() as u64,
             context: format_context_v2(&filtered, &facts),
         }
     } else {
         RecallOutcome {
             injected: false, gated: false, result_count: 0,
+            facts_injected: 0, chunks_injected: 0,
             latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
         }
     };
@@ -236,6 +242,7 @@ fn log_and_emit(hex_root: &Path, o: &RecallOutcome) {
                 "ts": chrono::Utc::now().to_rfc3339(),
                 "injected": o.injected, "gated": o.gated,
                 "result_count": o.result_count, "latency_ms": o.latency_ms,
+                "facts_injected": o.facts_injected, "chunks_injected": o.chunks_injected,
             })
         );
     }
