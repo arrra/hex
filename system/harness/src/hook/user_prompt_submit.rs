@@ -52,7 +52,8 @@ pub fn run() {
     if outcome.injected {
         parts.push(outcome.context);
     }
-    if let Some(nudge) = super::title_nudge::maybe_nudge(prompt) {
+    let session_id = input.get("session_id").and_then(|v| v.as_str());
+    if let Some(nudge) = super::title_nudge::maybe_nudge(session_id, prompt) {
         parts.push(nudge);
     }
     if !parts.is_empty() {

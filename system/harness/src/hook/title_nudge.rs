@@ -6,10 +6,9 @@ use std::time::{Duration, SystemTime};
 
 const NUDGE_INTERVAL: Duration = Duration::from_secs(30 * 60);
 
-pub fn maybe_nudge(prompt: &str) -> Option<String> {
-    let session_id = std::env::var("CLAUDE_SESSION_ID").ok();
+pub fn maybe_nudge(session_id: Option<&str>, prompt: &str) -> Option<String> {
     let state_dir = dirs::home_dir().map(|h| h.join(".happy/state"));
-    maybe_nudge_impl(session_id, prompt, state_dir)
+    maybe_nudge_impl(session_id.map(|s| s.to_string()), prompt, state_dir)
 }
 
 fn maybe_nudge_impl(session_id: Option<String>, prompt: &str, state_dir: Option<PathBuf>) -> Option<String> {
