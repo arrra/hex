@@ -120,9 +120,10 @@ cp "$SCRIPT_DIR/templates/observations.md"  "$TARGET_DIR/evolution/observations.
 cp "$SCRIPT_DIR/templates/suggestions.md"   "$TARGET_DIR/evolution/suggestions.md"
 cp "$SCRIPT_DIR/templates/changelog.md"     "$TARGET_DIR/evolution/changelog.md"
 
-# Copy evolution/eval scripts
+# Create evolution/eval dir (session-delta.py was ported to Rust in
+# session_reflect.rs — commit a819261f / BOI S8785 — and the template
+# was deleted. Dir kept for downstream tools that expect it.)
 mkdir -p "$TARGET_DIR/evolution/eval"
-cp "$SCRIPT_DIR/templates/eval/session-delta.py" "$TARGET_DIR/evolution/eval/session-delta.py"
 
 # Copy tests
 if [ -d "$SCRIPT_DIR/tests" ]; then
