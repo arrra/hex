@@ -11,7 +11,7 @@ pub struct Candidate {
 }
 
 const MODEL: &str = "anthropic/claude-sonnet-4.5";
-const MAX_TOK: u32 = 4096;
+const MAX_TOK: u32 = 16384;
 
 pub fn extract_from_span(text: &str) -> Result<Vec<Candidate>, ProviderError> {
     let template = std::fs::read_to_string(

@@ -21,7 +21,16 @@ pub fn db_path(hex_root: &Path) -> PathBuf {
 
 /// Open the memory DB with sqlite-vec registered. ALL memory code must open
 /// connections through this — `Connection::open` directly would miss vec0.
+/// Also ensures the Plan 2 schema (facts, fact_history, sessions, topics,
+/// transcript_files, facts_vec, facts_fts) is applied — DDL is idempotent.
 pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     vector::register_sqlite_vec();
-    Connection::open(path)
+    let conn = Connection::open(path)?;
+    // Best-effort migration — log but don't fail if a DDL piece is unhappy
+    // (e.g. older sqlite-vec without FLOAT[768]); the facts CLI commands will
+    // surface a clearer error.
+    if let Err(e) = schema::apply_plan2(&conn) {
+        eprintln!("[memory] Plan 2 schema migration warning: {e}");
+    }
+    Ok(conn)
 }
