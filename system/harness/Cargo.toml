@@ -28,6 +28,7 @@ sqlite-vec = "0.1"
 # The image/codec stack is not separately feature-gated in fastembed 4. Keeping defaults.
 fastembed = "4"
 anyhow = "1"
+dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"

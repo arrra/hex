@@ -15,6 +15,7 @@ mod charter_triggers;
 mod doctor;
 mod fleet;
 mod budget_reset;
+mod paths;
 mod health;
 mod integration;
 mod integration_cmd;
