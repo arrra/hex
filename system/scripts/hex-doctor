@@ -28,7 +28,7 @@ if [ -z "${HEX_DIR:-}" ]; then
     fi
     candidate="$(dirname "$candidate")"
   done
-  HEX_DIR="${HEX_DIR:-$HOME/hex}"
+  HEX_DIR="${HEX_DIR:-${HEX_DIR:-$HOME/hex}}"
 fi
 
 CLAUDE_DIR="$HEX_DIR/.hex"

@@ -1806,7 +1806,8 @@ fn run_agent_command(command: AgentCommands) {
             std::process::exit(rc);
         }
         AgentCommands::ResetPeriods { dry_run } => {
-            let projects_dir = get_hex_dir().join("projects");
+            let home = std::env::var("HOME").unwrap_or_default();
+            let projects_dir = std::path::PathBuf::from(&home).join("mrap-hex/projects");
             if !projects_dir.is_dir() {
                 println!("[reset-periods] PROJECTS_DIR not found: {}", projects_dir.display());
                 return;
@@ -2322,7 +2323,8 @@ fn main() {
                 std::process::exit(exec_script(&script, &args));
             }
             MetricsCommands::RotateTelemetry => {
-                let script = get_hex_dir().join(".hex/scripts/rotate-telemetry.sh");
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script = std::path::PathBuf::from(&home).join("mrap-hex/.hex/scripts/rotate-telemetry.sh");
                 std::process::exit(exec_script(&script, &[]));
             }
         },
@@ -2367,11 +2369,13 @@ fn main() {
                 std::process::exit(exec_script(&script, &arg_refs));
             }
             HealthCommands::CheckReflectionLiveness => {
-                let script = get_hex_dir().join(".hex/scripts/health/check-reflection-liveness.sh");
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script = std::path::PathBuf::from(&home).join("mrap-hex/.hex/scripts/health/check-reflection-liveness.sh");
                 std::process::exit(exec_script(&script, &[]));
             }
             HealthCommands::CheckFailureRouting => {
-                let script = get_hex_dir().join(".hex/scripts/health/check-failure-routing-roundtrip.sh");
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script = std::path::PathBuf::from(&home).join("mrap-hex/.hex/scripts/health/check-failure-routing-roundtrip.sh");
                 std::process::exit(exec_script(&script, &[]));
             }
             HealthCommands::CheckWatchdogHeartbeat => {
@@ -2537,7 +2541,8 @@ fn main() {
                 boi_pm::run_install(&hex_dir);
             }
             BoiPmCommands::Verify { spec_id } => {
-                let script = get_hex_dir().join(".hex/scripts/boi-completion-verify.sh");
+                let home = std::env::var("HOME").unwrap_or_default();
+                let script = std::path::PathBuf::from(&home).join("mrap-hex/.hex/scripts/boi-completion-verify.sh");
                 std::process::exit(exec_script(&script, &[&spec_id]));
             }
             BoiPmCommands::Archive { spec_id, target_repo } => {
@@ -2663,10 +2668,10 @@ fn main() {
         }
         Commands::Telemetry { command } => match command {
             TelemetryCommands::Rotate => {
-                let hex_dir = get_hex_dir();
+                let home = std::env::var("HOME").unwrap_or_default();
                 let dirs = [
-                    hex_dir.join(".hex/audit"),
-                    hex_dir.join(".hex/logs"),
+                    std::path::PathBuf::from(&home).join("mrap-hex/.hex/audit"),
+                    std::path::PathBuf::from(&home).join("mrap-hex/.hex/logs"),
                 ];
                 let ttl_days: u64 = 7;
                 let cap_bytes: u64 = 50 * 1024 * 1024;
@@ -2717,7 +2722,8 @@ fn main() {
             }
         },
         Commands::Picker => {
-            let ctx_json = get_hex_dir().join(".hex/contexts.json");
+            let home = std::env::var("HOME").unwrap_or_default();
+            let ctx_json = std::path::PathBuf::from(&home).join("mrap-hex/.hex/contexts.json");
             let contexts_text = if ctx_json.is_file() {
                 std::fs::read_to_string(&ctx_json).unwrap_or_else(|_| "{}".to_string())
             } else {

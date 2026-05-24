@@ -25,7 +25,7 @@ rules:
       - type: shell
         command: |
           export PATH="/opt/homebrew/bin:$PATH"
-          HEX_BIN="$HEX_DIR/.hex/bin/hex"
+          HEX_BIN="${HEX_DIR:-$HOME/hex}/.hex/bin/hex"
           FILE_PATH="{{ event.payload.path }}"
           "$HEX_BIN" memory distill "$FILE_PATH" \
             || echo "memory-distill failed for $FILE_PATH" >&2

@@ -19,7 +19,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 PORT = 8901
-HEX_ROOT = Path(os.environ.get("HEX_DIR", os.path.expanduser("~/hex")))
+HEX_ROOT = Path(os.path.expanduser("~/hex"))
 COMMENTS_FILE = HEX_ROOT / ".hex/data/comments.json"
 
 # ---------------------------------------------------------------------------

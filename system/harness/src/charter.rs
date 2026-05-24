@@ -35,8 +35,7 @@ mod tests {
     #[test]
     fn all_live_charters_parse() {
         let dir_str = std::env::var("MRAP_HEX_PROJECTS")
-            .or_else(|_| std::env::var("HEX_DIR").map(|d| format!("{}/projects", d)))
-            .unwrap_or_else(|_| format!("{}/hex/projects", std::env::var("HOME").unwrap_or_default()));
+            .unwrap_or_else(|_| "/Users/mrap/mrap-hex/projects".to_string());
         let dir = std::path::Path::new(&dir_str);
         if !dir.exists() {
             eprintln!("skipping all_live_charters_parse: {} not found", dir.display());

@@ -9,7 +9,7 @@
 #   bash meeting-prep.sh --test         # Run self-test with mock data
 #
 # The script checks work hours internally (9am-6pm in configured timezone).
-# Cron: */30 * * * * cd $HEX_DIR && bash .hex/scripts/meeting-prep.sh
+# Cron: */30 * * * * cd ~/hex && bash .hex/scripts/meeting-prep.sh
 set -uo pipefail
 
 # --- Resolve agent directory ---
