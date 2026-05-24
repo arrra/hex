@@ -394,7 +394,7 @@ bash tests/eval/run_eval_macos.sh            # macOS Tart
 
 ## Roadmap
 
-v0.19.0: **V2 Memory Plan 2 — facts layer, distill pipeline, nightly consolidate.**
+v0.19.1: **V2 Memory Plan 2 — facts layer, distill pipeline, nightly consolidate.**
 - **Facts layer**: six new tables (`facts`, `fact_history`, `sessions`, `topics`, `transcript_files`, `vec0`, FTS5). Structured facts with full history, typed by 24-predicate vocabulary.
 - **Distill pipeline** (`hex memory distill`): two-phase LLM process — Phase 1 extracts candidate facts from transcripts; Phase 2 judges each as ADD/UPDATE/NOOP/FLAG with embedding dedup and per-file watermarking.
 - **Nightly consolidate** (`hex memory consolidate`): 6-op consolidation pass — contradiction detection, staleness pruning, orphan cleanup, dedup, topic reorg, summary refresh. Runs on a nightly hex-events policy.

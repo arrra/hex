@@ -2,7 +2,7 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
-## [2026-05-23] — V2 Memory Plan 2: facts layer, distill pipeline, nightly consolidate (v0.19.0)
+## [2026-05-23] — V2 Memory Plan 2: facts layer, distill pipeline, nightly consolidate (v0.19.1)
 
 ### Added
 - **Memory facts schema** (`memory/schema.rs`): six new tables — `facts`, `fact_history`, `sessions`, `topics`, `transcript_files`, `vec0`, plus FTS5 index. Persistent structured facts with full history.
