@@ -196,7 +196,7 @@ enum Commands {
         #[command(subcommand)]
         command: BoiPmCommands,
     },
-    /// BOI live status web view launcher (port of .hex/scripts/boi-web/serve.sh)
+    /// BOI live status web view launcher (native Rust SSE server)
     #[command(name = "boi-web")]
     BoiWeb {
         #[command(subcommand)]
@@ -412,7 +412,7 @@ enum BoiPmCommands {
 
 #[derive(Subcommand)]
 enum BoiWebCommands {
-    /// Launch the BOI live status web server (port of boi-web/serve.sh)
+    /// Launch the BOI live status web server
     Serve,
 }
 

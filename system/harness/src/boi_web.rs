@@ -6,9 +6,8 @@
 use std::convert::Infallible;
 use std::io::BufReader;
 use std::path::Path;
-use std::process::Command;
 use std::sync::Arc;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use axum::{
     extract::State,
@@ -21,7 +20,9 @@ use axum::{
 };
 use serde_json::Value;
 use tokio::net::TcpListener;
+use tokio::process::Command;
 use tokio::sync::broadcast;
+use tokio::time::timeout;
 use tokio_stream::wrappers::BroadcastStream;
 use tokio_stream::StreamExt;
 
@@ -50,7 +51,13 @@ async fn serve(port: u16, cert: String, key: String) {
     let tx_bg = tx.clone();
     tokio::spawn(async move {
         loop {
-            let mut payload = fetch_status();
+            let mut payload = match timeout(Duration::from_secs(8), fetch_status()).await {
+                Ok(v) => v,
+                Err(_) => {
+                    eprintln!("boi_web: 'boi status' timed out (8s)");
+                    serde_json::json!({ "error": "timeout", "boi_status_unavailable": true })
+                }
+            };
             let ts = SystemTime::now()
                 .duration_since(UNIX_EPOCH)
                 .unwrap_or_default()
@@ -77,8 +84,14 @@ async fn serve(port: u16, cert: String, key: String) {
         serve_tls(app, &addr, &cert, &key).await;
     } else {
         println!("BOI live status (no TLS) → http://localhost:{}", port);
-        let listener = TcpListener::bind(&addr).await.expect("bind");
-        axum::serve(listener, app).await.expect("serve");
+        let listener = TcpListener::bind(&addr).await.unwrap_or_else(|e| {
+            eprintln!("boi_web: bind failed: {e} (port={port})");
+            std::process::exit(1);
+        });
+        axum::serve(listener, app).await.unwrap_or_else(|e| {
+            eprintln!("boi_web: serve error: {e} (port={port})");
+            std::process::exit(1);
+        });
     }
 }
 
@@ -90,39 +103,77 @@ async fn serve_tls(app: Router, addr: &str, cert_path: &str, key_path: &str) {
     use tokio_rustls::rustls::ServerConfig;
     use tokio_rustls::TlsAcceptor;
 
-    let cert_file = std::fs::File::open(cert_path).expect("open cert");
-    let key_file = std::fs::File::open(key_path).expect("open key");
+    let cert_file = std::fs::File::open(cert_path).unwrap_or_else(|e| {
+        eprintln!("boi_web: open cert failed: {e} (path={cert_path})");
+        std::process::exit(1);
+    });
+    let key_file = std::fs::File::open(key_path).unwrap_or_else(|e| {
+        eprintln!("boi_web: open key failed: {e} (path={key_path})");
+        std::process::exit(1);
+    });
 
     let certs: Vec<CertificateDer<'static>> = rustls_pemfile::certs(&mut BufReader::new(cert_file))
         .collect::<Result<Vec<_>, _>>()
-        .expect("parse certs");
+        .unwrap_or_else(|e| {
+            eprintln!("boi_web: parse certs failed: {e} (path={cert_path})");
+            std::process::exit(1);
+        });
     let key: PrivateKeyDer<'static> = rustls_pemfile::private_key(&mut BufReader::new(key_file))
-        .expect("parse key io")
-        .expect("no private key found");
+        .unwrap_or_else(|e| {
+            eprintln!("boi_web: read key failed: {e} (path={key_path})");
+            std::process::exit(1);
+        })
+        .unwrap_or_else(|| {
+            eprintln!("boi_web: no private key found (path={key_path})");
+            std::process::exit(1);
+        });
 
     let config = ServerConfig::builder()
         .with_no_client_auth()
         .with_single_cert(certs, key)
-        .expect("TLS config");
+        .unwrap_or_else(|e| {
+            eprintln!("boi_web: TLS config failed: {e} (cert={cert_path} key={key_path})");
+            std::process::exit(1);
+        });
     let acceptor = TlsAcceptor::from(Arc::new(config));
 
-    let listener = std::net::TcpListener::bind(addr).expect("bind");
-    listener.set_nonblocking(true).expect("nonblocking");
-    let listener = tokio::net::TcpListener::from_std(listener).expect("async listener");
+    let listener = std::net::TcpListener::bind(addr).unwrap_or_else(|e| {
+        eprintln!("boi_web: bind failed: {e} (addr={addr})");
+        std::process::exit(1);
+    });
+    listener.set_nonblocking(true).unwrap_or_else(|e| {
+        eprintln!("boi_web: set_nonblocking failed: {e} (addr={addr})");
+        std::process::exit(1);
+    });
+    let listener = tokio::net::TcpListener::from_std(listener).unwrap_or_else(|e| {
+        eprintln!("boi_web: async listener failed: {e} (addr={addr})");
+        std::process::exit(1);
+    });
 
     loop {
-        let (stream, _) = listener.accept().await.expect("accept");
+        let (stream, _) = match listener.accept().await {
+            Ok(pair) => pair,
+            Err(e) => {
+                eprintln!("boi_web: accept error: {e}");
+                continue;
+            }
+        };
         let acceptor = acceptor.clone();
         let app = app.clone();
         tokio::spawn(async move {
-            if let Ok(tls_stream) = acceptor.accept(stream).await {
-                let io = TokioIo::new(tls_stream);
-                let svc = TowerToHyperService::new(app);
-                let _ = http1::Builder::new()
-                    .serve_connection(io, svc)
-                    .with_upgrades()
-                    .await;
-            }
+            let tls_stream = match acceptor.accept(stream).await {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("boi_web: TLS handshake failed: {e}");
+                    return;
+                }
+            };
+            let io = TokioIo::new(tls_stream);
+            let svc = TowerToHyperService::new(app);
+            let _ = http1::Builder::new()
+                .serve_connection(io, svc)
+                .with_upgrades()
+                .await;
         });
     }
 }
@@ -146,7 +197,7 @@ async fn sse_handler(
 }
 
 async fn status_handler() -> impl IntoResponse {
-    let mut payload = fetch_status();
+    let mut payload = fetch_status().await;
     let ts = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -155,25 +206,36 @@ async fn status_handler() -> impl IntoResponse {
     Json(payload)
 }
 
-fn fetch_status() -> Value {
+async fn fetch_status() -> Value {
     let boi = shellexpand::tilde("~/.boi/boi").to_string();
     match Command::new("bash")
         .arg(&boi)
         .args(["status", "--json", "--all"])
         .output()
+        .await
     {
-        Err(e) => serde_json::json!({ "error": e.to_string() }),
+        Err(e) => {
+            eprintln!("boi_web: 'boi status' failed to spawn: {e}");
+            serde_json::json!({ "error": e.to_string(), "boi_status_unavailable": true })
+        }
         Ok(out) if !out.status.success() => {
             let stderr = String::from_utf8_lossy(&out.stderr);
+            eprintln!(
+                "boi_web: 'boi status' exited {}: {}",
+                out.status.code().unwrap_or(-1),
+                &stderr[..stderr.len().min(200)]
+            );
             serde_json::json!({
                 "error": format!("boi exited {}", out.status.code().unwrap_or(-1)),
                 "stderr": &stderr[..stderr.len().min(500)],
+                "boi_status_unavailable": true,
             })
         }
         Ok(out) => {
             let stdout = String::from_utf8_lossy(&out.stdout);
             serde_json::from_str(&stdout).unwrap_or_else(|e| {
-                serde_json::json!({ "error": format!("parse error: {e}") })
+                eprintln!("boi_web: 'boi status' JSON parse error: {e}");
+                serde_json::json!({ "error": format!("parse error: {e}"), "boi_status_unavailable": true })
             })
         }
     }
