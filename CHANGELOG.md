@@ -2,6 +2,11 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-24] — Docker OOM fix for memory indexing (v0.19.8)
+
+### Fixed
+- **OBS-019 Docker OOM** (`system/harness/src/memory/{embed,index}.rs`, `tests/Dockerfile`, `tests/Dockerfile.env`): Memory indexing OOMed in the 4 GB Docker E2E container. Chunked the `embed_documents` call to `EMBED_BATCH=8` to bound per-call working set, and capped `ORT_NUM_THREADS=1` / `OMP_NUM_THREADS=1` at container startup so ONNX Runtime sees the limits at dylib load (env-var-from-binary is too late). Added a Linux `rss_mb()` probe for future memory diagnosis.
+
 ## [2026-05-24] — BOI v2 path cutover, audit-closure hardcode sweep, E2E fix (v0.19.7)
 
 ### Changed
