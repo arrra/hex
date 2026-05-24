@@ -2,6 +2,20 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-24] — Python→Rust ports, paths helper, capability prompt, memory Plan 2 runtime fix (v0.19.2)
+
+### Added
+- **`paths.rs`** (`src/paths.rs`): centralized `hex_dir()` resolver — reads `$HEX_DIR`, falls back to `$HOME/hex`. Wired into `main.rs` as `mod paths`. Eliminates per-callsite `$HEX_DIR` assumptions; Wave 0 foundation for D4 hardcode sweep.
+- **`capability_call` / `capability_add` trail entry types** (`src/prompt.rs`): agents can now register and call fleet-level capabilities via structured trail entries. Harness routes calls, captures results, appends to `calls.jsonl`. Prompt instructions updated to distinguish `capability_call` from `act`.
+
+### Changed
+- **`session_reflect.rs`** (`src/session_reflect.rs`): session-delta eval now written natively via `rusqlite` — eliminates the Rust→Python shellout to `templates/eval/session-delta.py`. `templates/eval/session-delta.py` deleted.
+- **`memory/open_db()`** (`src/memory/mod.rs`): Plan 2 migration (`apply_plan2()`) now called at DB open (idempotent DDL) — fixes runtime gap where Plan 2 tables were only created in tests.
+- **`distill` max_tokens** bumped to handle longer session transcripts.
+- **`.legacy.sh` shellouts restored** (`system/scripts/`): watchdog-heartbeat-check.sh, watchdog-run-full.sh, weekly-synthesis-digest.sh, and others renamed back from `.legacy.sh` for backward compatibility with active callers.
+- **SpecTool + Router scripts restored** (`system/scripts/spec-tool/`, `system/scripts/hex-router/`): second batch of `.legacy.py` scripts re-added.
+- **PERSONAL-EXTRACT caller pruned** (`src/`): dead Rust caller for `x-oauth2-refresh.sh` removed.
+
 ## [2026-05-23] — V2 Memory Plan 2: facts layer, distill pipeline, nightly consolidate (v0.19.1)
 
 ### Added
