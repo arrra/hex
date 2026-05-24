@@ -12,7 +12,7 @@ All notable changes to hex-foundation will be documented in this file.
 - **Harness mod refs** (`src/`): removed dead `mod` declarations pointing to deleted personal integration files. Eliminates compile-time dead-code warnings.
 
 ### Changed
-- **HEX_DIR path sweep** (`src/main.rs`, `src/charter.rs`, `src/events.rs`, `src/backup_session.rs`, `build.rs`, `comments-service/server.py`, `system/scripts/meeting-prep.sh`): 7+ hardcoded `/Users/mrap/mrap-hex/...` paths replaced with `get_hex_dir()` / `$HEX_DIR` resolver. `charter.rs` test fallback chain: `MRAP_HEX_PROJECTS` → `HEX_DIR` → `$HOME/hex`.
+- **HEX_DIR path sweep** (`src/main.rs`, `src/charter.rs`, `src/events.rs`, `src/backup_session.rs`, `build.rs`, `comments-service/server.py`, `system/scripts/meeting-prep.sh`): 7+ hardcoded absolute workspace paths replaced with `get_hex_dir()` / `$HEX_DIR` resolver. `charter.rs` test fallback chain: `MRAP_HEX_PROJECTS` → `HEX_DIR` → `$HOME/hex`.
 - **`sanitize-check.sh` hardening**: scan now includes `*.rs` and `*.toml` files in addition to shell scripts — catches hardcoded paths in Rust source before they land.
 
 ---
