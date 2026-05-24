@@ -29,6 +29,7 @@ fastembed = "4"
 anyhow = "1"
 ureq = { version = "2", features = ["json"] }
 ulid = "1"
+dirs = "5"
 
 [dev-dependencies]
 tempfile = "3"
