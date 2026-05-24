@@ -52,7 +52,7 @@ launchctl list com.mrap.hex-eventd 2>&1
 # Expected: "Could not find service" or no PID in output
 
 # 3. Install the Rust plist
-cp /tmp/com.mrap.hex-eventd.rust.plist \
+cp /tmp/com.hex.hex-eventd.plist \
    ~/Library/LaunchAgents/com.mrap.hex-eventd.plist
 
 # 4. Load the Rust daemon
