@@ -58,6 +58,7 @@ cd "$REPO_DIR"
 
 # ── Subcommand: bump-version ─────────────────────────────────────────────────
 if [[ "${1:-}" == "bump-version" ]]; then
+  # Commits Cargo.toml + Cargo.lock (workspace lock file) + system/harness/Cargo.toml
   NEW_VERSION="${2:-}"
   if ! semver_valid "$NEW_VERSION"; then
     red "Usage: release.sh bump-version X.Y.Z  (semver required, e.g. 0.11.4)"
@@ -67,13 +68,13 @@ if [[ "${1:-}" == "bump-version" ]]; then
   CURRENT_VER=$(grep -E '^version' "$CARGO_TOML" | head -1 | cut -d'"' -f2)
   bold "Bumping $CURRENT_VER → $NEW_VERSION"
   sed -i '' "s/^version = \"$CURRENT_VER\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
-  bold "Building harness (cargo build --release)..."
-  if ! (cd system/harness && cargo build --release 2>&1); then
+  bold "Building harness (cargo build --release -p hex from workspace root)..."
+  if ! cargo build --release -p hex 2>&1; then
     red "Build failed — reverting Cargo.toml"
     git checkout "$CARGO_TOML"
     exit 1
   fi
-  git add "$CARGO_TOML"
+  git add "$CARGO_TOML" Cargo.lock
   git commit -m "bump: v$NEW_VERSION"
   git tag "v$NEW_VERSION"
   green "Bumped to v$NEW_VERSION and tagged ✓"
@@ -122,7 +123,11 @@ elif ! semver_valid "$VERSION"; then
   gate_fail "Invalid semver in system/harness/Cargo.toml: '$VERSION' (expected X.Y.Z)"
 elif [ "$VERSION" = "$LATEST_TAG" ]; then
   COMMITS_SINCE=$(git rev-list "v$LATEST_TAG"..HEAD --count 2>/dev/null || echo "?")
-  gate_fail "Version $VERSION matches latest tag v$LATEST_TAG but there are $COMMITS_SINCE unpublished commit(s). Run: bash system/scripts/release.sh bump-version $(echo "$LATEST_TAG" | awk -F. '{print $1"."$2"."$3+1}')"
+  if [ "$COMMITS_SINCE" = "0" ]; then
+    green "  Tag v$VERSION at HEAD — ready to push ✓"
+  else
+    gate_fail "Version $VERSION matches latest tag v$LATEST_TAG but there are $COMMITS_SINCE unpublished commit(s). Run: bash system/scripts/release.sh bump-version $(echo "$LATEST_TAG" | awk -F. '{print $1"."$2"."$3+1}')"
+  fi
 elif ! semver_gt "$VERSION" "$LATEST_TAG"; then
   gate_fail "Version $VERSION is not greater than latest tag v$LATEST_TAG"
 else
@@ -131,23 +136,33 @@ fi
 
 # ── Gate 3: Docker E2E ──────────────────────────────────────────────────────
 bold "Gate 3: Docker E2E"
+E2E_OUTCOME="PASS"
 if $SKIP_E2E; then
+  E2E_OUTCOME="SKIPPED"
   red "  SKIPPED (--skip-e2e) — emergency bypass"
 else
   # Test suite 1: env resolution tests
   echo "  Running env resolution tests..."
-  if docker build -f tests/Dockerfile.env -t hex-env-test . >/dev/null 2>&1 && \
-     docker run --rm hex-env-test >/dev/null 2>&1; then
+  docker build -f tests/Dockerfile.env -t hex-env-test . >/dev/null 2>&1
+  BUILD1_EXIT=$?
+  if [ "$BUILD1_EXIT" -ne 0 ]; then
+    gate_fail "Docker E2E build failed (exit $BUILD1_EXIT): env resolution"
+    echo "  Re-run for details: docker build -f tests/Dockerfile.env -t hex-env-test ."
+  elif docker run --rm hex-env-test >/dev/null 2>&1; then
     green "  env resolution: PASS ✓"
   else
     gate_fail "env resolution tests failed"
-    echo "  Re-run for details: docker build -f tests/Dockerfile.env -t hex-env-test . && docker run --rm hex-env-test"
+    echo "  Re-run for details: docker run --rm hex-env-test"
   fi
 
   # Test suite 2: existing E2E regression
   echo "  Running regression suite..."
-  if docker build -f tests/Dockerfile -t hex-e2e-test . >/dev/null 2>&1 && \
-     docker run --rm hex-e2e-test >/dev/null 2>&1; then
+  docker build -f tests/Dockerfile -t hex-e2e-test . >/dev/null 2>&1
+  BUILD2_EXIT=$?
+  if [ "$BUILD2_EXIT" -ne 0 ]; then
+    gate_fail "Docker E2E build failed (exit $BUILD2_EXIT): regression suite"
+    echo "  Re-run for details: docker build -f tests/Dockerfile -t hex-e2e-test ."
+  elif docker run --rm hex-e2e-test >/dev/null 2>&1; then
     green "  regression suite: PASS ✓"
   else
     # Doctor failure in Docker is expected (no claude binary) — check if it's the only failure
@@ -210,6 +225,11 @@ fi
 bold "Gate 7: Commits to push"
 REMOTE_SHA=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
 if [ "$FULL_SHA" = "$REMOTE_SHA" ]; then
+  if ! $GATE_PASS; then
+    red ""
+    red "Pipeline BLOCKED — fix gate failures above before pushing."
+    exit 1
+  fi
   green "  Already up to date — nothing to push"
   exit 0
 fi
@@ -235,7 +255,7 @@ HEX_AGENT="${HEX_DIR:-$HOME/hex}/.hex/bin/hex-agent"
 if [ -x "$HEX_AGENT" ]; then
   "$HEX_AGENT" message hex-main sentinel \
     --subject "REVIEW REQUEST: hex-foundation $VERSION ($SHA)" \
-    --body "Security review. $FILE_COUNT files. Docker E2E: PASS. gitleaks: PASS." \
+    --body "Security review. $FILE_COUNT files. Docker E2E: $E2E_OUTCOME. gitleaks: PASS." \
     2>/dev/null && green "  Sentinel notified ✓" || echo "  Sentinel notify failed (non-blocking)"
 else
   echo "  hex-agent not found — skipping sentinel notify"
@@ -273,7 +293,7 @@ bold "Notify: Fleet"
 if [ -x "$HEX_AGENT" ]; then
   "$HEX_AGENT" message hex-main releaser \
     --subject "RELEASE: hex-foundation $VERSION ($SHA) pushed" \
-    --body "Docker E2E PASS. Sentinel notified. $FILE_COUNT files. Write release notes." \
+    --body "Docker E2E: $E2E_OUTCOME. Sentinel notified. $FILE_COUNT files. Write release notes." \
     2>/dev/null && green "  Releaser notified ✓" || true
 
   "$HEX_AGENT" message hex-main hex-ops \

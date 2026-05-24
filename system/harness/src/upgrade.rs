@@ -480,9 +480,11 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
         println!("  [OK] VERSIONS → HEX_FOUNDATION_VERSION=v{cargo_ver}");
     }
 
-    // Rebuild hex binary if version changed
+    // Rebuild hex binary if version or commit SHA changed
     let hex_dot_dir = hex_dir.join(".hex");
     let installed_bin = hex_dot_dir.join("bin/hex");
+    let installed_sha_file = hex_dot_dir.join("bin/hex.sha");
+
     let installed_ver = Command::new(&installed_bin)
         .arg("--version")
         .output()
@@ -493,12 +495,42 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
                 .and_then(|s| s.split_whitespace().nth(1).map(|v| v.to_string()))
         });
 
-    if installed_ver.as_deref() != Some(&cargo_ver) {
+    let installed_sha = fs::read_to_string(&installed_sha_file)
+        .ok()
+        .map(|s| s.trim().to_string());
+
+    let source_sha = Command::new("git")
+        .arg("-C")
+        .arg(source_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+
+    let version_mismatch = installed_ver.as_deref() != Some(&cargo_ver);
+    let sha_mismatch = source_sha.is_some() && installed_sha.as_deref() != source_sha.as_deref();
+
+    if version_mismatch || sha_mismatch {
         let harness_dst = hex_dot_dir.join("harness");
-        println!(
-            "  → hex binary version mismatch ({} → {cargo_ver}) — rebuilding...",
-            installed_ver.as_deref().unwrap_or("none")
-        );
+        let reason = if version_mismatch {
+            format!(
+                "version mismatch ({} → {cargo_ver})",
+                installed_ver.as_deref().unwrap_or("none")
+            )
+        } else {
+            format!(
+                "SHA mismatch ({} → {} at v{cargo_ver})",
+                installed_sha.as_deref().unwrap_or("none"),
+                source_sha.as_deref().unwrap_or("unknown")
+            )
+        };
+        println!("  → hex binary {reason} — rebuilding...");
         if let Err(e) = apply_sync(source_dir.join("system/harness").as_path(), &harness_dst, None) {
             eprintln!("  [WARN] Failed to sync harness source: {e}");
             return;
@@ -509,10 +541,24 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
             .status();
         match build_status {
             Ok(s) if s.success() => {
-                let release_bin = harness_dst.join("target/release/hex");
+                // Workspace root puts target/ one level above the package dir; fall back to
+                // package-local target/ for standalone (non-workspace) builds.
+                let workspace_bin = harness_dst
+                    .parent()
+                    .map(|p| p.join("target/release/hex"))
+                    .filter(|p| p.exists());
+                let package_bin = harness_dst.join("target/release/hex");
+                let release_bin = workspace_bin.unwrap_or(package_bin);
                 match atomic_install_binary(&release_bin, &installed_bin) {
                     Ok(()) => {
                         println!("  [OK] hex binary rebuilt and swapped (atomic): v{cargo_ver}");
+                        if let Some(ref sha) = source_sha {
+                            let sha_tmp = installed_sha_file.with_extension("tmp");
+                            if fs::write(&sha_tmp, sha).is_ok() {
+                                let _ = fs::rename(&sha_tmp, &installed_sha_file);
+                                println!("  → Recorded installed SHA: {}...", &sha[..sha.len().min(8)]);
+                            }
+                        }
                         restart_events_daemon();
                     }
                     Err(e) => { eprintln!("  [FAIL] atomic binary install failed: {e}"); return; }
@@ -523,7 +569,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
             }
         }
     } else {
-        println!("  [OK] hex binary already at v{cargo_ver} — no rebuild needed");
+        println!("  [OK] hex binary already at v{cargo_ver} (SHA matches) — no rebuild needed");
     }
 }
 
