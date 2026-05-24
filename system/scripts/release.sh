@@ -65,16 +65,18 @@ if [[ "${1:-}" == "bump-version" ]]; then
     exit 1
   fi
   CARGO_TOML="system/harness/Cargo.toml"
+  VERSION_TXT="system/version.txt"
   CURRENT_VER=$(grep -E '^version' "$CARGO_TOML" | head -1 | cut -d'"' -f2)
   bold "Bumping $CURRENT_VER → $NEW_VERSION"
   sed -i '' "s/^version = \"$CURRENT_VER\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
+  echo "$NEW_VERSION" > "$VERSION_TXT"
   bold "Building harness (cargo build --release -p hex from workspace root)..."
   if ! cargo build --release -p hex 2>&1; then
-    red "Build failed — reverting Cargo.toml"
-    git checkout "$CARGO_TOML"
+    red "Build failed — reverting Cargo.toml + version.txt"
+    git checkout "$CARGO_TOML" "$VERSION_TXT"
     exit 1
   fi
-  git add "$CARGO_TOML" Cargo.lock
+  git add "$CARGO_TOML" "$VERSION_TXT" Cargo.lock
   git commit -m "bump: v$NEW_VERSION"
   git tag "v$NEW_VERSION"
   green "Bumped to v$NEW_VERSION and tagged ✓"

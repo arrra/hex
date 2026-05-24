@@ -1,5 +1,8 @@
-# Stage 1: Build hex binary from source (rusqlite "bundled" needs gcc, present in rust:slim)
+# Stage 1: Build hex binary from source (rusqlite "bundled" needs gcc, present in rust:slim;
+# openssl-sys needs pkg-config + libssl-dev, NOT in rust:slim by default)
 FROM rust:1-slim AS hex-builder
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    pkg-config libssl-dev g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
 COPY system/harness/ .
 RUN cargo build 2>&1
