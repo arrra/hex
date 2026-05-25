@@ -1,0 +1,34 @@
+name: c3-orphan-scan-daily
+description: >
+  C3 / M1 — run the orphan-detection collector daily. The Python
+  script scans hex-events policies, hex project charters, the BOI v2
+  snapshot DB, and the boi repo's specs/ dir for broken refs and
+  emits one hex.c3.orphan.scan event per run. Failures surface via
+  the on_failure handler (S6: no quiet failures).
+
+provides:
+  events:
+    - hex.c3.orphan.scan
+    - hex.policy.c3-orphan-scan-daily.failed
+
+requires:
+  events:
+    - timer.tick.daily
+
+rules:
+  - name: c3-orphan-scan-daily
+    trigger:
+      event: timer.tick.daily
+    rate_limit: 1/1d
+    actions:
+      - type: shell
+        command: |
+          export PATH="/opt/homebrew/bin:/usr/bin:/bin:$PATH"
+          export HEX_DIR="${HEX_DIR:-$HOME/hex}"
+          export HEX_ROOT="${HEX_ROOT:-$HEX_DIR}"
+          python3 "$HEX_DIR/.hex/scripts/c3-orphan-scan.py"
+        timeout: 300
+        on_failure:
+          - type: emit
+            event: hex.policy.c3-orphan-scan-daily.failed
+            source: "hex:c3-orphan-scan-daily"
