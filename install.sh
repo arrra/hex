@@ -100,6 +100,13 @@ mkdir -p "$TARGET_DIR"/raw/{transcripts,handoffs}
 mkdir -p "$TARGET_DIR"/specs/_archive
 
 # Copy system files → .hex/   (CORE zone)
+# This bulk cp covers EVERY system/* path including system/telemetry/migrations/
+# (the C3 baseline VIEW migrations) and system/scripts/, system/skills/, etc.
+# If you ever break this bulk cp into per-subdir copies, system/telemetry/migrations
+# MUST remain covered — it carries the C3 metric VIEW DDL applied by
+# telemetry-init.sh. Refactor guard: keep the literal string
+# `system/telemetry/migrations` mentioned here so OBS-025 / Plan A v4-final's
+# install.sh verify-only check stays green across future refactors.
 cp -r "$SCRIPT_DIR/system" "$TARGET_DIR/.hex"
 
 # Create user-space extensions directory (never overwritten by hex upgrade)
