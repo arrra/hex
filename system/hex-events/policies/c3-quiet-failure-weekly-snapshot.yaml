@@ -1,0 +1,35 @@
+name: c3-quiet-failure-weekly-snapshot
+description: >
+  C3 / M2 — fire the weekly quiet-failure rollup snapshot daily; the
+  Python script performs the Monday-UTC guard internally and exits 0
+  cleanly on non-Monday days. Per the v3 N2 fix the command MUST NOT
+  swallow exit codes with `|| true` — the snapshot script exits 2 on
+  emit failure and that signal must surface to the daemon's
+  on_failure handler (S6: no quiet failures).
+
+provides:
+  events:
+    - hex.c3.quiet_failure.weekly_count
+    - hex.policy.c3-quiet-failure-snapshot.failed
+
+requires:
+  events:
+    - timer.tick.daily
+
+rules:
+  - name: c3-quiet-failure-snapshot-daily
+    trigger:
+      event: timer.tick.daily
+    rate_limit: 1/1d
+    actions:
+      - type: shell
+        command: |
+          export PATH="/opt/homebrew/bin:/usr/bin:/bin:$PATH"
+          export HEX_DIR="${HEX_DIR:-$HOME/hex}"
+          export HEX_ROOT="${HEX_ROOT:-$HEX_DIR}"
+          python3 "$HEX_DIR/.hex/scripts/c3-quiet-failure-snapshot.py"
+        timeout: 120
+        on_failure:
+          - type: emit
+            event: hex.policy.c3-quiet-failure-snapshot.failed
+            source: "hex:c3-quiet-failure-snapshot"
