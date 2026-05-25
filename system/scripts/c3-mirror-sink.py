@@ -40,11 +40,13 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import sqlite3
+import subprocess
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Iterable, List, Optional, Tuple
+from typing import Any, Iterable, List, Optional, Tuple
 
 
 # ---------------------------------------------------------------------------
@@ -337,17 +339,478 @@ def read_watermark(con: sqlite3.Connection) -> int:
 
 
 # ---------------------------------------------------------------------------
-# __main__ stub
+# Producer loop — emit JSONL line per action_log row past the watermark
+# (Task Tr92rrn58 / §Task 6 — AMENDED contract conformance)
 # ---------------------------------------------------------------------------
-# The real producer loop is implemented by Task Tr92rrn58 (§Task 6). Until
-# that lands, executing this file as a script is a no-op that just announces
-# the helper module is installed. Importing the module (the unit tests do
-# this) never triggers this block.
 
-if __name__ == "__main__":  # pragma: no cover
+HEX_C3_EVENTS_DB_ENV = "HEX_C3_EVENTS_DB"
+DEFAULT_EVENTS_DB = Path.home() / ".hex-events" / "events.db"
+
+# Substrings (case-insensitive) that trigger conservative key-substring
+# redaction on nested dict keys. We err on the side of redacting too much
+# rather than too little — S6 / Standing Order #1.
+_REDACT_KEY_MARKERS = ("secret", "private")
+_REDACT_PLACEHOLDER = "[REDACTED]"
+
+# Inventory: every mirror-* policy that lives under ~/.hex-events/policies/
+# is recognised. Anything else means the operator landed an out-of-band
+# mirror producer we have NOT audited, and the producer halts so the new
+# pipeline is reviewed (test 6.13). Matches the v0.28 inventory.
+_RECOGNISED_MIRROR_POLICIES = frozenset({
+    "events-telemetry-mirror.yaml",
+    "boi-telemetry-mirror.yaml",
+    "c3-mirror-sink.yaml",
+})
+
+
+class _CorruptRecordError(Exception):
+    """Raised internally when action_detail or action_result JSON is corrupt.
+
+    Caught inside the per-row loop; the row is replaced by a degraded record
+    via ``_corrupt_record`` and the watermark still advances so the producer
+    never wedges on a single bad row (amended contract §4.5).
+    """
+
+
+# --- record-building helpers ------------------------------------------------
+
+_TS_RE_NAIVE = re.compile(r"^\d{4}-\d{2}-\d{2}[ T]\d{2}:\d{2}:\d{2}$")
+
+
+def _normalize_ts(executed_at: Optional[str]) -> str:
+    """Return ``executed_at`` reshaped to ``YYYY-MM-DDTHH:MM:SSZ``.
+
+    SQLite's ``datetime('now')`` default emits ``YYYY-MM-DD HH:MM:SS`` (no
+    timezone, space separator). The amended contract requires second
+    precision + trailing ``Z``. We never pad microseconds, never carry a
+    ``+00:00`` suffix. Anything we cannot parse falls back to the current
+    UTC second — a LOUD fallback rather than a crash, since dropping a row
+    over a malformed timestamp would be worse than recording it with ``now``.
+    """
+    if not executed_at:
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    raw = executed_at.strip()
+    if _TS_RE_NAIVE.match(raw):
+        return raw.replace(" ", "T") + "Z"
+    try:
+        if raw.endswith("Z"):
+            dt = datetime.fromisoformat(raw[:-1] + "+00:00")
+        else:
+            dt = datetime.fromisoformat(raw)
+    except (ValueError, AttributeError):
+        print(
+            f"[c3-mirror-sink] WARN: could not parse executed_at={raw!r}; "
+            "falling back to current UTC second.",
+            file=sys.stderr,
+        )
+        return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    if dt.tzinfo is None:
+        dt = dt.replace(tzinfo=timezone.utc)
+    else:
+        dt = dt.astimezone(timezone.utc)
+    return dt.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _redact(value: Any) -> Any:
+    """Recursively redact dict values whose keys contain redact markers.
+
+    Conservative key-substring match — any nested key whose lowercased name
+    contains ``secret`` or ``private`` has its VALUE replaced by
+    ``[REDACTED]``. Non-matching keys recurse normally so deep structures
+    are still walked. Lists and scalars pass through unchanged.
+    """
+    if isinstance(value, dict):
+        out = {}
+        for k, v in value.items():
+            key_lower = k.lower() if isinstance(k, str) else ""
+            if any(marker in key_lower for marker in _REDACT_KEY_MARKERS):
+                out[k] = _REDACT_PLACEHOLDER
+            else:
+                out[k] = _redact(v)
+        return out
+    if isinstance(value, list):
+        return [_redact(v) for v in value]
+    return value
+
+
+def _safe_load_json(blob: Optional[str]) -> Any:
+    """Parse a JSON blob, returning a sentinel on corrupt input.
+
+    ``None``/empty → ``None``. Valid JSON → the parsed value. Invalid JSON →
+    raises ``_CorruptRecordError`` so the caller can decide whether the row
+    should be degraded (action_detail/action_result) or fall back to the raw
+    string (event payload).
+    """
+    if blob is None:
+        return None
+    if isinstance(blob, (dict, list)):
+        return blob
+    if not isinstance(blob, str):
+        return blob
+    if not blob.strip():
+        return None
+    try:
+        return json.loads(blob)
+    except (json.JSONDecodeError, TypeError) as exc:
+        raise _CorruptRecordError(str(exc))
+
+
+def _extract_returncode(result: Any) -> Optional[int]:
+    """Pull a numeric returncode out of an action_result dict (best-effort)."""
+    if not isinstance(result, dict):
+        return None
+    rc = result.get("returncode")
+    if isinstance(rc, bool):
+        return None
+    if isinstance(rc, int):
+        return rc
+    return None
+
+
+def _now_ts() -> str:
+    """Current UTC second, formatted ``YYYY-MM-DDTHH:MM:SSZ`` (amended §3.1)."""
+    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+
+
+def _build_record(row: sqlite3.Row, mirror_id: int) -> dict:
+    """Build a JSONL record matching the amended contract §3.1.
+
+    ``ts`` is the WRITE TIME (when the mirror sink emits the line), at second
+    precision UTC with trailing ``Z`` — the producer's ordering authority
+    alongside ``mirror_id``. The row's own ``action_log.executed_at`` is
+    preserved separately under ``action_executed_at`` (normalised to the same
+    second-Z shape) so downstream consumers can recover the original action
+    timing.
+
+    Corrupt ``action_detail`` or ``action_result`` JSON raises
+    ``_CorruptRecordError`` so ``main()`` can swap in ``_corrupt_record``
+    while still advancing the watermark.
+    """
+    detail = _safe_load_json(row["action_detail"])
+    if isinstance(detail, (dict, list)):
+        detail = _redact(detail)
+
+    try:
+        result = _safe_load_json(row["action_result"])
+    except _CorruptRecordError:
+        result = None
+        result_redacted = None
+        returncode = None
+    else:
+        returncode = _extract_returncode(result)
+        if isinstance(result, (dict, list)):
+            result_redacted = _redact(result)
+        else:
+            result_redacted = result
+
+    # event_type / payload come from the LEFT JOIN to events. If the events
+    # row has been pruned the join columns are NULL — preserve as null.
+    event_type = row["event_type"] if "event_type" in row.keys() else None
+    try:
+        payload = _safe_load_json(row["payload"]) if "payload" in row.keys() else None
+    except _CorruptRecordError:
+        # Payload corruption shouldn't crash the row; fall back to raw text.
+        payload = row["payload"]
+    if isinstance(payload, (dict, list)):
+        payload = _redact(payload)
+
+    return {
+        "mirror_id": mirror_id,
+        "ts": _now_ts(),
+        "action_executed_at": _normalize_ts(row["executed_at"]),
+        "event_id": row["event_id"],
+        "event_type": event_type,
+        "payload": payload,
+        "recipe": row["recipe"],
+        "action_type": row["action_type"],
+        "action_detail": detail,
+        "status": row["status"],
+        "outcome": {
+            "error_class": classify_error(
+                row["status"], row["error_message"], returncode
+            ),
+            "error_message": row["error_message"],
+            "action_result": result_redacted,
+        },
+    }
+
+
+def _corrupt_record(row: sqlite3.Row, mirror_id: int, reason: str) -> dict:
+    """Build a degraded record for rows whose JSON blobs would not parse.
+
+    Per amended contract §4.5: never wedge on a single bad row — emit a
+    placeholder, mark ``degraded=True``, set ``outcome.error_class='unknown'``
+    so downstream consumers can audit, then advance the watermark.
+    """
+    return {
+        "mirror_id": mirror_id,
+        "ts": _now_ts(),
+        "action_executed_at": _normalize_ts(row["executed_at"]),
+        "event_id": row["event_id"],
+        "event_type": row["event_type"] if "event_type" in row.keys() else None,
+        "payload": None,
+        "recipe": row["recipe"],
+        "action_type": row["action_type"],
+        "action_detail": None,
+        "status": row["status"],
+        "degraded": True,
+        "degraded_reason": reason,
+        "outcome": {
+            "error_class": ERROR_CLASS_UNKNOWN,
+            "error_message": row["error_message"],
+            "action_result": None,
+        },
+    }
+
+
+# --- IO helpers -------------------------------------------------------------
+
+
+def _events_db_path() -> Path:
+    override = os.environ.get(HEX_C3_EVENTS_DB_ENV)
+    if override:
+        return Path(override)
+    return DEFAULT_EVENTS_DB
+
+
+def _emit_failure_event(reason: str) -> None:
+    """Best-effort emit ``hex.policy.c3-mirror-sink.failed`` (S6 loud-fail).
+
+    Always logs ``reason`` to stderr; ALSO tries to invoke hex-emit.sh if
+    available so downstream alerting policies fire. Swallowing exceptions
+    here is intentional — failure-emission must never mask the original
+    fault, but the original error message ALWAYS makes it to stderr.
+    """
     print(
-        "c3-mirror-sink: T6_0 helper module installed. main() producer loop "
-        "lands in Task Tr92rrn58 (§Task 6). No-op exit.",
+        f"[c3-mirror-sink][POLICY FAIL] hex.policy.c3-mirror-sink.failed: {reason}",
         file=sys.stderr,
     )
-    sys.exit(0)
+    hex_dir = os.environ.get("HEX_DIR")
+    if not hex_dir:
+        return
+    emit_script = Path(hex_dir) / ".hex" / "bin" / "hex-emit.sh"
+    if not emit_script.is_file():
+        return
+    try:
+        subprocess.run(
+            [
+                "bash",
+                str(emit_script),
+                "hex.policy.c3-mirror-sink.failed",
+                json.dumps({"reason": reason}),
+                "c3-mirror-sink",
+            ],
+            check=False,
+            timeout=5,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
+    except Exception:  # pragma: no cover — best effort
+        pass
+
+
+def _advance_watermark(mirror_dir: Path, value: int) -> None:
+    """Atomically replace the watermark file with ``value``."""
+    wm_path = mirror_dir / ".watermark"
+    tmp_path = mirror_dir / ".watermark.tmp"
+    tmp_path.write_text(str(int(value)), encoding="utf-8")
+    os.replace(tmp_path, wm_path)
+
+
+def _assert_mirror_inventory() -> None:
+    """Halt if an unrecognised mirror-* policy is present (test 6.13).
+
+    Defence-in-depth: ensures we never deploy a second mirror producer that
+    silently fights with this one. The check is OPT-IN — only runs when
+    ``HEX_C3_MIRROR_INVENTORY_DIR`` is set OR when the daemon's standard
+    policy dir exists. Missing dir is treated as 'no policies to audit'.
+    """
+    inv_dir_env = os.environ.get("HEX_C3_MIRROR_INVENTORY_DIR")
+    if inv_dir_env:
+        inv_dir = Path(inv_dir_env)
+    else:
+        inv_dir = Path.home() / ".hex-events" / "policies"
+    if not inv_dir.is_dir():
+        return
+    unknown = []
+    for path in sorted(inv_dir.glob("*mirror*.yaml")):
+        if path.name not in _RECOGNISED_MIRROR_POLICIES:
+            unknown.append(path.name)
+    if unknown:
+        msg = (
+            "unrecognised mirror policy in "
+            f"{inv_dir}: {sorted(unknown)!r}. Audit and either delete the "
+            "extra producer or add it to _RECOGNISED_MIRROR_POLICIES."
+        )
+        print(f"[c3-mirror-sink][INVENTORY] {msg}", file=sys.stderr)
+        _emit_failure_event(msg)
+        sys.exit(1)
+
+
+# --- main() -----------------------------------------------------------------
+
+
+def main() -> int:
+    """Mirror new ``action_log`` rows past the watermark into JSONL.
+
+    Returns 0 on success (including the no-new-rows case). On any S6
+    loud-fail path the function calls ``sys.exit(1)`` *after* emitting
+    ``hex.policy.c3-mirror-sink.failed`` so policy alerting fires.
+    """
+    _assert_mirror_inventory()
+
+    db_path = _events_db_path()
+    if not db_path.is_file():
+        _emit_failure_event(f"events.db not found at {db_path}")
+        sys.exit(1)
+
+    mirror_dir = _mirror_dir()
+    try:
+        mirror_dir.mkdir(parents=True, exist_ok=True)
+    except OSError as exc:
+        _emit_failure_event(f"mirror dir mkdir failed at {mirror_dir}: {exc}")
+        sys.exit(1)
+
+    try:
+        con = sqlite3.connect(f"file:{db_path}?mode=ro", uri=True)
+        con.row_factory = sqlite3.Row
+    except sqlite3.Error as exc:
+        _emit_failure_event(f"events.db open failed: {exc}")
+        sys.exit(1)
+
+    try:
+        # Schema-drift assertion comes first — anything beyond this point
+        # assumes V0.29 action_log shape (amended contract §3.2).
+        assert_action_log_schema(con)
+
+        wm_file_existed = (mirror_dir / ".watermark").is_file()
+        try:
+            watermark = read_watermark(con)
+        except sqlite3.Error as exc:
+            _emit_failure_event(f"read_watermark failed: {exc}")
+            sys.exit(1)
+
+        # Persist the cold-start watermark immediately so subsequent runs do
+        # NOT re-derive it from MAX(action_log.id) — that would silently skip
+        # rows that arrived between cold-start runs (B4: forward-only is
+        # advisory, not "skip everything every wake").
+        if not wm_file_existed:
+            try:
+                _advance_watermark(mirror_dir, watermark)
+            except OSError as exc:
+                _emit_failure_event(
+                    f"cold-start watermark persist failed: {exc}"
+                )
+                sys.exit(1)
+
+        # Probe for an events table — fixtures and rare deployments may have
+        # action_log without events. Without the table we still emit rows but
+        # the event_type/payload fields are null.
+        try:
+            probe = con.cursor()
+            probe.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='events'"
+            )
+            has_events_table = probe.fetchone() is not None
+        except sqlite3.Error as exc:
+            _emit_failure_event(f"events-table probe failed: {exc}")
+            sys.exit(1)
+
+        try:
+            cur = con.cursor()
+            if has_events_table:
+                cur.execute(
+                    "SELECT a.id AS id, a.event_id AS event_id, "
+                    " a.recipe AS recipe, a.action_type AS action_type, "
+                    " a.action_detail AS action_detail, a.status AS status, "
+                    " a.error_message AS error_message, "
+                    " a.executed_at AS executed_at, "
+                    " a.action_result AS action_result, "
+                    " e.event_type AS event_type, e.payload AS payload "
+                    "FROM action_log a LEFT JOIN events e ON e.id = a.event_id "
+                    "WHERE a.id > ? ORDER BY a.id ASC",
+                    (watermark,),
+                )
+            else:
+                cur.execute(
+                    "SELECT id, event_id, recipe, action_type, action_detail, "
+                    " status, error_message, executed_at, action_result, "
+                    " NULL AS event_type, NULL AS payload "
+                    "FROM action_log WHERE id > ? ORDER BY id ASC",
+                    (watermark,),
+                )
+            rows = cur.fetchall()
+        except sqlite3.Error as exc:
+            _emit_failure_event(f"action_log query failed: {exc}")
+            sys.exit(1)
+
+        if not rows:
+            return 0
+
+        new_watermark = watermark
+        open_files: dict[Path, Any] = {}
+        try:
+            for row in rows:
+                mirror_id = int(row["id"])
+                try:
+                    record = _build_record(row, mirror_id)
+                except _CorruptRecordError as exc:
+                    record = _corrupt_record(row, mirror_id, reason=str(exc))
+
+                # Day-boundary rollover: each row goes to its OWN UTC-date
+                # file, derived from the row's ts (which honours the amended
+                # second-precision Z shape). This means a long backlog
+                # spanning days produces one file per UTC day per §4.3.
+                day = record["ts"][:10]
+                target_path = mirror_dir / f"{day}.jsonl"
+
+                if target_path not in open_files:
+                    try:
+                        open_files[target_path] = target_path.open(
+                            "a", encoding="utf-8"
+                        )
+                    except OSError as exc:
+                        # Disk-write error: close cleanly and exit LOUD —
+                        # the watermark is NOT advanced so the next run
+                        # retries this row (test 6.5).
+                        _emit_failure_event(
+                            f"mirror file open failed at {target_path}: {exc}"
+                        )
+                        sys.exit(1)
+
+                line = json.dumps(record, ensure_ascii=False, sort_keys=True)
+                try:
+                    fh = open_files[target_path]
+                    fh.write(line + "\n")
+                    fh.flush()
+                except OSError as exc:
+                    _emit_failure_event(
+                        f"mirror file write failed at {target_path}: {exc}"
+                    )
+                    sys.exit(1)
+
+                new_watermark = mirror_id
+        finally:
+            for fh in open_files.values():
+                try:
+                    fh.close()
+                except Exception:  # pragma: no cover — best effort close
+                    pass
+
+        if new_watermark != watermark:
+            try:
+                _advance_watermark(mirror_dir, new_watermark)
+            except OSError as exc:
+                _emit_failure_event(f"watermark advance failed: {exc}")
+                sys.exit(1)
+    finally:
+        try:
+            con.close()
+        except Exception:  # pragma: no cover
+            pass
+
+    return 0
+
+
+if __name__ == "__main__":  # pragma: no cover
+    sys.exit(main() or 0)
