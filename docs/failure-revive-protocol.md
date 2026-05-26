@@ -57,17 +57,17 @@ boi.spec.failed (3rd+ same kind/title in 24h)
 
 ## Agent Responsibilities
 
-| Agent | Role |
-|-------|------|
+The protocol assumes the deployment defines an `owner agent` for each failure axis. The table below is **illustrative**, drawn from one reference deployment — replace the rows with the agents that exist in your fleet.
+
+| Agent (example) | Role |
+|-----------------|------|
 | **hex-autonomy** | Default owner for un-attributed specs, Context Routing failures |
-| **brand** | Failures tagged brand initiative or title mentions brand/lab |
-| **career** | Failures touching career/job/profile initiatives |
-| **hex-ops** | Infrastructure/pipeline failures |
-| **fleet-coordinator** | Multi-agent coordination failures |
-| **releaser** | Release/deploy failures |
+| **&lt;your domain agents&gt;** | Failures tagged with a domain initiative (one row per agent) |
+| **&lt;your ops agent&gt;** | Infrastructure/pipeline failures |
+| **&lt;your releaser agent&gt;** | Release/deploy failures |
 | **boi-optimizer** | BOI meta-issues + three-strike pattern analysis |
 
-All these agents have a `failure-triage` charter responsibility: on inbox message "Failed spec: ...", read brief, decide, act. Budget: max 3 revive attempts per failure axis.
+All owner agents need a `failure-triage` charter responsibility: on inbox message "Failed spec: ...", read brief, decide, act. Budget: max 3 revive attempts per failure axis.
 
 ---
 
