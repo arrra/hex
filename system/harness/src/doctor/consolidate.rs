@@ -128,7 +128,7 @@ fn chrono_utc_now() -> String {
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
 }
 
-fn days_to_ymd(mut days: u64) -> (u64, u64, u64) {
+fn days_to_ymd(days: u64) -> (u64, u64, u64) {
     // Algorithm: civil calendar from days-since-epoch (1970-01-01)
     let z = days + 719468;
     let era = z / 146097;
