@@ -15,6 +15,7 @@ All notable changes to hex-foundation will be documented in this file.
 
 ### Fixed
 - **`install.sh` refactor guard** (`system/scripts/install.sh`): adds `system/telemetry/migrations/` to the bulk `system/` copy so C3 VIEW migrations land in the install target.
+- **`hex-emit.sh` HEX_ROOT export** (`system/scripts/hex-emit.sh`): `HEX_ROOT` was set but not exported, so child processes (including the Python telemetry emitter) could not see it. Changed to `export HEX_ROOT=...`. Synced from S1 (`mrap-hex:.hex/bin/hex-emit.sh`).
 - **Sanitize false-positives** (`system/scripts/c3-orphan-scan.py`, `system/scripts/c3-audit-completeness.py`): doc-comment references to path patterns updated to avoid sanitize-check false positives.
 
 ## [2026-05-24] — Docker OOM fix for memory indexing (v0.19.8)
