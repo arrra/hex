@@ -75,6 +75,7 @@ Companion systems installed alongside:
 - **Claude Code hooks** — `install.sh` writes `PreToolUse`, `PostToolUse`, `Stop`, and `SessionStart` hooks into `.claude/settings.json` automatically. No manual hook setup required.
 - **Shell completions** — `install.sh` and `upgrade.sh` automatically install shell completions for your current shell (zsh, bash, or fish) after the binary is in place. Idempotent: re-running produces no diff. See [Shell completions](#shell-completions) for manual setup or bespoke paths.
 - **Default event policies** — a starter set of hex-events policies is deployed to `~/.hex-events/policies/` during install, enabling out-of-the-box reactivity (agent lifecycle, scheduler, BOI completion events).
+- **C3 observability scripts** — five baseline instrumentation scripts (`c3-mirror-sink`, `c3-audit-completeness`, `c3-ttd-tracker`, `c3-orphan-scan`, `c3-quiet-failure-snapshot`) with corresponding hex-events policies. Tracks agent wake completion ratios, time-to-detect for quiet failures, orphaned audit records, and drains `action_log` to a queryable JSONL mirror. SQL migrations at `system/telemetry/migrations/` define the C3 VIEWs.
 
 ---
 

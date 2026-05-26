@@ -9,7 +9,7 @@ the per-(agent, date) completeness ratio:
 Sources (per plan §Task 3.1):
 
   1. ``$HEX_DIR/.hex/audit/actions.jsonl`` — the main hex audit stream.
-  2. ``$HEX_DIR/.claude/worktrees/agent-*/.hex/audit/actions.jsonl`` —
+  2. ``$HEX_DIR/<runtime>/worktrees/agent-*/.hex/audit/actions.jsonl`` —
      per-agent worktree mirrors (one file per active worktree).
 
 Timestamps:
@@ -180,7 +180,7 @@ def summarize_completeness(records: Iterable[Dict[str, Any]]) -> List[Dict[str, 
 def _resolve_hex_root() -> Path:
     root = os.environ.get("HEX_ROOT") or os.environ.get("HEX_DIR")
     if not root:
-        # Default to ~/hex if neither var is set; the live policy exports
+        # Default to resolved hex dir if neither var is set; the live policy exports
         # HEX_DIR so this branch mostly serves tests that don't set env.
         return Path.home() / "hex"
     return Path(root)

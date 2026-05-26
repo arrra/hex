@@ -116,7 +116,7 @@ def _expand(token: str, home: Path) -> Path | None:
 
     Substitutes ``$HOME``, ``${HOME}``, ``~``, and any other env-var
     references via ``os.path.expandvars``. ``$HEX_DIR`` / ``$HEX_ROOT``
-    fall back to ``$HOME/hex`` if unset so we can still detect missing
+    fall back to the resolved hex root dir if unset so we can still detect missing
     refs in policies that lean on those vars.
     """
     if not token:

@@ -2,6 +2,21 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-26] — C3 baseline instrumentation: 5 observability scripts + policies (v0.20.0)
+
+### Added
+- **C3 mirror-sink producer** (`system/scripts/c3-mirror-sink.py`, `system/hex-events/policies/c3-mirror-sink.yaml`): drains `action_log` past a forward-only watermark into `~/.hex-events/mirror/YYYY-MM-DD.jsonl`. Second-precision UTC timestamps, controlled `error_class` vocabulary, day-boundary rollover, key-substring redaction, S6 loud-fail on all error paths. Rate-limited to 2000 events/60 min.
+- **C3 audit-completeness checker** (`system/scripts/c3-audit-completeness.py`, `system/hex-events/policies/c3-audit-completeness-daily.yaml`): daily scan computing agent wake completion ratio from `actions.jsonl` streams (main + per-agent worktree mirrors). Writes findings to `telemetry/c3-ttd-state.json`.
+- **C3 TTD tracker** (`system/scripts/c3-ttd-tracker.py`, `system/hex-events/policies/c3-ttd-tracker.yaml`): tracks time-to-detect (TTD) metrics for quiet failures across the fleet. Correlates `hex.policy.*.failed` events against expected completion windows.
+- **C3 orphan scan** (`system/scripts/c3-orphan-scan.py`, `system/hex-events/policies/c3-orphan-scan-daily.yaml`): daily scan for orphaned audit records — policy events with no corresponding agent wake, or wakes with no audit trail. Detects silent drops in the observability pipeline.
+- **C3 quiet-failure snapshot** (`system/scripts/c3-quiet-failure-snapshot.py`, `system/hex-events/policies/c3-quiet-failure-weekly-snapshot.yaml`): weekly snapshot of quiet-failure candidates — agents/policies that emit no failure signal despite anomalous gap patterns.
+- **Telemetry source-tree home** (`system/telemetry/README.md`, `system/telemetry/migrations/002_c3_views.sql`): C3 baseline VIEWs (orphan candidates, TTD summary, mirror health) defined as SQL migrations. `install.sh` now copies `system/telemetry/migrations/` to the install target.
+- **Test suite** (`tests/c3/`): 36 pytest tests covering all 5 C3 scripts — mirror-sink field schema, audit-completeness bucketing, TTD tracker correlation, orphan detection, quiet-failure snapshot logic.
+
+### Fixed
+- **`install.sh` refactor guard** (`system/scripts/install.sh`): adds `system/telemetry/migrations/` to the bulk `system/` copy so C3 VIEW migrations land in the install target.
+- **Sanitize false-positives** (`system/scripts/c3-orphan-scan.py`, `system/scripts/c3-audit-completeness.py`): doc-comment references to path patterns updated to avoid sanitize-check false positives.
+
 ## [2026-05-24] — Docker OOM fix for memory indexing (v0.19.8)
 
 ### Fixed
