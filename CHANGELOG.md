@@ -2,6 +2,15 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-05-27] — OBS-027 fix: action_log writes restored after 11-day silent drop (v0.20.1)
+
+### Fixed
+- **`system/harness/src/events.rs`**: 9 days of `action_log` INSERTs were silently dropped (2026-05-16 to 2026-05-27) because the Rust daemon's writer used new column names (`policy_name`, `rule_name`, `error`, `created_at`) against a Python-era table schema (`recipe`, `error_message`, `executed_at`). The `CREATE TABLE IF NOT EXISTS` was a no-op on existing DBs and the 4 `db.execute()` call sites used `let _ =`, swallowing the column-mismatch error.
+  - Added `ALTER TABLE` migrations in `init_schema()` to rename Python-era columns to the Rust schema (`recipe` → `policy_name`, `error_message` → `error`, `executed_at` → `created_at`, plus adding `rule_name`). Renames are idempotent.
+  - Added startup column-fingerprint check that fails loud (`return Err`) if any required column is missing — catches future schema drift before it silently corrupts the audit stream.
+  - Converted 4 `let _ = db.execute()` call sites (shell, emit, notify, update-file action types) to `if let Err(e) = ... { eprintln!(...) }` per Standing Order S6 (no quiet failures).
+  - Verified: `action_log.id` went from frozen at 347265 (2026-05-16 20:35:04) to actively writing again (347304 within seconds of migration completing).
+
 ## [2026-05-26] — C3 baseline instrumentation: 5 observability scripts + policies (v0.20.0)
 
 ### Added

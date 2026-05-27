@@ -1142,12 +1142,21 @@ impl EventEngine {
                 let succeeded = status == "ok";
                 match self.db.lock() {
                     Ok(db) => {
-                        let _ = db.execute(
+                        if let Err(e) = db.execute(
                             "INSERT INTO action_log \
                              (event_id, policy_name, rule_name, action_type, status, error, created_at) \
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                             params![event_id, policy_name, rule_name, "shell", status, error, now],
-                        );
+                        ) {
+                            // S6 — no quiet failures. The action ran; if we
+                            // can't audit it, scream so the operator notices.
+                            // Pre-OBS-027 this was `let _ =` and silently
+                            // dropped writes for 9 days.
+                            eprintln!(
+                                "events: action_log INSERT failed (shell): {e} \
+                                 policy={policy_name} rule={rule_name} event_id={event_id}"
+                            );
+                        }
                     }
                     Err(e) => eprintln!("events: db lock poisoned in execute_action(shell): {e}"),
                 }
@@ -1203,12 +1212,17 @@ impl EventEngine {
                 };
                 match self.db.lock() {
                     Ok(db) => {
-                        let _ = db.execute(
+                        if let Err(e) = db.execute(
                             "INSERT INTO action_log \
                              (event_id, policy_name, rule_name, action_type, status, error, created_at) \
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                             params![event_id, policy_name, rule_name, "emit", status, error, now],
-                        );
+                        ) {
+                            eprintln!(
+                                "events: action_log INSERT failed (emit): {e} \
+                                 policy={policy_name} rule={rule_name} event_id={event_id}"
+                            );
+                        }
                     }
                     Err(e) => eprintln!("events: db lock poisoned in execute_action(emit): {e}"),
                 }
@@ -1226,14 +1240,19 @@ impl EventEngine {
                 };
                 match self.db.lock() {
                     Ok(db) => {
-                        let _ = db.execute(
+                        if let Err(e) = db.execute(
                             "INSERT INTO action_log \
                              (event_id, policy_name, rule_name, action_type, status, error, created_at) \
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
                             params![
                                 event_id, policy_name, rule_name, "notify", status, error, now
                             ],
-                        );
+                        ) {
+                            eprintln!(
+                                "events: action_log INSERT failed (notify): {e} \
+                                 policy={policy_name} rule={rule_name} event_id={event_id}"
+                            );
+                        }
                     }
                     Err(e) => eprintln!("events: db lock poisoned in execute_action(notify): {e}"),
                 }
@@ -1275,7 +1294,7 @@ impl EventEngine {
                 };
                 match self.db.lock() {
                     Ok(db) => {
-                        let _ = db.execute(
+                        if let Err(e) = db.execute(
                             "INSERT INTO action_log \
                              (event_id, policy_name, rule_name, action_type, status, error, created_at) \
                              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
@@ -1288,7 +1307,12 @@ impl EventEngine {
                                 error,
                                 now
                             ],
-                        );
+                        ) {
+                            eprintln!(
+                                "events: action_log INSERT failed (update-file): {e} \
+                                 policy={policy_name} rule={rule_name} event_id={event_id}"
+                            );
+                        }
                     }
                     Err(e) => {
                         eprintln!("events: db lock poisoned in execute_action(update-file): {e}")
@@ -1982,6 +2006,46 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
         "ALTER TABLE events ADD COLUMN condition_details TEXT",
     ] {
         let _ = conn.execute_batch(col_ddl);
+    }
+
+    // OBS-027 fix: migrate Python-era action_log schema to Rust schema.
+    // CREATE TABLE IF NOT EXISTS above is a no-op when the old table exists,
+    // so the new column names (policy_name, rule_name, error, created_at)
+    // never appear. INSERT statements then fail and (until this fix) were
+    // silently dropped via `let _ =`. The renames below are idempotent —
+    // SQLite returns an error if the source column doesn't exist, which we
+    // explicitly tolerate because a freshly-created table is already on
+    // the new schema.
+    for migration_ddl in &[
+        "ALTER TABLE action_log RENAME COLUMN recipe TO policy_name",
+        "ALTER TABLE action_log ADD COLUMN rule_name TEXT",
+        "ALTER TABLE action_log RENAME COLUMN error_message TO error",
+        "ALTER TABLE action_log RENAME COLUMN executed_at TO created_at",
+    ] {
+        let _ = conn.execute_batch(migration_ddl);
+    }
+    // Sanity check: the Rust writer expects these columns. If any are
+    // missing after the migration, fail loud at startup (S6 — no quiet
+    // failures). This catches future schema drift before it silently
+    // corrupts the audit stream.
+    let required_cols = ["policy_name", "rule_name", "action_type", "status", "error", "created_at"];
+    let mut stmt = conn
+        .prepare("SELECT name FROM pragma_table_info('action_log')")
+        .map_err(|e| format!("schema init failed (action_log introspect): {e}"))?;
+    let actual_cols: std::collections::HashSet<String> = stmt
+        .query_map([], |row| row.get::<_, String>(0))
+        .map_err(|e| format!("schema init failed (action_log query): {e}"))?
+        .filter_map(Result::ok)
+        .collect();
+    drop(stmt);
+    for required in required_cols {
+        if !actual_cols.contains(required) {
+            return Err(format!(
+                "schema init failed: action_log missing required column '{required}'. \
+                 Run `sqlite3 ~/.hex-events/events.db \"PRAGMA table_info(action_log)\"` \
+                 to inspect; manual ALTER TABLE may be needed if the renames failed."
+            ));
+        }
     }
 
     Ok(())
