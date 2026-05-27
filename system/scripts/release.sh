@@ -278,16 +278,23 @@ fi
 
 # ── Tag ─────────────────────────────────────────────────────────────────────
 bold "Tag"
-if git rev-parse "v$VERSION" >/dev/null 2>&1; then
-  green "  Tag v$VERSION already exists ✓"
-else
-  git tag "v$VERSION" "$FULL_SHA"
+REMOTE_TAG_SHA=$(git ls-remote origin "v$VERSION" 2>/dev/null | cut -f1)
+if [ -z "$REMOTE_TAG_SHA" ]; then
+  if ! git rev-parse "v$VERSION" >/dev/null 2>&1; then
+    git tag "v$VERSION" "$FULL_SHA"
+  fi
   if HEX_RELEASE_PIPELINE=1 git push origin "v$VERSION" 2>&1; then
     green "  Tagged and pushed v$VERSION ✓"
   else
     red "  Tag push failed for v$VERSION — check pre-push hook output above"
     exit 1
   fi
+elif [ "$REMOTE_TAG_SHA" = "$FULL_SHA" ]; then
+  green "  Tag v$VERSION already on origin ✓"
+else
+  red "  Tag v$VERSION on origin points to $REMOTE_TAG_SHA, not $FULL_SHA"
+  red "  Refusing to silently overwrite a divergent remote tag."
+  exit 1
 fi
 
 # ── Fleet notification ───────────────────────────────────────────────────────
