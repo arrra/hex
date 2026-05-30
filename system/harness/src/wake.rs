@@ -10,19 +10,17 @@ const NON_JSON_REPROMPT: &str = "\n\n⚠️ Your previous response was NOT valid
 
 pub(crate) enum RetryOutcome {
     Parsed { response: crate::types::AgentResponse, quality: claude::ResponseParseQuality, was_retried: bool },
-    BudgetExhausted,
     Unrecoverable,
     InvokeError(String),
 }
 
 /// Parse a first LLM result text. If it returns `Empty` quality (non-JSON, unsalvageable),
-/// attempt ONE retry with a stern JSON-only reprompt — but only when `budget_ok` is true.
+/// attempt ONE retry with a stern JSON-only reprompt.
 /// `retry_fn` is called with the augmented retry prompt and must return the result text or error.
 pub(crate) fn retry_if_empty<F>(
     first_response: crate::types::AgentResponse,
     first_quality: claude::ResponseParseQuality,
     original_prompt: &str,
-    budget_ok: bool,
     retry_fn: F,
 ) -> RetryOutcome
 where
@@ -30,9 +28,6 @@ where
 {
     if first_quality != claude::ResponseParseQuality::Empty {
         return RetryOutcome::Parsed { response: first_response, quality: first_quality, was_retried: false };
-    }
-    if !budget_ok {
-        return RetryOutcome::BudgetExhausted;
     }
     let retry_prompt = format!("{original_prompt}{NON_JSON_REPROMPT}");
     match retry_fn(&retry_prompt) {
@@ -396,7 +391,7 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     let mut agent_state = if state_path.exists() {
         state::load(&state_path)?
     } else {
-        state::initialize(&config.agent_id, charter_data.budget.usd_per_day)
+        state::initialize(&config.agent_id)
     };
 
     // 4. Reset per-shift cost, increment wake
@@ -453,7 +448,6 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     }
 
     // 8. Shift loop
-    let shift_budget = charter_data.budget.usd_per_shift;
     let allowed_tools = ["Bash", "Read", "Write", "Edit", "Grep", "Glob"];
     let mut invocation = 0;
 
@@ -483,53 +477,6 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
 
     loop {
         invocation += 1;
-
-        let remaining = cost::shift_budget_remaining(&agent_state.cost, shift_budget);
-        if shift_budget > 0.0 && remaining <= 0.0 {
-            eprintln!(
-                "WARN: shift budget exhausted (spent ${:.4}, cap ${:.2})",
-                agent_state.cost.last_wake_usd, shift_budget
-            );
-            audit::append(
-                &audit_dir,
-                &config.agent_id,
-                "shift-budget-hit",
-                &serde_json::json!({
-                    "spent": agent_state.cost.last_wake_usd,
-                    "budget": shift_budget,
-                    "active_remaining": agent_state.queue.active.len(),
-                }),
-            );
-            break;
-        }
-
-        // Per-wake period-budget gate (releaser budget-LARP fix, 2026-05-29).
-        // Without this, a single wake can burn through 100% of an agent's
-        // daily/period budget because `record_invocation` updates
-        // `current_period.spent_usd` only AFTER `claude::invoke` returns —
-        // the shift gate above only caps within-shift spend. Releaser drove
-        // this in: one wake on 2026-05-24 cost $24.14 against a $10 daily cap.
-        // S6 — loud break (stderr + audit), no silent throttle.
-        if cost::period_budget_exhausted(&agent_state.cost) {
-            let period_spent = agent_state.cost.current_period.spent_usd;
-            let period_budget = agent_state.cost.current_period.budget_usd;
-            eprintln!(
-                "WARN: period budget exhausted (spent ${:.2}, cap ${:.2}) — skipping wake",
-                period_spent, period_budget
-            );
-            audit::append(
-                &audit_dir,
-                &config.agent_id,
-                "period-budget-hit",
-                &serde_json::json!({
-                    "spent_usd": period_spent,
-                    "budget_usd": period_budget,
-                    "active_remaining": agent_state.queue.active.len(),
-                    "invocation": invocation,
-                }),
-            );
-            break;
-        }
 
         let ctx_files = if context_files_content.is_empty() {
             None
@@ -567,15 +514,11 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
 
         let (first_response, first_quality) = claude::parse_agent_response(&claude_output.result);
 
-        let budget_ok_for_retry = shift_budget == 0.0
-            || cost::shift_budget_remaining(&agent_state.cost, shift_budget) > 0.0;
-
         let mut retry_claude_output: Option<crate::types::ClaudeOutput> = None;
         let retry_result = retry_if_empty(
             first_response,
             first_quality,
             &prompt_text,
-            budget_ok_for_retry,
             |retry_prompt| match claude::invoke(retry_prompt, "sonnet", &allowed_tools) {
                 Ok(out) => {
                     let text = out.result.clone();
@@ -598,7 +541,7 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
                 }
                 (response, quality)
             }
-            RetryOutcome::BudgetExhausted | RetryOutcome::Unrecoverable => {
+            RetryOutcome::Unrecoverable => {
                 eprintln!(
                     "[{}] WAKE RESPONSE UNRECOVERABLE after retry — shift work lost this iteration",
                     config.agent_id
@@ -804,12 +747,9 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
             }
         }
 
-        // Loop detection: check accepted observe/verify entries for repetition
-        let interval_seconds = if charter_data.budget.wakes_per_hour > 0 {
-            3600 / charter_data.budget.wakes_per_hour as u64
-        } else {
-            3600
-        };
+        // Loop detection: check accepted observe/verify entries for repetition.
+        // Window defaults to 1h; budget-derived `wakes_per_hour` throttling is gone.
+        let interval_seconds: u64 = 3600;
         if check_and_handle_loop(
             &mut agent_state,
             &accepted_entries,
@@ -887,7 +827,7 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
         }
     }
 
-    // 9. Self-assessment phase (runs every N wakes, respects shift budget)
+    // 9. Self-assessment phase (runs every N wakes)
     let assess_interval = charter_data
         .assessment
         .as_ref()
@@ -896,10 +836,8 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     let wakes_since_assessment = agent_state
         .wake_count
         .saturating_sub(agent_state.last_assessment_wake);
-    let budget_remaining = cost::shift_budget_remaining(&agent_state.cost, shift_budget);
-    let has_budget = shift_budget == 0.0 || budget_remaining > 0.0;
 
-    if assess_interval > 0 && wakes_since_assessment >= assess_interval && has_budget {
+    if assess_interval > 0 && wakes_since_assessment >= assess_interval {
         audit::append(
             &audit_dir,
             &config.agent_id,
@@ -1203,7 +1141,6 @@ mod tests {
             AgentResponse::default(),
             ResponseParseQuality::Empty,
             "original prompt",
-            true,
             |retry_prompt| {
                 call_count += 1;
                 assert!(
@@ -1230,7 +1167,6 @@ mod tests {
             AgentResponse::default(),
             ResponseParseQuality::Empty,
             "original prompt",
-            true,
             |_| {
                 call_count += 1;
                 Ok("still not json at all".to_string())
@@ -1247,7 +1183,6 @@ mod tests {
             AgentResponse::default(),
             ResponseParseQuality::Clean,
             "original prompt",
-            true,
             |_| {
                 call_count += 1;
                 Ok("this should never be called".to_string())
@@ -1255,22 +1190,5 @@ mod tests {
         );
         assert_eq!(call_count, 0, "zero retries for clean first response");
         assert!(matches!(outcome, RetryOutcome::Parsed { was_retried: false, .. }));
-    }
-
-    #[test]
-    fn retry_budget_exhausted_no_retry() {
-        let mut call_count = 0usize;
-        let outcome = retry_if_empty(
-            AgentResponse::default(),
-            ResponseParseQuality::Empty,
-            "original prompt",
-            false, // budget exhausted
-            |_| {
-                call_count += 1;
-                Ok("this should never be called".to_string())
-            },
-        );
-        assert_eq!(call_count, 0, "no retry when budget is exhausted");
-        assert!(matches!(outcome, RetryOutcome::BudgetExhausted));
     }
 }
