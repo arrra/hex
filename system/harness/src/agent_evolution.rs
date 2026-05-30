@@ -537,8 +537,6 @@ mod tests {
 kpis:
   - "Ship 3 features per week"
   - "Maintain <5% bug rate"
-budget:
-  usd_per_day: 1.0
 "#;
         write_file(tmp.path(), "charter.yaml", charter);
         let kpis = load_yaml_kpis(&tmp.path().join("charter.yaml"));

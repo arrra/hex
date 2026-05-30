@@ -364,13 +364,6 @@ enum AgentCommands {
         #[arg(long)]
         period: Option<String>,
     },
-    /// Reset stale agent budget periods (port of health/reset-periods.py)
-    #[command(name = "reset-periods")]
-    ResetPeriods {
-        /// Report what would happen without writing any state
-        #[arg(long)]
-        dry_run: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -1802,74 +1795,6 @@ fn run_agent_command(command: AgentCommands) {
         AgentCommands::Spawn { spec_file, dry_run } => {
             let rc = agent_spawn::run_spawn(&spec_file, dry_run);
             std::process::exit(rc);
-        }
-        AgentCommands::ResetPeriods { dry_run } => {
-            let projects_dir = get_hex_dir().join("projects");
-            if !projects_dir.is_dir() {
-                println!("[reset-periods] PROJECTS_DIR not found: {}", projects_dir.display());
-                return;
-            }
-            let now = chrono::Utc::now();
-            let stale_days = 7i64;
-            let mut reset_count = 0u32;
-            let mut checked_count = 0u32;
-            let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&projects_dir)
-                .unwrap_or_else(|_| { eprintln!("cannot read projects dir"); std::process::exit(1); })
-                .filter_map(|e| e.ok())
-                .map(|e| e.path())
-                .filter(|p| p.is_dir() && !p.file_name().unwrap_or_default().to_string_lossy().starts_with('_'))
-                .collect();
-            entries.sort();
-            for agent_dir in entries {
-                let agent_id = agent_dir.file_name().unwrap_or_default().to_string_lossy().to_string();
-                let state_path = agent_dir.join("state.json");
-                if !state_path.is_file() { continue; }
-                let state_text = match std::fs::read_to_string(&state_path) {
-                    Ok(s) => s,
-                    Err(_) => continue,
-                };
-                let mut state: serde_json::Value = match serde_json::from_str(&state_text) {
-                    Ok(v) => v,
-                    Err(_) => continue,
-                };
-                let start_str = state.pointer("/cost/current_period/start")
-                    .and_then(|v| v.as_str())
-                    .map(|s| s.to_string());
-                let start_str = match start_str {
-                    Some(s) => s,
-                    None => continue,
-                };
-                checked_count += 1;
-                let start = match chrono::DateTime::parse_from_rfc3339(&start_str)
-                    .map(|dt| dt.with_timezone(&chrono::Utc))
-                    .or_else(|_| chrono::DateTime::parse_from_rfc3339(&start_str.replace("Z", "+00:00"))
-                        .map(|dt| dt.with_timezone(&chrono::Utc)))
-                {
-                    Ok(dt) => dt,
-                    Err(_) => continue,
-                };
-                let age_days = (now - start).num_days();
-                if age_days > stale_days {
-                    println!("  RESET  {}: period was {} (stale {}d)", agent_id, &start_str[..10], age_days);
-                    if !dry_run {
-                        let new_start = now.to_rfc3339().replace("+00:00", "Z");
-                        if let Some(period) = state.pointer_mut("/cost/current_period") {
-                            period["start"] = serde_json::Value::String(new_start);
-                            period["spent_usd"] = serde_json::Value::from(0.0f64);
-                        }
-                        let tmp_path = state_path.with_extension("json.tmp");
-                        if let Ok(s) = serde_json::to_string_pretty(&state) {
-                            let _ = std::fs::write(&tmp_path, s);
-                            let _ = std::fs::rename(&tmp_path, &state_path);
-                        }
-                    }
-                    reset_count += 1;
-                } else {
-                    println!("  OK     {}: period started {}", agent_id, &start_str[..10]);
-                }
-            }
-            println!("\n[reset-periods] checked={checked_count} reset={reset_count}{}",
-                if dry_run { " (dry-run)" } else { "" });
         }
     }
 }

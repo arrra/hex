@@ -7,6 +7,7 @@ use std::path::{Path, PathBuf};
 // ── Role-spec YAML types ──────────────────────────────────────────────────────
 
 #[derive(Debug, Deserialize)]
+#[serde(default)]
 struct RoleSpec {
     id: String,
     name: String,
@@ -18,26 +19,36 @@ struct RoleSpec {
     wake_triggers: Vec<String>,
     authority: Authority,
     memory_access: MemoryAccess,
-    budget: Budget,
 }
 
-#[derive(Debug, Deserialize)]
+impl Default for RoleSpec {
+    fn default() -> Self {
+        Self {
+            id: String::new(),
+            name: String::new(),
+            role: String::new(),
+            scope: String::new(),
+            reason: String::new(),
+            parent: String::new(),
+            escalation_channel: String::new(),
+            wake_triggers: vec![],
+            authority: Authority::default(),
+            memory_access: MemoryAccess::default(),
+        }
+    }
+}
+
+#[derive(Debug, Default, Deserialize)]
 struct Authority {
     green: Vec<String>,
     yellow: Vec<String>,
     red: Vec<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Default, Deserialize)]
 struct MemoryAccess {
     read_tiers: Vec<String>,
     write_paths: Vec<String>,
-}
-
-#[derive(Debug, Deserialize)]
-struct Budget {
-    wakes_per_hour: u32,
-    usd_per_day: f64,
 }
 
 // ── Rollback tracker ──────────────────────────────────────────────────────────
@@ -241,7 +252,6 @@ fn run_spawn_inner(
         println!("  id:     {}", spec.id);
         println!("  name:   {}", spec.name);
         println!("  parent: {}", spec.parent);
-        println!("  budget: {} wph, ${}/day", spec.budget.wakes_per_hour, spec.budget.usd_per_day);
         return 0;
     }
 
@@ -262,8 +272,6 @@ fn run_spawn_inner(
     let write_paths_block = indent_list(&spec.memory_access.write_paths, "      - ");
     let wt_rules_events = indent_list(&spec.wake_triggers, "    - ");
     let wt_rules = build_wake_triggers_rules(&spec.id, &hex_dir, &spec.wake_triggers);
-    let budget_wph = spec.budget.wakes_per_hour.to_string();
-    let budget_usd = spec.budget.usd_per_day.to_string();
 
     let vars: &[(&str, &str)] = &[
         ("{{ID}}", &spec.id),
@@ -272,8 +280,6 @@ fn run_spawn_inner(
         ("{{SCOPE}}", &spec.scope),
         ("{{PARENT}}", &spec.parent),
         ("{{SPAWN_TIMESTAMP}}", &spawn_ts),
-        ("{{BUDGET_WPH}}", &budget_wph),
-        ("{{BUDGET_USD}}", &budget_usd),
         ("{{ESCALATION_CHANNEL}}", &spec.escalation_channel),
         ("{{STATE_DIR}}", &state_dir.to_string_lossy()),
         ("{{HALT_FILE}}", &halt_file.to_string_lossy()),
@@ -282,7 +288,6 @@ fn run_spawn_inner(
         ("{{LOG_PATH}}", &log_path.to_string_lossy()),
         ("{{WAKE_SCRIPT_PATH}}", &wake_script_path.to_string_lossy()),
         ("{{KILL_SWITCH_PATH}}", &halt_file.to_string_lossy()),
-        ("{{RATE_LIMIT_WPH}}", &budget_wph),
         ("{{WAKE_TRIGGERS}}", &wake_triggers_block),
         ("{{GREEN_ACTIONS}}", &green_block),
         ("{{YELLOW_ACTIONS}}", &yellow_block),
@@ -473,7 +478,6 @@ fn run_spawn_inner(
          ## Agent summary\n\n\
          - **Role:** {role}\n\
          - **Scope:** {scope}\n\
-         - **Budget:** {wph} wakes/hr, ${usd}/day\n\
          - **Escalation:** {esc}\n\n\
          ## Status\n\n\
          Agent starts **HALTED**. To activate: `rm {halt}`\n",
@@ -484,8 +488,6 @@ fn run_spawn_inner(
         reason = spec.reason,
         role = spec.role,
         scope = spec.scope,
-        wph = spec.budget.wakes_per_hour,
-        usd = spec.budget.usd_per_day,
         esc = spec.escalation_channel,
         halt = halt_file.display(),
     );
@@ -613,9 +615,6 @@ mod tests {
             "    - tier1\n",
             "  write_paths:\n",
             "    - projects/test-noop/\n",
-            "budget:\n",
-            "  wakes_per_hour: 2\n",
-            "  usd_per_day: 0.10\n",
         )).unwrap();
     }
 
@@ -654,9 +653,6 @@ mod tests {
             "memory_access:\n",
             "  read_tiers: []\n",
             "  write_paths: []\n",
-            "budget:\n",
-            "  wakes_per_hour: 1\n",
-            "  usd_per_day: 0.01\n",
         )).unwrap();
 
         let rc = run_spawn_inner(&spec_path, true, Some(dir.path().to_path_buf()), Some(home_tmp.path().to_path_buf()));
