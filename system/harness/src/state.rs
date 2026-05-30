@@ -1,9 +1,7 @@
-use crate::types::{AgentState, Cost, CostPeriod, Queue};
-use chrono::Utc;
+use crate::types::{AgentState, Cost, Queue};
 use std::path::Path;
 
-pub fn initialize(agent_id: &str, budget_usd: f64) -> AgentState {
-    let now = Utc::now();
+pub fn initialize(agent_id: &str) -> AgentState {
     AgentState {
         agent_id: agent_id.to_string(),
         version: 1,
@@ -23,11 +21,6 @@ pub fn initialize(agent_id: &str, budget_usd: f64) -> AgentState {
         memory: serde_json::Value::Object(Default::default()),
         cost: Cost {
             lifetime_usd: 0.0,
-            current_period: CostPeriod {
-                start: now,
-                spent_usd: 0.0,
-                budget_usd,
-            },
             last_wake_usd: 0.0,
         },
         cadence_overrides: Default::default(),

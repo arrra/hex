@@ -9,7 +9,6 @@ mod synthesis;
 mod boi_web;
 mod charter_triggers;
 mod doctor;
-mod budget_reset;
 mod paths;
 mod integration;
 mod integration_cmd;
@@ -991,13 +990,6 @@ enum TelemetryCommands {
 
 #[derive(Subcommand)]
 enum HealthCommands {
-    /// Auto-reset agent budget periods with tiered safety gate (port of health/budget-period-reset.py)
-    #[command(name = "budget-reset")]
-    BudgetReset {
-        /// Report what would happen without writing any state
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Verify sqlite-vec is loadable and memory.db has vectors (port of health/check-vector-search.sh)
     #[command(name = "check-vector-search")]
     CheckVectorSearch,
@@ -1472,10 +1464,7 @@ fn run_agent_command(command: AgentCommands) {
                         println!("Inbox: {} messages", s.inbox.len());
                         println!("Trail: {} entries", s.trail.len());
                         println!("Cost (lifetime): ${:.4}", s.cost.lifetime_usd);
-                        println!(
-                            "Cost (period): ${:.4} / ${:.2}",
-                            s.cost.current_period.spent_usd, s.cost.current_period.budget_usd
-                        );
+                        println!("Cost (last wake): ${:.4}", s.cost.last_wake_usd);
                     }
                     Err(e) => {
                         eprintln!("Cannot load state for '{}': {e}", id);
@@ -1527,7 +1516,7 @@ fn run_agent_command(command: AgentCommands) {
 
             println!(
                 "{:<20} {:>4} {:>6} {:>12} {:>8} {:>8} {:>10}",
-                "AGENT", "CORE", "WAKES", "LAST WAKE", "ACTIVE", "BLOCKED", "COST/DAY"
+                "AGENT", "CORE", "WAKES", "LAST WAKE", "ACTIVE", "BLOCKED", "LIFETIME"
             );
             println!("{}", "-".repeat(74));
             for id in &agents {
@@ -1547,7 +1536,7 @@ fn run_agent_command(command: AgentCommands) {
                         last,
                         s.queue.active.len(),
                         s.queue.blocked.len(),
-                        s.cost.current_period.spent_usd
+                        s.cost.lifetime_usd
                     );
                 } else {
                     println!(
@@ -2356,14 +2345,6 @@ fn main() {
             }
         },
         Commands::Health { command } => match command {
-            HealthCommands::BudgetReset { dry_run } => {
-                let hex_dir = get_hex_dir();
-                let code = budget_reset::run(&budget_reset::BudgetResetConfig {
-                    hex_dir,
-                    dry_run,
-                });
-                std::process::exit(code);
-            }
             HealthCommands::CheckVectorSearch => {
                 let hex_dir = get_hex_dir();
                 let script = hex_dir.join(".hex/scripts/health/check-vector-search.sh");
