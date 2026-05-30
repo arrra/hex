@@ -249,17 +249,11 @@ pub struct Message {
 
 // ── Cost ────────────────────────────────────────────────────────────────────
 
-#[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct CostPeriod {
-    pub start: DateTime<Utc>,
-    pub spent_usd: f64,
-    pub budget_usd: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, Serialize, Deserialize)]
 pub struct Cost {
+    #[serde(default)]
     pub lifetime_usd: f64,
-    pub current_period: CostPeriod,
+    #[serde(default)]
     pub last_wake_usd: f64,
 }
 
