@@ -423,13 +423,6 @@ pub struct WakeConfig {
 }
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
-pub struct Budget {
-    pub wakes_per_hour: u32,
-    pub usd_per_day: f64,
-    pub usd_per_shift: f64,
-}
-
-#[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct MemoryConfig {
     pub max_size_kb: u64,
 }
@@ -479,7 +472,6 @@ pub struct Charter {
     pub kpis: Option<Vec<String>>,
     pub wake: WakeConfig,
     pub authority: AuthorityTiers,
-    pub budget: Budget,
     pub memory: Option<MemoryConfig>,
     pub hooks: Option<HooksConfig>,
     pub assessment: Option<AssessmentConfig>,
