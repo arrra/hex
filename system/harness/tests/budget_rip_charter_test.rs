@@ -8,8 +8,8 @@
 //     (these were the only fields validated against on the Budget struct).
 //   - The parser must tolerate OLD charter.yaml files that still carry a
 //     `budget:` block — the stale key gets ignored rather than failing
-//     the parse. This lets the mrap-hex side migrate without ordering
-//     hazards.
+//     the parse. This lets downstream `$HEX_DIR` instances migrate without
+//     ordering hazards.
 //
 // The source-inspection tests intentionally read charter.rs from disk
 // (CARGO_MANIFEST_DIR-relative) rather than importing Rust symbols —
