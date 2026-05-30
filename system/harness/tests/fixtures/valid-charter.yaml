@@ -23,10 +23,6 @@ authority:
     - Modify runtime
   red:
     - Push to remote
-budget:
-  wakes_per_hour: 6
-  usd_per_day: 2.0
-  usd_per_shift: 0.10
 memory:
   max_size_kb: 64
 hooks:

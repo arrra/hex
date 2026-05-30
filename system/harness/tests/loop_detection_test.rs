@@ -16,7 +16,7 @@ fn make_trail_entry(entry_type: &str, key: &str, val: &str) -> TrailEntry {
 fn test_loop_not_triggered_on_varied_actions() {
     let dir = tempfile::TempDir::new().unwrap();
     let state_path = dir.path().join("state.json");
-    let mut agent_state = state::initialize("test-varied", 1.0);
+    let mut agent_state = state::initialize("test-varied");
 
     let e1 = make_trail_entry("observe", "target", "service-alpha");
     let e2 = make_trail_entry("observe", "target", "service-beta");
@@ -58,7 +58,7 @@ fn test_loop_triggered_on_repeated_observe() {
     let fake_home = dir.path().to_path_buf();
     std::env::set_var("HOME", &fake_home);
 
-    let mut agent_state = state::initialize("test-repeat", 1.0);
+    let mut agent_state = state::initialize("test-repeat");
 
     let same_entry = make_trail_entry("observe", "target", "same-service");
 

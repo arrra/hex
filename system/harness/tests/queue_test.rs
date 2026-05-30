@@ -6,7 +6,7 @@ use std::collections::HashMap;
 #[test]
 fn test_promote_due_scheduled_items() {
     let now = Utc::now();
-    let mut state = hex::state::initialize("test", 2.0);
+    let mut state = hex::state::initialize("test");
     state.queue.scheduled.push(ScheduledItem {
         id: "s-1".into(),
         summary: "Health check".into(),
@@ -30,7 +30,7 @@ fn test_promote_due_scheduled_items() {
 #[test]
 fn test_inbox_creates_active_items() {
     let now = Utc::now();
-    let mut state = hex::state::initialize("test", 2.0);
+    let mut state = hex::state::initialize("test");
     state.inbox.push(Message {
         id: "msg-1".into(),
         msg_type: hex::types::MessageType::Agent,
@@ -69,7 +69,7 @@ fn make_responsibilities(names: &[&str]) -> Vec<Responsibility> {
 #[test]
 fn test_auto_seed_empty_queue_all_responsibilities_become_active() {
     let now = Utc::now();
-    let mut state = hex::state::initialize("test", 2.0);
+    let mut state = hex::state::initialize("test");
     let responsibilities = make_responsibilities(&["health-check", "review", "metrics"]);
     let overrides: HashMap<String, u64> = HashMap::new();
 
@@ -85,7 +85,7 @@ fn test_auto_seed_empty_queue_all_responsibilities_become_active() {
 #[test]
 fn test_auto_seed_partial_queue_only_missing_responsibility_added() {
     let now = Utc::now();
-    let mut state = hex::state::initialize("test", 2.0);
+    let mut state = hex::state::initialize("test");
     // Pre-seed 2 of the 3 responsibilities
     for name in &["health-check", "review"] {
         state.queue.scheduled.push(ScheduledItem {
@@ -112,7 +112,7 @@ fn test_auto_seed_partial_queue_only_missing_responsibility_added() {
 #[test]
 fn test_auto_seed_no_responsibilities_queue_stays_empty() {
     let now = Utc::now();
-    let mut state = hex::state::initialize("test", 2.0);
+    let mut state = hex::state::initialize("test");
     let overrides: HashMap<String, u64> = HashMap::new();
 
     let added = queue::auto_seed_from_charter(&mut state.queue, &[], &overrides, now);

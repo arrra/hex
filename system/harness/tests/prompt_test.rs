@@ -4,7 +4,7 @@ use hex::prompt;
 
 #[test]
 fn test_prompt_catalog_injected_for_allowlisted_agent() {
-    let state = hex::state::initialize("test", 2.0);
+    let state = hex::state::initialize("test");
     let catalog_json = r#"[{"id":"my-fn","kind":"function","description":"Does things","input_schema":null,"created_by":"agent-a"}]"#;
     let charter_ctx = "\n## charter-file.md\n\ncharter content here\n";
     let p = prompt::build(
@@ -26,7 +26,7 @@ fn test_prompt_catalog_injected_for_allowlisted_agent() {
 
 #[test]
 fn test_prompt_unchanged_without_catalog() {
-    let state = hex::state::initialize("test", 2.0);
+    let state = hex::state::initialize("test");
     let p_with_catalog = prompt::build("id: test", &state, "manual", "{}", None, None, Some("[]"));
     let p_without_catalog = prompt::build("id: test", &state, "manual", "{}", None, None, None);
     // catalog=None should produce identical output to before T5258 (no catalog section)
@@ -39,7 +39,7 @@ fn test_prompt_unchanged_without_catalog() {
 #[test]
 fn test_prompt_contains_charter_and_state() {
     let charter_text = "id: test\nrole: Test Agent\nobjective: Be useful";
-    let state = hex::state::initialize("test", 2.0);
+    let state = hex::state::initialize("test");
     let p = prompt::build(charter_text, &state, "timer.tick.30m", "{}", None, None, None);
     assert!(
         p.contains("Test Agent"),
@@ -58,7 +58,7 @@ fn test_prompt_contains_charter_and_state() {
 
 #[test]
 fn test_prompt_includes_response_schema() {
-    let state = hex::state::initialize("test", 2.0);
+    let state = hex::state::initialize("test");
     let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
     assert!(p.contains("trail"), "must describe trail");
     assert!(p.contains("queue_updates"), "must describe queue_updates");
@@ -70,7 +70,7 @@ fn test_prompt_includes_response_schema() {
 
 #[test]
 fn test_prompt_includes_principles_when_provided() {
-    let state = hex::state::initialize("test", 2.0);
+    let state = hex::state::initialize("test");
     let p = prompt::build(
         "id: test",
         &state,
@@ -92,7 +92,7 @@ fn test_prompt_includes_principles_when_provided() {
 
 #[test]
 fn test_prompt_works_without_principles() {
-    let state = hex::state::initialize("test", 2.0);
+    let state = hex::state::initialize("test");
     let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
     assert!(!p.contains("Self-Tuning"), "no principles text when None");
 }
@@ -100,9 +100,9 @@ fn test_prompt_works_without_principles() {
 #[test]
 fn test_assessment_prompt_structure() {
     let charter = hex::charter::load_from_str(
-        "id: test\nname: Test Bot\nrole: Test role\nobjective: Be effective\nkpis:\n  - 'metric >= 5'\nwake:\n  triggers: []\n  responsibilities:\n    - name: task-a\n      interval: 3600\n      description: Do task A\nauthority:\n  green: []\n  yellow: []\n  red: []\nbudget:\n  wakes_per_hour: 10\n  usd_per_day: 1\n  usd_per_shift: 0.5\nkill_switch: /tmp/test-halt"
+        "id: test\nname: Test Bot\nrole: Test role\nobjective: Be effective\nkpis:\n  - 'metric >= 5'\nwake:\n  triggers: []\n  responsibilities:\n    - name: task-a\n      interval: 3600\n      description: Do task A\nauthority:\n  green: []\n  yellow: []\n  red: []\nkill_switch: /tmp/test-halt"
     ).unwrap();
-    let state = hex::state::initialize("test", 1.0);
+    let state = hex::state::initialize("test");
     let p = prompt::build_assessment(&charter, &state, None);
     assert!(
         p.contains("Self-Assessment Phase"),
@@ -123,7 +123,7 @@ fn test_assessment_prompt_structure() {
 
 #[test]
 fn test_prompt_includes_capability_action_types() {
-    let state = hex::state::initialize("test", 2.0);
+    let state = hex::state::initialize("test");
     let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
     assert!(p.contains("capability_call"), "must list capability_call action type");
     assert!(p.contains("capability_add"), "must list capability_add action type");
@@ -132,7 +132,7 @@ fn test_prompt_includes_capability_action_types() {
 
 #[test]
 fn test_prompt_includes_live_messaging_guidance() {
-    let state = hex::state::initialize("test", 2.0);
+    let state = hex::state::initialize("test");
     let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
     assert!(
         p.contains("response_requested"),
@@ -150,7 +150,7 @@ fn test_prompt_includes_live_messaging_guidance() {
 
 #[test]
 fn test_prompt_message_schema_includes_response_requested() {
-    let state = hex::state::initialize("test", 2.0);
+    let state = hex::state::initialize("test");
     let p = prompt::build("id: test", &state, "manual", "{}", None, None, None);
     let msg_schema_region = p.find("outbound_messages").expect("must have outbound_messages in schema");
     let after_schema = &p[msg_schema_region..];
@@ -162,7 +162,7 @@ fn test_prompt_message_schema_includes_response_requested() {
 
 #[test]
 fn test_principles_live_collaboration_injected() {
-    let state = hex::state::initialize("test", 2.0);
+    let state = hex::state::initialize("test");
     let principles = "## Live Collaboration by Default\n\nWhen you send a message to another agent, default to response_requested: true.";
     let p = prompt::build("id: test", &state, "manual", "{}", Some(principles), None, None);
     assert!(
@@ -178,9 +178,9 @@ fn test_principles_live_collaboration_injected() {
 #[test]
 fn test_assessment_prompt_shows_cadence_overrides() {
     let charter = hex::charter::load_from_str(
-        "id: test\nname: Test Bot\nrole: Test role\nwake:\n  triggers: []\n  responsibilities:\n    - name: task-a\n      interval: 3600\n      description: Do task A\nauthority:\n  green: []\n  yellow: []\n  red: []\nbudget:\n  wakes_per_hour: 10\n  usd_per_day: 1\n  usd_per_shift: 0.5\nkill_switch: /tmp/test-halt"
+        "id: test\nname: Test Bot\nrole: Test role\nwake:\n  triggers: []\n  responsibilities:\n    - name: task-a\n      interval: 3600\n      description: Do task A\nauthority:\n  green: []\n  yellow: []\n  red: []\nkill_switch: /tmp/test-halt"
     ).unwrap();
-    let mut state = hex::state::initialize("test", 1.0);
+    let mut state = hex::state::initialize("test");
     state.cadence_overrides.insert("task-a".to_string(), 7200);
     let p = prompt::build_assessment(&charter, &state, None);
     assert!(p.contains("7200s"), "must show overridden interval");
