@@ -25,7 +25,7 @@ Pick the simplest primitive that works. Never escalate when a lighter tool fits.
 | Deterministic reaction to an event (no judgment) | **hex-events policy** | Policies are cheap, stateless, instant |
 | One-shot multi-step work (3+ files, research, generation) | **BOI spec** | Workers are disposable, spec-driven |
 | Single edit, quick lookup, < 2 min | **Inline** | Don't dispatch what you can do in 30 seconds |
-| Persistent concern that compounds context over time | **Agent** | Agents have memory, queue, budget, initiative tracking |
+| Persistent concern that compounds context over time | **Agent** | Agents have memory, queue, initiative tracking |
 
 ### Agent-Worthy Signals (need 2+ to justify)
 
@@ -128,11 +128,6 @@ authority:
   yellow: []                    # do + notify
   red: []                       # ask first
 
-budget:
-  wakes_per_hour: 4
-  usd_per_day: 5.00
-  usd_per_shift: 1.00
-
 kill_switch: "~/.hex-<agent-id>-HALT"
 escalation_channel: "#cos"
 core: false                     # true = system-critical, protected by doctor + fleet
@@ -144,9 +139,6 @@ core: false                     # true = system-critical, protected by doctor + 
 ### Validation (harness-enforced)
 
 - `id` required, non-empty, must match directory name
-- `budget.usd_per_day` must be positive
-- `budget.usd_per_shift` must be positive
-- `budget.wakes_per_hour` must be > 0
 - `kill_switch` required
 
 Invalid charters cause `hex-agent fleet` to exit non-zero with a specific error. No agent shows status until all charters validate.
@@ -233,7 +225,7 @@ hex-agent message <from> <to> \
 4. **Inbox** — reads messages from `.hex/messages/{id}.jsonl`, clears inbox
 5. **Queue promotions** — scheduled items promoted if due, blocked items unblocked if resolved
 6. **Nothing actionable?** — empty active queue → audit "wake-skip", save, exit
-7. **Shift loop** — invoke Claude with charter + state, apply structured response (trail, queue updates, memory, messages), repeat until queue drained or shift budget hit
+7. **Shift loop** — invoke Claude with charter + state, apply structured response (trail, queue updates, memory, messages), repeat until queue drained or loop detection trips
 8. **State save** — atomic write to `state.json`
 9. **Audit** — `wake-complete` with invocation count, cost, trail size
 
@@ -245,8 +237,8 @@ hex-agent message <from> <to> \
 | Prefix fallback chains (`hex-{id}`, `{id}`) | Identity splits across state/audit/charter | One path: `projects/{id}/` |
 | Silent `.ok()` / `2>/dev/null` on agent ops | Invisible failures | Log to stderr, exit non-zero |
 | Charter `id` ≠ directory name | State and audit use different identities | Harness rejects this — fix the mismatch |
-| Creating agents for one-shot work | Wasted budget, fleet bloat | BOI specs |
-| Agents without KPIs | No way to measure if it earns its cost | Define outcomes in charter |
+| Creating agents for one-shot work | Fleet bloat, recurring overhead | BOI specs |
+| Agents without KPIs | No way to measure if they earn their place | Define outcomes in charter |
 | Agent messages with unchecked sends | Lost messages look "sent" in audit | Check result, audit failures separately |
 
 ## Troubleshooting

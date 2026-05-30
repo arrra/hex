@@ -27,8 +27,9 @@ Bucketing & status:
       hide the gap).
 
   ``wake-skip-llm`` MUST count in the denominator alongside ``wake-skip``
-  and ``wake-complete`` (v4 fix per plan §3.1) — otherwise LLM-budget-gated
-  wakes would falsely depress completeness.
+  and ``wake-complete`` (v4 fix per plan §3.1) — otherwise LLM-gated wakes
+  would falsely depress completeness. (Historical: emitted by removed
+  budget gate; retained for back-compat with older audit logs.)
 
 Output:
 

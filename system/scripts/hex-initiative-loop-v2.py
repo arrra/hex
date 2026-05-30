@@ -18,8 +18,7 @@ Unlike v1, every step COMPLETES its action — no proposals that wait for someon
      write a targeted BOI spec and dispatch it NOW.
   6. Fix broken metrics — if a metric command fails or returns None:
      dispatch a fix spec for the broken metric.
-  7. Escalate budget — if dispatch fails due to budget, emit hex.budget.escalation.
-  8. Self-assess — every 5 runs, check if any KR moved. If not, dispatch a
+  7. Self-assess — every 5 runs, check if any KR moved. If not, dispatch a
      pivot spec that tries a different approach.
 
 Outputs a JSON summary of all actions. Use --dry-run to preview without side effects.
@@ -235,9 +234,6 @@ def _write_and_dispatch_spec(spec_content, label, dry_run):
             if token.startswith("q-") and token[2:].isdigit():
                 queue_id = token
                 break
-        # Budget detection
-        if not ok and ("budget" in out.lower() or "cost" in out.lower()):
-            return False, None, "BUDGET_EXHAUSTED: " + out
         return ok, queue_id, out
     finally:
         try:
@@ -556,7 +552,6 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
         return summary
 
     exp_lookup = _load_all_experiments()
-    budget_exhausted = False
 
     # Snapshot KR values before the run (for self-assess and history)
     kr_snapshot_before = {}
@@ -789,9 +784,6 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                         "pivot_count": total_pivot_count,
                         "queue_id": qid or "[dry-run-q-XXX]", "success": ok2,
                     })
-                    if not ok2 and out2.startswith("BUDGET_EXHAUSTED"):
-                        budget_exhausted = True
-
             summary["actions"].append(action_entry)
 
         # ── Step 3b: Adopt PASS verdicts ──────────────────────────────────────
@@ -879,8 +871,6 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                     "kr_id": kr_id, "queue_id": qid or "[dry-run-q-XXX]",
                     "success": ok, "output": out[:200],
                 })
-                if not ok and out.startswith("BUDGET_EXHAUSTED"):
-                    budget_exhausted = True
                 continue
 
             # KR at zero with no active experiment — dispatch a drive spec
@@ -896,8 +886,6 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                         "kr_id": kr_id, "queue_id": qid or "[dry-run-q-XXX]",
                         "success": ok, "output": out[:200],
                     })
-                    if not ok and out.startswith("BUDGET_EXHAUSTED"):
-                        budget_exhausted = True
                     continue
 
                 init_data["_path"] = init_path
@@ -909,9 +897,6 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                     "kr_id": kr_id, "queue_id": qid or "[dry-run-q-XXX]",
                     "success": ok, "output": out[:200],
                 })
-                if not ok and out.startswith("BUDGET_EXHAUSTED"):
-                    budget_exhausted = True
-
         # ── Step 7 (horizon escalation) ───────────────────────────────────────
         horizon = init_data.get("horizon")
         if horizon:
@@ -932,19 +917,7 @@ def run_loop(agent_id, dry_run=False, filter_initiative=None):
                     "unmet_krs": unmet, "channel": os.environ.get("HEX_NOTIFY_CHANNEL", "#hex-announcements"),
                 }, dry_run=dry_run)
 
-    # ── Step 8: Budget escalation ─────────────────────────────────────────────
-    if budget_exhausted:
-        summary["actions"].append({
-            "step": 8, "action": "escalate_budget",
-            "message": "Budget exhausted — one or more dispatch attempts failed due to budget.",
-        })
-        _emit("hex.budget.escalation", {
-            "agent": agent_id,
-            "channel": os.environ.get("HEX_NOTIFY_CHANNEL", "#hex-announcements"),
-            "message": f"Initiative loop for {agent_id} hit budget limit. Dispatches blocked.",
-        }, dry_run=dry_run)
-
-    # ── Step 9: Self-assess — every 5 runs, pivot if no KR moved ─────────────
+    # ── Step 8: Self-assess — every 5 runs, pivot if no KR moved ─────────────
     recent_runs = _load_recent_runs(agent_id, count=5)
     run_count = len(recent_runs) + 1
 

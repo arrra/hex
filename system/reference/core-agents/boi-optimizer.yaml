@@ -102,11 +102,6 @@ authority:
     - Delete specs or queue entries
     - Modify other agents' charters or state
 
-budget:
-  wakes_per_hour: 10
-  usd_per_day: 3.00
-  usd_per_shift: 0.10
-
 memory:
   max_size_kb: 64
 

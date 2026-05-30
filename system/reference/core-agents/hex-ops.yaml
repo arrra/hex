@@ -53,11 +53,6 @@ authority:
     - Push to git remote
     - Send messages to people
 
-budget:
-  wakes_per_hour: 12
-  usd_per_day: 2.00
-  usd_per_shift: 0.10
-
 memory:
   max_size_kb: 64
 

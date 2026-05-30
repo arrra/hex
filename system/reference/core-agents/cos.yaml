@@ -54,11 +54,6 @@ authority:
     - Archive or delete any project directory
     - Spawn an agent that requests Red-tier authority (external messages, production, git push)
 
-budget:
-  wakes_per_hour: 15
-  usd_per_day: 5.00
-  usd_per_shift: 0.10
-
 memory:
   max_size_kb: 64
 

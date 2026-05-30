@@ -62,11 +62,6 @@ authority:
     - Modify CLAUDE.md
     - Push to git remote
 
-budget:
-  wakes_per_hour: 4
-  usd_per_day: 1.50
-  usd_per_shift: 0.15
-
 memory:
   max_size_kb: 128
 

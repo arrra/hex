@@ -58,11 +58,6 @@ authority:
     - Archive or delete projects other than own autonomy queue items
     - Trigger macOS TCC prompts on user behalf
 
-budget:
-  wakes_per_hour: 10
-  usd_per_day: 5.00
-  usd_per_shift: 0.10
-
 memory:
   max_size_kb: 64
 
