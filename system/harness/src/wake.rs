@@ -503,6 +503,34 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
             break;
         }
 
+        // Per-wake period-budget gate (releaser budget-LARP fix, 2026-05-29).
+        // Without this, a single wake can burn through 100% of an agent's
+        // daily/period budget because `record_invocation` updates
+        // `current_period.spent_usd` only AFTER `claude::invoke` returns —
+        // the shift gate above only caps within-shift spend. Releaser drove
+        // this in: one wake on 2026-05-24 cost $24.14 against a $10 daily cap.
+        // S6 — loud break (stderr + audit), no silent throttle.
+        if cost::period_budget_exhausted(&agent_state.cost) {
+            let period_spent = agent_state.cost.current_period.spent_usd;
+            let period_budget = agent_state.cost.current_period.budget_usd;
+            eprintln!(
+                "WARN: period budget exhausted (spent ${:.2}, cap ${:.2}) — skipping wake",
+                period_spent, period_budget
+            );
+            audit::append(
+                &audit_dir,
+                &config.agent_id,
+                "period-budget-hit",
+                &serde_json::json!({
+                    "spent_usd": period_spent,
+                    "budget_usd": period_budget,
+                    "active_remaining": agent_state.queue.active.len(),
+                    "invocation": invocation,
+                }),
+            );
+            break;
+        }
+
         let ctx_files = if context_files_content.is_empty() {
             None
         } else {
