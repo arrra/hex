@@ -173,11 +173,11 @@ if [ -n "$HEX_BIN" ]; then
     assert_fail "hex binary missing startup subcommand"
   fi
 
-  # Agent spawning is now native via hex agent (replaces hex-agent-spawn.sh)
+  # Fleet/agent teardown: `hex agent` was removed. Assert it's correctly absent.
   if "$HEX_BIN" agent --help &>/dev/null; then
-    assert_pass "hex agent subcommand exists (replaces hex-agent-spawn.sh)"
+    assert_fail "hex agent subcommand still present (should be removed in fleet teardown)"
   else
-    assert_fail "hex agent subcommand missing"
+    assert_pass "hex agent subcommand correctly absent (fleet teardown)"
   fi
 else
   assert_fail "hex binary not found — check install or Docker multi-stage build"

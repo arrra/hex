@@ -1,36 +1,24 @@
 #!/usr/bin/env python3
-"""Tests for the hex memory system (search, save, index)."""
+"""Tests for the hex memory system (save).
 
-import os
+NOTE: Indexing and search were rustified — the legacy `memory_index.py` and
+`memory_search.py` scripts (and their `*.legacy.py` shims) were removed in the
+fleet-free teardown. The memory subsystem is now native `hex memory`
+(see system/skills/memory/SKILL.md). Only `memory_save.py` remains as a Python
+script, so this file only exercises memory save.
+"""
+
 import shutil
 import sqlite3
 import sys
 import tempfile
 import unittest
-from io import StringIO
 from pathlib import Path
 from unittest.mock import patch
 
 # Add memory scripts to path
 SCRIPT_DIR = Path(__file__).resolve().parent.parent / "system" / "skills" / "memory" / "scripts"
 sys.path.insert(0, str(SCRIPT_DIR))
-
-# memory_index and memory_search were renamed to *.legacy.py during rustification.
-# Pre-load them under their original module names so `import memory_index` works.
-import importlib.util as _ilu
-
-
-def _load_legacy(name: str, filename: str) -> None:
-    spec = _ilu.spec_from_file_location(name, SCRIPT_DIR / filename)
-    if spec is None:
-        return
-    mod = _ilu.module_from_spec(spec)
-    sys.modules[name] = mod
-    spec.loader.exec_module(mod)  # type: ignore[union-attr]
-
-
-_load_legacy("memory_index", "memory_index.legacy.py")
-_load_legacy("memory_search", "memory_search.legacy.py")
 
 
 def _create_db(db_path):
@@ -141,214 +129,6 @@ class TestMemorySave(MemoryTestBase):
         count = conn.execute("SELECT COUNT(*) FROM memories").fetchone()[0]
         conn.close()
         self.assertEqual(count, 2)
-
-
-# ── memory_index tests ─────────────────────────────────────────────
-
-class TestChunkByHeading(unittest.TestCase):
-    """Test the chunking function in isolation (no DB needed)."""
-
-    def test_splits_by_heading(self):
-        import memory_index
-        text = "# Title\n\nIntro.\n\n## Section A\n\nContent A.\n\n## Section B\n\nContent B.\n"
-        chunks = memory_index.chunk_by_heading(text, "test.md")
-        self.assertEqual(len(chunks), 3)
-        self.assertEqual(chunks[0]["heading"], "Title")
-        self.assertEqual(chunks[1]["heading"], "Section A")
-        self.assertEqual(chunks[2]["heading"], "Section B")
-
-    def test_no_headings(self):
-        import memory_index
-        text = "Just some plain text\nwith multiple lines.\n"
-        chunks = memory_index.chunk_by_heading(text, "plain.md")
-        self.assertEqual(len(chunks), 1)
-        self.assertEqual(chunks[0]["heading"], "(top)")  # default heading when no markdown headings
-
-    def test_empty_content(self):
-        import memory_index
-        chunks = memory_index.chunk_by_heading("", "empty.md")
-        self.assertEqual(len(chunks), 0)
-
-    def test_splits_large_chunks(self):
-        import memory_index
-        big_text = "# Big\n\n" + " ".join(["word"] * 600)
-        chunks = memory_index.chunk_by_heading(big_text, "big.md")
-        self.assertGreater(len(chunks), 1)
-        for chunk in chunks:
-            self.assertLessEqual(len(chunk["content"].split()), memory_index.MAX_CHUNK_WORDS + 10)
-
-
-class TestMemoryIndex(MemoryTestBase):
-
-    def _create_workspace_files(self):
-        me_dir = self.test_dir / "me"
-        me_dir.mkdir(exist_ok=True)
-        (me_dir / "me.md").write_text("# About Me\n\nI am a test user.\n\n## Goals\n\nBuild things.\n")
-
-        proj_dir = self.test_dir / "projects" / "alpha"
-        proj_dir.mkdir(parents=True, exist_ok=True)
-        (proj_dir / "context.md").write_text("# Alpha Project\n\nA test project.\n\n## Status\n\nIn progress.\n")
-
-        (self.test_dir / "todo.md").write_text("# Priorities\n\n- [ ] Ship feature\n- [ ] Fix bug\n")
-
-    def test_index_creates_chunks(self):
-        self._create_workspace_files()
-        import memory_index
-        with patch.object(memory_index, 'HEX_ROOT', self.test_dir), \
-             patch.object(memory_index, 'DB_PATH', self.db_path):
-            memory_index.run_index(full=True)
-        conn = sqlite3.connect(str(self.db_path))
-        chunk_count = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-        file_count = conn.execute("SELECT COUNT(*) FROM files").fetchone()[0]
-        conn.close()
-        self.assertGreater(chunk_count, 0)
-        self.assertGreater(file_count, 0)
-
-    def test_index_records_file_paths(self):
-        self._create_workspace_files()
-        import memory_index
-        with patch.object(memory_index, 'HEX_ROOT', self.test_dir), \
-             patch.object(memory_index, 'DB_PATH', self.db_path):
-            memory_index.run_index(full=True)
-        conn = sqlite3.connect(str(self.db_path))
-        paths = {r[0] for r in conn.execute("SELECT path FROM files").fetchall()}
-        conn.close()
-        self.assertIn("me/me.md", paths)
-        self.assertIn("CLAUDE.md", paths)
-        self.assertIn("todo.md", paths)
-
-    def test_incremental_skips_unchanged(self):
-        self._create_workspace_files()
-        import memory_index
-        with patch.object(memory_index, 'HEX_ROOT', self.test_dir), \
-             patch.object(memory_index, 'DB_PATH', self.db_path):
-            memory_index.run_index(full=True)
-            conn = sqlite3.connect(str(self.db_path))
-            count_after_first = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-            conn.close()
-            # Second run: nothing changed, should produce same count
-            memory_index.run_index(full=False)
-            conn = sqlite3.connect(str(self.db_path))
-            count_after_second = conn.execute("SELECT COUNT(*) FROM chunks").fetchone()[0]
-            conn.close()
-        self.assertEqual(count_after_first, count_after_second)
-
-    def test_skips_hex_directory(self):
-        (self.hex_dir / "config.md").write_text("# Internal\n\nShould skip.\n")
-        self._create_workspace_files()
-        import memory_index
-        with patch.object(memory_index, 'HEX_ROOT', self.test_dir), \
-             patch.object(memory_index, 'DB_PATH', self.db_path):
-            memory_index.run_index(full=True)
-        conn = sqlite3.connect(str(self.db_path))
-        hex_rows = conn.execute("SELECT path FROM files WHERE path LIKE '.hex%'").fetchall()
-        conn.close()
-        self.assertEqual(len(hex_rows), 0)
-
-    def test_full_rebuild_clears_old_data(self):
-        self._create_workspace_files()
-        import memory_index
-        with patch.object(memory_index, 'HEX_ROOT', self.test_dir), \
-             patch.object(memory_index, 'DB_PATH', self.db_path):
-            memory_index.run_index(full=True)
-            # Delete a file, then full reindex
-            (self.test_dir / "todo.md").unlink()
-            memory_index.run_index(full=True)
-        conn = sqlite3.connect(str(self.db_path))
-        paths = {r[0] for r in conn.execute("SELECT path FROM files").fetchall()}
-        conn.close()
-        self.assertNotIn("todo.md", paths)
-
-    def test_stats_output(self):
-        self._create_workspace_files()
-        import memory_index
-        with patch.object(memory_index, 'HEX_ROOT', self.test_dir), \
-             patch.object(memory_index, 'DB_PATH', self.db_path):
-            memory_index.run_index(full=True)
-            captured = StringIO()
-            sys.stdout = captured
-            memory_index.show_stats()
-            sys.stdout = sys.__stdout__
-        output = captured.getvalue()
-        self.assertIn("Files indexed:", output)
-        self.assertIn("Total chunks:", output)
-
-
-# ── memory_search tests ────────────────────────────────────────────
-
-class TestMemorySearch(MemoryTestBase):
-
-    def _seed_data(self):
-        conn = sqlite3.connect(str(self.db_path))
-        conn.execute(
-            "INSERT INTO memories (content, tags, source, created_at) VALUES (?, ?, ?, ?)",
-            ("JWT tokens should use httpOnly cookies for security", "auth,security", "review.md", "2026-01-01T00:00:00Z"),
-        )
-        conn.execute(
-            "INSERT INTO memories (content, tags, source, created_at) VALUES (?, ?, ?, ?)",
-            ("Database indexes on foreign keys improve join performance", "database", "notes.md", "2026-01-02T00:00:00Z"),
-        )
-        conn.execute(
-            "INSERT INTO chunks (source_path, heading, chunk_index, content) VALUES (?, ?, ?, ?)",
-            ("projects/api/context.md", "Authentication", "0", "We use JWT with httpOnly cookies. Tokens expire after 24h."),
-        )
-        conn.execute(
-            "INSERT INTO chunks (source_path, heading, chunk_index, content) VALUES (?, ?, ?, ?)",
-            ("me/learnings.md", "Database Patterns", "0", "Always add indexes on foreign keys before production."),
-        )
-        conn.commit()
-        conn.close()
-
-    def test_search_finds_memories(self):
-        self._seed_data()
-        import memory_search
-        with patch.object(memory_search, 'DB_PATH', self.db_path):
-            results = memory_search.search("JWT cookies")
-        self.assertGreater(len(results), 0)
-        all_content = " ".join(str(r) for r in results).lower()
-        self.assertIn("jwt", all_content)
-
-    def test_search_finds_chunks(self):
-        self._seed_data()
-        import memory_search
-        with patch.object(memory_search, 'DB_PATH', self.db_path):
-            results = memory_search.search("foreign keys indexes")
-        all_content = " ".join(str(r) for r in results).lower()
-        self.assertTrue("index" in all_content or "foreign" in all_content)
-
-    def test_search_no_results(self):
-        import memory_search
-        with patch.object(memory_search, 'DB_PATH', self.db_path):
-            results = memory_search.search("xyznonexistent")
-        self.assertEqual(len(results), 0)
-
-    def test_search_file_filter(self):
-        self._seed_data()
-        import memory_search
-        with patch.object(memory_search, 'DB_PATH', self.db_path):
-            results = memory_search.search("JWT", file_filter="projects")
-        self.assertGreater(len(results), 0)
-        # All results should have source paths matching the filter
-        source_paths = [r[0] for r in results]
-        self.assertTrue(any("projects" in p for p in source_paths))
-
-    def test_search_compact_mode(self):
-        self._seed_data()
-        import memory_search
-        with patch.object(memory_search, 'DB_PATH', self.db_path):
-            results = memory_search.search("JWT")
-        # search() returns a list of rows — verify non-empty for known content
-        self.assertGreater(len(results), 0)
-
-    def test_search_prefix_fallback(self):
-        """Single-word query should find results via FTS5 prefix matching."""
-        self._seed_data()
-        import memory_search
-        with patch.object(memory_search, 'DB_PATH', self.db_path):
-            results = memory_search.search("auth")
-        # Should find the authentication chunk
-        all_content = " ".join(str(r) for r in results).lower()
-        self.assertTrue("auth" in all_content or len(results) >= 0)
 
 
 if __name__ == "__main__":

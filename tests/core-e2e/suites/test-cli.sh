@@ -5,7 +5,6 @@
 set -uo pipefail
 
 HEX="$HEX_DIR/.hex/bin/hex"
-HEX_AGENT="$HEX_DIR/.hex/bin/hex-agent"
 VERSION_FILE="$HEX_DIR/.hex/hex-version.txt"
 
 echo ""
@@ -17,28 +16,18 @@ CODE=$?
 assert_exit 0 "$CODE" "cli-version: exit 0"
 assert_contains "$OUT" "." "cli-version: output contains a version string (has '.')"
 
-# ── 2. hex agent fleet ────────────────────────────────────────────────────────
+# ── 2. hex agent removed (fleet teardown) ─────────────────────────────────────
+# The `hex agent` subcommand (fleet/list/...) was removed in the fleet teardown.
+# Assert it is no longer a recognized subcommand.
 OUT=$("$HEX" agent fleet 2>&1)
 CODE=$?
-# Acceptable: exit 0 (fleet listed) or exit 1 with "no agents" style message
-if [ "$CODE" -eq 0 ]; then
-    assert_pass "cli-agent-fleet: exit 0"
-elif echo "$OUT" | grep -qi "no\|empty\|agent\|0 agent"; then
-    assert_pass "cli-agent-fleet: graceful 'no agents' response (exit $CODE)"
+if [ "$CODE" -ne 0 ] && echo "$OUT" | grep -qi "unrecognized subcommand"; then
+    assert_pass "cli-agent-removed: 'hex agent' correctly absent (fleet teardown)"
 else
-    assert_fail "cli-agent-fleet: unexpected exit $CODE — output: $OUT"
+    assert_fail "cli-agent-removed: 'hex agent' still recognized (exit $CODE) — output: $OUT"
 fi
 
-# ── 3. hex agent list ─────────────────────────────────────────────────────────
-OUT=$("$HEX" agent list 2>&1)
-CODE=$?
-if [ "$CODE" -eq 0 ] || echo "$OUT" | grep -qi "no\|empty\|agent\|0 agent"; then
-    assert_pass "cli-agent-list: accessible (exit $CODE)"
-else
-    assert_fail "cli-agent-list: unexpected exit $CODE — output: $OUT"
-fi
-
-# ── 4. hex message list ───────────────────────────────────────────────────────
+# ── 3. hex message list ───────────────────────────────────────────────────────
 OUT=$("$HEX" message list 2>&1)
 CODE=$?
 assert_exit 0 "$CODE" "cli-message-list: exit 0"
@@ -97,20 +86,7 @@ else
     assert_fail "cli-doctor-quiet: exit $CODE (expected 0 or 2) — output: $OUT"
 fi
 
-# ── 11. hex-agent fleet (backward compat symlink) ─────────────────────────────
-if [ -L "$HEX_AGENT" ] || [ -f "$HEX_AGENT" ]; then
-    OUT=$("$HEX_AGENT" fleet 2>&1)
-    CODE=$?
-    if [ "$CODE" -eq 0 ] || echo "$OUT" | grep -qi "no\|empty\|agent\|0 agent"; then
-        assert_pass "cli-hex-agent-symlink: hex-agent fleet accessible (exit $CODE)"
-    else
-        assert_fail "cli-hex-agent-symlink: unexpected exit $CODE — output: $OUT"
-    fi
-else
-    assert_fail "cli-hex-agent-symlink: $HEX_AGENT does not exist"
-fi
-
-# ── 12. Version consistency: hex version matches Cargo.toml version compiled in ──
+# ── 11. Version consistency: hex version matches Cargo.toml version compiled in ──
 if [ -f "$VERSION_FILE" ]; then
     EXPECTED_VERSION=$(cat "$VERSION_FILE" | tr -d '[:space:]')
     VERSION_OUT=$("$HEX" version 2>&1)
