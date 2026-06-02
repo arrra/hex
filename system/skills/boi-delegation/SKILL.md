@@ -2,9 +2,9 @@
 name: boi-delegation
 description: >
   Delegate tasks to BOI v2. Covers TOML spec authoring, dispatch, context
-  wiring, and completion notification via hex-events. Use when delegating any
-  non-trivial task — code changes, research, generation, or multi-step work.
-tags: boi, delegation, dispatch, hex-events, specs
+  wiring, and monitoring. Use when delegating any non-trivial task — code
+  changes, research, generation, or multi-step work.
+tags: boi, delegation, dispatch, specs
 trigger: >
   User asks to delegate work, dispatch a task, or you need to send work to BOI.
 version: 2
@@ -108,13 +108,13 @@ daemon is running. Read-only commands (`log`, `dashboard`, `spec show`,
 
 See `~/github.com/mrap/boi-v2/src/cli/mod.rs:14-29` for the process-model docs.
 
-### Event Flow (BOI → hex-events)
+### Event Flow (BOI observability)
 
 BOI v2 emits OpenTelemetry traces (DuckDB-backed) and writes inbox messages on
-spec/task transitions. hex-events policies reacting to BOI events should listen
-for `boi.spec.completed`, `boi.spec.failed`, etc. via the bridge that converts
-control-socket events into the existing hex-events emitter. (Bridge code lives
-in the hex-events daemon; the BOI v2 binary itself does not call `hex_emit.py`.)
+spec/task transitions. Query them via `boi traces query "<sql>"` and
+`boi failures top --last 7d`. The hex-events event bus has been removed; there
+is no policy bridge. Completion detection is via `boi log <spec-id>` or
+`boi dashboard`.
 
 ## Spec Format — TOML ONLY
 
@@ -359,9 +359,9 @@ conflict resolution is deferred to v1.x
 4. **`deny_unknown_fields` is strict.** Typos in field names fail at parse
    time with line/column. Don't paste v1 specs and hope they work.
 5. **VERBAL MONITORING = BUG.** When you leave and a spec is running, NEVER say
-   "I'll keep an eye on it." Set up a hex-events policy to poll
-   `boi log <spec-id>` / `boi dashboard` and notify on completion or failure.
-   This is SO #10 (mechanical action, not verbal) applied to BOI v2.
+   "I'll keep an eye on it." Use `boi dashboard` or `boi log <spec-id>` to
+   check status; wire an OS-level launchd job or Claude Code hook to notify on
+   completion or failure. Mechanical action, not verbal (SO #10).
 6. **One pipeline at v1.0.** Custom pipelines via `pipeline = "./my.toml"` are
    supported but rare; ship with `pipeline = "standard"` unless you have a
    specific reason and a written pipeline TOML.
