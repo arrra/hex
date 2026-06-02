@@ -3,7 +3,7 @@ use rusqlite::{params, Connection};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
-use crate::server::{Request, Response};
+use crate::types::{Request, Response};
 
 // Migration tracking table: _ext_migrations
 const MIGRATIONS_TABLE: &str = "_ext_migrations";

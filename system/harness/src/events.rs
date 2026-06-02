@@ -11,7 +11,7 @@ use std::sync::atomic::AtomicBool;
 use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::time::{Duration, Instant, SystemTime};
 
-use crate::server::{Request, Response};
+use crate::types::{Request, Response};
 use crate::sse::SseBus;
 use crate::telemetry::Telemetry;
 

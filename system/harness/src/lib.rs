@@ -7,7 +7,6 @@ pub mod memory;
 pub mod extensions;
 pub mod events;
 pub mod registry;
-pub mod server;
 pub mod sse;
 pub mod telemetry;
 pub mod types;

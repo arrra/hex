@@ -8,7 +8,7 @@ use std::io::{Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
-use crate::server::{Request, Response};
+use crate::types::{Request, Response};
 use crate::sse::SseBus;
 use crate::telemetry::Telemetry;
 

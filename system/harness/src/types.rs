@@ -1,4 +1,22 @@
 use serde::{Deserialize, Deserializer, Serialize};
+use std::collections::HashMap;
+
+// ── HTTP Request / Response (shared by assets, events, extensions) ────────────
+
+pub struct Request {
+    pub method: String,
+    pub path: String,
+    pub query: HashMap<String, String>,
+    pub headers: HashMap<String, String>,
+    pub body: Vec<u8>,
+}
+
+pub struct Response {
+    pub status: u16,
+    pub content_type: String,
+    pub headers: Vec<(String, String)>,
+    pub body: Vec<u8>,
+}
 
 // ── Trail ───────────────────────────────────────────────────────────────────
 
