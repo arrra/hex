@@ -46,20 +46,6 @@ enum Commands {
         #[command(subcommand)]
         command: DoctorCommands,
     },
-    /// Mirofish VM and service health (port of .hex/scripts/mirofish-status.sh)
-    #[cfg(feature = "personal")]
-    #[command(display_order = 17)]
-    Mirofish {
-        #[command(subcommand)]
-        command: MirofishCommands,
-    },
-    /// Kalshi prediction market integration
-    #[cfg(feature = "personal")]
-    #[command(display_order = 16)]
-    Kalshi {
-        #[command(subcommand)]
-        command: KalshiCommands,
-    },
     /// Session lifecycle commands
     #[command(display_order = 3)]
     Session {
@@ -315,32 +301,6 @@ enum SessionCommands {
         /// Suppress informational output
         #[arg(long)]
         quiet: bool,
-    },
-}
-
-#[cfg(feature = "personal")]
-#[derive(Subcommand)]
-enum MirofishCommands {
-    /// Check VM status and service health
-    Status,
-    /// Deploy latest code to Mirofish GCE VM (port of mirofish-deploy.sh)
-    Deploy,
-}
-
-#[cfg(feature = "personal")]
-#[derive(Subcommand)]
-enum KalshiCommands {
-    /// Generate RSA keypair for Kalshi API authentication (port of kalshi-keygen.sh)
-    Keygen {
-        /// Override the secrets directory (default: $HEX_DIR/.hex/secrets)
-        #[arg(long)]
-        secrets_dir: Option<std::path::PathBuf>,
-    },
-    /// Two-legged connectivity probe: public exchange/status + signed portfolio/balance (port of integrations/kalshi.sh)
-    Probe {
-        /// Override the secrets directory (default: $HEX_DIR/.hex/secrets)
-        #[arg(long)]
-        secrets_dir: Option<std::path::PathBuf>,
     },
 }
 
@@ -854,30 +814,6 @@ fn main() {
                 }
             }
         }
-        #[cfg(feature = "personal")]
-        Commands::Mirofish { command } => match command {
-            MirofishCommands::Status => mirofish::run_status(),
-            MirofishCommands::Deploy => mirofish::run_deploy(),
-        },
-        #[cfg(feature = "personal")]
-        Commands::Kalshi { command } => match command {
-            KalshiCommands::Keygen { secrets_dir } => {
-                let dir = match secrets_dir {
-                    Some(d) => d,
-                    None => {
-                        let hex_dir = get_hex_dir();
-                        kalshi::secrets_dir_from_hex(&hex_dir)
-                    }
-                };
-                kalshi::run_keygen(&dir);
-            }
-            KalshiCommands::Probe { secrets_dir } => {
-                let hex_dir = get_hex_dir();
-                let dir = secrets_dir.unwrap_or_else(|| kalshi::secrets_dir_from_hex(&hex_dir));
-                let sign_script = hex_dir.join(".hex/scripts/integrations/lib/kalshi_sign.py");
-                std::process::exit(kalshi::run_probe(&dir, &sign_script));
-            }
-        },
         Commands::Session { command } => match command {
             SessionCommands::Startup { quick, step, status } => {
                 let hex_dir = get_hex_dir();

@@ -32,8 +32,6 @@ fn main() {
 #[path = "{d}/integration_x_twitter.rs"] mod integration_x_twitter;
 #[path = "{d}/integration_publer.rs"] mod integration_publer;
 #[path = "{d}/integration_granola_mcp.rs"] mod integration_granola_mcp;
-#[path = "{d}/kalshi.rs"] mod kalshi;
-#[path = "{d}/mirofish.rs"] mod mirofish;
 #[path = "{d}/release.rs"] mod release;
 "#,
         d = personal_dir
