@@ -342,8 +342,14 @@ install_or_upgrade_boi() {
     # Clone or update the BOI repo
     if [ -d "$boi_src/.git" ]; then
         echo "  BOI repo exists — fetching $BOI_VERSION..."
-        ( cd "$boi_src" && git fetch --tags origin 2>/dev/null && \
-          git checkout "$BOI_VERSION" 2>/dev/null ) || true
+        # checkout -f is required: we write a generated boi.sh wrapper into the
+        # repo tree below, and boi.sh is a *tracked* file, so a plain checkout
+        # aborts ("local changes would be overwritten") and the old version
+        # ships silently. Surface failures loudly (S6) instead of `|| true`.
+        if ! ( cd "$boi_src" && git fetch --tags origin 2>/dev/null && \
+               git checkout -f "$BOI_VERSION" 2>/dev/null ); then
+            echo "  BOI: failed to fetch/checkout $BOI_VERSION — boi may be stale" >&2
+        fi
     else
         echo "  Cloning BOI repo..."
         mkdir -p "$(dirname "$boi_src")"

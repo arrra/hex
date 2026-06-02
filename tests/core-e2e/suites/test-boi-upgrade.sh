@@ -7,10 +7,10 @@
 # missing-`bench` incident.
 #
 # Flow in container:
-#   1. Clone hex-foundation; checkout v0.7.0 (BOI v0.2.0)
+#   1. Clone hex-foundation; checkout v0.10.0 (BOI v1.1.0)
 #   2. Run install.sh — baseline install
 #   3. Capture version + help-line count + binary mtime
-#   4. Checkout HEAD (BOI v1.0.0); re-run install.sh — upgrade
+#   4. Checkout HEAD (BOI from HEAD VERSIONS); re-run install.sh — upgrade
 #   5. Assert: version bumped, binary mtime newer, `bench` + others present
 #   6a. Smoke dispatch (optional, requires ANTHROPIC_API_KEY)
 #   6b. BAD case: corrupt symlink → run doctor → assert caught
@@ -88,7 +88,8 @@ on_exit() {
             | xargs -r tail -n 50 2>/dev/null || true
     fi
     # Clean up for reruns
-    rm -rf "$HOME/.boi" /tmp/hex "$HOME/github.com" 2>/dev/null || true
+    rm -rf "$HOME/.boi" /tmp/hex "$HOME/github.com" \
+           "$HOME/hex-baseline" "$HOME/hex-head" 2>/dev/null || true
     exit "${FAIL}"
 }
 trap on_exit EXIT
@@ -102,8 +103,14 @@ export PATH="$HOME/.boi/bin:$PATH"
 git config --global --add safe.directory /repo
 git config --global --add safe.directory /boi
 
-# ── 1. Clone hex-foundation + checkout old release ────────────────────────────
-echo "--- 1. clone + checkout v0.7.0 ---"
+# ── 1. Clone hex-foundation (HEAD) ────────────────────────────────────────────
+# Baseline mechanism: rather than checking out an old hex tag (whose historical
+# install.sh carries its own bugs — Python-era boi paths, `local` outside a
+# function, phantom BOI_VERSION pins), we install from HEAD's *clean* install.sh
+# twice: first with VERSIONS pinned to an older real boi tag, then restored to
+# HEAD's target. This exercises the upgrade/rebuild path — the bug this suite
+# exists to catch — without depending on buggy old releases.
+echo "--- 1. clone hex-foundation (HEAD) ---"
 if git clone /repo /tmp/hex > /tmp/clone.log 2>&1; then
     pass "clone: hex-foundation cloned to /tmp/hex"
 else
@@ -113,25 +120,29 @@ else
 fi
 
 cd /tmp/hex
-UPGRADE_SHA=$(git rev-parse HEAD)
-
-if git checkout v0.7.0 > /tmp/checkout-old.log 2>&1; then
-    pass "checkout-old: checked out v0.7.0"
-else
-    fail "checkout-old: could not checkout v0.7.0"
-    cat /tmp/checkout-old.log
-    exit 1
-fi
-
-# ── 2. Install at v0.7.0 (BOI v0.2.0) ────────────────────────────────────────
-echo "--- 2. baseline install (v0.7.0 / BOI v0.2.0) ---"
 export HEX_NONINTERACTIVE=1 CI=1
 if [ -d /boi/.git ]; then
     export HEX_BOI_REPO="file:///boi"
 fi
 
-if bash install.sh > /tmp/install-old.log 2>&1; then
-    pass "install-old: install.sh (v0.7.0) exited 0"
+# HEAD's target BOI version (what a real upgrade lands on) and the older
+# baseline version we upgrade *from*.
+NEW_BOI_VERSION=$(grep "^BOI_VERSION=" VERSIONS | cut -d= -f2)
+BASELINE_BOI_VERSION="v1.1.0"
+
+# install.sh is the fresh-install entrypoint and refuses to run over an existing
+# target dir. boi_src ($HOME/github.com/mrap/boi) and the binary ($HOME/.boi)
+# are HOME-based and shared across installs, so we point the two installs at
+# distinct target dirs: the second install proceeds and its
+# install_or_upgrade_boi sees the existing boi repo → fetch + checkout + rebuild.
+BASE_TARGET="$HOME/hex-baseline"
+HEAD_TARGET="$HOME/hex-head"
+
+# ── 2. Baseline install (HEAD install.sh, BOI pinned to $BASELINE_BOI_VERSION) ─
+echo "--- 2. baseline install (BOI $BASELINE_BOI_VERSION) ---"
+sed -i "s|^BOI_VERSION=.*|BOI_VERSION=$BASELINE_BOI_VERSION|" VERSIONS
+if bash install.sh "$BASE_TARGET" > /tmp/install-old.log 2>&1; then
+    pass "install-old: baseline install.sh (BOI $BASELINE_BOI_VERSION) exited 0"
 else
     INSTALL_EXIT=$?
     fail "install-old: install.sh exited $INSTALL_EXIT"
@@ -141,39 +152,32 @@ fi
 
 BOI="$HOME/.boi/bin/boi"
 if [ ! -x "$BOI" ]; then
-    fail "baseline-binary: $BOI not executable after old install"
+    fail "baseline-binary: $BOI not executable after baseline install"
     exit 1
 fi
-pass "baseline-binary: $BOI is executable after old install"
+pass "baseline-binary: $BOI is executable after baseline install"
 
 BASELINE_VER=$("$BOI" version 2>&1 || echo "unknown")
 BASELINE_HELP_LINES=$("$BOI" --help 2>&1 | wc -l | tr -d ' ')
 BINARY_MTIME_BEFORE=$(stat -c %Y "$BOI" 2>/dev/null || echo "0")
 pass "baseline-captured: version='$BASELINE_VER', help-lines=$BASELINE_HELP_LINES, mtime=$BINARY_MTIME_BEFORE"
 
-# ── 3. Update checkout to HEAD ────────────────────────────────────────────────
-echo "--- 3. update checkout to HEAD ---"
-if git checkout "$UPGRADE_SHA" > /tmp/checkout-head.log 2>&1; then
-    pass "checkout-head: updated to HEAD ($UPGRADE_SHA)"
-else
-    fail "checkout-head: could not checkout HEAD"
-    cat /tmp/checkout-head.log
-    exit 1
-fi
-
-NEW_BOI_VERSION=$(grep "^BOI_VERSION=" /tmp/hex/VERSIONS | cut -d= -f2)
-echo "  HEAD VERSIONS BOI_VERSION=$NEW_BOI_VERSION (baseline was from v0.7.0)"
+# ── 3. Restore HEAD's VERSIONS (target upgrade version) ───────────────────────
+echo "--- 3. restore VERSIONS to HEAD (BOI $NEW_BOI_VERSION) ---"
+sed -i "s|^BOI_VERSION=.*|BOI_VERSION=$NEW_BOI_VERSION|" VERSIONS
+pass "restore-versions: BOI_VERSION restored to $NEW_BOI_VERSION"
+echo "  upgrade: BOI $BASELINE_BOI_VERSION → $NEW_BOI_VERSION"
 
 # Sleep 1 second to ensure binary mtime differs from baseline
 sleep 1
 
-# ── 4. Upgrade: re-run install.sh from HEAD ───────────────────────────────────
-echo "--- 4. upgrade install (HEAD / $NEW_BOI_VERSION) ---"
-if bash install.sh > /tmp/install-new.log 2>&1; then
-    pass "install-new: install.sh (HEAD) exited 0"
+# ── 4. Upgrade: install into a fresh target (shared boi_src triggers rebuild) ─
+echo "--- 4. upgrade install (BOI $NEW_BOI_VERSION) ---"
+if bash install.sh "$HEAD_TARGET" > /tmp/install-new.log 2>&1; then
+    pass "install-new: upgrade install.sh exited 0"
 else
     INSTALL_EXIT=$?
-    fail "install-new: install.sh (HEAD) exited $INSTALL_EXIT"
+    fail "install-new: install.sh exited $INSTALL_EXIT"
     tail -50 /tmp/install-new.log
     exit 1
 fi
@@ -339,26 +343,29 @@ else
     fail "corrupt-symlink: expected dangling symlink; got something else"
 fi
 
-# Run doctor.sh against the HEAD checkout; it must detect the dangling symlink.
-# HEX_DIR is auto-detected from SCRIPT_DIR in doctor.sh, so running from /tmp/hex works.
-DOCTOR_OUT=$(HEX_DIR=/tmp/hex bash /tmp/hex/system/scripts/doctor.sh 2>&1) || DOCTOR_RC=$?
+# Run the deployed doctor (`hex doctor run`). Its boi-health check resolves
+# ~/.boi/bin/boi via is_file() (follows symlinks), so a dangling symlink is
+# reported as "[WARN] boi-health: ~/.boi/bin/boi not found" and the run exits
+# non-zero when any check warns/errors.
+HEX_BIN="$HEAD_TARGET/.hex/bin/hex"
+DOCTOR_OUT=$(HEX_DIR="$HEAD_TARGET" "$HEX_BIN" doctor run 2>&1) || DOCTOR_RC=$?
 DOCTOR_RC=${DOCTOR_RC:-0}
 
-if echo "$DOCTOR_OUT" | grep -qi "dangling\|corrupt\|\[ERROR\].*boi\|boi.*error\|boi.*symlink\|symlink.*boi"; then
-    pass "doctor-catch: doctor detected dangling symlink (exit $DOCTOR_RC)"
+if echo "$DOCTOR_OUT" | grep -qi "boi-health\|\.boi/bin/boi\|dangling\|boi.*not found\|boi.*error\|boi.*symlink"; then
+    pass "doctor-catch: doctor surfaced the broken boi binary (exit $DOCTOR_RC)"
 else
-    fail "doctor-catch: doctor did NOT report dangling symlink — this is the bug to fix"
+    fail "doctor-catch: doctor did NOT surface broken boi binary"
     echo "  BOI-related doctor output:"
     echo "$DOCTOR_OUT" | grep -i boi | head -10 || echo "  (no BOI lines in doctor output)"
     echo "  Last 15 lines:"
     echo "$DOCTOR_OUT" | tail -15
 fi
 
-# Also assert doctor exited non-zero (errors should fail the run)
+# doctor must reflect the problem in its exit code
 if [ "$DOCTOR_RC" -ne 0 ]; then
-    pass "doctor-exit: doctor exited $DOCTOR_RC (non-zero on error, as expected)"
+    pass "doctor-exit: doctor exited $DOCTOR_RC (non-zero on broken boi, as expected)"
 else
-    fail "doctor-exit: doctor exited 0 despite dangling symlink — errors not reflected in exit code"
+    fail "doctor-exit: doctor exited 0 despite broken boi — not reflected in exit code"
 fi
 
 # Restore clean symlink so on_exit cleanup is tidy
