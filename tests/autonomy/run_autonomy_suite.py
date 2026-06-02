@@ -133,12 +133,14 @@ def classify_mechanism(prompt: str) -> str:
     """
     Predict which mechanism hex should use for the given natural-language prompt.
 
-    Returns one of: inline, boi, hex-events, agent-route, doctor, upgrade
+    Returns one of: inline, boi, launchd, agent-route, doctor, upgrade
+    (hex-events was removed in collapse-to-cc-boi; automation now routes to launchd)
     """
     # Automation / recurring / event-triggered — check before implementation
     # because "when a PR is merged, run the test suite" is automation not boi.
+    # hex-events is removed; the collapsed system uses OS-level scheduling (launchd).
     if _matches(prompt, _AUTOMATION_PATTERNS):
-        return "hex-events"
+        return "launchd"
 
     # Health checks
     if _matches(prompt, _HEALTH_PATTERNS):

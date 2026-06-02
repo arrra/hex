@@ -76,8 +76,9 @@ echo "[5] BOI delegation"
 check_contains "BOI section"               "BOI\|boi"                         "$AGENTS_MD"
 check_contains "dispatch reference"        "dispatch"                         "$AGENTS_MD"
 
-echo "[6] hex-events automation"
-check_contains "hex-events section"        "hex-events\|hex_events"           "$AGENTS_MD"
+echo "[6] Automation section (launchd/OS-level — hex-events removed)"
+check_contains "Automation section present" "## Automation"                   "$AGENTS_MD"
+check_contains "launchd reference"          "launchd"                         "$AGENTS_MD"
 
 echo "[7] Memory system"
 check_contains "memory section"            "memory\|Memory"                   "$AGENTS_MD"

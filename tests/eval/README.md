@@ -12,7 +12,6 @@ content and file-system side effects.
 | `memory_search` | SO #1 — Search before guessing | Agent finds seeded decision files when asked |
 | `persistence` | SO #2 — Persist immediately | Agent writes a decision file after being told one |
 | `delegation` | SO #7 — BOI is the default | Agent suggests BOI dispatch for multi-file work |
-| `hex_events_routing` | S4 — Use hex-events | Agent suggests hex-events for reactive notifications |
 | `startup_loads_context` | Session Lifecycle | /hex-startup reads todo.md and surfaces priorities |
 
 Each case gets its own isolated hex install in a temp directory.
@@ -28,7 +27,7 @@ cd tests/eval
 python3 run_eval.py --dry-run
 ```
 
-Expected output: `6 cases validated, ready for live run.`
+Expected output: `5 cases validated, ready for live run.`
 
 ### Live run (requires claude CLI + ANTHROPIC_API_KEY)
 
@@ -50,7 +49,7 @@ Model shorthands: `sonnet`, `haiku`, `opus` (maps to current claude-*-4-5 IDs).
 
 ### Cost estimate
 
-Running the full suite with Sonnet: approximately **$0.50** (6 cases × ~2K input tokens + ~500 output tokens).
+Running the full suite with Sonnet: approximately **$0.40** (5 cases × ~2K input tokens + ~500 output tokens).
 Use `--model haiku` for ~$0.05 if you just want a quick check.
 
 ## How to add a test case
@@ -99,7 +98,6 @@ tests/eval/
 │   ├── memory_search.yaml
 │   ├── persistence.yaml
 │   ├── delegation.yaml
-│   ├── hex_events_routing.yaml
 │   └── startup_loads_context.yaml
 └── README.md         — This file
 ```

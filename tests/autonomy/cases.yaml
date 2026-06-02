@@ -3,7 +3,7 @@
 # does hex pick the right internal mechanism and keep the plumbing invisible?
 #
 # leak_words: words that must NOT appear in hex's response (case-insensitive)
-# expected_mechanism: inline | boi | hex-events | agent-route | skill | doctor | upgrade
+# expected_mechanism: inline | boi | launchd | agent-route | skill | doctor | upgrade
 # category: implementation | automation | research | health | routing | improvement | delegation | inline
 
 default_leak_words: &default_leak_words
@@ -86,12 +86,12 @@ cases:
       reporting progress naturally as if it were a single focused effort.
     leak_words: *default_leak_words
 
-  # ── AUTOMATION (expect: hex-events) ──────────────────────────────────────
+  # ── AUTOMATION (expect: launchd — hex-events removed) ───────────────────
 
   - id: auto-morning-deploy-check
     category: automation
     prompt: "Remind me every morning to check deploy status"
-    expected_mechanism: hex-events
+    expected_mechanism: launchd
     expected_behavior: >
       Hex confirms it will send a daily morning reminder about deploy status.
       No mention of how the scheduling is implemented.
@@ -100,7 +100,7 @@ cases:
   - id: auto-pr-test-suite
     category: automation
     prompt: "When a PR is merged, automatically run the test suite"
-    expected_mechanism: hex-events
+    expected_mechanism: launchd
     expected_behavior: >
       Hex confirms the automation is set up: tests will run whenever a PR merges.
       Implementation details stay hidden.
@@ -109,7 +109,7 @@ cases:
   - id: auto-nightly-cleanup
     category: automation
     prompt: "Clean up temp files every night"
-    expected_mechanism: hex-events
+    expected_mechanism: launchd
     expected_behavior: >
       Hex confirms nightly cleanup will happen automatically, without describing
       the scheduling mechanism used.
@@ -118,7 +118,7 @@ cases:
   - id: auto-api-latency-alert
     category: automation
     prompt: "Alert me if the API response time exceeds 2 seconds"
-    expected_mechanism: hex-events
+    expected_mechanism: launchd
     expected_behavior: >
       Hex confirms monitoring is set up and will alert when response time
       exceeds the threshold. No internal tooling names mentioned.
@@ -127,7 +127,7 @@ cases:
   - id: auto-post-deploy-health
     category: automation
     prompt: "After every deploy, verify the health endpoint"
-    expected_mechanism: hex-events
+    expected_mechanism: launchd
     expected_behavior: >
       Hex confirms it will check the health endpoint after each deploy, described
       as a simple standing behavior with no mechanism vocabulary.
@@ -136,7 +136,7 @@ cases:
   - id: auto-weekly-report
     category: automation
     prompt: "Send me a weekly summary of open GitHub issues every Monday"
-    expected_mechanism: hex-events
+    expected_mechanism: launchd
     expected_behavior: >
       Hex confirms a weekly Monday summary will be delivered, without exposing
       how the recurring task is scheduled.
@@ -252,7 +252,7 @@ cases:
   - id: improve-monday-habit
     category: improvement
     prompt: "I keep doing the same thing every Monday morning — it would be great if that just happened automatically"
-    expected_mechanism: hex-events
+    expected_mechanism: launchd
     expected_behavior: >
       Hex asks what the Monday task is (or infers from context) and sets it up
       to run automatically, without describing how the automation works.
@@ -261,7 +261,7 @@ cases:
   - id: improve-table-formatting
     category: improvement
     prompt: "You always format tables wrong — please fix that permanently"
-    expected_mechanism: hex-events
+    expected_mechanism: launchd
     expected_behavior: >
       Hex acknowledges the formatting preference and confirms it will be applied
       going forward, without mentioning how the correction is persisted.
@@ -270,7 +270,7 @@ cases:
   - id: improve-email-first
     category: improvement
     prompt: "Can you remember to check email first every time I start a session?"
-    expected_mechanism: hex-events
+    expected_mechanism: launchd
     expected_behavior: >
       Hex confirms it will check email at the start of each session, presented
       as a natural behavioral change with no internal vocabulary.

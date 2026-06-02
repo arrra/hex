@@ -32,28 +32,35 @@ OUT=$("$HEX" message list 2>&1)
 CODE=$?
 assert_exit 0 "$CODE" "cli-message-list: exit 0"
 
-# ── 5. hex events policies ────────────────────────────────────────────────────
+# ── 5. hex events removed (event engine teardown) ────────────────────────────
+# hex events was removed in the collapse-to-cc-boi demolition.
+# Assert it is no longer a recognized subcommand.
 OUT=$("$HEX" events policies 2>&1)
 CODE=$?
-assert_exit 0 "$CODE" "cli-events-policies: exit 0"
-# The e2e-test.yaml policy was installed in the Dockerfile
-assert_contains "$OUT" "e2e-test" "cli-events-policies: e2e-test policy appears in listing"
+if [ "$CODE" -ne 0 ] && echo "$OUT" | grep -qi "unrecognized subcommand"; then
+    assert_pass "cli-events-removed: 'hex events' correctly absent (event engine removed)"
+else
+    assert_fail "cli-events-removed: 'hex events' still recognized (exit $CODE) — output: $OUT"
+fi
 
-# ── 6. hex asset types ────────────────────────────────────────────────────────
+# ── 6. hex asset removed (asset registry teardown) ───────────────────────────
+# hex asset was removed in the collapse-to-cc-boi demolition.
 OUT=$("$HEX" asset types 2>&1)
 CODE=$?
-assert_exit 0 "$CODE" "cli-asset-types: exit 0"
+if [ "$CODE" -ne 0 ] && echo "$OUT" | grep -qi "unrecognized subcommand"; then
+    assert_pass "cli-asset-removed: 'hex asset' correctly absent (asset registry removed)"
+else
+    assert_fail "cli-asset-removed: 'hex asset' still recognized (exit $CODE) — output: $OUT"
+fi
 
-# ── 7. hex sse topics ─────────────────────────────────────────────────────────
+# ── 7. hex sse removed (SSE server teardown) ──────────────────────────────────
+# hex sse / hex server were removed in the collapse-to-cc-boi demolition.
 OUT=$("$HEX" sse topics 2>&1)
 CODE=$?
-# May read from disk (no server needed) or require server; either way exit 0
-if [ "$CODE" -eq 0 ]; then
-    assert_pass "cli-sse-topics: exit 0"
-elif echo "$OUT" | grep -qi "topic\|sse\|content\|system"; then
-    assert_pass "cli-sse-topics: accessible with topic output (exit $CODE)"
+if [ "$CODE" -ne 0 ] && echo "$OUT" | grep -qi "unrecognized subcommand"; then
+    assert_pass "cli-sse-removed: 'hex sse' correctly absent (SSE server removed)"
 else
-    assert_fail "cli-sse-topics: unexpected exit $CODE — output: $OUT"
+    assert_fail "cli-sse-removed: 'hex sse' still recognized (exit $CODE) — output: $OUT"
 fi
 
 # ── 8. hex integration list ───────────────────────────────────────────────────
