@@ -737,9 +737,6 @@ enum HealthCommands {
     /// Check daily reflection log freshness (port of health/check-reflection-liveness.sh)
     #[command(name = "check-reflection-liveness")]
     CheckReflectionLiveness,
-    /// Verify failure-routing pipeline integrity (port of health/check-failure-routing-roundtrip.sh)
-    #[command(name = "check-failure-routing")]
-    CheckFailureRouting,
 }
 
 #[derive(Subcommand)]
@@ -1508,10 +1505,6 @@ fn main() {
             }
             HealthCommands::CheckReflectionLiveness => {
                 let script = get_hex_dir().join(".hex/scripts/health/check-reflection-liveness.sh");
-                std::process::exit(exec_script(&script, &[]));
-            }
-            HealthCommands::CheckFailureRouting => {
-                let script = get_hex_dir().join(".hex/scripts/health/check-failure-routing-roundtrip.sh");
                 std::process::exit(exec_script(&script, &[]));
             }
         },
