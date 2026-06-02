@@ -1,4 +1,4 @@
-use crate::types::{AgentState, Cost, Queue};
+use crate::types::{AgentState, Queue};
 use std::path::Path;
 
 pub fn initialize(agent_id: &str) -> AgentState {
@@ -19,10 +19,6 @@ pub fn initialize(agent_id: &str) -> AgentState {
         initiatives: Default::default(),
         inbox: vec![],
         memory: serde_json::Value::Object(Default::default()),
-        cost: Cost {
-            lifetime_usd: 0.0,
-            last_wake_usd: 0.0,
-        },
         cadence_overrides: Default::default(),
         last_assessment_wake: 0,
         recent_action_hashes: vec![],

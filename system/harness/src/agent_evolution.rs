@@ -24,8 +24,6 @@ struct AgentMetrics {
     f2a_ratio: f64,
     diversity: usize,
     trail_quality: f64,
-    cost_7d_usd: f64,
-    cost_per_action: Option<f64>,
     is_idle: bool,
     last_trail_ts: Option<DateTime<Utc>>,
     kpis: Vec<String>,
@@ -34,11 +32,10 @@ struct AgentMetrics {
 
 impl AgentMetrics {
     fn composite_score(&self) -> f64 {
-        let cost_score = match self.cost_per_action {
-            Some(c) => (1.0 / (c + 0.01)).min(1.0) * 0.2,
-            None => 0.0,
-        };
-        self.kpi_achievement * 0.5 + self.trail_quality * 0.3 + cost_score
+        // Cost-derived score component removed 2026-06-01 (Mike's "strip $
+        // everywhere" directive). Score now caps at 0.8 — kpi_achievement
+        // and trail_quality remain the only signal.
+        self.kpi_achievement * 0.5 + self.trail_quality * 0.3
     }
 }
 
@@ -47,7 +44,7 @@ impl AgentMetrics {
 pub fn run(dry_run: bool) -> i32 {
     let hex_dir = crate::get_hex_dir();
     let projects_dir = hex_dir.join("projects");
-    let ledger_path = hex_dir.join(".hex/cost/ledger.jsonl");
+    let ledger_path = hex_dir.join(".hex/tokens/ledger.jsonl");
     let evolution_dir = projects_dir.join("fleet-lead/evolution");
     let board_path = projects_dir.join("fleet-lead/board.md");
     let today = Utc::now().format("%Y-%m-%d").to_string();
@@ -246,17 +243,6 @@ fn compute_metrics(
     let diversity_score = (diversity as f64 / 5.0).min(1.0);
     let trail_quality = (productive_ratio * 0.6 + diversity_score * 0.4 * 1000.0).round() / 1000.0;
 
-    let cost_entries = ledger.get(agent_id).map(|v| v.as_slice()).unwrap_or(&[]);
-    let total_cost_7d: f64 = cost_entries
-        .iter()
-        .filter_map(|e| e.get("cost_usd")?.as_f64())
-        .sum();
-    let cost_per_action = if productive_count > 0 {
-        Some((total_cost_7d / productive_count as f64 * 10000.0).round() / 10000.0)
-    } else {
-        None
-    };
-
     let kpi_count = kpis.len();
     let kpi_target = kpi_count * 5;
     let kpi_achievement = if kpi_count == 0 {
@@ -277,8 +263,6 @@ fn compute_metrics(
         f2a_ratio: (f2a_ratio * 1000.0).round() / 1000.0,
         diversity,
         trail_quality,
-        cost_7d_usd: (total_cost_7d * 10000.0).round() / 10000.0,
-        cost_per_action,
         is_idle,
         last_trail_ts,
         kpis,
@@ -310,12 +294,8 @@ fn build_report(
     for (agent_id, score) in scored.iter() {
         let m = &metrics[*agent_id];
         let idle_marker = if m.is_idle { "YES" } else { "" };
-        let cost_str = match m.cost_per_action {
-            Some(c) => format!("${c:.4}"),
-            None => "—".into(),
-        };
         lines.push(format!(
-            "| {agent_id} | {:.0}% | {} | {:.2} | {cost_str} | {idle_marker} | {score:.3} |",
+            "| {agent_id} | {:.0}% | {} | {:.2} | {idle_marker} | {score:.3} |",
             m.kpi_achievement * 100.0,
             m.trail_7d,
             m.trail_quality,
@@ -331,10 +311,6 @@ fn build_report(
         lines.push(format!("- KPI achievement: {:.0}%", m.kpi_achievement * 100.0));
         lines.push(format!("- Trail entries (7d): {}", m.trail_7d));
         lines.push(format!("- Trail quality: {:.2}", m.trail_quality));
-        lines.push(format!(
-            "- Cost/action: {}",
-            m.cost_per_action.map(|c| format!("${c}")).unwrap_or_else(|| "no cost data".into())
-        ));
         lines.push(format!("- Action diversity: {} types used", m.diversity));
         lines.push("- What's working: high activity, broad action coverage".into());
         lines.push(String::new());
@@ -614,8 +590,6 @@ kpis:
             f2a_ratio: 0.5,
             diversity: 3,
             trail_quality: 0.7,
-            cost_7d_usd: 0.12,
-            cost_per_action: Some(0.015),
             is_idle: false,
             last_trail_ts: Some(Utc::now()),
             kpis: vec!["kpi1".into()],

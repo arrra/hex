@@ -11,8 +11,6 @@ fn test_initialize_new_state() {
     assert!(s.queue.scheduled.is_empty());
     assert!(s.trail.is_empty());
     assert!(s.inbox.is_empty());
-    assert_eq!(s.cost.lifetime_usd, 0.0);
-    assert_eq!(s.cost.last_wake_usd, 0.0);
 }
 
 #[test]
@@ -24,7 +22,6 @@ fn test_save_and_load_roundtrip() {
     let loaded = state::load(&path).unwrap();
     assert_eq!(loaded.agent_id, original.agent_id);
     assert_eq!(loaded.wake_count, original.wake_count);
-    assert_eq!(loaded.cost.lifetime_usd, original.cost.lifetime_usd);
 }
 
 #[test]

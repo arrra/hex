@@ -21,7 +21,6 @@ pub fn build(
     let queue_json = serialize_or_loud("queue", &state.queue);
     let memory_json = serialize_or_loud("memory", &state.memory);
     let inbox_json = serialize_or_loud("inbox", &state.inbox);
-    let cost_json = serialize_or_loud("cost", &state.cost);
     let initiatives_json = serialize_or_loud("initiatives", &state.initiatives);
 
     let principles_section = principles_text
@@ -88,7 +87,6 @@ pub fn build(
 ## Cost
 
 ```json
-{cost_json}
 ```
 
 ---
@@ -205,7 +203,6 @@ pub fn build_assessment(
     let trail_recent: Vec<_> = state.trail.iter().rev().take(50).collect();
     let trail_json = serialize_or_loud("trail", &trail_recent);
     let memory_json = serialize_or_loud("memory", &state.memory);
-    let cost_json = serialize_or_loud("cost", &state.cost);
     let cadence_json = serialize_or_loud("cadence_overrides", &state.cadence_overrides);
 
     let kpis_section = charter
@@ -288,7 +285,6 @@ You are {name} ({role}).
 ## Cost
 
 ```json
-{cost_json}
 ```
 
 ---

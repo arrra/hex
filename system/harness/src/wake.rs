@@ -1,5 +1,5 @@
 use crate::{
-    act_evidence, audit, capability_exec, capability_guard, charter, claude, cost, gate, message,
+    act_evidence, audit, capability_exec, capability_guard, charter, claude, tokens, gate, message,
     prompt, queue, registry, state,
 };
 use chrono::Utc;
@@ -281,7 +281,7 @@ pub struct WakeConfig {
 pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     let hex_dir = &config.hex_dir;
     let audit_dir = hex_dir.join(".hex/audit");
-    let cost_dir = hex_dir.join(".hex/cost");
+    let tokens_dir = hex_dir.join(".hex/tokens");
     let msg_dir = hex_dir.join(".hex/messages");
 
     // 1. Load charter — one canonical path, no fallbacks
@@ -407,7 +407,6 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
     };
 
     // 4. Reset per-shift cost, increment wake
-    agent_state.cost.last_wake_usd = 0.0;
     agent_state.wake_count += 1;
     agent_state.last_wake = Some(Utc::now());
 
@@ -540,8 +539,8 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
             }
         };
 
-        cost::record_invocation(&mut agent_state.cost, &claude_output);
-        cost::append_ledger(&cost_dir, &config.agent_id, &claude_output);
+        tokens::record_invocation(&claude_output);
+        tokens::append_ledger(&tokens_dir, &config.agent_id, &claude_output);
 
         let (first_response, first_quality) = claude::parse_agent_response(&claude_output.result);
 
@@ -561,8 +560,8 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
         );
 
         if let Some(ref out) = retry_claude_output {
-            cost::record_invocation(&mut agent_state.cost, out);
-            cost::append_ledger(&cost_dir, &config.agent_id, out);
+            tokens::record_invocation(out);
+            tokens::append_ledger(&tokens_dir, &config.agent_id, out);
         }
 
         let (response, parse_quality) = match retry_result {
@@ -885,8 +884,8 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
 
         match claude::invoke(&assess_prompt, "sonnet", &["Bash", "Read", "Grep", "Glob"]) {
             Ok(assess_output) => {
-                cost::record_invocation(&mut agent_state.cost, &assess_output);
-                cost::append_ledger(&cost_dir, &config.agent_id, &assess_output);
+                tokens::record_invocation(&assess_output);
+                tokens::append_ledger(&tokens_dir, &config.agent_id, &assess_output);
 
                 match claude::parse_assessment_response(&assess_output.result) {
                     Ok(assessment) => {
@@ -1004,7 +1003,6 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
         "wake-complete",
         &serde_json::json!({
             "invocations": invocation,
-            "shift_cost_usd": agent_state.cost.last_wake_usd,
             "trail_entries": agent_state.trail.len(),
             "active_remaining": agent_state.queue.active.len(),
         }),

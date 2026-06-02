@@ -247,16 +247,6 @@ pub struct Message {
     pub sent_at: DateTime<Utc>,
 }
 
-// ── Cost ────────────────────────────────────────────────────────────────────
-
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
-pub struct Cost {
-    #[serde(default)]
-    pub lifetime_usd: f64,
-    #[serde(default)]
-    pub last_wake_usd: f64,
-}
-
 // ── Agent State ─────────────────────────────────────────────────────────────
 
 #[derive(Debug, Clone, Serialize, Deserialize)]
@@ -270,7 +260,6 @@ pub struct AgentState {
     pub initiatives: HashMap<String, serde_json::Value>,
     pub inbox: Vec<Message>,
     pub memory: serde_json::Value,
-    pub cost: Cost,
     #[serde(default)]
     pub cadence_overrides: HashMap<String, u64>,
     #[serde(default)]

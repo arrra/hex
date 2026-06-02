@@ -1456,8 +1456,6 @@ fn run_agent_command(command: AgentCommands) {
                         println!("Scheduled: {} items", s.queue.scheduled.len());
                         println!("Inbox: {} messages", s.inbox.len());
                         println!("Trail: {} entries", s.trail.len());
-                        println!("Cost (lifetime): ${:.4}", s.cost.lifetime_usd);
-                        println!("Cost (last wake): ${:.4}", s.cost.last_wake_usd);
                     }
                     Err(e) => {
                         eprintln!("Cannot load state for '{}': {e}", id);
@@ -1508,10 +1506,10 @@ fn run_agent_command(command: AgentCommands) {
             }
 
             println!(
-                "{:<20} {:>4} {:>6} {:>12} {:>8} {:>8} {:>10}",
-                "AGENT", "CORE", "WAKES", "LAST WAKE", "ACTIVE", "BLOCKED", "LIFETIME"
+                "{:<20} {:>4} {:>6} {:>12} {:>8} {:>8}",
+                "AGENT", "CORE", "WAKES", "LAST WAKE", "ACTIVE", "BLOCKED"
             );
-            println!("{}", "-".repeat(74));
+            println!("{}", "-".repeat(64));
             for id in &agents {
                 let is_core = charters.get(id).map(|c| c.core).unwrap_or(false);
                 let core_flag = if is_core { "  ●" } else { "" };
@@ -1522,19 +1520,18 @@ fn run_agent_command(command: AgentCommands) {
                         .map(|t| t.format("%H:%M:%S").to_string())
                         .unwrap_or("never".into());
                     println!(
-                        "{:<20} {:>4} {:>6} {:>12} {:>8} {:>8} ${:>9.4}",
+                        "{:<20} {:>4} {:>6} {:>12} {:>8} {:>8}",
                         id,
                         core_flag,
                         s.wake_count,
                         last,
                         s.queue.active.len(),
                         s.queue.blocked.len(),
-                        s.cost.lifetime_usd
                     );
                 } else {
                     println!(
-                        "{:<20} {:>4} {:>6} {:>12} {:>8} {:>8} {:>10}",
-                        id, core_flag, 0, "never", 0, 0, "new"
+                        "{:<20} {:>4} {:>6} {:>12} {:>8} {:>8}",
+                        id, core_flag, 0, "never", 0, 0
                     );
                 }
             }

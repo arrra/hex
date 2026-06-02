@@ -1,20 +1,20 @@
-use crate::types::{ClaudeOutput, Cost};
+use crate::types::ClaudeOutput;
 use chrono::Utc;
 use std::fs::{self, OpenOptions};
 use std::io::Write;
 use std::path::Path;
 
-pub fn record_invocation(cost: &mut Cost, output: &ClaudeOutput) {
-    let usd = output.total_cost_usd;
-    cost.last_wake_usd += usd;
-    cost.lifetime_usd += usd;
+pub fn record_invocation(_output: &ClaudeOutput) {
+    // Token counts are recorded by `append_ledger`. There is no longer any
+    // per-invocation $ accumulation — Mike's 2026-06-01 directive: strip $
+    // everywhere, keep tokens everywhere.
 }
 
 pub fn append_ledger(ledger_dir: &Path, agent_id: &str, output: &ClaudeOutput) {
     let path = ledger_dir.join("ledger.jsonl");
     if let Err(e) = fs::create_dir_all(ledger_dir) {
         eprintln!(
-            "COST LEDGER FAILED: cannot create {}: {e}",
+            "TOKEN LEDGER FAILED: cannot create {}: {e}",
             ledger_dir.display()
         );
         return;
@@ -22,7 +22,6 @@ pub fn append_ledger(ledger_dir: &Path, agent_id: &str, output: &ClaudeOutput) {
     let entry = serde_json::json!({
         "ts": Utc::now().to_rfc3339(),
         "agent": agent_id,
-        "cost_usd": output.total_cost_usd,
         "input_tokens": output.usage.input_tokens,
         "output_tokens": output.usage.output_tokens,
         "cache_read_tokens": output.usage.cache_read_input_tokens,
@@ -32,7 +31,7 @@ pub fn append_ledger(ledger_dir: &Path, agent_id: &str, output: &ClaudeOutput) {
     let line = match serde_json::to_string(&entry) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("COST SERIALIZE FAILED: {e}");
+            eprintln!("TOKEN SERIALIZE FAILED: {e}");
             return;
         }
     };
@@ -40,13 +39,13 @@ pub fn append_ledger(ledger_dir: &Path, agent_id: &str, output: &ClaudeOutput) {
         Ok(mut file) => {
             if let Err(e) = writeln!(file, "{}", line) {
                 eprintln!(
-                    "COST LEDGER FAILED: cannot write to {}: {e}",
+                    "TOKEN LEDGER FAILED: cannot write to {}: {e}",
                     path.display()
                 );
             }
         }
         Err(e) => {
-            eprintln!("COST LEDGER FAILED: cannot open {}: {e}", path.display());
+            eprintln!("TOKEN LEDGER FAILED: cannot open {}: {e}", path.display());
         }
     }
 }

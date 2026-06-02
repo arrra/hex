@@ -8,7 +8,7 @@ pub mod charter_triggers;
 pub mod extensions;
 pub mod charter;
 pub mod claude;
-pub mod cost;
+pub mod tokens;
 pub mod events;
 pub mod gate;
 pub mod message;
