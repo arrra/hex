@@ -527,6 +527,20 @@ RCEOF
     else
         echo "  HEX_DIR already in $SHELL_RC ✓"
     fi
+
+    # Shell completions — sourced from the binary so they always match the
+    # installed version. Self-contained (no fpath/compinit ordering deps).
+    if ! grep -q 'hex completions' "$SHELL_RC" 2>/dev/null; then
+        if [[ "$SHELL_RC" == *.bashrc ]]; then COMP_SHELL="bash"; else COMP_SHELL="zsh"; fi
+        cat >> "$SHELL_RC" << RCEOF
+
+# hex shell completions
+command -v hex >/dev/null 2>&1 && source <(hex completions $COMP_SHELL)
+RCEOF
+        echo "  hex completions ($COMP_SHELL) added to $SHELL_RC ✓"
+    else
+        echo "  hex completions already in $SHELL_RC ✓"
+    fi
 else
     echo ""
     echo "Add these to your shell rc file:"

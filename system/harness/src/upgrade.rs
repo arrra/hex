@@ -634,6 +634,22 @@ fn setup_shell(hex_dir: &Path) {
         dirty = true;
     }
 
+    // Shell completions — sourced from the binary so they always match the
+    // installed version. Self-contained (no fpath/compinit ordering deps).
+    if !content.contains("hex completions") {
+        let completions_shell = if rc_path.ends_with(".bashrc") {
+            "bash"
+        } else {
+            "zsh"
+        };
+        lines.push(String::new());
+        lines.push("# hex shell completions".to_string());
+        lines.push(format!(
+            r#"command -v hex >/dev/null 2>&1 && source <(hex completions {completions_shell})"#
+        ));
+        dirty = true;
+    }
+
     if dirty {
         let out = lines.join("\n") + "\n";
         let tmp = rc_path.with_extension("tmp");
