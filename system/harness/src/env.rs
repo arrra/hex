@@ -97,10 +97,9 @@ pub fn compose_path_dirs(hex_dir: &Path) -> Vec<PathBuf> {
     add_order.push(home.join(".local/share/uv/python"));
     add_order.push(home.join(".pyenv/shims"));
 
-    // hex binary, BOI, hex-events
+    // hex binary, BOI
     add_order.push(hex_dir.join(".hex/bin"));
     add_order.push(home.join(".boi/bin"));
-    add_order.push(home.join(".hex-events/venv/bin"));
 
     // Filter: existing dirs only; reverse so last-added = highest priority
     let mut seen = std::collections::HashSet::new();

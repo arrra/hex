@@ -28,29 +28,7 @@ pub fn run(conn: &mut Connection) -> anyhow::Result<ConsolidateReport> {
     iso!("prune",                op_prune(conn));
     iso!("topic-rollup",         op_topic_rollup(conn));
 
-    emit_consolidated_event(&r);
     Ok(r)
-}
-
-fn emit_consolidated_event(r: &ConsolidateReport) {
-    use std::io::Write;
-    let hex_dir = crate::memory::provider::hex_root();
-    let log_path = hex_dir.join(".hex/telemetry/server.jsonl");
-    let _ = std::fs::create_dir_all(log_path.parent().unwrap_or(&log_path));
-    let entry = serde_json::json!({
-        "ts": chrono::Utc::now().to_rfc3339(),
-        "event": "hex.memory.consolidated",
-        "detail": {
-            "source": "hex-memory-consolidate",
-            "ok": r.ok.len(),
-            "failed": r.failed.len(),
-        }
-    });
-    if let Ok(line) = serde_json::to_string(&entry) {
-        if let Ok(mut file) = std::fs::OpenOptions::new().create(true).append(true).open(&log_path) {
-            let _ = writeln!(file, "{}", line);
-        }
-    }
 }
 
 fn op_orientation_snapshot(_conn: &mut Connection) -> anyhow::Result<()> {
