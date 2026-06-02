@@ -113,12 +113,6 @@ enum Commands {
         /// Session ID to deregister (from startup output); omit to get manual instructions
         session_id: Option<String>,
     },
-    /// BOI Process Manager subcommands (verify, archive, auto-commit)
-    #[command(name = "boi-pm", display_order = 21)]
-    BoiPm {
-        #[command(subcommand)]
-        command: BoiPmCommands,
-    },
     /// Spec-tool server launcher (port of .hex/scripts/spec-tool/run.sh)
     #[command(name = "spec-tool", display_order = 36)]
     SpecTool {
@@ -177,35 +171,6 @@ enum Commands {
     #[command(display_order = 12)]
     Completions {
         shell: clap_complete::Shell,
-    },
-}
-
-#[derive(Subcommand)]
-enum BoiPmCommands {
-    /// Verify a BOI spec's completion claims (port of boi-completion-verify.sh)
-    Verify {
-        /// Spec ID to verify
-        spec_id: String,
-    },
-    /// Archive a completed BOI spec as JSON (port of boi-completion-to-archive.sh)
-    Archive {
-        /// Spec ID to archive
-        spec_id: String,
-        /// Target repo path (optional)
-        #[arg(long)]
-        target_repo: Option<String>,
-    },
-    /// Auto-commit BOI spec output to target repo (port of auto-commit-boi-output.sh)
-    #[command(name = "auto-commit")]
-    AutoCommit {
-        /// Spec ID
-        spec_id: String,
-        /// Target repo path (optional)
-        #[arg(long)]
-        target_repo: Option<String>,
-        /// Manifest path (optional)
-        #[arg(long)]
-        manifest: Option<String>,
     },
 }
 
@@ -961,29 +926,6 @@ fn main() {
             let code = shutdown::run(&hex_dir, shutdown::ShutdownArgs { session_id });
             std::process::exit(code);
         }
-        Commands::BoiPm { command } => match command {
-            BoiPmCommands::Verify { spec_id } => {
-                let script = get_hex_dir().join(".hex/scripts/boi-completion-verify.sh");
-                std::process::exit(exec_script(&script, &[&spec_id]));
-            }
-            BoiPmCommands::Archive { spec_id, target_repo } => {
-                let home = std::env::var("HOME").unwrap_or_default();
-                let script = std::path::PathBuf::from(&home).join(".boi/scripts/boi-completion-to-archive.sh");
-                let mut args: Vec<String> = vec![spec_id];
-                if let Some(r) = target_repo { args.push(r); }
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                std::process::exit(exec_script(&script, &arg_refs));
-            }
-            BoiPmCommands::AutoCommit { spec_id, target_repo, manifest } => {
-                let home = std::env::var("HOME").unwrap_or_default();
-                let script = std::path::PathBuf::from(&home).join(".hex-events/scripts/auto-commit-boi-output.sh");
-                let mut args: Vec<String> = vec![spec_id];
-                if let Some(r) = target_repo { args.push(r); } else { args.push(String::new()); }
-                if let Some(m) = manifest { args.push(m); }
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                std::process::exit(exec_script(&script, &arg_refs));
-            }
-        },
         Commands::SpecTool { command } => match command {
             SpecToolCommands::VerifyClaims { spec_file, workspace, verbose } => {
                 let hex_dir = get_hex_dir();
