@@ -28,7 +28,7 @@ If `.hex/migrate-from` does not exist, skip to Step 1.
 ## Step 1: Run Startup Script
 
 ```bash
-hex startup
+hex session startup
 ```
 
 This handles: environment detection, session registration, transcript parsing, memory index rebuild, health check, integration check, and pending improvement suggestions.

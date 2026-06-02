@@ -167,10 +167,10 @@ if [ -n "$HEX_BIN" ]; then
     assert_fail "hex binary missing doctor subcommand"
   fi
 
-  if "$HEX_BIN" --help 2>&1 | grep -q "startup"; then
-    assert_pass "hex binary includes startup subcommand"
+  if "$HEX_BIN" session --help 2>&1 | grep -q "startup"; then
+    assert_pass "hex binary includes session startup subcommand"
   else
-    assert_fail "hex binary missing startup subcommand"
+    assert_fail "hex binary missing session startup subcommand"
   fi
 
   # Fleet/agent teardown: `hex agent` was removed. Assert it's correctly absent.

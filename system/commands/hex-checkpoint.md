@@ -15,7 +15,7 @@ Persist context from the current conversation, then suggest compact if the user 
 Run the checkpoint binary to handle all mechanical steps:
 
 ```
-hex checkpoint [focus directive]
+hex session checkpoint [focus directive]
 ```
 
 The binary will:
@@ -31,12 +31,12 @@ The binary will:
 The user may pass a focus directive (what they want to work on next). Pass it as the first argument:
 
 ```
-hex checkpoint "auth refactor"
+hex session checkpoint "auth refactor"
 ```
 
 ## AI-driven steps (still required)
 
-After running `hex checkpoint`, complete the steps that require conversation context:
+After running `hex session checkpoint`, complete the steps that require conversation context:
 
 1. **Quick distill pass** — scan the conversation for unpersisted context:
    - Decisions made → `me/decisions/` or `projects/*/decisions/`

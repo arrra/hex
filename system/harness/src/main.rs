@@ -87,31 +87,6 @@ enum Commands {
         #[command(subcommand)]
         command: McpCommands,
     },
-    /// Run the hex session startup checklist (port of .hex/scripts/startup.sh)
-    #[command(display_order = 38)]
-    Startup {
-        /// Skip slow steps (integration pulls, evolution engine, priority scoring)
-        #[arg(long)]
-        quick: bool,
-        /// Run a single named step and exit (see --status for names)
-        #[arg(long)]
-        step: Option<String>,
-        /// List available steps and exit
-        #[arg(long)]
-        status: bool,
-    },
-    /// Checkpoint the current session (port of /hex-checkpoint slash command)
-    #[command(display_order = 23)]
-    Checkpoint {
-        /// What to work on next (used in compact suggestion and handoff)
-        focus: Option<String>,
-    },
-    /// Close the current session (port of /hex-shutdown slash command)
-    #[command(display_order = 35)]
-    Shutdown {
-        /// Session ID to deregister (from startup output); omit to get manual instructions
-        session_id: Option<String>,
-    },
     /// Spec-tool server launcher (port of .hex/scripts/spec-tool/run.sh)
     #[command(name = "spec-tool", display_order = 36)]
     SpecTool {
@@ -377,6 +352,28 @@ enum MemoryCommands {
 
 #[derive(Subcommand)]
 enum SessionCommands {
+    /// Run the hex session startup checklist (port of .hex/scripts/startup.sh)
+    Startup {
+        /// Skip slow steps (integration pulls, evolution engine, priority scoring)
+        #[arg(long)]
+        quick: bool,
+        /// Run a single named step and exit (see --status for names)
+        #[arg(long)]
+        step: Option<String>,
+        /// List available steps and exit
+        #[arg(long)]
+        status: bool,
+    },
+    /// Checkpoint the current session (port of /hex-checkpoint slash command)
+    Checkpoint {
+        /// What to work on next (used in compact suggestion and handoff)
+        focus: Option<String>,
+    },
+    /// Close the current session (port of /hex-shutdown slash command)
+    Shutdown {
+        /// Session ID to deregister (from startup output); omit to get manual instructions
+        session_id: Option<String>,
+    },
     /// Post-session reflection: update reflection-log.md and persist eval_records to memory.db
     Reflect {
         /// Session identifier to record in the reflection log
@@ -894,6 +891,24 @@ fn main() {
             }
         },
         Commands::Session { command } => match command {
+            SessionCommands::Startup { quick, step, status } => {
+                let hex_dir = get_hex_dir();
+                let code = startup::run(
+                    &hex_dir,
+                    startup::StartupArgs { quick, step, status },
+                );
+                std::process::exit(code);
+            }
+            SessionCommands::Checkpoint { focus } => {
+                let hex_dir = get_hex_dir();
+                let code = checkpoint::run(&hex_dir, checkpoint::CheckpointArgs { focus });
+                std::process::exit(code);
+            }
+            SessionCommands::Shutdown { session_id } => {
+                let hex_dir = get_hex_dir();
+                let code = shutdown::run(&hex_dir, shutdown::ShutdownArgs { session_id });
+                std::process::exit(code);
+            }
             SessionCommands::Reflect { session_id, quiet } => {
                 session_reflect::run(session_id.as_deref(), quiet);
             }
@@ -906,24 +921,6 @@ fn main() {
                 std::process::exit(mcp::oauth_rewrite(&auth_url));
             }
         },
-        Commands::Startup { quick, step, status } => {
-            let hex_dir = get_hex_dir();
-            let code = startup::run(
-                &hex_dir,
-                startup::StartupArgs { quick, step, status },
-            );
-            std::process::exit(code);
-        }
-        Commands::Checkpoint { focus } => {
-            let hex_dir = get_hex_dir();
-            let code = checkpoint::run(&hex_dir, checkpoint::CheckpointArgs { focus });
-            std::process::exit(code);
-        }
-        Commands::Shutdown { session_id } => {
-            let hex_dir = get_hex_dir();
-            let code = shutdown::run(&hex_dir, shutdown::ShutdownArgs { session_id });
-            std::process::exit(code);
-        }
         Commands::SpecTool { command } => match command {
             SpecToolCommands::VerifyClaims { spec_file, workspace, verbose } => {
                 let hex_dir = get_hex_dir();

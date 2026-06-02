@@ -18,7 +18,7 @@ pub struct ShutdownArgs {
     pub session_id: Option<String>,
 }
 
-/// Run `hex shutdown`. Returns exit code (0 = success).
+/// Run `hex session shutdown`. Returns exit code (0 = success).
 pub fn run(hex_dir: &Path, args: ShutdownArgs) -> i32 {
     println!("\n{}Shutdown — closing session{}", BOLD, RESET);
 
@@ -65,7 +65,7 @@ pub fn run(hex_dir: &Path, args: ShutdownArgs) -> i32 {
                 DIM, RESET
             );
             println!("    ls $HEX_DIR/.hex/sessions/    # list active sessions");
-            println!("    hex shutdown --session-id <SESSION_ID>");
+            println!("    hex session shutdown <SESSION_ID>");
         }
     }
 
