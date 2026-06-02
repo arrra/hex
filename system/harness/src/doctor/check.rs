@@ -4,7 +4,6 @@ use std::path::PathBuf;
 pub enum Category {
     Health,
     Config,
-    Fleet,
     Security,
     Performance,
 }
@@ -14,7 +13,6 @@ impl std::fmt::Display for Category {
         match self {
             Category::Health => write!(f, "Health"),
             Category::Config => write!(f, "Config"),
-            Category::Fleet => write!(f, "Fleet"),
             Category::Security => write!(f, "Security"),
             Category::Performance => write!(f, "Performance"),
         }

@@ -1122,7 +1122,7 @@ fn main() {
                         std::process::exit(1);
                     });
                 ext_db.scan_and_migrate(&hex_dir);
-                let server = hex::server::HexServer::new(port, hex_dir, bus, telemetry, events, assets, ext_db);
+                let server = hex::server::HexServer::new(port, bus, telemetry, events, assets, ext_db);
                 server.start();
             }
             ServerCommands::Health => {
