@@ -262,27 +262,6 @@ fn log_and_emit(hex_root: &Path, o: &RecallOutcome) {
         );
     }
 
-    // Gate EventEngine on injected — the hot path runs on every prompt; building
-    // EventEngine (reads config files) is only worth it when we actually injected.
-    // The JSONL append above is the eval's complete data source for both injected
-    // and non-injected recalls — do NOT gate that write on o.injected.
-    if o.injected {
-        let bus = crate::sse::SseBus::new();
-        let telemetry = std::sync::Arc::new(crate::telemetry::Telemetry::new(hex_root));
-        match crate::events::EventEngine::new(hex_root, telemetry, bus) {
-            Ok(engine) => {
-                engine.ingest(
-                    "memory.recall",
-                    &json!({
-                        "injected": o.injected, "gated": o.gated,
-                        "result_count": o.result_count, "latency_ms": o.latency_ms,
-                    }),
-                    "hex:memory",
-                );
-            }
-            Err(e) => eprintln!("[memory recall] could not emit recall event: {e}"),
-        }
-    }
 }
 
 /// `hex memory recall <query>` — prints the context block to stdout.

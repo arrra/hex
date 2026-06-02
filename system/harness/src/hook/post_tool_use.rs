@@ -1,6 +1,5 @@
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::io::Read;
-use std::path::PathBuf;
 
 // ── filter list ───────────────────────────────────────────────────────────────
 // Deliberate design choice: high-volume tools are excluded to avoid log noise.
@@ -35,26 +34,6 @@ pub fn parse_outcome(tool_response: &Value) -> &'static str {
     }
 }
 
-// ── event emission ────────────────────────────────────────────────────────────
-
-fn emit_event(hex_dir: &std::path::Path, tool_name: &str, outcome: &str) {
-    let bus = hex::sse::SseBus::new();
-    let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(hex_dir));
-    let engine = match hex::events::EventEngine::new(hex_dir, telemetry, bus) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("[hook/post-tool-use] event engine init failed: {e}");
-            return;
-        }
-    };
-
-    let payload = json!({
-        "tool_name": tool_name,
-        "outcome": outcome,
-    });
-    engine.ingest("tool.post_use", &payload, "claude-code");
-}
-
 // ── entry point ───────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -75,18 +54,6 @@ pub fn run() {
 
     if is_filtered(&tool_name) {
         std::process::exit(0);
-    }
-
-    let tool_response = input.get("tool_response").cloned().unwrap_or(Value::Null);
-    let outcome = parse_outcome(&tool_response);
-
-    let hex_dir = std::env::var("HEX_DIR")
-        .ok()
-        .or_else(|| std::env::var("CLAUDE_PROJECT_DIR").ok())
-        .map(PathBuf::from);
-
-    if let Some(dir) = hex_dir {
-        emit_event(&dir, &tool_name, outcome);
     }
 
     std::process::exit(0);

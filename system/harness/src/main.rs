@@ -34,12 +34,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Event engine
-    #[command(display_order = 25)]
-    Events {
-        #[command(subcommand)]
-        command: EventsCommands,
-    },
     /// Integration bundle lifecycle management
     #[command(display_order = 9)]
     Integration {
@@ -276,34 +270,6 @@ enum LearningsCommands {
         /// Print candidates without writing any files
         #[arg(long)]
         dry_run: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum EventsCommands {
-    /// Show event engine status
-    Status,
-    /// Emit an event
-    Emit {
-        event_type: String,
-        payload: String,
-        /// Source tag for the emitted event (e.g., "hex:checkpoint")
-        #[arg(long, default_value = "cli")]
-        source: String,
-    },
-    /// Show full action chain for an event
-    Trace {
-        event_id: i64,
-    },
-    /// List loaded policies
-    Policies,
-    /// Force policy reload
-    Reload,
-    /// Run the event daemon (long-running; processes events, fires actions, logs heartbeats)
-    Daemon {
-        /// Shadow mode: process events and log intended actions, but do NOT execute them
-        #[arg(long, default_value_t = false)]
-        shadow: bool,
     },
 }
 
@@ -702,26 +668,6 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Events { command } => {
-            let hex_dir = get_hex_dir();
-            let bus = hex::sse::SseBus::new();
-            let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(&hex_dir));
-            let engine = hex::events::EventEngine::new(&hex_dir, telemetry, bus)
-                .unwrap_or_else(|e| {
-                    eprintln!("events engine init failed: {e}");
-                    std::process::exit(1);
-                });
-            match command {
-                EventsCommands::Status => engine.cli_status(),
-                EventsCommands::Emit { event_type, payload, source } => engine.cli_emit(&event_type, &payload, &source),
-                EventsCommands::Trace { event_id } => engine.cli_trace(event_id),
-                EventsCommands::Policies => engine.cli_policies(),
-                EventsCommands::Reload => engine.cli_reload(),
-                EventsCommands::Daemon { shadow } => {
-                    hex::events::EventEngine::cli_daemon(engine, shadow);
-                }
-            }
-        }
         Commands::Integration { command } => {
             if let IntegrationCommands::Template = command {
                 integration::template();

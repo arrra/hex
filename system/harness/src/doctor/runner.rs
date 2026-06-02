@@ -51,7 +51,6 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::symlinks::NoBrokenSymlinks),
         Box::new(checks::memory_db::MemoryDbExists),
         Box::new(checks::scripts_exec::ScriptsExecutable),
-        Box::new(checks::hex_events::HexEventsReachable),
         Box::new(checks::boi_health::BoiHealth),
         Box::new(checks::python::PythonVersion),
         Box::new(checks::hex_binary::HexBinaryOnPath),
