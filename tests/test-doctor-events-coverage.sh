@@ -20,11 +20,12 @@ TOTAL=0
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 HEX_DOCTOR="$SCRIPT_DIR/../system/scripts/hex-doctor"
-# Inline stub: the fixture used to live at system/scripts/health/ but that
-# dir was deleted (audit-closure 2026-05-24). hex doctor only checks for
-# the script's presence, not its contents.
-POLICY_LOAD_STUB='#!/bin/sh
-exit 0'
+# Real check script (restored 2026-06-02). hex-doctor execs this to scan the
+# hex-events daemon log for POLICY LOAD/VALIDATION ERROR entries. A no-op stub
+# was wrongly substituted when system/scripts/health/ was pruned, silencing
+# broken-policy detection (S6 violation). We install the *real* script so the
+# assertions below genuinely verify detection works end-to-end.
+POLICY_LOAD_SCRIPT="$SCRIPT_DIR/../system/scripts/health/check-hex-events-policy-load.sh"
 
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
@@ -110,7 +111,7 @@ assert_not_contains "no ERROR when scripts absent"  "ERROR"  "$DOCTOR_OUT"
 echo ""
 echo "[2] Policy-load script present, daemon log absent: SKIP (not ERROR)"
 
-printf '%s\n' "$POLICY_LOAD_STUB" > "$FAKE_HEX/.hex/scripts/health/check-hex-events-policy-load.sh"
+cp "$POLICY_LOAD_SCRIPT" "$FAKE_HEX/.hex/scripts/health/check-hex-events-policy-load.sh"
 chmod +x "$FAKE_HEX/.hex/scripts/health/check-hex-events-policy-load.sh"
 
 DAEMON_LOG="$FAKE_HEX/daemon-absent.log"  # doesn't exist
