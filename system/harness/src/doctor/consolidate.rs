@@ -53,10 +53,12 @@ pub fn run(hex_dir: &Path) -> i32 {
                     let name_str = name.to_string_lossy();
                     if name_str == "_archive" { continue; }
                     let has_context = path.join("context.md").exists();
-                    let has_charter = path.join("charter.yaml").exists();
                     let has_checkpoint = path.join("checkpoint.md").exists();
-                    if !has_context || !has_charter || !has_checkpoint {
-                        let msg = format!("ORPHAN: projects/{name_str} missing required files (context.md, charter.yaml, checkpoint.md)");
+                    // charter.yaml is no longer required: the agent fleet and per-project
+                    // charters were removed in the fleet teardown. Requiring it would flag
+                    // every project as ORPHAN.
+                    if !has_context || !has_checkpoint {
+                        let msg = format!("ORPHAN: projects/{name_str} missing required files (context.md, checkpoint.md)");
                         lines.push(msg.clone());
                         issues.push(msg);
                     }
