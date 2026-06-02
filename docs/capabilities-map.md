@@ -134,12 +134,8 @@
   _via built-in · [cron system]_
 - 🟢 **Hex Dashboard Auto-Update** — Slack canvas dashboard refreshed every 2 hours via cron
   _via cron+script · [.claude/scripts/generate-hex-dashboard.py]_
-- 🟢 **Hex Event** — Generate and validate hex-events policies for reactive/event-driven automation. Use when wiring "when X happens do Y", event chains, oneshot notifications, or any event-driven behavior.
-  _via hex-skill · [~/.claude/skills/hex-event/SKILL.md]_
 - 🟢 **Morning Brief** — Daily 6am brief — priorities, landings, north star, open threads
-  _via cron+policy · [.claude/morning-brief.md]_
-- 🟢 **hex-events Policy Engine** — YAML-based Event-Condition-Action engine for reactive automation
-  _via daemon · [~/.hex-events/policies/]_
+  _via cron+script · [.claude/morning-brief.md]_
 - 🔵 **Agent Browser** — Browser automation via the agent-browser CLI (Vercel). Rust-native, token-efficient alternative to Playwright for AI agent browser control. Use for web scraping, e2e testing, form filling, and control
   _via skill · [~/.hex/legacy-skills/skills/software-development/agent-browser/SKILL.md]_
 

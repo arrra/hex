@@ -23,7 +23,7 @@ etc.). The live `env.sh` and `hex-agent-spawn.sh` in foundation are thin
 shims (intentional wrappers calling `hex env` / `hex agent spawn`) and
 must remain.
 
-Scripts still in active use by hex-events policies
+Scripts still in active use by initiative loop
 (`initiative-watchdog.py`, `hex-experiment.py`, `hex-initiative-loop-v2.py`)
 are classified PORT-NOW and are handled by the PORT-NOW work list.
 

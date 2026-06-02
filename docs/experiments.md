@@ -2,7 +2,7 @@
 
 **Status:** Canonical reference  
 **Date:** 2026-04-22  
-**Relates to:** architecture.md, hex-events.md, multi-agent.md
+**Relates to:** architecture.md, multi-agent.md
 
 ---
 
@@ -188,7 +188,7 @@ Guard: if `baseline` already set, refuses to overwrite. Re-baselining is blocked
 
 ### `hex experiment activate <id>`
 
-Records that the change has shipped. Captures current git HEAD. Emits `experiment.activated` to hex-events (triggers auto-measure scheduling). Transitions to `ACTIVE`.
+Records that the change has shipped. Captures current git HEAD. Transitions to `ACTIVE`.
 
 ```bash
 hex experiment activate exp-001
@@ -243,7 +243,7 @@ VERDICT: ✓ PASS
 ────────────────────────────────────────────────
 ```
 
-On `VERDICT_FAIL`: exits with code 1, prints rollback commands from `rollback_plan.commands`, emits `experiment.verdict_fail` to hex-events.
+On `VERDICT_FAIL`: exits with code 1, prints rollback commands from `rollback_plan.commands`.
 
 Exit codes: 0 = PASS, 1 = FAIL, 2 = INCONCLUSIVE, 3 = runner error.
 
@@ -280,7 +280,7 @@ Agents propose experiments via a new charter action type:
 
 The harness runs `hex experiment create <file>`, records the experiment ID in the agent's state (`active_experiments: [exp-001]`), and feeds validation errors back on the agent's next wake.
 
-Agents do NOT run `baseline`, `activate`, or `measure` — those require human or hex-events triggers. This separation prevents agents from closing experiments they authored.
+Agents do NOT run `baseline`, `activate`, or `measure` — those require human or scheduled triggers. This separation prevents agents from closing experiments they authored.
 
 Agents query experiment status for reasoning:
 ```bash
@@ -311,69 +311,9 @@ import sys, json; d=json.load(sys.stdin)
 exit(0 if d['state']=='VERDICT_PASS' else 1)"
 ```
 
-### hex-events integration
-
-`hex experiment activate` emits `experiment.activated`. A hex-events policy schedules auto-measurement after `time_bound.measure_by`:
-
-```yaml
-# ~/.hex/hex-events-policies/experiment-auto-measure.yaml
-rules:
-  - name: schedule-measure
-    trigger: { event: experiment.activated }
-    actions:
-      - type: emit
-        event: experiment.measure_due
-        delay: "{{ event.seconds_until_measure_by }}s"
-        payload: { experiment_id: "{{ event.experiment_id }}" }
-  - name: run-measure
-    trigger: { event: experiment.measure_due }
-    actions:
-      - type: shell
-        command: "hex experiment measure {{ event.experiment_id }}"
-```
-
-`VERDICT_FAIL` emits `experiment.verdict_fail`, triggering a notification policy that prints the experiment title, primary delta, and rollback commands.
-
-Full event table:
-
-| Event | Emitted when |
-|-------|-------------|
-| `experiment.created` | `create` |
-| `experiment.baseline_collected` | `baseline` |
-| `experiment.activated` | `activate` |
-| `experiment.measured` | `measure` |
-| `experiment.verdict_pass` | `verdict` → PASS |
-| `experiment.verdict_fail` | `verdict` → FAIL |
-| `experiment.verdict_inconclusive` | `verdict` → INCONCLUSIVE |
-
 ### Cost integration
 
 At `measure` time, the runner reads `.hex/cost/ledger.jsonl` and sums API spend from `activated_at` to `now`. Written to `post_change.experiment_window_cost_usd`. Optionally surfaced as a guardrail via the `__experiment_window_cost__` sentinel.
-
-### Telemetry integration
-
-All events land in `.hex/telemetry/events.db` via the existing `emit.py` path. Useful dashboard queries:
-
-```sql
--- Active (non-terminal) experiments
-SELECT json_extract(payload, '$.experiment_id') AS id, event_type, created_at
-FROM events
-WHERE event_type LIKE 'experiment.%'
-  AND event_type NOT LIKE 'experiment.verdict%'
-ORDER BY created_at DESC;
-
--- Stale: activated but never measured after 7 days
-SELECT json_extract(a.payload, '$.experiment_id') AS id,
-       JULIANDAY('now') - JULIANDAY(a.created_at) AS days_since_activation
-FROM events a
-WHERE a.event_type = 'experiment.activated'
-  AND NOT EXISTS (
-    SELECT 1 FROM events m
-    WHERE m.event_type = 'experiment.measured'
-      AND json_extract(m.payload, '$.experiment_id') = json_extract(a.payload, '$.experiment_id')
-  )
-  AND JULIANDAY('now') - JULIANDAY(a.created_at) > 7;
-```
 
 ### Fleet-wide view
 
@@ -403,7 +343,7 @@ hex experiment activate exp-001
 # → state: ACTIVE
 
 # 4. Wait for min_cycles_before_measure (20 BOI cycles), or time_bound
-# hex-events auto-fires measure on 2026-05-22, or run manually:
+# Run manually after measure_by date, or schedule via OS-level job:
 hex experiment measure exp-001
 # → state: MEASURING
 

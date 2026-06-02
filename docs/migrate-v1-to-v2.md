@@ -94,7 +94,7 @@ This restores from the most recent `.claude.v1-backup-*` and moves the migrated 
 ## What the migrator does NOT do
 
 - **Does not touch runtime data**: `me/`, `projects/`, `people/`, `evolution/`, `landings/`, `raw/`, `todo.md` are left alone.
-- **Does not touch companion repos**: `~/.boi/`, `~/.hex-events/` stay exactly as they are.
+- **Does not touch companion repos**: `~/.boi/` stays exactly as it is.
 - **Does not update LaunchAgents**: plists in `~/Library/LaunchAgents/` are NOT inspected or modified. (In the reference migration, none referenced `.claude/` paths anyway — companion daemons live elsewhere.)
 - **Does not push anywhere**: all changes stay local on your branch. You merge/push when you're ready.
 
