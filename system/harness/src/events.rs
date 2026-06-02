@@ -134,359 +134,16 @@ pub struct Action {
     pub tier: Option<String>,
 }
 
-// ── Agent-charter policy types ────────────────────────────────────────────────
-//
-// These types deserialize the `wake:` block from a project charter.yaml.
-// `id` is set by CharterLoader (derived from the project directory name).
-
+// `TriggerSpec` is re-exported for the trigger-parsing tests and any external
+// consumers of the generic trigger-spec type.
 pub use crate::types::TriggerSpec;
-
-/// Parsed from `wake.rate_limit` in a charter. `window` is a duration string
-/// like "60m" or "24h"; call `.window_duration()` to convert to `std::time::Duration`.
-#[derive(Debug, Clone, Deserialize)]
-pub struct RateLimit {
-    pub max_fires: u32,
-    pub window: String,
-}
-
-impl RateLimit {
-    /// Parse the window string ("60m", "24h", "1d") into a `Duration`.
-    /// Returns an error string if the format is unrecognised.
-    pub fn window_duration(&self) -> Result<Duration, String> {
-        let s = self.window.trim();
-        if let Some(n) = s.strip_suffix('m') {
-            n.parse::<u64>()
-                .map(|v| Duration::from_secs(v * 60))
-                .map_err(|e| format!("invalid rate_limit window '{}': {e}", self.window))
-        } else if let Some(n) = s.strip_suffix('h') {
-            n.parse::<u64>()
-                .map(|v| Duration::from_secs(v * 3600))
-                .map_err(|e| format!("invalid rate_limit window '{}': {e}", self.window))
-        } else if let Some(n) = s.strip_suffix('d') {
-            n.parse::<u64>()
-                .map(|v| Duration::from_secs(v * 86400))
-                .map_err(|e| format!("invalid rate_limit window '{}': {e}", self.window))
-        } else {
-            Err(format!(
-                "unrecognised rate_limit window '{}' — expected suffix m/h/d",
-                self.window
-            ))
-        }
-    }
-}
-
-/// Mirrors the `wake:` block of a charter.yaml.  The `id` field is injected by
-/// `CharterLoader` after discovery (it is NOT present in the YAML itself).
-#[derive(Debug, Clone, Deserialize, Default)]
-pub struct AgentPolicy {
-    /// Agent identifier — set by CharterLoader from the project directory name.
-    #[serde(skip)]
-    pub id: String,
-
-    #[serde(default = "default_true")]
-    pub enabled: bool,
-
-    /// Optional rate limit.  `null` is valid; a missing key is also valid (treated
-    /// as no limit).  The spec distinguishes "null is OK; absence is NOT" only for
-    /// validation purposes — both deserialise to `None` here.
-    #[serde(default)]
-    pub rate_limit: Option<RateLimit>,
-
-    /// Override wake command. When `None`, the daemon uses `hex agent wake <id>`.
-    #[serde(default)]
-    pub command: Option<String>,
-
-    #[serde(default)]
-    pub triggers: Vec<TriggerSpec>,
-
-    #[serde(default)]
-    pub on_success: Vec<String>,
-
-    #[serde(default)]
-    pub on_failure: Vec<String>,
-}
-
-fn default_true() -> bool {
-    true
-}
-
-// ── Charter-as-policy loader ──────────────────────────────────────────────────
-
-/// Raw charter YAML shape for wake-policy extraction.
-/// Only `id` and `wake` are parsed; all other charter fields are ignored.
-#[derive(Debug, Deserialize)]
-struct CharterDocRaw {
-    pub id: String,
-    #[serde(default)]
-    pub wake: Option<AgentPolicy>,
-}
-
-/// Known trigger-event namespace prefixes.  A trigger event whose name begins
-/// with one of these prefixes (or is exactly "*") is accepted; anything else
-/// is rejected at load time to catch typos early.
-const TRIGGER_ALLOWLIST_PREFIXES: &[&str] = &[
-    "timer.tick.",
-    "boi.",
-    "hex.",
-    "git.",
-    "integrations.",
-    "calendar.",
-];
-
-fn validate_trigger_event(event: &str) -> Option<String> {
-    if event == "*" {
-        return None;
-    }
-    for prefix in TRIGGER_ALLOWLIST_PREFIXES {
-        if event.starts_with(prefix) {
-            return None;
-        }
-    }
-    Some(format!(
-        "trigger event '{event}' is not in an allowed namespace \
-         (expected prefix: {})",
-        TRIGGER_ALLOWLIST_PREFIXES.join(", ")
-    ))
-}
-
-/// Loads `AgentPolicy` objects from `<hex_dir>/projects/*/charter.yaml`.
-/// Uses mtime-based caching: only re-reads files when a mtime changes.
-/// Validation errors are written to `hex_dir/health.json` and the offending
-/// agent is excluded from the returned list.
-pub struct CharterLoader {
-    hex_dir: PathBuf,
-    /// (mtime_snapshot, cached_policies)
-    cache: Mutex<(HashMap<PathBuf, SystemTime>, Vec<AgentPolicy>)>,
-}
-
-impl CharterLoader {
-    pub fn new(hex_dir: PathBuf) -> Self {
-        Self {
-            hex_dir,
-            cache: Mutex::new((HashMap::new(), Vec::new())),
-        }
-    }
-
-    /// Scan `hex_dir/projects/*/charter.yaml`, validate wake blocks, and
-    /// return one `AgentPolicy` per enabled, valid agent.  Agents with
-    /// `wake.enabled: false` are silently skipped.  All other validation
-    /// errors are written to `hex_dir/health.json` and the agent is excluded.
-    pub fn load_charters(&self) -> Vec<AgentPolicy> {
-        let pattern = self
-            .hex_dir
-            .join("projects")
-            .join("*")
-            .join("charter.yaml");
-        let pattern_str = pattern.to_string_lossy();
-
-        let mut current_mtimes: HashMap<PathBuf, SystemTime> = HashMap::new();
-        if let Ok(paths) = glob::glob(&pattern_str) {
-            for entry in paths.flatten() {
-                if let Ok(meta) = std::fs::metadata(&entry) {
-                    if let Ok(mtime) = meta.modified() {
-                        current_mtimes.insert(entry, mtime);
-                    }
-                }
-            }
-        }
-
-        let mut cache = match self.cache.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("charter_loader: cache lock poisoned: {e}");
-                return Vec::new();
-            }
-        };
-
-        if cache.0 == current_mtimes {
-            return cache.1.clone();
-        }
-
-        let health_path = self.hex_dir.join("health.json");
-        let mut loaded: Vec<AgentPolicy> = Vec::new();
-        let mut health_errors: HashMap<String, serde_json::Value> = HashMap::new();
-
-        for path in current_mtimes.keys() {
-            self.load_one_charter(path, &mut loaded, &mut health_errors);
-        }
-
-        if !health_errors.is_empty() {
-            self.write_health_errors(&health_path, &health_errors);
-        }
-
-        eprintln!(
-            "charter_loader: loaded {}/{} agent policies from charters",
-            loaded.len(),
-            current_mtimes.len()
-        );
-        cache.0 = current_mtimes;
-        cache.1 = loaded.clone();
-        loaded
-    }
-
-    fn load_one_charter(
-        &self,
-        path: &Path,
-        loaded: &mut Vec<AgentPolicy>,
-        health_errors: &mut HashMap<String, serde_json::Value>,
-    ) {
-        let content = match std::fs::read_to_string(path) {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("charter_loader: failed to read {:?}: {e}", path);
-                return;
-            }
-        };
-
-        // Fallback id from parent directory name (used before we parse id:).
-        let dir_id = path
-            .parent()
-            .and_then(|p| p.file_name())
-            .map(|n| n.to_string_lossy().to_string())
-            .unwrap_or_else(|| "unknown".to_string());
-
-        let raw: CharterDocRaw = match serde_yaml::from_str(&content) {
-            Ok(r) => r,
-            Err(e) => {
-                eprintln!("charter_loader: YAML parse error in {:?}: {e}", path);
-                health_errors.insert(
-                    dir_id,
-                    serde_json::json!({
-                        "status": "invalid_charter",
-                        "error": format!("YAML parse error: {e}")
-                    }),
-                );
-                return;
-            }
-        };
-
-        let agent_id = raw.id.clone();
-
-        let mut wake = match raw.wake {
-            Some(w) => w,
-            None => {
-                let msg = "missing wake: block";
-                eprintln!("charter_loader: {msg} for agent {}", agent_id);
-                health_errors.insert(
-                    agent_id,
-                    serde_json::json!({ "status": "invalid_charter", "error": msg }),
-                );
-                return;
-            }
-        };
-
-        if !wake.enabled {
-            eprintln!("charter_loader: skipping disabled agent {}", agent_id);
-            return;
-        }
-
-        if wake.triggers.is_empty() {
-            let msg = "wake.triggers is empty — at least one trigger is required";
-            eprintln!("charter_loader: {} for agent {}", msg, agent_id);
-            health_errors.insert(
-                agent_id,
-                serde_json::json!({ "status": "invalid_charter", "error": msg }),
-            );
-            return;
-        }
-
-        for trigger in &wake.triggers {
-            if let Some(err) = validate_trigger_event(&trigger.event) {
-                eprintln!("charter_loader: invalid trigger for agent {}: {err}", agent_id);
-                health_errors.insert(
-                    agent_id,
-                    serde_json::json!({ "status": "invalid_charter", "error": err }),
-                );
-                return;
-            }
-        }
-
-        wake.id = agent_id;
-        loaded.push(wake);
-    }
-
-    fn write_health_errors(
-        &self,
-        health_path: &Path,
-        errors: &HashMap<String, serde_json::Value>,
-    ) {
-        let mut health_map: serde_json::Map<String, serde_json::Value> =
-            if health_path.exists() {
-                std::fs::read_to_string(health_path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .and_then(|v| {
-                        if let serde_json::Value::Object(m) = v {
-                            Some(m)
-                        } else {
-                            None
-                        }
-                    })
-                    .unwrap_or_default()
-            } else {
-                serde_json::Map::new()
-            };
-
-        let agents_entry = health_map
-            .entry("agents".to_string())
-            .or_insert_with(|| serde_json::json!({}));
-
-        if let serde_json::Value::Object(ref mut agents_map) = agents_entry {
-            for (id, status) in errors {
-                agents_map.insert(id.clone(), status.clone());
-            }
-        }
-
-        let json_str = match serde_json::to_string_pretty(&serde_json::Value::Object(health_map))
-        {
-            Ok(s) => s,
-            Err(e) => {
-                eprintln!("charter_loader: failed to serialize health.json: {e}");
-                return;
-            }
-        };
-
-        let dir = health_path.parent().unwrap_or(Path::new("."));
-        let tmp = dir.join(format!(
-            ".health_tmp_{}.json",
-            std::time::SystemTime::now()
-                .duration_since(std::time::UNIX_EPOCH)
-                .map(|d| d.subsec_nanos())
-                .unwrap_or(0)
-        ));
-
-        match std::fs::File::create(&tmp) {
-            Ok(mut f) => {
-                let ok = f.write_all(json_str.as_bytes()).is_ok()
-                    && f.flush().is_ok()
-                    && std::fs::rename(&tmp, health_path).is_ok();
-                if !ok {
-                    let _ = std::fs::remove_file(&tmp);
-                    eprintln!(
-                        "charter_loader: failed to write health.json to {:?}",
-                        health_path
-                    );
-                }
-            }
-            Err(e) => eprintln!(
-                "charter_loader: failed to create health.json tmp at {:?}: {e}",
-                tmp
-            ),
-        }
-    }
-}
 
 // ── Engine ────────────────────────────────────────────────────────────────────
 
 pub struct EventEngine {
     db: Mutex<Connection>,
     pub policies_dir: PathBuf,
-    hex_dir: PathBuf,
     policies: RwLock<Vec<Policy>>,
-    /// Agent policies loaded from project charters (wake: blocks).
-    pub agent_policies: RwLock<Vec<AgentPolicy>>,
-    /// Charter loader; None in test contexts.
-    pub charter_loader: Option<CharterLoader>,
     telemetry: Arc<Telemetry>,
     pub bus: Arc<SseBus>,
     start_time: Instant,
@@ -496,7 +153,7 @@ pub struct EventEngine {
 
 impl EventEngine {
     pub fn new(
-        hex_dir: &Path,
+        _hex_dir: &Path,
         telemetry: Arc<Telemetry>,
         bus: Arc<SseBus>,
     ) -> Result<Arc<Self>, String> {
@@ -512,20 +169,10 @@ impl EventEngine {
             .map_err(|e| format!("events db open failed: {e}"))?;
         init_schema(&conn)?;
 
-        // Prefer HEX_DIR env var; fall back to the path passed in.
-        let charter_hex_dir = std::env::var("HEX_DIR")
-            .ok()
-            .map(PathBuf::from)
-            .unwrap_or_else(|| hex_dir.to_path_buf());
-        let charter_loader = Some(CharterLoader::new(charter_hex_dir.clone()));
-
         let engine = Arc::new(Self {
             db: Mutex::new(conn),
             policies_dir,
-            hex_dir: charter_hex_dir,
             policies: RwLock::new(Vec::new()),
-            agent_policies: RwLock::new(Vec::new()),
-            charter_loader,
             telemetry,
             bus,
             start_time: Instant::now(),
@@ -534,7 +181,6 @@ impl EventEngine {
         });
 
         engine.load_policies();
-        engine.load_agent_policies();
         Ok(engine)
     }
 
@@ -550,10 +196,7 @@ impl EventEngine {
         Arc::new(Self {
             db: Mutex::new(conn),
             policies_dir,
-            hex_dir: hex_dir.to_path_buf(),
             policies: RwLock::new(Vec::new()),
-            agent_policies: RwLock::new(Vec::new()),
-            charter_loader: None,
             telemetry,
             bus,
             start_time: Instant::now(),
@@ -574,10 +217,7 @@ impl EventEngine {
         Arc::new(Self {
             db: Mutex::new(conn),
             policies_dir,
-            hex_dir: hex_dir.to_path_buf(),
             policies: RwLock::new(Vec::new()),
-            agent_policies: RwLock::new(Vec::new()),
-            charter_loader: None,
             telemetry,
             bus,
             start_time: Instant::now(),
@@ -597,17 +237,6 @@ impl EventEngine {
         f(&db)
     }
 
-    /// Load agent policies from project charters and store them.
-    pub fn load_agent_policies(&self) {
-        if let Some(ref loader) = self.charter_loader {
-            let policies = loader.load_charters();
-            match self.agent_policies.write() {
-                Ok(mut guard) => *guard = policies,
-                Err(e) => eprintln!("events: agent_policies write lock poisoned: {e}"),
-            }
-        }
-    }
-
     pub fn load_policies(&self) {
         let pattern = self.policies_dir.join("*.yaml");
         let pattern_str = pattern.to_string_lossy();
@@ -615,14 +244,14 @@ impl EventEngine {
 
         if let Ok(paths) = glob::glob(&pattern_str) {
             for entry in paths.flatten() {
-                // Skip *-agent.yaml — agent policies come from charters now.
-                // This prevents double-wake during the Phase 3→4 overlap window.
+                // Skip *-agent.yaml — the agent fleet has been removed; these
+                // legacy per-agent wake policies are intentionally ignored.
                 let fname = entry
                     .file_name()
                     .and_then(|n| n.to_str())
                     .unwrap_or("");
                 if fname.ends_with("-agent.yaml") {
-                    eprintln!("events: skipping agent policy file {:?} (use charters)", entry);
+                    eprintln!("events: skipping legacy agent policy file {:?}", entry);
                     continue;
                 }
 
@@ -653,7 +282,6 @@ impl EventEngine {
 
     pub fn reload_policies(&self) {
         self.load_policies();
-        self.load_agent_policies();
     }
 
     /// Spawn a background thread that polls policy file mtimes every 10s.
@@ -843,9 +471,6 @@ impl EventEngine {
                 }
             }
         }
-
-        // Dispatch agent wakes from charter policies (rate-limited, persisted).
-        actions_fired += self.dispatch_agent_wakes(event_id, event_type, payload, shadow);
 
         // Mark processed
         let now = Utc::now().to_rfc3339();
@@ -1681,269 +1306,6 @@ impl EventEngine {
         };
         println!("Reloaded {count} policies");
     }
-
-    // ── Persisted rate limiting ───────────────────────────────────────────────
-
-    /// Returns true if the agent is allowed to fire (count of recent fires < max_fires).
-    /// Queries the persisted `agent_wake_fires` table so limits survive daemon restarts.
-    pub fn check_rate_limit(&self, agent_id: &str, max_fires: u32, window: Duration) -> bool {
-        let cutoff = Utc::now() - chrono::Duration::from_std(window).unwrap_or(chrono::Duration::hours(1));
-        let cutoff_str = cutoff.to_rfc3339();
-        let db = match self.db.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("events: db lock poisoned in check_rate_limit: {e}");
-                return true; // fail open to avoid blocking all wakes on lock corruption
-            }
-        };
-        let count: i64 = db
-            .query_row(
-                "SELECT COUNT(*) FROM agent_wake_fires WHERE agent_id = ?1 AND fired_at > ?2",
-                params![agent_id, cutoff_str],
-                |row| row.get(0),
-            )
-            .unwrap_or(0);
-        count < max_fires as i64
-    }
-
-    /// Record one agent wake fire.  Garbage-collects rows older than 30 days.
-    pub fn record_fire(&self, agent_id: &str) {
-        let now = Utc::now().to_rfc3339();
-        let cutoff = (Utc::now() - chrono::Duration::days(30)).to_rfc3339();
-        let db = match self.db.lock() {
-            Ok(g) => g,
-            Err(e) => {
-                eprintln!("events: db lock poisoned in record_fire: {e}");
-                return;
-            }
-        };
-        let _ = db.execute(
-            "INSERT INTO agent_wake_fires (agent_id, fired_at) VALUES (?1, ?2)",
-            params![agent_id, now],
-        );
-        // GC: remove rows older than 30 days to keep the table bounded
-        let _ = db.execute(
-            "DELETE FROM agent_wake_fires WHERE fired_at < ?1",
-            params![cutoff],
-        );
-    }
-
-    /// Dispatch agent wakes for a given event.  Called from dispatch_existing_event
-    /// after the regular policy dispatch.  Rate limiting is enforced here via
-    /// Write `health.agents.<agent_id>.degraded = true` to health.json when a
-    /// trigger condition times out or errors in a way that signals misconfiguration.
-    fn set_agent_degraded(&self, agent_id: &str, reason: &str) {
-        let health_path = self.hex_dir.join("health.json");
-        let mut health_map: serde_json::Map<String, serde_json::Value> =
-            if health_path.exists() {
-                std::fs::read_to_string(&health_path)
-                    .ok()
-                    .and_then(|s| serde_json::from_str::<serde_json::Value>(&s).ok())
-                    .and_then(|v| if let serde_json::Value::Object(m) = v { Some(m) } else { None })
-                    .unwrap_or_default()
-            } else {
-                serde_json::Map::new()
-            };
-
-        let agents = health_map
-            .entry("agents".to_string())
-            .or_insert_with(|| serde_json::json!({}));
-        if let serde_json::Value::Object(ref mut map) = agents {
-            let entry = map
-                .entry(agent_id.to_string())
-                .or_insert_with(|| serde_json::json!({}));
-            if let serde_json::Value::Object(ref mut agent_map) = entry {
-                agent_map.insert("degraded".to_string(), serde_json::Value::Bool(true));
-                agent_map.insert("degraded_reason".to_string(), serde_json::Value::String(reason.to_string()));
-            }
-        }
-
-        if let Ok(json_str) = serde_json::to_string_pretty(&serde_json::Value::Object(health_map)) {
-            let dir = health_path.parent().unwrap_or(Path::new("."));
-            let tmp = dir.join(format!(
-                ".health_degraded_tmp_{}.json",
-                std::time::SystemTime::now()
-                    .duration_since(std::time::UNIX_EPOCH)
-                    .map(|d| d.subsec_nanos())
-                    .unwrap_or(0)
-            ));
-            if let Ok(mut f) = std::fs::File::create(&tmp) {
-                let ok = f.write_all(json_str.as_bytes()).is_ok()
-                    && f.flush().is_ok()
-                    && std::fs::rename(&tmp, &health_path).is_ok();
-                if !ok {
-                    let _ = std::fs::remove_file(&tmp);
-                }
-            }
-        }
-    }
-
-    /// Dispatch agent wakes for charter-based policies matching the given event.
-    /// Per-trigger condition expressions are shell-evaluated with a 5s timeout.
-    /// A passing condition (or no condition) proceeds to the wake command.
-    /// `policy.command` overrides the default `hex agent wake <id>` invocation.
-    /// on_success / on_failure events are emitted after the wake completes.
-    pub fn dispatch_agent_wakes(
-        &self,
-        event_id: i64,
-        event_type: &str,
-        payload: &Value,
-        shadow: bool,
-    ) -> usize {
-        let agent_policies = match self.agent_policies.read() {
-            Ok(guard) => guard.clone(),
-            Err(e) => {
-                eprintln!("events: agent_policies read lock poisoned: {e}");
-                return 0;
-            }
-        };
-
-        let mut wakes_fired = 0usize;
-        for policy in &agent_policies {
-            // Gather triggers matching this event type.
-            let matching_triggers: Vec<&TriggerSpec> = policy
-                .triggers
-                .iter()
-                .filter(|t| wildcard_matches(&t.event, event_type))
-                .collect();
-
-            if matching_triggers.is_empty() {
-                continue;
-            }
-
-            // Rate limit check (persisted, survives daemon restarts).
-            if let Some(ref rl) = policy.rate_limit {
-                match rl.window_duration() {
-                    Ok(window) => {
-                        if !self.check_rate_limit(&policy.id, rl.max_fires, window) {
-                            eprintln!(
-                                "events: agent '{}' rate-limited ({} fires/{} window) — skipping wake for event={event_type}",
-                                policy.id, rl.max_fires, rl.window
-                            );
-                            continue;
-                        }
-                    }
-                    Err(e) => {
-                        eprintln!("events: agent '{}' rate_limit window parse error: {e}", policy.id);
-                    }
-                }
-            }
-
-            // Evaluate per-trigger conditions. The first trigger whose condition
-            // passes (or that has no condition) gives the green light.
-            // Timeout → ERROR log + degraded flag. Non-zero exit → debug log + skip that trigger.
-            let mut wake_approved = false;
-            for trigger in &matching_triggers {
-                match &trigger.condition {
-                    None => {
-                        wake_approved = true;
-                        break;
-                    }
-                    Some(wake_condition) => {
-                        let (status, error, _stdout) = run_shell_with_timeout(wake_condition, 5);
-                        if status == "ok" {
-                            wake_approved = true;
-                            break;
-                        }
-                        if error.contains("timeout after") {
-                            eprintln!(
-                                "events: ERROR agent '{}' trigger condition timed out: {wake_condition}",
-                                policy.id
-                            );
-                            self.set_agent_degraded(
-                                &policy.id,
-                                &format!("condition_timeout: {wake_condition}"),
-                            );
-                        } else {
-                            eprintln!(
-                                "events: debug agent '{}' condition not met: {wake_condition} ({})",
-                                policy.id, error
-                            );
-                        }
-                    }
-                }
-            }
-
-            if !wake_approved {
-                continue;
-            }
-
-            if shadow {
-                eprintln!(
-                    "SHADOW: event={event_type} agent_wake agent={} (event_id={event_id})",
-                    policy.id
-                );
-                wakes_fired += 1;
-                continue;
-            }
-
-            // Build wake command: use wake_command override if present, else default.
-            let wake_command = if let Some(ref cmd_template) = policy.command {
-                render_template(cmd_template, event_type, payload)
-            } else {
-                format!(
-                    "nohup hex agent wake {} --trigger {} >/dev/null 2>&1 &",
-                    policy.id, event_type
-                )
-            };
-
-            let (status, _error, _stdout) = run_shell_with_timeout(&wake_command, 10);
-            let succeeded = status == "ok";
-
-            if succeeded {
-                self.record_fire(&policy.id);
-                for event_name in &policy.on_success {
-                    self.ingest_with_depth(
-                        event_name,
-                        &serde_json::json!({
-                            "source": format!("hex:{}", policy.id),
-                            "trigger_event": event_type,
-                            "exit_code": 0,
-                        }),
-                        &format!("hex:{}", policy.id),
-                        1,
-                    );
-                }
-            } else {
-                eprintln!(
-                    "events: agent wake failed agent={} event={event_type} status={status}",
-                    policy.id
-                );
-                for event_name in &policy.on_failure {
-                    self.ingest_with_depth(
-                        event_name,
-                        &serde_json::json!({
-                            "source": format!("hex:{}", policy.id),
-                            "trigger_event": event_type,
-                            "exit_code": 1,
-                        }),
-                        &format!("hex:{}", policy.id),
-                        1,
-                    );
-                }
-            }
-
-            let _ = self.db.lock().map(|db| {
-                db.execute(
-                    "INSERT INTO action_log \
-                     (event_id, policy_name, rule_name, action_type, status, error, created_at) \
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-                    params![
-                        event_id,
-                        format!("charter:{}", policy.id),
-                        "wake",
-                        "agent_wake",
-                        status,
-                        "",
-                        Utc::now().to_rfc3339()
-                    ],
-                )
-            });
-
-            wakes_fired += 1;
-        }
-        wakes_fired
-    }
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
@@ -1988,12 +1350,7 @@ fn init_schema(conn: &Connection) -> Result<(), String> {
          );
          CREATE INDEX IF NOT EXISTS idx_events_type ON events(event_type);
          CREATE INDEX IF NOT EXISTS idx_events_created ON events(created_at);
-         CREATE INDEX IF NOT EXISTS idx_events_unprocessed ON events(processed_at) WHERE processed_at IS NULL;
-         CREATE TABLE IF NOT EXISTS agent_wake_fires (
-             agent_id TEXT NOT NULL,
-             fired_at TEXT NOT NULL
-         );
-         CREATE INDEX IF NOT EXISTS idx_agent_wake_fires ON agent_wake_fires(agent_id, fired_at);",
+         CREATE INDEX IF NOT EXISTS idx_events_unprocessed ON events(processed_at) WHERE processed_at IS NULL;",
     )
     .map_err(|e| format!("schema init failed: {e}"))?;
 
@@ -2376,10 +1733,7 @@ mod tests {
         Arc::new(EventEngine {
             db: Mutex::new(conn),
             policies_dir: tmp.path().join("policies"),
-            hex_dir: tmp.path().to_path_buf(),
             policies: RwLock::new(Vec::new()),
-            agent_policies: RwLock::new(Vec::new()),
-            charter_loader: None,
             telemetry,
             bus,
             start_time: Instant::now(),
@@ -2623,10 +1977,7 @@ rules:
         let engine = Arc::new(EventEngine {
             db: Mutex::new(conn),
             policies_dir: policies_tmp.clone(),
-            hex_dir: tmp.path().to_path_buf(),
             policies: RwLock::new(Vec::new()),
-            agent_policies: RwLock::new(Vec::new()),
-            charter_loader: None,
             telemetry,
             bus,
             start_time: Instant::now(),
