@@ -390,7 +390,6 @@ enum MemoryCommands {
     /// Run the memory smoke-eval + consumption-rate check (nightly)
     Eval {
         /// Print only the 7-day consumption rate (decimal) and exit 0.
-        /// For the memory-consumption-floor hex-events policy.
         #[arg(long = "rate-only")]
         rate_only: bool,
     },

@@ -147,13 +147,10 @@ pub fn run(hex_dir: &Path, args: StartupArgs) -> i32 {
         step_daemon_status(&scripts_dir, &mut state);
     }
 
-    // Step 14: Emit session.started (always)
-    step_emit_session_started(hex_dir, &today);
-
-    // Step 15: Update notice (always)
+    // Step 14: Update notice (always)
     step_update_notice(&hex_system_dir);
 
-    // Step 16: Summary + exit
+    // Step 15: Summary + exit
     step_summary(&state)
 }
 
@@ -489,28 +486,6 @@ fn step_daemon_status(scripts_dir: &Path, state: &mut State) {
             info("Daemon status unavailable");
         }
     }
-}
-
-fn step_emit_session_started(hex_dir: &Path, today: &str) {
-    let emit_script = hex_dir.join(".hex/bin/hex-emit.sh");
-    if !emit_script.exists() {
-        return;
-    }
-
-    let payload = format!(
-        "{{\"hex_dir\":\"{}\",\"today\":\"{}\"}}",
-        hex_dir.display(),
-        today
-    );
-
-    // || true — always tolerated
-    let _ = Command::new(&emit_script)
-        .arg("session.started")
-        .arg(&payload)
-        .arg("startup")
-        .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .status();
 }
 
 fn step_update_notice(hex_system_dir: &Path) {

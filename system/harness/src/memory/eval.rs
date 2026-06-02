@@ -18,7 +18,6 @@ struct EvalQuery {
 }
 
 /// Print just the 7-day consumption rate as a decimal ("0.99") and exit 0.
-/// Used by the memory-consumption-floor hex-events policy.
 pub fn run_rate_only(hex_root: &Path) -> i32 {
     match consumption_rate(hex_root, 7) {
         Some((rate, _)) => { println!("{:.2}", rate); 0 }
