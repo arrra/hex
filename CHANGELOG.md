@@ -2,6 +2,10 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [Unreleased] — Collapse hex to Claude Code + BOI
+
+Collapsed hex to Claude Code + BOI: removed the hex-events policy engine + daemon + `hex events` CLI, the SSE/HTTP server + assets + extensions + boi-web, telemetry (`hex telemetry`/`hex metrics`), the workspace picker, the `hex-event`/`hex-agents` skills, and event emission from hooks/memory. Automation moves to OS-level (launchd) per-job scheduling; there is no event bus. SSE/hex-ui is fully removed.
+
 ## [2026-06-02] — Demolish the agent fleet, OKRs, and initiatives (v0.21.0)
 
 Large teardown: hex is now a lean single-operator system (BOI delegation + a small
