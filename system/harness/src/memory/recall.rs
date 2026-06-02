@@ -190,10 +190,6 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
     outcome
 }
 
-fn format_context(results: &[super::search::SearchResult]) -> String {
-    format_context_v2(results, &[])
-}
-
 fn format_context_v2(results: &[super::search::SearchResult], facts: &[FactHit]) -> String {
     let mut out = String::from(
         "## Relevant workspace memory\n\nThe following may be relevant to the current request \

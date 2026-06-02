@@ -558,13 +558,6 @@ fn run_single_step(
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 
-fn is_executable(path: &Path) -> bool {
-    use std::os::unix::fs::PermissionsExt;
-    std::fs::metadata(path)
-        .map(|m| m.permissions().mode() & 0o111 != 0)
-        .unwrap_or(false)
-}
-
 /// Strip ANSI escape sequences from a string (mirrors `sed 's/\x1b\[[0-9;]*m//g'`).
 fn strip_ansi(s: &str) -> String {
     let mut out = String::with_capacity(s.len());

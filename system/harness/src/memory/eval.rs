@@ -6,7 +6,7 @@
 //! Exits non-zero and emits `memory.eval.regression` on any failure — this is
 //! what catches V1's pathology (nothing injected, nobody noticed).
 
-use serde_json::{json, Value};
+use serde_json::Value;
 use std::path::Path;
 
 const CONSUMPTION_FLOOR: f64 = 0.30; // ≥30% of real recalls should inject
@@ -128,6 +128,7 @@ fn consumption_rate(hex_root: &Path, days: i64) -> Option<(f64, usize)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use serde_json::json;
 
     #[test]
     fn consumption_rate_none_when_no_log() {

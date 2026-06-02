@@ -3,7 +3,6 @@ use std::io;
 use std::path::{Path, PathBuf};
 
 mod doctor;
-mod paths;
 mod integration;
 mod integration_cmd;
 mod checkpoint;
@@ -667,7 +666,6 @@ fn main() {
                 IntegrationCommands::Digest => unreachable!(),
                 IntegrationCommands::RunCheck { .. } => unreachable!(),
             };
-            let start = std::time::Instant::now();
             let mut cmd = std::process::Command::new("bash");
             cmd.arg(&script).arg(subcmd);
             if let Some(n) = &name_arg {
