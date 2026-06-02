@@ -56,7 +56,7 @@ pub struct StartupArgs {
     pub status: bool,
 }
 
-/// Run `hex startup`. Returns the exit code (0 = pass/warn, 1 = failures).
+/// Run `hex session startup`. Returns the exit code (0 = pass/warn, 1 = failures).
 pub fn run(hex_dir: &Path, args: StartupArgs) -> i32 {
     let hex_system_dir = hex_dir.join(".hex");
     let scripts_dir = hex_system_dir.join("scripts");
@@ -639,7 +639,7 @@ fn run_single_step(
         "daemon" => step_daemon_status(scripts_dir, state),
         "hex-events" => step_hex_events(state),
         other => {
-            eprintln!("hex startup: unknown step '{}'. Use --status to list steps.", other);
+            eprintln!("hex session startup: unknown step '{}'. Use --status to list steps.", other);
             return 1;
         }
     }

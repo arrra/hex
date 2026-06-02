@@ -23,7 +23,7 @@ pub struct CheckpointArgs {
     pub focus: Option<String>,
 }
 
-/// Run `hex checkpoint`. Returns exit code (0 = success).
+/// Run `hex session checkpoint`. Returns exit code (0 = success).
 pub fn run(hex_dir: &Path, args: CheckpointArgs) -> i32 {
     let now = Local::now();
     let date_str = now.format("%Y-%m-%d").to_string();

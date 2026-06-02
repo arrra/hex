@@ -6,5 +6,5 @@ description: >
 ---
 
 ```bash
-hex shutdown [SESSION_ID]
+hex session shutdown [SESSION_ID]
 ```

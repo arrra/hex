@@ -184,7 +184,7 @@ fi
 # ── Test 15: Startup runs ─────────────────────────────────────────
 echo "[15] Startup"
 cd /tmp/test-hex
-STARTUP_OUT=$(HEX_DIR=/tmp/test-hex hex startup 2>&1 || true)
+STARTUP_OUT=$(HEX_DIR=/tmp/test-hex hex session startup 2>&1 || true)
 if echo "$STARTUP_OUT" | grep -q "Startup complete"; then
     echo "  PASS: Startup runs"
     PASS=$((PASS + 1))

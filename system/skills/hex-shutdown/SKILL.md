@@ -27,10 +27,10 @@ Background processes triggered by Stop hooks:
    - Action items not in todo.md
    Write anything found to the correct location. Skip if the session was very short (< 5 exchanges) with no meaningful context.
 
-2. **Deregister session**: Pass the session ID that was printed during startup. If you don't remember it, run `hex shutdown` (without a session ID) to see manual instructions and the list of active sessions, identify yours by start time, and pass that ID.
+2. **Deregister session**: Pass the session ID that was printed during startup. If you don't remember it, run `hex session shutdown` (without a session ID) to see manual instructions and the list of active sessions, identify yours by start time, and pass that ID.
 
 ```bash
-hex shutdown <SESSION_ID>
+hex session shutdown <SESSION_ID>
 ```
 
 3. **Report**: "Session closed. Reflection and cleanup will run in the background."
