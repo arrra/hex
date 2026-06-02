@@ -2,6 +2,44 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-06-02] — Demolish the agent fleet, OKRs, and initiatives (v0.21.0)
+
+Large teardown: hex is now a lean single-operator system (BOI delegation + a small
+set of personal-cadence hex-events automations). The multi-agent fleet, the OKR
+system, the initiatives system, the inbox/messaging layer, and the agent-routed BOI
+failure-revive protocol are all removed. Reviewed by a 3-agent release team (harness
+correctness + live coherence PASS; silent-failure hunt cleared). Decision records in
+`me/decisions/demolish-agent-fleet-2026-06-02.md` (+ rebuild notes for BOI failure
+handling and the alert mechanism).
+
+### Removed
+- **Harness (Rust):** `agent_spawn`, `agent_evolution`, `wake`, `charter`,
+  `charter_triggers`, `messaging`, `message`, `initiative` modules; the
+  `hex agent|message|initiative|synthesis|alert|router` CLI; the events-engine
+  agent-wake scheduler (`CharterLoader`/`dispatch_agent_wakes`); the `/fleet` HTTP
+  route; `doctor` checks `agent_fleet`/`agent_liveness`/`goal_alignment` and the
+  `Category::Fleet` variant; the `hex health check-fleet-pulse|check-stalled-initiatives|fleet-scorecard|check-failure-routing` subcommands; and the dead BOI
+  failure-revive surface (`build-failure-brief`, `spec-owner-resolver`).
+- **Also removed (unused):** `hex workspace` (tmux launcher) and `hex path-map`
+  command surface (`path_map.rs` kept — `upgrade.rs` uses `detect_layout`).
+- **Policies/docs/reference:** fleet/OKR/initiative/c3 policy templates, the
+  `core-agents/` reference set, `docs/multi-agent.md`, `docs/initiative-driven-operations.md`, `docs/charter-as-policy-source.md`, `docs/failure-revive-protocol.md`.
+- **CLAUDE template:** Multi-Agent / OKR / Inbox sections + the agent-wake standing order.
+
+### Changed
+- `hex` binary `about` string: "Hex multi-agent harness" → "Hex harness".
+- Skills (`hex-upgrade`/`debrief`/`decide`/`save`/`reflect`/`doctor`): documented
+  `python3 .../memory_index.py|memory_search.py` (removed) → `hex memory index|search`.
+
+### Cleanup
+- Pruned dead `*.legacy.{sh,py}` files (Rust-port leftovers).
+
+### Kept intact
+- BOI (boi-pm, boi-web, spec-tool verify-claims), release pipeline, memory, doctor,
+  startup, events policy engine + hot-reload, integration, telemetry, mcp, session,
+  upgrade, hooks. Both default and `--features personal` builds green; full test suite
+  green (300+ tests).
+
 ## [2026-05-27] — OBS-027 fix: action_log writes restored after 11-day silent drop (v0.20.1)
 
 ### Fixed
