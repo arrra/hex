@@ -8,6 +8,18 @@ use std::path::{Path, PathBuf};
 
 const NON_JSON_REPROMPT: &str = "\n\n⚠️ Your previous response was NOT valid JSON and was rejected. Respond with ONLY the JSON object specified in the Response format section — no prose, no markdown fences, no explanation before or after. Your entire response must start with { and end with }.";
 
+/// Hard ceiling on the number of LLM invocations per wake-loop iteration.
+///
+/// Without this cap the wake loop is unbounded — its only exits are queue
+/// drain, claude::invoke error, parse-unrecoverable, and check_and_handle_loop
+/// (which catches same-action-3x, not same-pattern-varied-cost). An agent doing
+/// varied novel work each invocation (different action hashes every iteration,
+/// queue keeps growing via response.queue_updates.added_active) would loop
+/// forever. 50 is a defensible 2x headroom over the historical per-wake range
+/// of roughly 10-30 invocations. Hitting the cap is LOUD — eprintln WARN to
+/// stderr plus an audit::append entry with kind `wake-iteration-cap-hit`.
+const MAX_INVOCATIONS_PER_WAKE: usize = 50;
+
 pub(crate) enum RetryOutcome {
     Parsed { response: crate::types::AgentResponse, quality: claude::ResponseParseQuality, was_retried: bool },
     Unrecoverable,
@@ -477,6 +489,25 @@ pub fn run(config: WakeConfig) -> Result<i32, Box<dyn std::error::Error>> {
 
     loop {
         invocation += 1;
+
+        if invocation >= MAX_INVOCATIONS_PER_WAKE {
+            eprintln!(
+                "WARN: wake-iteration cap hit ({MAX_INVOCATIONS_PER_WAKE}) — \
+                 breaking out of wake loop, agent_id={}",
+                config.agent_id
+            );
+            audit::append(
+                &audit_dir,
+                &config.agent_id,
+                "wake-iteration-cap-hit",
+                &serde_json::json!({
+                    "invocation": invocation,
+                    "cap": MAX_INVOCATIONS_PER_WAKE,
+                    "active_remaining": agent_state.queue.active.len(),
+                }),
+            );
+            break;
+        }
 
         let ctx_files = if context_files_content.is_empty() {
             None
