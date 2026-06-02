@@ -1,11 +1,9 @@
 /// Port of:
 ///   system/scripts/validate-boi-spec.py  → hex validate boi-spec <file>
-///   system/scripts/extension-validate.py → hex validate extension <path>
 ///   system/scripts/e2e-guard/verify.py   → hex validate e2e <url>
 ///
 /// Commands:
 ///   hex validate boi-spec <file>      - Check a BOI spec for known anti-patterns
-///   hex validate extension <path>     - Validate a hex extension manifest
 ///   hex validate e2e <url>            - HTTP-level E2E guard (browser tests skipped)
 use std::path::Path;
 
@@ -164,96 +162,6 @@ pub fn run_boi_spec(files: &[String]) -> i32 {
         }
     }
     overall
-}
-
-// ---------------------------------------------------------------------------
-// hex validate extension
-// ---------------------------------------------------------------------------
-
-pub fn run_extension(path: &str) -> i32 {
-    let ext_path = Path::new(path);
-    let manifest_path = if ext_path.is_dir() {
-        ext_path.join("extension.yaml")
-    } else {
-        ext_path.to_path_buf()
-    };
-
-    let ext_label = manifest_path
-        .parent()
-        .and_then(|p| p.file_name())
-        .map(|n| n.to_string_lossy().to_string())
-        .unwrap_or_else(|| "unknown".to_string());
-
-    println!("Validating extension: {ext_label}");
-    println!("Manifest:  {}", manifest_path.display());
-    println!();
-
-    if !manifest_path.is_file() {
-        eprintln!("  ✗  File not found: {}", manifest_path.display());
-        println!("\nResult: INVALID (1 error(s))");
-        return 1;
-    }
-
-    let content = match std::fs::read_to_string(&manifest_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("  ✗  Cannot read manifest: {e}");
-            println!("\nResult: INVALID (1 error(s))");
-            return 1;
-        }
-    };
-
-    let mut errors: Vec<String> = Vec::new();
-    let warnings: Vec<String> = Vec::new();
-
-    // Required fields
-    for field in &["name:", "version:", "description:", "type:"] {
-        if !content.contains(field) {
-            errors.push(format!("Missing required field: '{}'", field.trim_end_matches(':')));
-        }
-    }
-
-    // type must be static | reactive | full
-    if let Some(type_line) = content.lines().find(|l| l.trim_start().starts_with("type:")) {
-        let val = type_line.split(':').nth(1).unwrap_or("").trim().trim_matches('"');
-        if !matches!(val, "static" | "reactive" | "full") && !val.is_empty() {
-            errors.push(format!("type must be one of [full, reactive, static], got: '{val}'"));
-        }
-    }
-
-    // version must look like semver
-    if let Some(ver_line) = content.lines().find(|l| l.trim_start().starts_with("version:")) {
-        let val = ver_line.split(':').nth(1).unwrap_or("").trim().trim_matches('"');
-        if !val.is_empty() {
-            let parts: Vec<&str> = val.split('.').collect();
-            let ok = parts.len() == 3 && parts.iter().all(|p| p.parse::<u32>().is_ok());
-            if !ok {
-                errors.push(format!("version must be semver (e.g. '1.0.0'), got: '{val}'"));
-            }
-        }
-    }
-
-    for line in &warnings {
-        println!("  ⚠  {line}");
-    }
-    for line in &errors {
-        println!("  ✗  {line}");
-    }
-    if errors.is_empty() && warnings.is_empty() {
-        println!("  ✓  All checks passed");
-    }
-
-    println!();
-    if !errors.is_empty() {
-        println!("Result: INVALID ({} error(s), {} warning(s))", errors.len(), warnings.len());
-        1
-    } else if !warnings.is_empty() {
-        println!("Result: VALID with {} warning(s)", warnings.len());
-        0
-    } else {
-        println!("Result: VALID");
-        0
-    }
 }
 
 // ---------------------------------------------------------------------------

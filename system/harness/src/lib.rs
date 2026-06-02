@@ -1,11 +1,8 @@
 pub mod act_evidence;
-pub mod assets;
 pub mod capability_exec;
 pub mod audit;
 pub mod capability_guard;
 pub mod memory;
-pub mod extensions;
 pub mod registry;
-pub mod sse;
 pub mod telemetry;
 pub mod types;
