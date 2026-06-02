@@ -194,9 +194,9 @@ if [ -f "$CLAUDE_MD" ]; then
   fi
 
   if grep -q 'python3 ~/.hex-events/hex_events_cli.py' "$CLAUDE_MD"; then
-    assert_fail "CLAUDE.md still references 'python3 ~/.hex-events/hex_events_cli.py'"
+    assert_fail "CLAUDE.md still references 'python3 ~/.hex-events/hex_events_cli.py' (should be absent)"
   else
-    assert_pass "CLAUDE.md uses 'hex-events' binary references"
+    assert_pass "CLAUDE.md does not reference old hex-events python CLI (correct — hex-events removed)"
   fi
 
   if grep -q 'env\.sh' "$CLAUDE_MD"; then
@@ -252,24 +252,27 @@ for removed_script in hex-agent-spawn.sh verify-agent-infra.sh doctor.sh; do
   fi
 done
 
-# Metrics .py scripts replaced by hex metrics subcommand
+# Metrics .py scripts removed (hex metrics subcommand was removed in collapse-to-cc-boi)
 METRICS_DIR="$INSTALL_DIR/.hex/scripts/metrics"
 if [ -d "$METRICS_DIR" ]; then
   PY_COUNT=$(ls "$METRICS_DIR"/*.py 2>/dev/null | wc -l | tr -d ' ')
   if [ "$PY_COUNT" -gt 0 ]; then
     assert_fail "Legacy Python metrics scripts still present: $(ls "$METRICS_DIR"/*.py 2>/dev/null | tr '\n' ' ')"
   else
-    assert_pass "No legacy Python metrics scripts in .hex/scripts/metrics/ (replaced by hex metrics)"
+    assert_pass "No legacy Python metrics scripts in .hex/scripts/metrics/ (correct)"
   fi
 else
-  assert_pass ".hex/scripts/metrics/ absent — metrics moved to native hex (correct)"
+  assert_pass ".hex/scripts/metrics/ absent — metrics scripts removed (correct)"
 fi
 
+# hex metrics was removed in the collapse-to-cc-boi demolition; assert absent.
 if [ -n "$HEX_BIN" ]; then
-  if "$HEX_BIN" metrics --help &>/dev/null; then
-    assert_pass "hex metrics native command accessible (replaces metrics/*.py)"
+  METRICS_OUT=$("$HEX_BIN" metrics --help 2>&1)
+  METRICS_CODE=$?
+  if [ "$METRICS_CODE" -ne 0 ] && echo "$METRICS_OUT" | grep -qi "unrecognized subcommand"; then
+    assert_pass "hex metrics correctly absent (removed in collapse-to-cc-boi)"
   else
-    assert_fail "hex metrics subcommand missing"
+    assert_fail "hex metrics still recognized (exit $METRICS_CODE) — should be removed"
   fi
 fi
 

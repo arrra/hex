@@ -1,8 +1,8 @@
 #!/bin/bash
 # hex-doctor — Unified health check entry point for all hex modules
 #
-# Runs installation checks (via doctor.sh) + all 6 module checks:
-#   Memory → hex-events → BOI → startup → landings → workspace
+# Runs installation checks (via doctor.sh) + module checks:
+#   Memory → BOI → startup → landings → workspace
 #
 # Usage:
 #   hex-doctor              # Check all modules, report results
@@ -205,20 +205,6 @@ else
     fi
   fi
 
-  # ── hex-events ───────────────────────────────────────────────────────────────
-  if [ -f "$HEX_CHECKS_DIR/hex-events.sh" ] && ! $CHAIN_STOPPED; then
-    MODULE_COUNT=$((MODULE_COUNT + 1))
-    echo ""
-    echo -e "${BOLD}hex-events Module${RESET}"
-    echo "  ─────────────────────────────────────────"
-    source "$HEX_CHECKS_DIR/hex-events.sh"
-    run_hex_events_checks
-  elif [ -f "$HEX_CHECKS_DIR/hex-events.sh" ] && $CHAIN_STOPPED; then
-    MODULE_COUNT=$((MODULE_COUNT + 1))
-    echo ""
-    echo -e "  ${DIM}[SKIP] hex-events — blocked by memory errors${RESET}"
-  fi
-
   # ── BOI ──────────────────────────────────────────────────────────────────────
   if [ -f "$HEX_CHECKS_DIR/boi.sh" ] && ! $CHAIN_STOPPED; then
     MODULE_COUNT=$((MODULE_COUNT + 1))
@@ -356,25 +342,6 @@ if [ -f "$VEC_CHECK" ]; then
     _pass "$vec_out"
   else
     _error "$vec_out"
-  fi
-fi
-
-# ─── hex-events Policy Load Errors ───────────────────────────────────────────
-# Surfaces POLICY LOAD/VALIDATION ERROR entries from the daemon log that would
-# otherwise sit silently — legacy-schema policies, deprecated fields, etc.
-POLICY_LOAD_CHECK="$SCRIPTS_DIR/health/check-hex-events-policy-load.sh"
-if [ -f "$POLICY_LOAD_CHECK" ]; then
-  MODULE_COUNT=$((MODULE_COUNT + 1))
-  echo ""
-  echo -e "${BOLD}hex-events Policy Load${RESET}"
-  echo "  ─────────────────────────────────────────"
-  pol_out=""
-  pol_exit=0
-  pol_out="$(SKIP_ALERT=1 bash "$POLICY_LOAD_CHECK" 2>&1)" || pol_exit=$?
-  if [ "$pol_exit" -eq 0 ]; then
-    _pass "$pol_out"
-  else
-    _error "$pol_out"
   fi
 fi
 

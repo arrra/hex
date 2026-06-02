@@ -19,7 +19,6 @@ digraph hex_skills {
   "memory" [fillcolor="#99ccff", penwidth=2];
   "hex-doctor" [fillcolor="#99ccff"];
   "hex-upgrade" [fillcolor="#99ccff"];
-  "hex-event" [fillcolor="#99ccff"];
 
   // Teams cluster — MARKED FOR REMOVAL
   "hex-sync" [fillcolor="#ff9999", fontcolor="#990000", label="hex-sync\n⛔ REMOVE"];
@@ -63,7 +62,6 @@ digraph hex_skills {
   "hex-decide" -> "memory";
   "hex-upgrade" -> "memory";
   "hex-context-sync" -> "memory";
-  "boi-delegation" -> "hex-event";
 
   // Edges — teams (circular, removing)
   "hex-sync" -> "hex-connect-team" [color="#cc0000", style=dashed];

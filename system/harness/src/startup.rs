@@ -6,8 +6,7 @@
 /// script calling them.
 
 use chrono::Local;
-use std::io::Write as _;
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::process::{Command, Stdio};
 
 // ── ANSI codes mirroring startup.sh ─────────────────────────────────────────
@@ -148,16 +147,10 @@ pub fn run(hex_dir: &Path, args: StartupArgs) -> i32 {
         step_daemon_status(&scripts_dir, &mut state);
     }
 
-    // Step 14: hex-events telemetry (always)
-    step_hex_events(&mut state);
-
-    // Step 15: Emit session.started (always)
-    step_emit_session_started(hex_dir, &today);
-
-    // Step 16: Update notice (always)
+    // Step 14: Update notice (always)
     step_update_notice(&hex_system_dir);
 
-    // Step 17: Summary + exit
+    // Step 15: Summary + exit
     step_summary(&state)
 }
 
@@ -495,90 +488,6 @@ fn step_daemon_status(scripts_dir: &Path, state: &mut State) {
     }
 }
 
-fn step_hex_events(state: &mut State) {
-    header("10. hex-events Telemetry");
-
-    let home = std::env::var("HOME").unwrap_or_default();
-    let cli_path = PathBuf::from(&home).join(".hex-events/hex_events_cli.py");
-    let venv_python = PathBuf::from(&home).join(".hex-events/venv/bin/python");
-
-    let python_bin = if venv_python.exists() {
-        venv_python
-    } else {
-        PathBuf::from("python3")
-    };
-
-    if !cli_path.exists() {
-        pass("hex-events not installed (OK)");
-        return;
-    }
-
-    // Query actions_failed in last 24h
-    let output = Command::new(&python_bin)
-        .arg(&cli_path)
-        .arg("telemetry")
-        .arg("--json")
-        .stderr(Stdio::null())
-        .output();
-
-    let actions_failed: u64 = match output {
-        Ok(out) if out.status.success() => {
-            let stdout = out.stdout;
-            // Pipe JSON via stdin to avoid shell quoting issues with string interpolation
-            let mut child = Command::new("python3")
-                .arg("-c")
-                .arg("import json,sys; d=json.load(sys.stdin); print(d.get('actions_failed', 0))")
-                .stdin(Stdio::piped())
-                .stdout(Stdio::piped())
-                .stderr(Stdio::null())
-                .spawn()
-                .ok();
-            if let Some(ref mut c) = child {
-                if let Some(stdin) = c.stdin.take() {
-                    let mut stdin = stdin;
-                    let _ = stdin.write_all(&stdout);
-                }
-            }
-            match child.and_then(|c| c.wait_with_output().ok()) {
-                Some(e) => String::from_utf8_lossy(&e.stdout)
-                    .trim()
-                    .parse()
-                    .unwrap_or(0),
-                None => 0,
-            }
-        }
-        _ => 0,
-    };
-
-    if actions_failed > 0 {
-        warn_line(&format!("{} action failure(s) in last 24h", actions_failed), state);
-    } else {
-        pass("hex-events telemetry OK");
-    }
-}
-
-fn step_emit_session_started(hex_dir: &Path, today: &str) {
-    let emit_script = hex_dir.join(".hex/bin/hex-emit.sh");
-    if !emit_script.exists() {
-        return;
-    }
-
-    let payload = format!(
-        "{{\"hex_dir\":\"{}\",\"today\":\"{}\"}}",
-        hex_dir.display(),
-        today
-    );
-
-    // || true — always tolerated
-    let _ = Command::new(&emit_script)
-        .arg("session.started")
-        .arg(&payload)
-        .arg("startup")
-        .stderr(Stdio::null())
-        .stdout(Stdio::null())
-        .status();
-}
-
 fn step_update_notice(hex_system_dir: &Path) {
     let update_file = hex_system_dir.join(".update-available");
     if update_file.exists() {
@@ -637,7 +546,6 @@ fn run_single_step(
         "evolution" => step_evolution(hex_dir, scripts_dir, hex_system_dir, state),
         "priorities" => step_priorities(hex_dir, state),
         "daemon" => step_daemon_status(scripts_dir, state),
-        "hex-events" => step_hex_events(state),
         other => {
             eprintln!("hex startup: unknown step '{}'. Use --status to list steps.", other);
             return 1;
@@ -691,7 +599,6 @@ pub fn step_names() -> Vec<&'static str> {
         "evolution",
         "priorities",
         "daemon",
-        "hex-events",
     ]
 }
 
@@ -704,8 +611,8 @@ mod tests {
     #[test]
     fn step_sequence_matches_inventory() {
         let steps = step_names();
-        // 10 named steps in startup sequence order
-        assert_eq!(steps.len(), 10);
+        // 9 named steps in startup sequence order (hex-events removed)
+        assert_eq!(steps.len(), 9);
         assert_eq!(steps[0], "env");
         assert_eq!(steps[1], "session");
         assert_eq!(steps[2], "transcripts");
@@ -715,7 +622,6 @@ mod tests {
         assert_eq!(steps[6], "evolution");
         assert_eq!(steps[7], "priorities");
         assert_eq!(steps[8], "daemon");
-        assert_eq!(steps[9], "hex-events");
     }
 
     #[test]

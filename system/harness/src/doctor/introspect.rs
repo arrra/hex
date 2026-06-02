@@ -185,9 +185,9 @@ fn build_prompt(hex_dir: &Path) -> String {
 Your working directory is {d}.
 
 Audit checklist:
-1. Log Audit: Read the last 50 lines of the 3 most recent files in ~/.boi/logs/ \
-and ~/github.com/mrap/hex-events/daemon.log. Flag errors, crashes, recurring warnings.
-2. Repo Hygiene: For each repo in ~/github.com/mrap/ (hex, hex-core, hex-ui, hex-events, boi), \
+1. Log Audit: Read the last 50 lines of the 3 most recent files in ~/.boi/logs/. \
+Flag errors, crashes, recurring warnings.
+2. Repo Hygiene: For each repo in ~/github.com/mrap/ (hex, hex-core, boi), \
 run git status --short. Flag uncommitted changes.
 3. Daemon Health: Run bash {d}/.hex/scripts/hex-daemons.sh status. Flag daemons down.
 4. Research Feed Health: Check {d}/raw/research/bookmarks/ and {d}/raw/research/scout/ \

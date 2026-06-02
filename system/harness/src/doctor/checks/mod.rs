@@ -6,7 +6,6 @@ pub mod env_sh;
 pub mod git;
 pub mod hex_binary;
 pub mod hex_dir;
-pub mod hex_events;
 pub mod hex_structure;
 pub mod llm_preference;
 pub mod me_md;

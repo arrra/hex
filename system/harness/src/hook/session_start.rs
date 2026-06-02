@@ -176,32 +176,6 @@ pub fn format_checkpoint_output(topic: &str, content: &str) -> String {
     )
 }
 
-// ── event emission ────────────────────────────────────────────────────────────
-
-fn emit_session_start_event(hex_dir: &Path) {
-    let bus = hex::sse::SseBus::new();
-    let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(hex_dir));
-    let engine = match hex::events::EventEngine::new(hex_dir, telemetry, bus) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("[hook/session-start] event engine init failed: {e}");
-            return;
-        }
-    };
-
-    let channel = std::env::var("CC_SESSION_KEY").unwrap_or_else(|_| "local-dev".to_string());
-    let pid = std::process::id();
-    let ts = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%SZ").to_string();
-    let payload = json!({
-        "channel": channel,
-        "agent": "claude-code",
-        "pid": pid,
-        "start_ts": ts,
-    });
-
-    engine.ingest("session.start", &payload, "claude-code");
-}
-
 // ── entry point ───────────────────────────────────────────────────────────────
 
 pub fn run() {
@@ -216,9 +190,6 @@ pub fn run() {
             return;
         }
     };
-
-    // Emit session.start event (best-effort; failures are logged but don't abort).
-    emit_session_start_event(&hex_dir);
 
     // ── Blocker primitive ─────────────────────────────────────────────────────
     let blocker_paths = collect_blockers(&hex_dir);

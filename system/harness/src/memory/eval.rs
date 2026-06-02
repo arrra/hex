@@ -18,7 +18,6 @@ struct EvalQuery {
 }
 
 /// Print just the 7-day consumption rate as a decimal ("0.99") and exit 0.
-/// Used by the memory-consumption-floor hex-events policy.
 pub fn run_rate_only(hex_root: &Path) -> i32 {
     match consumption_rate(hex_root, 7) {
         Some((rate, _)) => { println!("{:.2}", rate); 0 }
@@ -89,7 +88,6 @@ pub fn run(hex_root: &Path) -> i32 {
         None => println!("consumption rate: no recall-log data yet (skipped)"),
     }
 
-    emit_result(hex_root, &failures);
     if failures.is_empty() {
         println!("hex memory eval: OK");
         0
@@ -125,25 +123,6 @@ fn consumption_rate(hex_root: &Path, days: i64) -> Option<(f64, usize)> {
         }
     }
     if total == 0 { None } else { Some((injected as f64 / total as f64, total)) }
-}
-
-fn emit_result(hex_root: &Path, failures: &[String]) {
-    let bus = crate::sse::SseBus::new();
-    let telemetry = std::sync::Arc::new(crate::telemetry::Telemetry::new(hex_root));
-    match crate::events::EventEngine::new(hex_root, telemetry, bus) {
-        Ok(engine) => {
-            let (event, payload) = if failures.is_empty() {
-                ("memory.eval.ok", json!({}))
-            } else {
-                ("memory.eval.regression", json!({ "failures": failures }))
-            };
-            engine.ingest(event, &payload, "hex:memory");
-        }
-        // S6: never swallow silently. The eval still exits non-zero and the
-        // nightly policy re-emits memory.eval.regression, but a dropped result
-        // event is a real fault — say so.
-        Err(e) => eprintln!("[memory eval] could not emit result event: {e}"),
-    }
 }
 
 #[cfg(test)]

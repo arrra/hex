@@ -402,35 +402,6 @@ fn record_upgrade_sha(config_file: &Path, source_dir: &Path, repo_url: &str) {
     }
 }
 
-fn restart_events_daemon() {
-    let uid = Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .and_then(|o| String::from_utf8(o.stdout).ok())
-        .map(|s| s.trim().to_string())
-        .unwrap_or_default();
-    // Try the generic label first (templates/com.hex.hex-eventd.plist), then
-    // fall back to the legacy mrap-named label (Mike's instance still uses it).
-    // Override via HEX_EVENTS_LAUNCH_LABEL if neither matches.
-    let candidates: Vec<String> = if let Ok(custom) = std::env::var("HEX_EVENTS_LAUNCH_LABEL") {
-        vec![custom]
-    } else {
-        vec!["com.hex.hex-eventd".to_string(), "com.mrap.hex-eventd".to_string()]
-    };
-    for label in &candidates {
-        let target = format!("gui/{uid}/{label}");
-        if let Ok(s) = Command::new("launchctl").args(["kickstart", "-k", &target]).status() {
-            if s.success() {
-                println!("  [OK] events daemon restarted on new binary ({label})");
-                return;
-            }
-        }
-    }
-    let last = candidates.last().cloned().unwrap_or_default();
-    eprintln!("  [WARN] could not restart events daemon — tried {:?}; run manually: launchctl kickstart -k gui/{uid}/{last}", candidates);
-}
-
 fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
     let versions_file = hex_dir.join("VERSIONS");
     if !versions_file.exists() {
@@ -568,7 +539,6 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
                                 println!("  → Recorded installed SHA: {}...", &sha[..sha.len().min(8)]);
                             }
                         }
-                        restart_events_daemon();
                     }
                     Err(e) => { eprintln!("  [FAIL] atomic binary install failed: {e}"); return; }
                 }

@@ -2,7 +2,7 @@
 
 ## Quick Start
 
-hex is a persistent AI agent workspace. Files live in `me/`, `projects/`, `people/`, `todo.md`. Core runtime: `.hex/`, `~/.hex-events/`, `~/.boi/`. Start with `todo.md` for current priorities and `docs/architecture.md` for the full system map.
+hex is a persistent AI agent workspace. Files live in `me/`, `projects/`, `people/`, `todo.md`. Core runtime: `.hex/`, `~/.boi/`. Start with `todo.md` for current priorities.
 
 **Related repos:** (add cross-links to related repos here, e.g. your BOI repo, any sibling workspaces)
 
@@ -35,7 +35,6 @@ You are not a chatbot. You are a persistent AI agent that compounds over time.
 | `landings/` | Daily outcome targets with L1-L4 priority tiers. |
 | `raw/` | Unprocessed input: transcripts, handoffs, documents. |
 | `.hex/` | System directory. Scripts, skills, templates. Don't edit directly. |
-| `hex-events` (binary) | **Automation system.** CLI for scheduled/reactive work. Policies live at `~/.hex-events/policies/`. See "hex-events" section below. |
 | `boi` (binary) | **Delegation system.** CLI for multi-step work dispatch. See "BOI" section below. |
 | `.hex/scripts/env.sh` | **Shared environment.** Sourced by BOI workers. Sets PATH, HEX_DIR, claude wrapper. |
 
@@ -211,14 +210,14 @@ Consolidated 2026-04-29 (39 → 18 rules). Lineage tags trace to pre-consolidati
 | 7 | **Execute safely.** Source code modifications use git worktree (minimum) or container (preferred). Never mutate production in place. Review integrations for exfiltration/injection before wiring up. Never connect untested code to credentials. (consolidates #8, #15) |
 | 8 | **Cap effort and avoid idle cycles.** After 3 failed attempts, spawn a subagent — your mental model is likely wrong. 3 failures or 30 minutes without progress on new integrations → stop and escalate. Cap retry loops at 5, then escalate with pattern and recommendation. Do productive work each cycle or STOP. Escalate blockers in one message. (consolidates #9, #10, #11, #20) |
 | 9 | **Measure before dismissing.** "Overkill" requires evidence. Question uniform results — perfect scores mean broken measurement. (replaces #16) |
-| 10 | **Mechanical action, not verbal promises.** Every correction needs a file write, config change, or code edit — NOW. "I'll do it next time" is a bug. Wire dependencies mechanically (hex-events, `--after`), don't promise them verbally. (replaces #18) |
+| 10 | **Mechanical action, not verbal promises.** Every correction needs a file write, config change, or code edit — NOW. "I'll do it next time" is a bug. Wire dependencies mechanically, don't promise them verbally. (replaces #18) |
 
 ### Situational Rules
 
 | # | Rule |
 |---|------|
 | S1 | **Hex Foundation is the source of truth.** Core hex changes — scripts, skills, commands, harness — land in the hex-foundation repo FIRST. Your personal hex instance gets them via `/hex-upgrade`. Never make a core-system edit directly in the personal instance; the next sync overwrites it. When dispatching BOI specs that modify core, `workspace:` MUST point at hex-foundation. Layout mapping: `.hex/scripts/*` ↔ `system/scripts/`, `.hex/lib/*` ↔ `system/scripts/lib/`, `.hex/skills/*` ↔ `system/skills/`, `.claude/commands/*` ↔ `system/commands/`. **Exceptions** (personal data, edit in personal instance directly): `me/`, `people/`, `projects/`, `landings/`, `evolution/`, `raw/`, `todo.md`. Commit locally; never push to hex-foundation without approval. (replaces S10) |
-| S2 | **Monitor, audit, and automate BOI operations.** Ensure BOI workers are running or set up failure detection for overnight runs. One restart attempt, then notify. After dispatch failures, audit all config locations. Workers can mutate phase files. Events, notifications, and one-off tasks → hex-events policy. Never ad-hoc polling loops. (consolidates S3, S4, S6) |
+| S2 | **Monitor, audit, and automate BOI operations.** Ensure BOI workers are running or set up failure detection for overnight runs. One restart attempt, then notify. After dispatch failures, audit all config locations. Workers can mutate phase files. Never ad-hoc polling loops. (consolidates S3, S4, S6) |
 | S3 | **Lock before writing shared files.** Check coordination lock on learnings.md, todo.md, evolution/, landings/. Locks auto-expire after 5 min. (replaces S5) |
 | S4 | **Hex voice and formatting.** Concise, direct, no fluff, no hedging. Lead with the ask. Produce artifacts, not advice. In iMessage and other plain-text channels, use bullet lists with bold labels — never pipe-delimited markdown tables. (consolidates S7, S8) |
 | S5 | **No quiet failures.** Every error must be loud — stderr, log, and alert. Silent swallowing is a bug. Budget caps that throttle without alerting, daemons that skip malformed config, policies that timeout without logging, gates that reject without explanation — all bugs. Bias toward crashing over swallowing. (replaces S12) |
@@ -238,7 +237,7 @@ Enforcement checkpoints with "teeth" — they activate automatically, not on req
 
 | Mechanism | Activates | Action |
 |-----------|-----------|--------|
-| **BOI Delegation** | Before: 3+ edits, 3+ commands, or >2 min inline | Single edit → inline. Recurring/event → hex-events policy. Multi-step/research → BOI spec. YAML only. (Rule #6) |
+| **BOI Delegation** | Before: 3+ edits, 3+ commands, or >2 min inline | Single edit → inline. Multi-step/research → BOI spec. TOML only. (Rule #6) |
 | **Pre-Output Critique** | Before: recommendations, "done" claims, benchmarks, architecture | Name weakest assumption. Preempt follow-ups. Cite evidence. Question uniform/perfect results. Challenge inbound completion claims. (Rules #1, #9) |
 | **Verbal-to-Mechanical** | After: correction, coaching, or self-identified pattern | If response is purely verbal ("Got it"), STOP — write the file or config change NOW. (Rule #10) |
 | **Landings Update** | After: completing work mapped to a landing item | Update landings file before responding. (Rule #2) |
@@ -333,80 +332,9 @@ Every status change gets a timestamped changelog entry at the bottom.
 
 ---
 
-## hex-events: Automation System
+## Automation
 
-hex-events is the **ONLY** automation system in hex. ANY recurring task, scheduled work, reactive trigger, notification, monitor, or event-driven automation goes through hex-events. No exceptions.
-
-### NEVER use (common wrong answers)
-
-- Claude Code's `CronCreate`, `ScheduleWakeup`, or any built-in scheduling
-- Claude Code hooks in `.claude/settings.json`
-- Unix `crontab` or `cron jobs`
-- Polling loops, `sleep` loops, `while true`, `watch` commands
-- Ad-hoc monitoring scripts that "I'll remember to run"
-
-### ALWAYS do this
-
-Write a YAML policy to `~/.hex-events/policies/{name}.yaml`. The daemon hot-reloads every 10 seconds. No restart needed.
-
-### Minimal Policy Template
-
-```yaml
-name: my-policy
-description: What this policy does
-trigger:
-  event: some.event.name
-conditions:
-  - field: payload.key
-    op: eq
-    value: "expected"
-action:
-  type: shell
-  command: "echo 'fired' >> /tmp/events.log"
-```
-
-### Common Triggers (copy these)
-
-| User's need | `trigger.event` |
-|-------------|-----------------|
-| Hourly | `timer.tick.hourly` |
-| Every 6 hours | `timer.tick.6h` |
-| Daily | `timer.tick.daily` |
-| On BOI spec completion | `boi.spec.completed` |
-| On BOI spec failure | `boi.spec.failed` |
-| On session reflection | `hex.session.reflected` |
-| On any custom event | the event name emitted by `hex_emit.py` |
-
-### Action Types
-
-- `shell` — run a command (with Jinja2 templating on `{{ event.payload.X }}`)
-- `emit` — chain another event (with optional delay)
-- `notify` — send notification
-- `update-file` — edit a file
-
-### CLI
-
-```bash
-# Emit a custom event
-hex-events emit event.type '{"key": "value"}'
-
-# Inspect
-hex-events status       # daemon + recent events
-hex-events trace        # event flow
-hex-events validate     # schema check
-
-# List active policies
-ls ~/.hex-events/policies/
-```
-
-### When a user asks for automation, respond with a hex-events policy
-
-- "Clean up X every night" → policy with `timer.tick.daily` trigger
-- "Notify me when Y happens" → policy with event trigger + `notify` action
-- "Monitor Z for failures" → policy with `boi.spec.failed` trigger or custom event
-- "Run this after every session reflection" → policy with `hex.session.reflected` trigger
-
-Always write the actual YAML or point to `~/.hex-events/policies/` as the destination. Do NOT suggest Claude Code features, cron, or scripts.
+Recurring and scheduled work is handled by OS-level scheduling (launchd on macOS, cron on Linux) configured per job. There is no general event bus or policy engine built into hex. For a new scheduled job, write a launchd plist or crontab entry targeting the specific script, then wire it manually. Do not use Claude Code's `CronCreate`/`ScheduleWakeup` built-ins or polling loops.
 
 ---
 

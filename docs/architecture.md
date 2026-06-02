@@ -4,9 +4,8 @@
 
 ## What is Hex?
 
-Hex is a self-improving AI agent system with three core components and four feedback loops:
+Hex is a self-improving AI agent system with two core components and four feedback loops:
 
-- **hex-events** -- Event-driven policy engine (enforcement, automation)
 - **Orchestrator** -- Dispatches AI tasks to workers (BOI is the default; swappable)
 - **hex-ops** -- Operational glue (session management, dashboards, LaunchAgents)
 
@@ -23,23 +22,6 @@ The components handle execution. The feedback loops handle learning:
 
 ```
   ┌──────────────────────────────────────────────────────────────────┐
-  │  EXTERNAL SIGNALS                                                │
-  │  git commits, cron timers, file changes, manual hex_emit.py     │
-  └─────────────────────┬────────────────────────────────────────────┘
-                        │ events
-                        ▼
-  ┌──────────────────────────────────────────────────────────────────┐
-  │  hex-events (~/.hex-events/)                                     │
-  │                                                                  │
-  │  adapters/ ──► events.db (SQLite WAL) ──► policy engine         │
-  │  (fswatch,                                (YAML ECA rules)      │
-  │   scheduler)        ◄── deferred_events ──► actions             │
-  │                          (debounce)         (shell, emit,       │
-  │                                              notify, update-file)│
-  └───────────────────────────┬──────────────────────────────────────┘
-                              │ orchestrator.* events
-                              ▼
-  ┌──────────────────────────────────────────────────────────────────┐
   │  ORCHESTRATOR (pluggable — default: BOI at ~/.boi/)              │
   │                                                                  │
   │  Daemon ──► Worker 1 ──► Claude Code (isolated worktree)        │
@@ -48,13 +30,13 @@ The components handle execution. The feedback loops handle learning:
   │                                                                  │
   │  Spec queue (boi.db) → dispatch → iterate → verify → commit     │
   └───────────────────────────┬──────────────────────────────────────┘
-                              │ events back to hex-events
+                              │
                               ▼
   ┌──────────────────────────────────────────────────────────────────┐
   │  hex-ops (.hex/scripts/, .hex/bin/)                              │
   │                                                                  │
   │  startup.sh  session.sh  landings-dashboard.sh                  │
-  │  LaunchAgents: hex-eventd, fswatch adapter                       │
+  │  LaunchAgents: OS-level scheduled jobs                           │
   │  hex binary: multi-agent harness (.hex/bin/hex)                  │
   └──────────────────────────────────────────────────────────────────┘
 ```
@@ -65,38 +47,9 @@ The components handle execution. The feedback loops handle learning:
 
 | Component | Role | Location | Test command |
 |-----------|------|----------|--------------|
-| **hex-events** | Event bus + policy engine | `~/.hex-events/` | `cd ~/.hex-events && python -m pytest tests/` |
 | **BOI** (orchestrator) | Dispatch specs to Claude Code workers | `~/.boi/` | `cd ~/.boi && python -m pytest` |
 | **hex-ops** | Session mgmt, dashboards, LaunchAgents | `.hex/scripts/`, `.hex/bin/` | Manual inspection |
-| **hex-eventd** | hex-events daemon process | `~/.hex-events/hex_eventd.py` | `ps aux \| grep hex_eventd` |
 | **hex harness** | Multi-agent fleet driver (Rust) | `.hex/bin/hex` | `cd .hex/harness && cargo test` |
-
----
-
-## Event Flow
-
-```
-External signal
-    │
-    ▼
-adapter or hex_emit.py  ──► INSERT into events.db (event_type, payload, source)
-                                        │
-                              hex-eventd polls every 2s
-                                        │
-                              match against policy rules (YAML, glob)
-                                        │
-                              evaluate conditions (ECA model)
-                                        │
-                    ┌───────────────────┴──────────────────────┐
-                    ▼                                          ▼
-              immediate actions                    deferred actions
-              (shell, notify, emit,                (emit with delay/
-               update-file)                         cancel_group)
-                    │                                          │
-                    ▼                                          ▼
-              action_log table                   deferred_events table
-                                                 (heapq, drained on due)
-```
 
 ---
 
@@ -104,9 +57,6 @@ adapter or hex_emit.py  ──► INSERT into events.db (event_type, payload, so
 
 | Data | Lives in | Notes |
 |------|----------|-------|
-| Events | `~/.hex-events/events.db` | SQLite WAL, polled every 2s |
-| Deferred events | `~/.hex-events/events.db` (deferred_events table) | Debounce/delay queue |
-| Action log | `~/.hex-events/events.db` (action_log table) | Audit trail |
 | Spec queue | `~/.boi/boi.db` | Orchestrator state |
 | Spec files | `specs/` (or project dirs) | Source of truth for tasks |
 | Agent rules | `CLAUDE.md` | Standing orders, session protocol |
@@ -117,7 +67,6 @@ adapter or hex_emit.py  ──► INSERT into events.db (event_type, payload, so
 | KR snapshots | `.hex/audit/kr-snapshots.jsonl` | Initiative progress tracking |
 | Approach library | `.hex/audit/approach-library.jsonl` | Successful experiment patterns |
 | Pivot trail | `.hex/audit/pivots.jsonl` | Initiative pivot history |
-| Telemetry | `.hex/telemetry/events.db` | Append-only structured event log |
 
 ---
 
@@ -128,13 +77,10 @@ adapter or hex_emit.py  ──► INSERT into events.db (event_type, payload, so
 2. Environment detected, session ID registered in `.sessions/`
 3. Transcripts parsed to daily markdown
 4. Memory index rebuilt (incremental)
-5. Integrations checked (BOI status, hex-events daemon health)
-6. Evolution suggestions surfaced
+5. BOI status checked, evolution suggestions surfaced
 
 ### During Work
-- hex-eventd runs continuously, processing events from adapters
 - BOI daemon dispatches specs to Claude Code workers in isolated worktrees
-- Policies fire automatically on events (git commits, file changes, BOI completions)
 - Landings tracked in `landings/` directory
 - Multi-agent fleet driven by `.hex/bin/hex` harness
 
@@ -163,16 +109,13 @@ Full multi-agent reference: [multi-agent.md](multi-agent.md).
 
 ## Replacing Components
 
-hex-events is the stable core. The orchestrator and hex-ops scripts are swappable.
+The orchestrator and hex-ops scripts are swappable.
 
 | Component | Swappable? | Notes |
 |-----------|-----------|-------|
-| hex-events | No -- it's the brain | Stable API: hex_emit.py + policies YAML |
 | Orchestrator | **Yes** | Must implement the orchestrator interface |
 | hex-ops scripts | Yes | Shell scripts; replace or extend freely |
 | Claude Code agent | Yes | Any agent that reads CLAUDE.md works |
-
-**Orchestrator interface:** See [orchestrator-interface.md](orchestrator-interface.md) for the event contract any orchestrator must fulfill.
 
 ---
 
@@ -231,7 +174,7 @@ L3 (Outcome→Threshold) ─── depends on approach-library.jsonl entries
 | Field | Value |
 |-------|-------|
 | **Trigger** | 3+ consecutive pivot failures on same initiative |
-| **Measures** | Pivot failure count; cascade failure events in hex-events |
+| **Measures** | Pivot failure count; cascade failure events |
 | **Action** | Escalate to CoS; CoS surfaces to Mike; structural redesign spec dispatched |
 | **Feeds into** | New initiative structure, not just new experiment hypothesis |
 | **Meta-metric** | Time from confirmed cascade failure to structural redesign dispatch |
@@ -276,7 +219,7 @@ Every contract specifies: **writer -> file/event/schema -> reader -> mismatch de
 | **Writer** | `hex-initiative-loop-v2.py` Step 1 (Measure) |
 | **Schema** | `kr-snapshots.jsonl`: `{"ts": ISO8601, "initiative_id": str, "kr_id": str, "value": float, "run_count": int}` |
 | **Reader** | `self_improvement.py` `run_self_assess()` |
-| **Mismatch detection** | Validates schema on load; logs `schema_error` to hex-events if key missing |
+| **Mismatch detection** | Validates schema on load; logs `schema_error` event if key missing |
 
 ### Self-Assessment to Pattern Library
 
@@ -295,15 +238,6 @@ Every contract specifies: **writer -> file/event/schema -> reader -> mismatch de
 | **Schema** | SQLite `behavioral_patterns` table: `(id, category, description, severity, created_at, recurrence_count, last_recurred, mechanical_guard_needed)` |
 | **Reader** | `hex-memory check-behavior` at session start |
 | **Mismatch detection** | Returns empty-safe response; logs `m7_unavailable` if DB missing |
-
-### Initiative Loop to hex-events
-
-| Field | Value |
-|-------|-------|
-| **Writer** | `hex-initiative-loop-v2.py` `_emit_event()` |
-| **Schema** | `{"event": str, "agent": str, "initiative": str, "ts": ISO8601, "data": dict}` |
-| **Reader** | hex-events daemon; experiment measurement/verdict/stale policies |
-| **Mismatch detection** | Policies specify required event keys; daemon logs schema violations |
 
 ### Agent Charter to Harness Wake Gate
 
@@ -430,7 +364,7 @@ Three anti-patterns to guard against:
 
 2. **Integration before dispatch.** Before dispatching any spec that touches a shared component, check the integration contract. If undefined, define it first.
 
-3. **Mechanical enforcement, not textual rules.** Charter rules written as text are documentation, not enforcement. Every rule that must be enforced needs a corresponding harness gate or hex-events policy.
+3. **Mechanical enforcement, not textual rules.** Charter rules written as text are documentation, not enforcement. Every rule that must be enforced needs a corresponding harness gate or scheduled enforcement script.
 
 ---
 
@@ -502,8 +436,6 @@ For use by `hex-feedback-loops.py`:
 
 | Doc | Contents |
 |-----|----------|
-| [hex-events.md](hex-events.md) | Policy YAML schema, operators, actions, CLI reference, DB schema |
-| [orchestrator-interface.md](orchestrator-interface.md) | Event contract, BOI setup, roll-your-own guide |
+| [orchestrator-interface.md](orchestrator-interface.md) | Orchestrator interface, BOI setup, roll-your-own guide |
 | [hex-ops.md](hex-ops.md) | Scripts reference, LaunchAgents, session protocol, memory system |
-| [policies.md](policies.md) | Catalog of active policies with trigger/action/test for each |
 | [multi-agent.md](multi-agent.md) | Agent fleet, harness mechanics, state model, gates, messaging, CLI |

@@ -10,7 +10,6 @@ integrations/<name>/
   probe.sh               # health probe — exit 0 healthy, non-0 with stderr reason, completes in 30s
   runbook.md             # failure modes, diagnostics, auto-fix, manual-fix, last known good
   secret.env.example     # schema only; actual values live in `.hex/secrets/<name>.env`
-  events/                # hex-events policy templates, compiled by `hex-integration install`
   maintenance/           # refresh.sh, rotate.sh, etc.
   lib/                   # integration-specific helpers (e.g., RSA signing)
   tests/                 # bundle-local test scripts
@@ -21,7 +20,7 @@ Copy `templates/integrations/_template/` to start a new integration.
 
 ## The CLI
 
-`system/scripts/hex-integration` is the bundle lifecycle manager. It compiles bundle event policies into `~/.hex-events/policies/<name>-<event>.yaml` with a `# generated_from:` audit header, validates secrets against the bundle schema, and creates a symlink at `.hex/scripts/integrations/<name>.sh` → bundle `probe.sh` so the existing health harness finds bundle probes without modification.
+`system/scripts/hex-integration` is the bundle lifecycle manager. It validates secrets against the bundle schema and creates a symlink at `.hex/scripts/integrations/<name>.sh` → bundle `probe.sh` so the existing health harness finds bundle probes without modification.
 
 Commands:
 
@@ -36,34 +35,7 @@ hex-integration probe <name>       # wraps hex-integration-check.sh (q-567 harne
 hex-integration rotate <name>      # runs maintenance/rotate.sh if present
 ```
 
-All commands support `--json` and emit `hex.integration.{installed,uninstalled,updated,validated,probed,rotated}.{ok,fail}` telemetry.
-
-## Compile-step policy coupling
-
-The hex-events daemon watches `~/.hex-events/policies/*.yaml`. Bundles live under `integrations/<name>/events/*.yaml`. `hex-integration install` shells out to `hex-events compile <bundle>` which runs full static analysis before writing any file.
-
-**As of hex-events v0.2.0, the compile step is a real compiler** — not just templating. It runs three validator passes:
-
-1. **Schema** — enforces canonical `rules:[{name, trigger, actions}]` shape; rejects flat `trigger:/action:` form.
-2. **Producer-check** — cross-references every subscribed event against the live catalog (`hex-events list-events`); unknown subscriptions are errors.
-3. **Dead-code** — duplicate rule/policy names, unknown action types, rules with no actions, rate-limit cadence mismatches.
-
-On compile error, `install` exits non-zero and **no files land in** `~/.hex-events/policies/`. The previously-installed version (if any) stays in place untouched.
-
-Compiled policies carry full manifest headers:
-
-```
-# generated_from: integrations/<name>/events/<stem>.yaml
-# generated_at: <ISO-8601>
-# compiler_version: 1.0.0
-# checks_passed: schema, producer-check, dead-code
-```
-
-This gives operators an audit trail (grep `generated_from:` to find which bundle owns any installed policy) and makes uninstall atomic (remove every file with a matching `generated_from:` header).
-
-Pre-existing non-bundle policies (no `generated_from:` header) are scanned in `--permissive` warn-only mode during the migration window.
-
-Bundle event YAMLs use the standard hex-events policy schema — a `rules:` list with `name`, `trigger`, and `actions` per rule. Do NOT use a flat top-level `trigger:` + `action:` — the daemon rejects that shape.
+All commands support `--json`.
 
 ## Secrets
 
@@ -83,12 +55,12 @@ Private key files (RSA PEMs etc.) are referenced by path in the `.env` and live 
 
 ## Zero-downtime migration
 
-When migrating a live refresh policy (Slack bot token, X OAuth2) into a bundle:
+When migrating a live refresh job (Slack bot token, X OAuth2) into a bundle:
 
-1. Copy (don't move) the existing policy file into `<bundle>/events/`.
-2. Run `hex-integration install`. This creates `<bundle>-<stem>.yaml` in `~/.hex-events/policies/` — the old file keeps firing.
-3. Wait for telemetry evidence that the new compiled policy has fired successfully once (check `events.db` for events with source containing the bundle name).
-4. Only then rename the old policy to `_deprecated-<original>.yaml`.
+1. Copy the existing maintenance script into `<bundle>/maintenance/`.
+2. Run `hex-integration install` to register the new probe and validate secrets.
+3. Verify the new probe passes (`hex-integration probe <name>`).
+4. Remove the old ad-hoc script once confirmed working.
 
 ## Related
 

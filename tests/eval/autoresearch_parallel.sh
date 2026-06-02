@@ -3,8 +3,7 @@ set -euo pipefail
 
 # hex autoresearch — parallel multi-branch optimization
 #
-# Runs 3 focused autoresearch loops simultaneously, each in its own git worktree:
-#   - Branch "events": fixes hex-events routing failures
+# Runs 2 focused autoresearch loops simultaneously, each in its own git worktree:
 #   - Branch "boi": fixes BOI delegation failures
 #   - Branch "core": fixes persistence/onboarding/memory failures
 #
@@ -43,16 +42,15 @@ TIMESTAMP=$(date +%Y%m%d-%H%M%S)
 echo "============================================="
 echo " hex autoresearch — parallel optimization"
 echo "============================================="
-echo "  Branches    : events, boi, core"
+echo "  Branches    : boi, core"
 echo "  Iterations  : $ITERATIONS per branch"
 echo "  Candidates  : $CANDIDATES per tournament"
-echo "  Budget      : \$$BUDGET per branch (\$$(( BUDGET * 3 )) total)"
+echo "  Budget      : \$$BUDGET per branch (\$$(( BUDGET * 2 )) total)"
 echo "  Model       : $MODEL"
 echo ""
 
 # Define focus categories
 # Each maps to specific eval cases
-FOCUS_EVENTS="route_schedule_to_events,route_monitoring_to_events,route_reactive_to_events,hex_events_routing"
 FOCUS_BOI="delegation,route_research_to_boi,route_build_to_boi"
 FOCUS_CORE="persistence,onboarding,memory_search,startup_loads_context"
 
@@ -60,7 +58,7 @@ FOCUS_CORE="persistence,onboarding,memory_search,startup_loads_context"
 echo "Creating worktrees..."
 cd "$REPO_DIR"
 
-for branch in events boi core; do
+for branch in boi core; do
     WT_PATH="/tmp/hex-ar-$branch-$TIMESTAMP"
     BRANCH_NAME="autoresearch/$branch-$TIMESTAMP"
 
@@ -73,19 +71,18 @@ done
 echo ""
 
 # Launch parallel loops
-echo "Launching 3 parallel autoresearch loops..."
+echo "Launching 2 parallel autoresearch loops..."
 echo ""
 
 PIDS=()
 LOGS=()
 
-for branch in events boi core; do
+for branch in boi core; do
     WT_PATH="/tmp/hex-ar-$branch-$TIMESTAMP"
     BRANCH_NAME="autoresearch/$branch-$TIMESTAMP"
     LOG="/tmp/hex-ar-$branch-$TIMESTAMP.log"
 
     case "$branch" in
-        events) FOCUS="$FOCUS_EVENTS" ;;
         boi)    FOCUS="$FOCUS_BOI" ;;
         core)   FOCUS="$FOCUS_CORE" ;;
     esac
@@ -111,9 +108,8 @@ for branch in events boi core; do
 done
 
 echo ""
-echo "All 3 branches running. PIDs: ${PIDS[*]}"
+echo "All 2 branches running. PIDs: ${PIDS[*]}"
 echo "Monitor:"
-echo "  tail -f /tmp/hex-ar-events-$TIMESTAMP.log"
 echo "  tail -f /tmp/hex-ar-boi-$TIMESTAMP.log"
 echo "  tail -f /tmp/hex-ar-core-$TIMESTAMP.log"
 echo ""
@@ -121,8 +117,8 @@ echo "Waiting for completion..."
 
 # Wait for all to finish
 RESULTS=()
-for i in 0 1 2; do
-    branch=("events" "boi" "core")
+for i in 0 1; do
+    branch=("boi" "core")
     wait "${PIDS[$i]}" 2>/dev/null
     EXIT_CODE=$?
 
@@ -141,7 +137,7 @@ echo "============================================="
 echo ""
 
 # Show results from each branch
-for branch in events boi core; do
+for branch in boi core; do
     LOG="/tmp/hex-ar-$branch-$TIMESTAMP.log"
     BRANCH_NAME="autoresearch/$branch-$TIMESTAMP"
 
@@ -153,14 +149,14 @@ done
 
 echo "To merge improvements:"
 echo "  cd $REPO_DIR"
-for branch in events boi core; do
+for branch in boi core; do
     BRANCH_NAME="autoresearch/$branch-$TIMESTAMP"
     echo "  git merge $BRANCH_NAME  # if it improved"
 done
 
 echo ""
 echo "To clean up worktrees:"
-for branch in events boi core; do
+for branch in boi core; do
     WT_PATH="/tmp/hex-ar-$branch-$TIMESTAMP"
     echo "  git worktree remove $WT_PATH"
 done

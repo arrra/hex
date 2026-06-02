@@ -9,7 +9,6 @@ from __future__ import annotations
 
 import logging
 import os
-import subprocess
 from pathlib import Path
 from typing import Union
 
@@ -62,34 +61,6 @@ def load_yaml(path: Union[str, Path]) -> dict:
     except OSError as exc:
         logger.warning("Cannot read %s: %s", resolved, exc)
         return {}
-
-
-def emit_event(event_type: str, payload: dict) -> None:
-    """Emit a hex event via the hex-emit.sh shell script.
-
-    The script is resolved relative to HEX_DIR so it works in any
-    deployment without hardcoded paths.
-
-    Args:
-        event_type: Dot-separated event name, e.g. ``"hex.session.reflected"``.
-        payload: Arbitrary JSON-serialisable dict attached to the event.
-    """
-    import json as _json
-
-    logger = logging.getLogger(__name__)
-    emit_script = get_hex_root() / ".hex" / "bin" / "hex-emit.sh"
-    if not emit_script.exists():
-        logger.warning("hex-emit.sh not found at %s; event %s dropped", emit_script, event_type)
-        return
-    try:
-        subprocess.run(
-            ["bash", str(emit_script), event_type, _json.dumps(payload)],
-            check=False,
-            capture_output=True,
-            timeout=10,
-        )
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        logger.warning("emit_event failed for %s: %s", event_type, exc)
 
 
 def get_today() -> str:

@@ -12,8 +12,14 @@ content and file-system side effects.
 | `memory_search` | SO #1 — Search before guessing | Agent finds seeded decision files when asked |
 | `persistence` | SO #2 — Persist immediately | Agent writes a decision file after being told one |
 | `delegation` | SO #7 — BOI is the default | Agent suggests BOI dispatch for multi-file work |
-| `hex_events_routing` | S4 — Use hex-events | Agent suggests hex-events for reactive notifications |
 | `startup_loads_context` | Session Lifecycle | /hex-startup reads todo.md and surfaces priorities |
+| `route_build_to_boi` | SO #6 — BOI routing | Build requests route to BOI, not inline |
+| `route_research_to_boi` | SO #6 — BOI routing | Research requests route to BOI, not inline |
+| `skill-discovery` | Skill system | Agent surfaces relevant skills for a task |
+| `skill-discovery-codex` | Skill system | Codex skill discovered when building APIs |
+| `skill-frontmatter` | Skill system | Skill frontmatter is readable and well-formed |
+| `skill-refs` | Skill system | Skill cross-references resolve correctly |
+| `codex-onboarding` | Session Lifecycle | Codex onboarding flow triggers correctly |
 
 Each case gets its own isolated hex install in a temp directory.
 
@@ -28,7 +34,7 @@ cd tests/eval
 python3 run_eval.py --dry-run
 ```
 
-Expected output: `6 cases validated, ready for live run.`
+Expected output: `12 cases validated, ready for live run.`
 
 ### Live run (requires claude CLI + ANTHROPIC_API_KEY)
 
@@ -50,8 +56,8 @@ Model shorthands: `sonnet`, `haiku`, `opus` (maps to current claude-*-4-5 IDs).
 
 ### Cost estimate
 
-Running the full suite with Sonnet: approximately **$0.50** (6 cases × ~2K input tokens + ~500 output tokens).
-Use `--model haiku` for ~$0.05 if you just want a quick check.
+Running the full suite with Sonnet: approximately **$0.96** (12 cases × ~2K input tokens + ~500 output tokens).
+Use `--model haiku` for ~$0.12 if you just want a quick check.
 
 ## How to add a test case
 
@@ -95,11 +101,17 @@ python3 run_eval.py --live --case my_case
 tests/eval/
 ├── run_eval.py       — Main runner (dry-run + live modes)
 ├── cases/            — YAML test case definitions
-│   ├── onboarding.yaml
-│   ├── memory_search.yaml
-│   ├── persistence.yaml
+│   ├── codex-onboarding.yaml
 │   ├── delegation.yaml
-│   ├── hex_events_routing.yaml
+│   ├── memory_search.yaml
+│   ├── onboarding.yaml
+│   ├── persistence.yaml
+│   ├── route_build_to_boi.yaml
+│   ├── route_research_to_boi.yaml
+│   ├── skill-discovery-codex.yaml
+│   ├── skill-discovery.yaml
+│   ├── skill-frontmatter.yaml
+│   ├── skill-refs.yaml
 │   └── startup_loads_context.yaml
 └── README.md         — This file
 ```

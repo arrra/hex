@@ -1,7 +1,7 @@
 //! `hex memory recall` — fast, FTS5-only contextual retrieval for per-prompt
 //! injection. No embedding model is loaded (keeps the UserPromptSubmit hook
-//! inside its latency budget — spec §8). Emits a `memory.recall` event and
-//! appends a line to `.hex/memory/recall-log.jsonl` for the nightly eval.
+//! inside its latency budget — spec §8). Appends a line to
+//! `.hex/memory/recall-log.jsonl` for the nightly eval.
 
 use serde_json::json;
 use std::io::Write;
@@ -143,7 +143,7 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
             facts_injected: 0, chunks_injected: 0,
             latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
         };
-        log_and_emit(hex_root, &outcome);
+        log_recall(hex_root, &outcome);
         return outcome;
     }
 
@@ -186,7 +186,7 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
             latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
         }
     };
-    log_and_emit(hex_root, &outcome);
+    log_recall(hex_root, &outcome);
     outcome
 }
 
@@ -241,10 +241,9 @@ fn format_context_v2(results: &[super::search::SearchResult], facts: &[FactHit])
     out
 }
 
-/// Append a JSONL line and emit a `memory.recall` event. The JSONL is the
-/// eval's data source (no telemetry-schema coupling); the event feeds
-/// hex-events. Both are best-effort and never panic.
-fn log_and_emit(hex_root: &Path, o: &RecallOutcome) {
+/// Append a JSONL line to `.hex/memory/recall-log.jsonl` for the nightly eval.
+/// Best-effort — never panics.
+fn log_recall(hex_root: &Path, o: &RecallOutcome) {
     let dir = hex_root.join(".hex/memory");
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -262,27 +261,6 @@ fn log_and_emit(hex_root: &Path, o: &RecallOutcome) {
         );
     }
 
-    // Gate EventEngine on injected — the hot path runs on every prompt; building
-    // EventEngine (reads config files) is only worth it when we actually injected.
-    // The JSONL append above is the eval's complete data source for both injected
-    // and non-injected recalls — do NOT gate that write on o.injected.
-    if o.injected {
-        let bus = crate::sse::SseBus::new();
-        let telemetry = std::sync::Arc::new(crate::telemetry::Telemetry::new(hex_root));
-        match crate::events::EventEngine::new(hex_root, telemetry, bus) {
-            Ok(engine) => {
-                engine.ingest(
-                    "memory.recall",
-                    &json!({
-                        "injected": o.injected, "gated": o.gated,
-                        "result_count": o.result_count, "latency_ms": o.latency_ms,
-                    }),
-                    "hex:memory",
-                );
-            }
-            Err(e) => eprintln!("[memory recall] could not emit recall event: {e}"),
-        }
-    }
 }
 
 /// `hex memory recall <query>` — prints the context block to stdout.

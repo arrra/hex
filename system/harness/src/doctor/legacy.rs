@@ -193,7 +193,7 @@ pub fn quality_check(_hex_dir: &std::path::Path, spec: Option<&str>, sweep: bool
 fn qc_boi_queue() -> PathBuf { dirs_home().join(".boi/queue") }
 fn qc_workspace() -> PathBuf { dirs_home().join("hex") }
 fn qc_initiatives_dir() -> PathBuf { qc_workspace().join("initiatives") }
-fn qc_events_dir() -> PathBuf { dirs_home().join(".hex-events/events") }
+fn qc_events_dir() -> PathBuf { dirs_home().join(".hex/events") }
 fn qc_github_mrap_base() -> PathBuf {
     // Mike's checkout convention is ~/github.com/mrap/; users with a different
     // layout can override with HEX_GITHUB_BASE.

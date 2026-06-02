@@ -40,26 +40,6 @@ def _save(data: dict):
     COMMENTS_FILE.write_text(json.dumps(data, indent=2))
 
 
-def _emit_event(comment: dict):
-    """Emit hex-event for LLM-based agent routing."""
-    try:
-        import subprocess
-        payload = json.dumps({
-            "comment_id": comment["id"],
-            "asset": comment["asset"],
-            "text": comment["text"][:200],
-            "author": comment.get("author", "mike"),
-            "source": "comments-service",
-        })
-        subprocess.Popen(
-            ["python3", os.path.expanduser("~/.hex-events/hex_emit.py"),
-             "hex.comment.created", payload],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-    except Exception:
-        pass
-
-
 # ---------------------------------------------------------------------------
 # Widget JS — embeddable on any hex page
 # ---------------------------------------------------------------------------
@@ -460,7 +440,6 @@ class Handler(http.server.BaseHTTPRequestHandler):
             data = _load()
             data["comments"].append(comment)
             _save(data)
-            _emit_event(comment)
             self._send(201, "application/json", json.dumps(comment))
 
         elif path == "/api/comments/update":

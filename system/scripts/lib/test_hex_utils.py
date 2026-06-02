@@ -14,7 +14,6 @@ import pytest
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from lib.hex_utils import (
-    emit_event,
     get_hex_root,
     get_today,
     load_yaml,
