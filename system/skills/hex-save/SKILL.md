@@ -18,7 +18,7 @@ hex memory parse-transcripts
 2. **Rebuild memory index**: Update the search index with any new or changed files.
 
 ```bash
-python3 $HEX_DIR/.hex/skills/memory/scripts/memory_index.py
+hex memory index
 ```
 
 3. **Report**: Tell the user what was saved.

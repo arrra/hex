@@ -619,10 +619,10 @@ If any issues are recurring (matched against previous reflection-log entries in 
 **Step 5: Rebuild memory index**
 Run the memory indexer to ensure new learnings and skills are discoverable:
 ```bash
-python3 $HEX_DIR/.hex/skills/memory/scripts/memory_index.py
+hex memory index
 ```
-If the memory index script doesn't exist or fails, skip this step silently — it's
-non-critical and the index may not be configured yet.
+If `hex memory index` fails, skip this step silently — it's non-critical and the
+index may not be configured yet.
 
 ### 4.4 Report Summary
 

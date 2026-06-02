@@ -45,7 +45,7 @@ If the upgrade script reports that the CLAUDE.md template has changed:
 
 After upgrade, rebuild the memory index to pick up any changes:
 ```bash
-python3 $HEX_DIR/.hex/skills/memory/scripts/memory_index.py
+hex memory index
 ```
 
 ## Step 4: Report

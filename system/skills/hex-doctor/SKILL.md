@@ -80,7 +80,7 @@ When migrating user data from backup:
 - **Copy, don't move.** The backup stays intact until the user explicitly deletes it.
 - **Read before writing.** Check if the destination already has content (from a partial previous migration). If so, skip that item and report it.
 - **Verify after each item.** After copying, verify the file exists and is readable at the destination.
-- **Re-index memory.** After migration, run `python3 .hex/skills/memory/scripts/memory_index.py --full` to rebuild the search index with correct paths.
+- **Re-index memory.** After migration, run `hex memory index --full` to rebuild the search index with correct paths.
 
 ## Output Format
 
