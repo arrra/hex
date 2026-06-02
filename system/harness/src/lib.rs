@@ -5,7 +5,6 @@ pub mod audit;
 pub mod capability_guard;
 pub mod memory;
 pub mod extensions;
-pub mod events;
 pub mod registry;
 pub mod sse;
 pub mod telemetry;
