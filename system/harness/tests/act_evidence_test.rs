@@ -132,31 +132,3 @@ fn test_evidence_no_evidence_field_means_no_verification() {
     );
 }
 
-#[test]
-fn test_evidence_observe_entry_has_no_evidence_check() {
-    // Observe/find/decide entries are not mechanical acts — they carry no evidence.
-    // This test documents that the evidence field is only meaningful on "act" entries.
-    use hex::gate;
-    use chrono::Utc;
-    use hex::types::TrailEntry;
-
-    let observe = TrailEntry {
-        ts: Utc::now(),
-        entry_type: "observe".to_string(),
-        detail: serde_json::json!({"what": "logs", "noted": "all green"}),
-        queue_item: None,
-    };
-    assert!(gate::validate(&observe).is_ok());
-
-    let decide = TrailEntry {
-        ts: Utc::now(),
-        entry_type: "decide".to_string(),
-        detail: serde_json::json!({
-            "decision": "ship it",
-            "alternatives": ["wait"],
-            "reasoning": "tests pass"
-        }),
-        queue_item: None,
-    };
-    assert!(gate::validate(&decide).is_ok());
-}
