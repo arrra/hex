@@ -6,13 +6,11 @@ mod doctor;
 mod paths;
 mod integration;
 mod integration_cmd;
-mod metrics;
 mod checkpoint;
 mod shutdown;
 mod startup;
 mod validate;
 mod integration_check_all;
-mod integration_telemetry;
 mod mcp;
 use hex::memory;
 mod path_map;
@@ -45,12 +43,6 @@ enum Commands {
     Memory {
         #[command(subcommand)]
         command: MemoryCommands,
-    },
-    /// User-outcome metrics (port of .hex/scripts/metrics/run-all.sh)
-    #[command(display_order = 32)]
-    Metrics {
-        #[command(subcommand)]
-        command: MetricsCommands,
     },
     /// Agent health checks (port of .hex/scripts/health/)
     #[command(display_order = 6)]
@@ -150,12 +142,6 @@ enum Commands {
     Learnings {
         #[command(subcommand)]
         command: LearningsCommands,
-    },
-    /// Telemetry file rotation and management (port of rotate-telemetry.sh)
-    #[command(display_order = 8)]
-    Telemetry {
-        #[command(subcommand)]
-        command: TelemetryCommands,
     },
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
     #[command(display_order = 14)]
@@ -332,18 +318,6 @@ enum IntegrationCommands {
         #[arg(long, default_value = "all")]
         tier: String,
     },
-    /// Emit a hex.integration.* telemetry event (port of lib/integration/telemetry.py)
-    #[command(name = "telemetry")]
-    Telemetry {
-        /// Event type, e.g. hex.integration.installed.ok
-        event_type: String,
-        /// JSON payload (default: {})
-        #[arg(default_value = "{}")]
-        payload: String,
-        /// Event source tag
-        #[arg(default_value = "hex-integration")]
-        source: String,
-    },
     /// Post weekly integrations summary to #integrations (port of integrations-digest.sh)
     Digest,
     /// Run one integration sub-check, update state, emit events (port of hex-integration-check.sh)
@@ -485,51 +459,6 @@ enum McpCommands {
         /// The OAuth auth URL to rewrite
         auth_url: String,
     },
-}
-
-#[derive(Subcommand)]
-enum MetricsCommands {
-    /// Run all user-outcome metric scripts and report PASS/FAIL (port of metrics/run-all.sh)
-    #[command(name = "run-all")]
-    RunAll,
-    /// Rolling-24h system health scorer (port of hex-vitals.py)
-    Vitals {
-        /// JSON output
-        #[arg(long)]
-        json: bool,
-    },
-    /// Cost-effectiveness report: KR movement per dollar by agent (port of cost-effectiveness.py)
-    #[command(name = "cost-effectiveness")]
-    CostEffectiveness {
-        /// Filter to a single agent ID
-        #[arg(long)]
-        agent: Option<String>,
-        /// JSON output
-        #[arg(long)]
-        json: bool,
-    },
-    /// Input:Output telemetry ratio calculator (port of telemetry-ratio.py)
-    #[command(name = "telemetry-ratio")]
-    TelemetryRatio {
-        /// Hours to look back (default 24)
-        #[arg(long, default_value = "24")]
-        hours: u32,
-        /// Filter to a surface (e.g. pulse)
-        #[arg(long)]
-        surface: Option<String>,
-        /// JSON output
-        #[arg(long)]
-        json: bool,
-    },
-    /// Delete telemetry files older than 7 days and cap dirs at 50MB (port of rotate-telemetry.sh)
-    #[command(name = "rotate-telemetry")]
-    RotateTelemetry,
-}
-
-#[derive(Subcommand)]
-enum TelemetryCommands {
-    /// Delete telemetry files older than 7 days and cap dirs at 50MB (port of rotate-telemetry.sh)
-    Rotate,
 }
 
 #[derive(Subcommand)]
@@ -710,11 +639,6 @@ fn main() {
                 let code = integration_check_all::run(&hex_dir, tier);
                 std::process::exit(code);
             }
-            if let IntegrationCommands::Telemetry { ref event_type, ref payload, ref source } = command {
-                let hex_dir = get_hex_dir();
-                let code = integration_telemetry::emit_event(&hex_dir, event_type, payload, source);
-                std::process::exit(code);
-            }
             if let IntegrationCommands::Digest = command {
                 let hex_dir = get_hex_dir();
                 let script = hex_dir.join("system/scripts/integrations-digest.sh");
@@ -779,7 +703,6 @@ fn main() {
                 #[cfg(feature = "personal")]
                 IntegrationCommands::GranolaMcp => unreachable!(),
                 IntegrationCommands::CheckAll { .. } => unreachable!(),
-                IntegrationCommands::Telemetry { .. } => unreachable!(),
                 IntegrationCommands::Digest => unreachable!(),
                 IntegrationCommands::RunCheck { .. } => unreachable!(),
             };
@@ -795,37 +718,10 @@ fn main() {
                 std::process::exit(1);
             });
             let exit_code = status.code().unwrap_or(1);
-            let duration_ms = start.elapsed().as_millis() as u64;
-            let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(&hex_dir));
-            let integration_name = name_arg.as_deref().unwrap_or("(all)");
-            telemetry.emit(&format!("hex.integration.{}", subcmd), &serde_json::json!({
-                "integration": integration_name,
-                "exit_code": exit_code,
-                "duration_ms": duration_ms,
-            }));
             std::process::exit(exit_code);
         }
         Commands::Memory { command } => {
             let hex_dir = get_hex_dir();
-            let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(&hex_dir));
-            let subcmd_name = match &command {
-                MemoryCommands::CheckBehavior { .. } => "check-behavior",
-                MemoryCommands::Store { .. } => "store",
-                MemoryCommands::Bootstrap => "bootstrap",
-                MemoryCommands::Health => "health",
-                MemoryCommands::Search { .. } => "search",
-                MemoryCommands::Index { stats, .. } => {
-                    if *stats { "index-stats" } else { "index" }
-                }
-                MemoryCommands::ParseTranscripts { .. } => "parse-transcripts",
-                MemoryCommands::Recall { .. } => "recall",
-                MemoryCommands::Eval { .. } => "eval",
-                MemoryCommands::LlmCheck => "llm-check",
-                MemoryCommands::Distill { .. } => "distill",
-                MemoryCommands::Consolidate => "consolidate",
-                MemoryCommands::Stats { .. } => "stats",
-            };
-            let start = std::time::Instant::now();
             let exit_code = match &command {
                 MemoryCommands::Search { query, top, file, compact, context, private } => {
                     let args = memory::search::SearchArgs {
@@ -954,53 +850,8 @@ fn main() {
                     cmd.status().map(|s| s.code().unwrap_or(1)).unwrap_or(1)
                 }
             };
-            let duration_ms = start.elapsed().as_millis() as u64;
-            telemetry.emit(
-                &format!("hex.memory.{}", subcmd_name),
-                &serde_json::json!({
-                    "exit_code": exit_code,
-                    "duration_ms": duration_ms,
-                }),
-            );
             std::process::exit(exit_code);
         }
-        Commands::Metrics { command } => match command {
-            MetricsCommands::RunAll => {
-                let hex_dir = get_hex_dir();
-                metrics::run_all(&hex_dir);
-            }
-            MetricsCommands::Vitals { json } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/hex-vitals.py");
-                let mut args: Vec<&str> = vec![];
-                let json_flag;
-                if json { json_flag = "--json"; args.push(json_flag); }
-                std::process::exit(exec_script(&script, &args));
-            }
-            MetricsCommands::CostEffectiveness { agent, json } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/cost-effectiveness.py");
-                let mut args: Vec<String> = vec![];
-                if let Some(ref a) = agent { args.push("--agent".into()); args.push(a.clone()); }
-                if json { args.push("--json".into()); }
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                std::process::exit(exec_script(&script, &arg_refs));
-            }
-            MetricsCommands::TelemetryRatio { hours, surface, json } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/telemetry-ratio.py");
-                let hours_s = hours.to_string();
-                let mut args: Vec<&str> = vec!["--hours", &hours_s];
-                let surface_flag;
-                if let Some(ref s) = surface { surface_flag = s.clone(); args.push("--surface"); args.push(&surface_flag); }
-                if json { args.push("--json"); }
-                std::process::exit(exec_script(&script, &args));
-            }
-            MetricsCommands::RotateTelemetry => {
-                let script = get_hex_dir().join(".hex/scripts/rotate-telemetry.sh");
-                std::process::exit(exec_script(&script, &[]));
-            }
-        },
         Commands::Health { command } => match command {
             HealthCommands::CheckVectorSearch => {
                 let hex_dir = get_hex_dir();
@@ -1045,8 +896,6 @@ fn main() {
                     std::process::exit(code);
                 }
                 DoctorCommands::Run { fix, smoke: _, quiet, json, filter } => {
-                    let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(&hex_dir));
-                    let start = std::time::Instant::now();
                     let ctx = doctor::Context::new(hex_dir.clone(), fix);
                     let runner = match &filter {
                         Some(pat) => doctor::Runner::filtered(pat),
@@ -1059,21 +908,6 @@ fn main() {
                         doctor::reporter::print_text(&results, quiet);
                     }
                     let exit_code = doctor::reporter::exit_code(&results);
-                    let duration_ms = start.elapsed().as_millis() as u64;
-                    telemetry.emit("hex.doctor.run", &serde_json::json!({
-                        "fix": fix,
-                        "quiet": quiet,
-                        "json": json,
-                        "filter": filter,
-                        "exit_code": exit_code,
-                        "duration_ms": duration_ms,
-                    }));
-                    if exit_code != 0 {
-                        telemetry.emit("hex.doctor.failed", &serde_json::json!({
-                            "exit_code": exit_code,
-                            "duration_ms": duration_ms,
-                        }));
-                    }
                     std::process::exit(exit_code);
                 }
                 DoctorCommands::List => {
@@ -1185,61 +1019,6 @@ fn main() {
                 LearningsCommands::Promote { dry_run } => learnings::run_promote(&hex_dir, dry_run),
             }
         }
-        Commands::Telemetry { command } => match command {
-            TelemetryCommands::Rotate => {
-                let hex_dir = get_hex_dir();
-                let dirs = [
-                    hex_dir.join(".hex/audit"),
-                    hex_dir.join(".hex/logs"),
-                ];
-                let ttl_days: u64 = 7;
-                let cap_bytes: u64 = 50 * 1024 * 1024;
-                let mut rotated = 0u64;
-                let mut freed_bytes = 0u64;
-                let mut cap_truncated = 0u64;
-                let now = std::time::SystemTime::now();
-                let ttl_secs = ttl_days * 86400;
-                for dir in &dirs {
-                    if !dir.is_dir() { continue; }
-                    let entries: Vec<_> = std::fs::read_dir(dir)
-                        .unwrap_or_else(|_| { eprintln!("cannot read {}", dir.display()); std::process::exit(1); })
-                        .filter_map(|e| e.ok())
-                        .filter(|e| {
-                            let name = e.file_name();
-                            let n = name.to_string_lossy();
-                            e.path().is_file() && (n.ends_with(".jsonl") || n.ends_with(".log"))
-                        })
-                        .collect();
-                    let mut remaining: Vec<_> = entries.iter().filter_map(|e| {
-                        let meta = e.path().metadata().ok()?;
-                        let modified = meta.modified().ok()?;
-                        let age = now.duration_since(modified).ok()?.as_secs();
-                        if age > ttl_secs {
-                            let sz = meta.len();
-                            let _ = std::fs::remove_file(e.path());
-                            freed_bytes += sz;
-                            rotated += 1;
-                            None
-                        } else {
-                            Some((e.path(), meta.len(), modified))
-                        }
-                    }).collect();
-                    let total: u64 = remaining.iter().map(|(_, sz, _)| sz).sum();
-                    if total > cap_bytes {
-                        remaining.sort_by_key(|(_, _, m)| *m);
-                        let mut running = total;
-                        for (path, sz, _) in &remaining {
-                            if running <= cap_bytes { break; }
-                            let _ = std::fs::remove_file(path);
-                            freed_bytes += sz;
-                            running -= sz;
-                            cap_truncated += 1;
-                        }
-                    }
-                }
-                println!("{{\"rotated\":{rotated},\"freed_bytes\":{freed_bytes},\"cap_truncated\":{cap_truncated}}}");
-            }
-        },
         Commands::Upgrade { args } => {
             std::process::exit(upgrade::run(&args));
         }
