@@ -24,7 +24,7 @@ Agents are event-driven. hex-events fires a trigger (timer tick, BOI completion,
 7. Parses the agent's structured response
 8. Validates every trail entry through gates (required fields per action type)
 9. Persists state, delivers outbound messages, records cost
-10. Loops until the active queue is drained or shift budget is hit
+10. Loops until the active queue is drained or the runaway-loop safeguard (`check_and_handle_loop`, OBS-009 / q-711) halts the wake
 
 ## Core Agents
 
@@ -47,28 +47,9 @@ Each agent's state is a JSON file owned by the harness. Agents return structured
 - **inbox** -- async messages from other agents
 - **cost** -- per-wake, per-period, lifetime USD tracking
 
-## Budget & Cost
+## Cost & Safeguards
 
-Every charter has a `budget` block with three fields:
-
-```yaml
-budget:
-  wakes_per_hour: 12
-  usd_per_day: 0      # 0 = unlimited
-  usd_per_shift: 0    # 0 = unlimited
-```
-
-**How it works:**
-- `0` = unlimited. No enforcement. The agent runs until its queue is drained.
-- Any positive value = enforced cap. When cumulative cost within a single wake exceeds `usd_per_shift`, the shift loop breaks with a loud warning + audit entry.
-- `usd_per_day`: tracked in state but not currently enforced as a hard stop. Serves as a baseline for cost reporting.
-- `wakes_per_hour`: rate limit enforced by the hex-events policy, not the harness itself.
-- Negative values are rejected at charter load.
-
-**Cost tracking is always on**, regardless of budget settings. Every Claude invocation records tokens, USD, and duration to `.hex/cost/ledger.jsonl`. Use this for cost analysis without needing to set restrictive budgets.
-
-**To uncap an agent:** set `usd_per_day` and `usd_per_shift` to `0`.
-**To cap an agent:** set positive dollar values — the harness will stop the shift loop and log when the cap is hit.
+The per-wake dollar gates (the old `usd_per_shift` / `usd_per_day` charter fields) and the matching `budget-period-reset` health check were **removed in v0.20.3 on 2026-05-29** — they enforced caps silently, which violated the "no quiet failures" rule. Cost *recording* continues unchanged: every Claude invocation writes tokens, USD, and duration to `~/.hex/cost/ledger.jsonl`, and is surfaced per agent via `Cost.last_wake_usd` and `Cost.lifetime_usd` (see `hex agent status`). The live runaway-agent safeguard is now `check_and_handle_loop` (OBS-009 / q-711), which detects pathological wake loops and halts the agent loudly. Rate-limiting still exists via the `wake.rate_limit` charter field — the previously-advertised per-hour wake cap was deleted along with the rest of the budget block.
 
 ## Action Types (Gates)
 
@@ -120,7 +101,7 @@ For the full decision framework (when to use agents vs BOI vs hex-events), see t
 - **Charter-driven discovery.** No hardcoded lists. Charter exists → agent is registered.
 - **Agents don't write their own state.** The harness owns state.json. Agents return structured output; the harness validates and persists.
 - **Loud errors, never quiet.** Every failure prints a specific error and exits non-zero. Audit and cost writes log to stderr on failure.
-- **Shift model.** Agents work until their active queue is empty or budget is hit (if set). They don't choose when to stop. Budget of 0 = unlimited.
+- **Shift model.** Agents work until their active queue is empty or the runaway-loop safeguard (`check_and_handle_loop`) fires. They don't choose when to stop.
 - **Core agent protection.** Core agents are detected, monitored, and restorable. The system knows its own critical path.
 - **Cost tracking is automatic.** Every Claude invocation records tokens and USD to `.hex/cost/ledger.jsonl`.
 

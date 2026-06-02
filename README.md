@@ -328,7 +328,7 @@ hex-foundation/
 │   ├── scripts/         startup.sh, doctor.sh, upgrade.sh, quality-check.py,
 │   │                    route-comment.py, hex-asset.py, hex-asset-discover.py, ...
 │   │   ├── health/      fleet self-driving scripts (fleet-pulse, stalled-initiative,
-│   │   │                mike-pending, budget-period-reset, backlog-promote,
+│   │   │                mike-pending, backlog-promote,
 │   │   │                agent-performance-review, fleet-scorecard-aggregate)
 │   │   ├── comments-service/  comment widget (widget.js) + Python fallback server
 │   │   └── sse-bus/           hex-events → SSE bridge script
@@ -344,7 +344,7 @@ hex-foundation/
 ├── adapter/
 │   └── policy-templates/  Installable hex-events policy templates for fleet health
 │                          (fleet-pulse, stalled-initiative-monitor, mike-pending-escalator,
-│                          budget-period-reset, agent-performance-review-weekly, ...)
+│                          agent-performance-review-weekly, ...)
 ├── templates/           Seeds for CLAUDE.md, AGENTS.md, me.md, todo.md, decision-template.md
 ├── docs/architecture.md System overview
 └── tests/
@@ -459,13 +459,12 @@ v0.13.1 fixes: **Doctor reliability and skip_llm WakeConfig.**
 - **`skip_llm` WakeConfig**: Agents that exercise wake plumbing without needing LLM reasoning (e.g. health probes) can set `wake.skip_llm: true`. Harness bypasses shift loop and self-assessment; inbox still loads and `mark_delivered` fires. `state.json` inbox drain prevents unbounded growth on high-frequency skip_llm wakes.
 
 v0.13.0 adds: **Fleet self-driving mechanisms and agent performance review.**
-- **Fleet pulse watchdog**: `check-fleet-pulse.sh` emits `hex.agent.needs-attention` events for dormant agents. Composite liveness score with WARN/ERROR escalation tiers. Suppresses during budget lockout.
+- **Fleet pulse watchdog**: `check-fleet-pulse.sh` emits `hex.agent.needs-attention` events for dormant agents. Composite liveness score with WARN/ERROR escalation tiers.
 - **Stalled initiative monitor**: `check-stalled-initiatives.sh` detects initiatives with no progress signal in 48h (commit, act trail, or KR update). Sends drive-or-close directives to initiative owners. Anti-spam guard prevents re-fire within 24h.
 - **Mike-pending board monitor**: `check-mike-pending.sh` tracks Mike-blocked items with tier labels (quiet/digest/direct-ping). Coalesced per-run alerts with DM fallback.
-- **Budget period auto-reset**: `budget-period-reset.py` rolls `cost.current_period.start` forward when a period expires. 5x runaway safety gate emits ERROR alert instead of clearing an out-of-control agent.
 - **Agent performance review**: `agent-performance-review.py` produces per-agent quality/velocity/autonomy scorecards from critic reviews, BOI DB, audit trail, and Mike-pushback signals. Composite geometric mean (0.0–1.0) with cold-start handling.
 - **Fleet scorecard aggregate**: `fleet-scorecard-aggregate.py` runs per-agent reviews and produces fleet-wide top/bottom 5, biggest movers, and Mike-pushback heatmap. Outputs a single coalesced digest — no per-agent pings.
-- **Policy templates**: `adapter/policy-templates/` gains fleet-pulse, stalled-initiative-monitor, mike-pending-escalator, budget-period-reset, and agent-performance-review-weekly templates for out-of-the-box fleet health wiring.
+- **Policy templates**: `adapter/policy-templates/` gains fleet-pulse, stalled-initiative-monitor, mike-pending-escalator, and agent-performance-review-weekly templates for out-of-the-box fleet health wiring.
 - **Note**: Backlog auto-promotion (`wake.rs`) was staged but reverted — supporting modules incomplete. Tracked for v0.14.0.
 
 v0.12.0 adds: **Upgrade reliability, shell completions, failure-revive protocol, and doctor improvements.**

@@ -1,3 +1,5 @@
+// delete after 2026-09-01 — migration-window scaffolding, not permanent coverage
+//
 // Red test for budget-rip task Tpp0wy712 — the final cleanup gate.
 //
 // Asserts the workspace-level post-condition for the whole budget rip:

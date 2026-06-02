@@ -58,10 +58,6 @@ authority:
   green: []
   yellow: []
   red: []
-budget:
-  wakes_per_hour: 4
-  usd_per_day: 5.0
-  usd_per_shift: 1.0
 kill_switch: "~/.hex-${id}-HALT"
 core: $core
 YAML
@@ -82,10 +78,6 @@ authority:
   green: []
   yellow: []
   red: []
-budget:
-  wakes_per_hour: 4
-  usd_per_day: 5.0
-  usd_per_shift: 1.0
 kill_switch: "~/.hex-${id}-HALT"
 core: true
 YAML
@@ -151,10 +143,6 @@ authority:
   green: []
   yellow: []
   red: []
-budget:
-  wakes_per_hour: 1
-  usd_per_day: 1.0
-  usd_per_shift: 0.5
 kill_switch: "~/.hex-bad-agent-HALT"
 YAML
 
@@ -322,10 +310,6 @@ authority:
   green: []
   yellow: []
   red: []
-budget:
-  wakes_per_hour: 10
-  usd_per_day: 99.0
-  usd_per_shift: 10.0
 kill_switch: "~/.hex-ops-HALT"
 core: true
 YAML
@@ -343,39 +327,7 @@ fi
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════════
-bold "10. Invalid charter validation"
-# ══════════════════════════════════════════════════════════════════════════════
-
-cleanup
-
-# Missing budget
-mkdir -p "$HEX_DIR/projects/bad-budget"
-cat > "$HEX_DIR/projects/bad-budget/charter.yaml" <<YAML
-id: bad-budget
-name: Bad Budget
-role: test
-wake:
-  triggers: []
-  responsibilities: []
-authority:
-  green: []
-  yellow: []
-  red: []
-budget:
-  wakes_per_hour: 0
-  usd_per_day: 0
-  usd_per_shift: 0
-kill_switch: "~/.hex-bad-budget-HALT"
-YAML
-
-out=$("$HEX_AGENT" fleet 2>&1); rc=$?
-assert_exit 1 $rc "fleet rejects charter with zero budget"
-assert_contains "$out" "invalid charter" "error mentions invalid charter"
-
-echo ""
-
-# ══════════════════════════════════════════════════════════════════════════════
-bold "11. Message send/receive (unified store)"
+bold "10. Message send/receive (unified store)"
 # ══════════════════════════════════════════════════════════════════════════════
 
 cleanup
@@ -393,7 +345,7 @@ assert_contains "$out" "test msg\|hello\|sender\|receiver" "message appears in u
 echo ""
 
 # ══════════════════════════════════════════════════════════════════════════════
-bold "12. Messaging primitive"
+bold "11. Messaging primitive"
 # ══════════════════════════════════════════════════════════════════════════════
 
 cleanup

@@ -22,3 +22,38 @@ fn test_reject_charter_missing_id() {
         "Error should mention missing 'id': {err}"
     );
 }
+
+/// The parser MUST tolerate old charter.yaml files that still carry a
+/// `budget:` block — workspaces (`~/hex`) migrate at their own pace and
+/// the foundation must not break their parse during the transition.
+#[test]
+fn test_load_charter_with_stale_budget_block_ignored() {
+    let yaml = r#"
+id: legacy-agent
+name: Legacy Agent
+role: Stale charter that still carries a budget block
+wake:
+  triggers:
+    - timer.tick.6h
+  responsibilities:
+    - name: health-check
+      interval: 1800
+      description: Run health checks
+authority:
+  green:
+    - Read files
+  yellow: []
+  red: []
+budget:
+  wakes_per_hour: 6
+  usd_per_day: 2.0
+  usd_per_shift: 0.10
+kill_switch: /tmp/.hex-legacy-agent-HALT
+"#;
+    let charter = hex::charter::load_from_str(yaml).expect(
+        "charter parser must tolerate a stale `budget:` block on old charter.yaml files \
+         — the key should be ignored, not rejected",
+    );
+    assert_eq!(charter.id, "legacy-agent");
+    assert_eq!(charter.name, "Legacy Agent");
+}

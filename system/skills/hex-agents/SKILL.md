@@ -249,5 +249,5 @@ hex-agent message <from> <to> \
 | `fleet` exits non-zero | Error message names the broken charter |
 | Agent never wakes | hex-events policy exists? Trigger event fires? Kill switch: `ls ~/.hex-{id}-HALT` |
 | Agent wakes but does nothing | `hex-agent status {id}` — active queue empty? Scheduled items configured? |
-| Cost growing fast | Check `usd_per_shift` in charter vs actual spend in status |
+| Cost growing fast | Check `cost.last_wake_usd` in `hex-agent status` |
 | Messages not delivered | Check `.hex/messages/{id}.jsonl` and stderr for SEND FAILED |
