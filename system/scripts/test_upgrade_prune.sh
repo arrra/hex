@@ -42,19 +42,7 @@ setup_fixture() {
     mkdir -p "$FAKE_HEX/.claude"
 
     # Fake HOME — keeps all side effects inside tmpdir
-    mkdir -p "$FAKE_HOME/.hex-events/policies"
-    mkdir -p "$FAKE_HOME/.hex-events/venv/bin"
     mkdir -p "$FAKE_HOME/.boi"
-
-    # hex_eventd.py sentinel → install_hex_events takes "no git repo" path
-    touch "$FAKE_HOME/.hex-events/hex_eventd.py"
-
-    # Fake hex-events binary so verify_hex_events succeeds without COMPONENT_WARNINGS
-    cat > "$FAKE_HOME/.hex-events/venv/bin/hex-events" << 'HEXEOF'
-#!/bin/bash
-exit 0
-HEXEOF
-    chmod +x "$FAKE_HOME/.hex-events/venv/bin/hex-events"
 
     # BOI config sentinel → install_boi takes "no installer found" path (verify_boi
     # returns immediately because .boi/src/boi.sh doesn't exist in FAKE_HOME)
@@ -110,18 +98,6 @@ EOF
 }
 EOF
 
-    # hex-events policy: one valid action + one stale action
-    cat > "$FAKE_HOME/.hex-events/policies/test_policy.yaml" << EOF
-rules:
-  - name: valid-rule
-    actions:
-      - type: shell
-        command: $FAKE_HEX/.hex/scripts/valid_script.sh
-  - name: stale-rule
-    actions:
-      - type: shell
-        command: $FAKE_HEX/.hex/scripts/ghost_script.sh
-EOF
 }
 
 cleanup_fixture() {

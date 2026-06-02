@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # hex-integration — integration bundle lifecycle manager
-# Usage: hex-integration [--json|--dry-run|--no-telemetry|--quiet] <command> [args...]
+# Usage: hex-integration [--json|--dry-run|--quiet] <command> [args...]
 # Commands: install, uninstall, update, list, validate, status, probe, rotate
 
 set -uo pipefail
@@ -11,9 +11,8 @@ readonly HEX_ROOT="${HEX_DIR:-$HOME/hex}"
 readonly HEX_SECRETS="${HEX_ROOT}/.hex/secrets"
 readonly HEX_STATE="${HEX_ROOT}/projects/integrations/_state"
 readonly HEX_BUNDLES="${HEX_ROOT}/integrations"
-readonly HEX_EVENTS_POLICIES="${HOME}/.hex-events/policies"
 readonly HEX_LIB="${HEX_ROOT}/.hex/lib"
-export HEX_ROOT HEX_SECRETS HEX_STATE HEX_BUNDLES HEX_EVENTS_POLICIES HEX_LIB
+export HEX_ROOT HEX_SECRETS HEX_STATE HEX_BUNDLES HEX_LIB
 
 # ─── Logging helpers ─────────────────────────────────────────────────────────
 log_info() { [[ "${FLAG_QUIET}" == "true" ]] || echo "[INFO] $*" >&2; }
@@ -21,14 +20,13 @@ log_warn() { echo "[WARN] $*" >&2; }
 log_err()  { echo "[ERR]  $*" >&2; }
 
 die() { log_err "$*"; exit 1; }
-die_usage() { log_err "$*"; echo "Usage: hex-integration [--json|--dry-run|--no-telemetry|--quiet] <command> [args...]" >&2; exit 2; }
+die_usage() { log_err "$*"; echo "Usage: hex-integration [--json|--dry-run|--quiet] <command> [args...]" >&2; exit 2; }
 
 # ─── Global flag defaults ────────────────────────────────────────────────────
 FLAG_JSON="false"
 FLAG_DRY_RUN="false"
-FLAG_NO_TELEMETRY="false"
 FLAG_QUIET="false"
-export FLAG_JSON FLAG_DRY_RUN FLAG_NO_TELEMETRY FLAG_QUIET
+export FLAG_JSON FLAG_DRY_RUN FLAG_QUIET
 
 # ─── Parse global flags ──────────────────────────────────────────────────────
 # Global flags must appear before the command. Once the command (first non-flag
@@ -39,7 +37,6 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
       --json)           FLAG_JSON="true";         shift ;;
       --dry-run)        FLAG_DRY_RUN="true";      shift ;;
-      --no-telemetry)   FLAG_NO_TELEMETRY="true"; shift ;;
       --quiet)          FLAG_QUIET="true";        shift ;;
       --*)              die_usage "Unknown global flag: $1" ;;
       *)                ARGS+=("$1");             shift ;;
@@ -75,7 +72,6 @@ case "$CMD" in
       --hex-root "${HEX_ROOT}" \
       --json "${FLAG_JSON}" \
       --dry-run "${FLAG_DRY_RUN}" \
-      --no-telemetry "${FLAG_NO_TELEMETRY}" \
       --quiet "${FLAG_QUIET}" \
       "${CMD_ARGS[@]}"
     ;;
@@ -84,7 +80,6 @@ case "$CMD" in
       --hex-root "${HEX_ROOT}" \
       --json "${FLAG_JSON}" \
       --dry-run "${FLAG_DRY_RUN}" \
-      --no-telemetry "${FLAG_NO_TELEMETRY}" \
       --quiet "${FLAG_QUIET}" \
       "${CMD_ARGS[@]}"
     ;;
@@ -93,7 +88,6 @@ case "$CMD" in
       --hex-root "${HEX_ROOT}" \
       --json "${FLAG_JSON}" \
       --dry-run "${FLAG_DRY_RUN}" \
-      --no-telemetry "${FLAG_NO_TELEMETRY}" \
       --quiet "${FLAG_QUIET}" \
       "${CMD_ARGS[@]}"
     ;;
@@ -122,7 +116,6 @@ case "$CMD" in
     python3 "${HEX_LIB}/integration/commands/probe.py" \
       --hex-root "${HEX_ROOT}" \
       --json "${FLAG_JSON}" \
-      --no-telemetry "${FLAG_NO_TELEMETRY}" \
       --quiet "${FLAG_QUIET}" \
       "${CMD_ARGS[@]}"
     ;;
@@ -130,7 +123,6 @@ case "$CMD" in
     python3 "${HEX_LIB}/integration/commands/rotate.py" \
       --hex-root "${HEX_ROOT}" \
       --json "${FLAG_JSON}" \
-      --no-telemetry "${FLAG_NO_TELEMETRY}" \
       --quiet "${FLAG_QUIET}" \
       "${CMD_ARGS[@]}"
     ;;

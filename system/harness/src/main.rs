@@ -466,9 +466,6 @@ enum HealthCommands {
     /// Verify sqlite-vec is loadable and memory.db has vectors (port of health/check-vector-search.sh)
     #[command(name = "check-vector-search")]
     CheckVectorSearch,
-    /// Surface POLICY LOAD/VALIDATION ERROR entries from hex-events daemon log (port of health/check-hex-events-policy-load.sh)
-    #[command(name = "check-policy-load")]
-    CheckPolicyLoad,
     /// Check daily reflection log freshness (port of health/check-reflection-liveness.sh)
     #[command(name = "check-reflection-liveness")]
     CheckReflectionLiveness,
@@ -856,11 +853,6 @@ fn main() {
             HealthCommands::CheckVectorSearch => {
                 let hex_dir = get_hex_dir();
                 let script = hex_dir.join(".hex/scripts/health/check-vector-search.sh");
-                std::process::exit(exec_script(&script, &[]));
-            }
-            HealthCommands::CheckPolicyLoad => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join(".hex/scripts/health/check-hex-events-policy-load.sh");
                 std::process::exit(exec_script(&script, &[]));
             }
             HealthCommands::CheckReflectionLiveness => {

@@ -24,17 +24,6 @@ import yaml
 HEX_ROOT = os.environ.get("HEX_ROOT", os.path.expanduser("${HEX_DIR:-$HOME/hex}"))
 EXPERIMENTS_DIR = os.path.join(HEX_ROOT, "experiments")
 
-# ── telemetry ─────────────────────────────────────────────────────────────────
-
-def _emit(event_type: str, payload: dict) -> None:
-    telemetry_path = os.path.join(HEX_ROOT, ".hex", "telemetry")
-    sys.path.insert(0, telemetry_path)
-    try:
-        from emit import emit
-        emit(event_type, payload, source="hex-experiment")
-    except Exception as exc:
-        print(f"[hex-experiment] telemetry warn: {exc}", file=sys.stderr)
-
 # ── YAML I/O ──────────────────────────────────────────────────────────────────
 
 def _load(path: str) -> dict:
@@ -181,7 +170,6 @@ def cmd_create(args: list[str]) -> int:
     dest = os.path.join(EXPERIMENTS_DIR, f"{exp_id}-{slug}.yaml")
     _save(data, dest)
     print(f"→ {dest} written (state: DRAFT)")
-    _emit("experiment.created", {"id": exp_id, "title": data.get("title", "")})
     return 0
 
 def cmd_baseline(args: list[str]) -> int:
@@ -221,7 +209,6 @@ def cmd_baseline(args: list[str]) -> int:
         _save(data, path)
         print(f"Baseline locked. SHA: {sha[:8]}...")
         print("State: BASELINE")
-        _emit("experiment.baseline_collected", {"id": exp_id, "sha": sha})
     finally:
         _release_lock(lock)
     return 0
@@ -255,13 +242,6 @@ def cmd_activate(args: list[str]) -> int:
         measure_by = tb.get("measure_by", "")
         print(f"Records commit: {commit[:8]}...")
         print("State: ACTIVE")
-        print(f"→ hex-events: experiment.activated (id: {exp_id}, measure_by: {measure_by})")
-        _emit("experiment.activated", {
-            "id": exp_id,
-            "title": data.get("title", ""),
-            "measure_by": str(measure_by),
-            "activated_commit": commit,
-        })
     finally:
         _release_lock(lock)
     return 0
@@ -301,7 +281,6 @@ def cmd_measure(args: list[str]) -> int:
         data["state"] = "MEASURING"
         _save(data, path)
         print("State: MEASURING")
-        _emit("experiment.measured", {"id": exp_id})
     finally:
         _release_lock(lock)
     return 0
@@ -335,7 +314,6 @@ def cmd_verdict(args: list[str]) -> int:
                 }
                 _save(data, path)
                 print(f"VERDICT: INCONCLUSIVE (measure_by {measure_by} exceeded)")
-                _emit("experiment.verdict", {"id": exp_id, "result": "inconclusive"})
                 return 2
 
         if state != "MEASURING":
@@ -435,16 +413,6 @@ def cmd_verdict(args: list[str]) -> int:
             "guardrail_results": guardrail_results,
         }
         _save(data, path)
-        _emit("experiment.verdict", {"id": exp_id, "result": result_str, "delta_pct": round(delta_pct, 2)})
-        if final_state == "VERDICT_FAIL":
-            _emit("experiment.verdict_fail", {
-                "id": exp_id,
-                "title": data.get("title", ""),
-                "hypothesis": data.get("hypothesis", ""),
-                "primary_delta_pct": round(delta_pct, 2),
-                "threshold_pct": threshold_pct,
-                "rollback_commands": (data.get("rollback_plan") or {}).get("commands", []),
-            })
         return exit_code
     finally:
         _release_lock(lock)

@@ -34,9 +34,9 @@ FILE_PATH_RE = re.compile(
 
 FILE_EXTENSIONS = {'.py', '.sh', '.yaml', '.yml', '.md', '.json', '.txt', '.toml'}
 
-# CLI command patterns: `boi X`, `hex X`, `hex-agent X`, `hex-events X`
+# CLI command patterns: `boi X`, `hex X`, `hex-agent X`
 CLI_CMD_RE = re.compile(
-    r'`((?:boi|hex|hex-agent|hex-events|hex-agent-spawn\.sh)\s+[\w-]+(?:\s+[\w-]+)?)`'
+    r'`((?:boi|hex|hex-agent|hex-agent-spawn\.sh)\s+[\w-]+(?:\s+[\w-]+)?)`'
 )
 
 # Schema field claim patterns: "has field X", "field Y", "has 'X' field"
@@ -164,7 +164,7 @@ def extract_cli_claims(text: str) -> list[tuple[str, str, int]]:
     lines = text.splitlines()
     found = []
     seen = set()
-    cli_re = re.compile(r'`((?:boi|hex|hex-agent|hex-events)\s+([\w-]+)(?:\s+[\w-]+)?)`')
+    cli_re = re.compile(r'`((?:boi|hex|hex-agent)\s+([\w-]+)(?:\s+[\w-]+)?)`')
     for lineno, line in enumerate(lines, 1):
         for m in cli_re.finditer(line):
             full_cmd = m.group(1)
