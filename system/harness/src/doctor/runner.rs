@@ -70,9 +70,6 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::llm_preference::NoStaleLlmPreference),
         Box::new(checks::settings_json::SettingsJsonValid),
         Box::new(checks::timezone::TimezoneValid),
-        // Fleet checks
-        Box::new(checks::agent_fleet::AgentFleet),
-        Box::new(checks::agent_liveness::AgentLiveness),
         // Registry health checks
         Box::new(checks::registry_health::RegistryOrphanedBin),
         Box::new(checks::registry_health::RegistryStalePolicy),

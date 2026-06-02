@@ -1,11 +1,24 @@
 use hex::registry::{
     add_function, add_trigger, append_audit, append_call, build_catalog, check_reentrancy,
-    emit_trigger_policy, is_allowed, load_allowlist, remove_capability, FunctionCapability,
-    TriggerCapability,
+    is_allowed, load_allowlist, remove_capability, FunctionCapability, TriggerCapability,
 };
 use std::fs;
 use std::os::unix::fs::PermissionsExt;
 use tempfile::TempDir;
+
+/// Test helper: write a registry policy file directly. The old `emit_trigger_policy`
+/// function was removed in the fleet teardown (it shelled out to the now-defunct
+/// `hex agent wake`), but `remove_capability` still reconciles these policy files,
+/// so the lifecycle and re-entrancy tests below need one present on disk.
+fn write_registry_policy(registry_dir: &std::path::Path, cap_id: &str) {
+    let policies_dir = registry_dir.join("policies");
+    fs::create_dir_all(&policies_dir).unwrap();
+    fs::write(
+        policies_dir.join(format!("registry-{cap_id}.yaml")),
+        format!("name: registry-{cap_id}\n"),
+    )
+    .unwrap();
+}
 
 fn make_fn_cap(id: &str, created_by: &str) -> FunctionCapability {
     FunctionCapability {
@@ -279,49 +292,6 @@ fn test_catalog_empty_when_no_files() {
     assert!(catalog.is_empty());
 }
 
-// ── emit_trigger_policy ───────────────────────────────────────────────────────
-
-#[test]
-fn test_emit_trigger_policy_writes_to_isolated_dir() {
-    let dir = TempDir::new().unwrap();
-    let registry_dir = dir.path().join("registry");
-
-    let cap = make_trig_cap("trig-wake-a", "agent-a");
-    emit_trigger_policy(&registry_dir, &cap, "agent-a").unwrap();
-
-    let policy_path = registry_dir.join("policies/registry-trig-wake-a.yaml");
-    assert!(
-        policy_path.exists(),
-        "policy must be in .hex/registry/policies/, not live hex-events dir"
-    );
-}
-
-#[test]
-fn test_emit_trigger_policy_action_is_restricted() {
-    let dir = TempDir::new().unwrap();
-    let registry_dir = dir.path().join("registry");
-
-    let cap = make_trig_cap("trig-restricted", "agent-b");
-    emit_trigger_policy(&registry_dir, &cap, "agent-b").unwrap();
-
-    let policy_path = registry_dir.join("policies/registry-trig-restricted.yaml");
-    let content = fs::read_to_string(&policy_path).unwrap();
-    // Action must be exactly "hex agent wake agent-b" — no arbitrary shell
-    assert!(
-        content.contains("hex agent wake agent-b"),
-        "policy action must be 'hex agent wake agent-b', got:\n{content}"
-    );
-    // Must NOT contain any pipe, semicolon, or other shell metachar beyond the exact command
-    let action_line = content
-        .lines()
-        .find(|l| l.contains("hex agent wake"))
-        .unwrap_or("");
-    assert!(
-        !action_line.contains('|') && !action_line.contains(';') && !action_line.contains("&&"),
-        "policy action must not contain shell metacharacters"
-    );
-}
-
 // ── lifecycle removal ─────────────────────────────────────────────────────────
 
 #[test]
@@ -331,7 +301,7 @@ fn test_remove_capability_removes_trigger_and_policy() {
 
     let cap = make_trig_cap("trig-remove", "agent-a");
     add_trigger(&registry_dir, &cap).unwrap();
-    emit_trigger_policy(&registry_dir, &cap, "agent-a").unwrap();
+    write_registry_policy(&registry_dir, "trig-remove");
 
     // Confirm both exist before removal
     assert!(registry_dir.join("triggers/trig-remove.json").exists());
@@ -383,7 +353,7 @@ fn test_reentrancy_guard_blocks_same_wake() {
     let mut cap = make_trig_cap("trig-001", "agent-a");
     cap.created_in_wake = 5;
     add_trigger(&registry_dir, &cap).unwrap();
-    emit_trigger_policy(&registry_dir, &cap, "agent-a").unwrap();
+    write_registry_policy(&registry_dir, "trig-001");
 
     let result = check_reentrancy(&registry_dir, "agent-a", 5);
     assert!(
@@ -401,7 +371,7 @@ fn test_reentrancy_guard_allows_different_wake() {
     let mut cap = make_trig_cap("trig-diff-wake", "agent-a");
     cap.created_in_wake = 5;
     add_trigger(&registry_dir, &cap).unwrap();
-    emit_trigger_policy(&registry_dir, &cap, "agent-a").unwrap();
+    write_registry_policy(&registry_dir, "trig-diff-wake");
 
     let result = check_reentrancy(&registry_dir, "agent-a", 6);
     assert!(
@@ -419,7 +389,7 @@ fn test_reentrancy_guard_allows_different_agent() {
     let mut cap = make_trig_cap("trig-other-agent", "agent-a");
     cap.created_in_wake = 5;
     add_trigger(&registry_dir, &cap).unwrap();
-    emit_trigger_policy(&registry_dir, &cap, "agent-a").unwrap();
+    write_registry_policy(&registry_dir, "trig-other-agent");
 
     let result = check_reentrancy(&registry_dir, "agent-b", 5);
     assert!(

@@ -1,14 +1,12 @@
 use std::collections::HashMap;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::net::{TcpListener, TcpStream};
-use std::path::{Path, PathBuf};
 use std::sync::{mpsc, Arc};
 use std::time::Duration;
 
 use crate::assets::AssetsHandler;
 use crate::events::EventEngine;
 use crate::extensions::ExtensionDb;
-use crate::messaging::MessagingHandler;
 use crate::sse::SseBus;
 use crate::telemetry::Telemetry;
 
@@ -16,11 +14,9 @@ const THREAD_POOL_SIZE: usize = 32;
 
 pub struct HexServer {
     pub port: u16,
-    pub hex_dir: PathBuf,
     pub bus: Arc<SseBus>,
     pub telemetry: Arc<Telemetry>,
     pub events: Arc<EventEngine>,
-    pub messaging: Arc<MessagingHandler>,
     pub assets: Arc<AssetsHandler>,
     // Extension-owned tables are tracked in _ext_migrations (see extensions.rs)
     pub ext_db: Arc<ExtensionDb>,
@@ -44,15 +40,13 @@ pub struct Response {
 impl HexServer {
     pub fn new(
         port: u16,
-        hex_dir: PathBuf,
         bus: Arc<SseBus>,
         telemetry: Arc<Telemetry>,
         events: Arc<EventEngine>,
-        messaging: Arc<MessagingHandler>,
         assets: Arc<AssetsHandler>,
         ext_db: Arc<ExtensionDb>,
     ) -> Self {
-        Self { port, hex_dir, bus, telemetry, events, messaging, assets, ext_db }
+        Self { port, bus, telemetry, events, assets, ext_db }
     }
 
     pub fn start(&self) {
@@ -81,9 +75,7 @@ impl HexServer {
             let rx = Arc::clone(&rx);
             let bus = Arc::clone(&self.bus);
             let telemetry = Arc::clone(&self.telemetry);
-            let hex_dir = self.hex_dir.clone();
             let events = Arc::clone(&self.events);
-            let messaging = Arc::clone(&self.messaging);
             let assets = Arc::clone(&self.assets);
             let ext_db = Arc::clone(&self.ext_db);
             std::thread::spawn(move || loop {
@@ -91,7 +83,7 @@ impl HexServer {
                     Ok(s) => s,
                     Err(_) => break,
                 };
-                handle_connection(stream, &bus, &telemetry, &hex_dir, &events, &messaging, &assets, &ext_db);
+                handle_connection(stream, &bus, &telemetry, &events, &assets, &ext_db);
             });
         }
 
@@ -133,9 +125,7 @@ fn handle_connection(
     mut stream: TcpStream,
     bus: &Arc<SseBus>,
     telemetry: &Arc<Telemetry>,
-    hex_dir: &Path,
     events: &Arc<EventEngine>,
-    messaging: &Arc<MessagingHandler>,
     assets: &Arc<AssetsHandler>,
     ext_db: &Arc<ExtensionDb>,
 ) {
@@ -173,7 +163,7 @@ fn handle_connection(
     }
 
     let start = std::time::Instant::now();
-    let resp = route_request(&req, bus, hex_dir, events, messaging, assets, ext_db);
+    let resp = route_request(&req, bus, events, assets, ext_db);
     let duration_ms = start.elapsed().as_millis();
     telemetry.emit("hex.server.request", &serde_json::json!({
         "method": req.method,
@@ -288,9 +278,7 @@ fn hex_digit(b: u8) -> Option<u8> {
 fn route_request(
     req: &Request,
     bus: &Arc<SseBus>,
-    hex_dir: &Path,
     events: &Arc<EventEngine>,
-    messaging: &Arc<MessagingHandler>,
     assets: &Arc<AssetsHandler>,
     ext_db: &Arc<ExtensionDb>,
 ) -> Response {
@@ -307,17 +295,6 @@ fn route_request(
     // Event engine HTTP API
     if path.starts_with("/events/") {
         return events.handle(req);
-    }
-
-    // Messaging API
-    if path.starts_with("/messages/") {
-        return messaging.handle(req);
-    }
-
-    // Legacy comments redirect → messages (backward compat for widget migration)
-    if path.starts_with("/comments/") {
-        let new_path = format!("/messages/{}?type=comment", &path["/comments/".len()..]);
-        return redirect(&new_path);
     }
 
     if path.starts_with("/assets") {
@@ -345,11 +322,6 @@ fn route_request(
     if path.starts_with("/boi")       { return proxy_request(req, 8891); }
     if path.starts_with("/ui")        { return proxy_request(req, 8889); }
     if path.starts_with("/artifacts") { return proxy_request(req, 8897); }
-
-    // Static files for fleet dashboard
-    if path.starts_with("/fleet") {
-        return serve_fleet_static(path, hex_dir);
-    }
 
     // Landing page
     if path == "/" {
@@ -437,18 +409,6 @@ fn events_publish(req: &Request, bus: &Arc<SseBus>) -> Response {
     json_response(202, body)
 }
 
-fn redirect(location: &str) -> Response {
-    Response {
-        status: 301,
-        content_type: "text/plain".to_string(),
-        headers: vec![
-            ("Location".to_string(), location.to_string()),
-            ("Access-Control-Allow-Origin".to_string(), "*".to_string()),
-        ],
-        body: Vec::new(),
-    }
-}
-
 fn proxy_request(req: &Request, backend_port: u16) -> Response {
     let addr = format!("127.0.0.1:{}", backend_port);
     let sock_addr: std::net::SocketAddr = match addr.parse() {
@@ -495,27 +455,6 @@ fn proxy_request(req: &Request, backend_port: u16) -> Response {
     }
 }
 
-fn serve_fleet_static(path: &str, hex_dir: &Path) -> Response {
-    let static_dir = hex_dir.join(".hex/scripts/hex-router/static");
-    let rel = path.trim_start_matches("/fleet").trim_start_matches('/');
-    let rel = if rel.is_empty() { "index.html" } else { rel };
-
-    if rel.contains("..") {
-        return json_error(400, "invalid path");
-    }
-
-    let file_path = static_dir.join(rel);
-    match std::fs::read(&file_path) {
-        Ok(data) => Response {
-            status: 200,
-            content_type: mime_type(rel).to_string(),
-            headers: vec![("Access-Control-Allow-Origin".to_string(), "*".to_string())],
-            body: data,
-        },
-        Err(_) => json_error(404, "file not found"),
-    }
-}
-
 fn landing_page() -> Response {
     let html = r#"<!DOCTYPE html>
 <html><head><title>hex server</title></head>
@@ -527,9 +466,7 @@ fn landing_page() -> Response {
 <li><a href="/events/stream">/events/stream</a> — SSE event stream</li>
 <li><a href="/events/status">/events/status</a> — Event engine status</li>
 <li><a href="/events/recent">/events/recent</a> — Recent events</li>
-<li>/messages/ — Unified messaging API</li>
 <li>/assets/ — Asset registry</li>
-<li><a href="/fleet">/fleet</a> — Fleet dashboard</li>
 </ul>
 </body></html>"#;
     Response {
@@ -552,24 +489,6 @@ fn json_response(status: u16, body: Vec<u8>) -> Response {
 fn json_error(status: u16, msg: &str) -> Response {
     let body = serde_json::to_vec(&serde_json::json!({ "error": msg })).unwrap_or_default();
     json_response(status, body)
-}
-
-fn mime_type(filename: &str) -> &'static str {
-    if filename.ends_with(".html") || filename.ends_with(".htm") {
-        "text/html; charset=utf-8"
-    } else if filename.ends_with(".js") {
-        "application/javascript"
-    } else if filename.ends_with(".css") {
-        "text/css"
-    } else if filename.ends_with(".json") {
-        "application/json"
-    } else if filename.ends_with(".png") {
-        "image/png"
-    } else if filename.ends_with(".svg") {
-        "image/svg+xml"
-    } else {
-        "application/octet-stream"
-    }
 }
 
 fn status_text(status: u16) -> &'static str {
@@ -641,13 +560,6 @@ mod tests {
     }
 
     #[test]
-    fn mime_type_mapping() {
-        assert_eq!(mime_type("index.html"), "text/html; charset=utf-8");
-        assert_eq!(mime_type("app.js"), "application/javascript");
-        assert_eq!(mime_type("style.css"), "text/css");
-    }
-
-    #[test]
     fn router_events_prefix() {
         assert!("/events/health".starts_with("/events/"));
         assert!("/events/topics".starts_with("/events/"));
@@ -660,11 +572,4 @@ mod tests {
         }
     }
 
-    #[test]
-    fn comments_redirect_path() {
-        let path = "/comments/api/messages";
-        assert!(path.starts_with("/comments/"));
-        let new_path = format!("/messages/{}?type=comment", &path["/comments/".len()..]);
-        assert_eq!(new_path, "/messages/api/messages?type=comment");
-    }
 }

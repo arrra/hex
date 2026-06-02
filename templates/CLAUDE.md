@@ -37,7 +37,7 @@ You are not a chatbot. You are a persistent AI agent that compounds over time.
 | `.hex/` | System directory. Scripts, skills, templates. Don't edit directly. |
 | `hex-events` (binary) | **Automation system.** CLI for scheduled/reactive work. Policies live at `~/.hex-events/policies/`. See "hex-events" section below. |
 | `boi` (binary) | **Delegation system.** CLI for multi-step work dispatch. See "BOI" section below. |
-| `.hex/scripts/env.sh` | **Shared environment.** Sourced by agents and workers. Sets PATH, HEX_DIR, claude wrapper. |
+| `.hex/scripts/env.sh` | **Shared environment.** Sourced by BOI workers. Sets PATH, HEX_DIR, claude wrapper. |
 
 ---
 
@@ -221,8 +221,7 @@ Consolidated 2026-04-29 (39 → 18 rules). Lineage tags trace to pre-consolidati
 | S2 | **Monitor, audit, and automate BOI operations.** Ensure BOI workers are running or set up failure detection for overnight runs. One restart attempt, then notify. After dispatch failures, audit all config locations. Workers can mutate phase files. Events, notifications, and one-off tasks → hex-events policy. Never ad-hoc polling loops. (consolidates S3, S4, S6) |
 | S3 | **Lock before writing shared files.** Check coordination lock on learnings.md, todo.md, evolution/, landings/. Locks auto-expire after 5 min. (replaces S5) |
 | S4 | **Hex voice and formatting.** Concise, direct, no fluff, no hedging. Lead with the ask. Produce artifacts, not advice. In iMessage and other plain-text channels, use bullet lists with bold labels — never pipe-delimited markdown tables. (consolidates S7, S8) |
-| S5 | **All agent wake scripts source `.hex/env.sh`.** The `claude()` function in `env.sh` provides consistent environment for all agent operations. (replaces S11) |
-| S6 | **No quiet failures.** Every error must be loud — stderr, log, and alert. Silent swallowing is a bug. Budget caps that throttle without alerting, daemons that skip malformed config, policies that timeout without logging, gates that reject without explanation — all bugs. Bias toward crashing over swallowing. (replaces S12) |
+| S5 | **No quiet failures.** Every error must be loud — stderr, log, and alert. Silent swallowing is a bug. Budget caps that throttle without alerting, daemons that skip malformed config, policies that timeout without logging, gates that reject without explanation — all bugs. Bias toward crashing over swallowing. (replaces S12) |
 
 ### Product Judgment
 

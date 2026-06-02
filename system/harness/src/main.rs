@@ -2,12 +2,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use std::io;
 use std::path::{Path, PathBuf};
 
-use hex::{state, wake};
-
-mod alert;
-mod synthesis;
 mod boi_web;
-mod charter_triggers;
 mod doctor;
 mod paths;
 mod integration;
@@ -26,17 +21,14 @@ mod session_reflect;
 mod today;
 mod workspace;
 mod env;
-mod agent_evolution;
-mod agent_spawn;
 mod hook;
 mod upgrade;
-mod initiative;
 mod learnings;
 // Personal modules (mrap-only overlay). Resolved via build.rs → OUT_DIR/personal_mods.rs.
 #[cfg(feature = "personal")]
 include!(concat!(env!("OUT_DIR"), "/personal_mods.rs"));
 #[derive(Parser)]
-#[command(name = "hex", about = "Hex multi-agent harness", version)]
+#[command(name = "hex", about = "Hex harness", version)]
 struct Cli {
     #[command(subcommand)]
     command: Commands,
@@ -44,12 +36,6 @@ struct Cli {
 
 #[derive(Subcommand)]
 enum Commands {
-    /// Agent fleet management
-    #[command(display_order = 1)]
-    Agent {
-        #[command(subcommand)]
-        command: AgentCommands,
-    },
     /// HTTP/SSE server
     #[command(display_order = 34)]
     Server {
@@ -61,12 +47,6 @@ enum Commands {
     Asset {
         #[command(subcommand)]
         command: AssetCommands,
-    },
-    /// Unified messaging (comments, agent messages, notifications)
-    #[command(display_order = 31)]
-    Message {
-        #[command(subcommand)]
-        command: MessageCommands,
     },
     /// Event engine
     #[command(display_order = 25)]
@@ -203,24 +183,6 @@ enum Commands {
         #[command(subcommand)]
         command: SpecToolCommands,
     },
-    /// Hex-router reverse proxy launcher (port of .hex/scripts/hex-router/serve.sh)
-    #[command(display_order = 11)]
-    Router {
-        #[command(subcommand)]
-        command: RouterCommands,
-    },
-    /// iMessage alert sender (port of .hex/scripts/hex-alert.sh)
-    #[command(display_order = 19)]
-    Alert {
-        #[command(subcommand)]
-        command: AlertCommands,
-    },
-    /// Weekly and on-demand synthesis pipeline (port of system/scripts/weekly-synthesis-digest.sh, synthesis-trigger.sh)
-    #[command(display_order = 39)]
-    Synthesis {
-        #[command(subcommand)]
-        command: SynthesisCommands,
-    },
     /// Environment setup utilities (Phase 5: port of env.sh non-shell logic)
     #[command(display_order = 24)]
     Env {
@@ -232,12 +194,6 @@ enum Commands {
     Validate {
         #[command(subcommand)]
         command: ValidateCommands,
-    },
-    /// Initiative CRUD (port of system/scripts/hex-initiative.py)
-    #[command(display_order = 28)]
-    Initiative {
-        #[command(subcommand)]
-        command: InitiativeCommands,
     },
     /// Learnings analysis and promotion (port of system/scripts/promote-learnings.py)
     #[command(display_order = 29)]
@@ -292,81 +248,6 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-enum AgentCommands {
-    /// Run an agent wake cycle (shift)
-    Wake {
-        agent_id: String,
-        #[arg(long, default_value = "manual")]
-        trigger: String,
-        #[arg(long, default_value = "{}")]
-        payload: String,
-    },
-    /// Show agent status
-    Status { agent_id: Option<String> },
-    /// Show fleet overview
-    Fleet,
-    /// Send async message to another agent
-    Message {
-        from: String,
-        to: String,
-        #[arg(long)]
-        subject: String,
-        #[arg(long)]
-        body: String,
-        #[arg(long)]
-        initiative: Option<String>,
-        #[arg(long)]
-        response_requested: bool,
-    },
-    /// List agent IDs (one per line, machine-readable)
-    List {
-        #[arg(long)]
-        core: bool,
-    },
-    /// Check core agents against reference set
-    CheckCore,
-    /// Restore missing core agents from reference (never overwrites existing)
-    RestoreCore,
-    /// Wake the boi-optimizer agent (port of .hex/scripts/boi-optimizer-wake.sh)
-    #[command(name = "optimizer-wake")]
-    OptimizerWake {
-        #[arg(default_value = "timer.tick.6h")]
-        trigger: String,
-        #[arg(default_value = "{}")]
-        payload: String,
-    },
-    /// Run daily agent performance analysis and evolution proposals (port of agent-evolution.sh)
-    Evolution {
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Spawn a new hex agent from a role-spec YAML file (port of hex-agent-spawn.sh)
-    Spawn {
-        /// Path to role-spec YAML file
-        spec_file: std::path::PathBuf,
-        /// Validate spec but don't write any files
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Query audit trail
-    Audit {
-        #[arg(long)]
-        agent: Option<String>,
-        #[arg(long)]
-        action: Option<String>,
-        #[arg(long)]
-        since: Option<String>,
-    },
-    /// Show cost data
-    Cost {
-        #[arg(long)]
-        agent: Option<String>,
-        #[arg(long)]
-        period: Option<String>,
-    },
-}
-
-#[derive(Subcommand)]
 enum BoiPmCommands {
     /// Verify a BOI spec's completion claims (port of boi-completion-verify.sh)
     Verify {
@@ -415,45 +296,6 @@ enum SpecToolCommands {
         #[arg(long)]
         verbose: bool,
     },
-    /// Resolve a spec's owning agent (port of spec-owner-resolver.py)
-    #[command(name = "resolve-owner")]
-    ResolveOwner {
-        /// Spec ID or spec YAML path
-        spec: String,
-    },
-    /// Build a structured failure brief for a failed BOI spec (port of build-failure-brief.py)
-    #[command(name = "failure-brief")]
-    FailureBrief {
-        /// Spec ID
-        spec_id: String,
-    },
-    /// Verify that work traces to active initiatives (port of check-cohesion.py)
-    #[command(name = "check-cohesion")]
-    CheckCohesion {
-        /// Check a specific spec file
-        #[arg(long)]
-        spec: Option<String>,
-        /// Check all active specs
-        #[arg(long)]
-        all: bool,
-        /// Show initiative coverage map
-        #[arg(long)]
-        map: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum RouterCommands {
-    /// Route a comment to matching agents via charter classification (port of route-comment.py)
-    #[command(name = "route-comment")]
-    RouteComment {
-        /// Comment ID
-        comment_id: String,
-        /// Asset identifier
-        asset: String,
-        /// Comment text
-        text: String,
-    },
 }
 
 #[derive(Subcommand)]
@@ -486,65 +328,10 @@ enum ValidateCommands {
 }
 
 #[derive(Subcommand)]
-enum InitiativeCommands {
-    /// List initiatives, optionally filtered by status
-    List {
-        /// Filter by status: open, closed, or all (default: all)
-        #[arg(long, default_value = "all")]
-        status: String,
-    },
-    /// Show details for a specific initiative
-    Show {
-        /// Initiative ID
-        id: String,
-    },
-    /// Create a new initiative
-    Create {
-        /// Initiative name (used to derive the ID)
-        name: String,
-        /// Initial status (default: open)
-        #[arg(long, default_value = "open")]
-        status: String,
-    },
-    /// Update an initiative's status
-    Update {
-        /// Initiative ID
-        id: String,
-        /// New status value
-        #[arg(long)]
-        status: String,
-    },
-    /// Close an initiative (set status to closed)
-    Close {
-        /// Initiative ID
-        id: String,
-    },
-}
-
-#[derive(Subcommand)]
 enum LearningsCommands {
     /// Scan learnings.md for recurring patterns and write promotion candidates to evolution/suggestions.md
     Promote {
         /// Print candidates without writing any files
-        #[arg(long)]
-        dry_run: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum SynthesisCommands {
-    /// Summarize the week's input compounding pipeline output (port of weekly-synthesis-digest.sh)
-    Weekly {
-        /// Run regardless of day-of-week
-        #[arg(long)]
-        force: bool,
-        /// Print to stdout, don't write file
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Cluster related inputs and dispatch synthesis BOI specs (port of synthesis-trigger.sh)
-    Trigger {
-        /// Show what would be dispatched without dispatching
         #[arg(long)]
         dry_run: bool,
     },
@@ -594,38 +381,6 @@ enum AssetCommands {
 }
 
 #[derive(Subcommand)]
-enum MessageCommands {
-    /// Send a message
-    Send {
-        from: String,
-        to: Vec<String>,
-        #[arg(long)]
-        content: String,
-        #[arg(long, default_value = "agent")]
-        msg_type: String,
-        #[arg(long)]
-        anchor: Option<String>,
-    },
-    /// List messages
-    List {
-        #[arg(long)]
-        msg_type: Option<String>,
-        #[arg(long)]
-        status: Option<String>,
-        #[arg(long)]
-        anchor: Option<String>,
-    },
-    /// Update message status / action log
-    Respond {
-        id: String,
-        status: String,
-        action: Option<String>,
-        #[arg(long)]
-        assets: Vec<String>,
-    },
-}
-
-#[derive(Subcommand)]
 enum EventsCommands {
     /// Show event engine status
     Status,
@@ -667,16 +422,6 @@ enum SseCommands {
     Bridge {
         hex_event_name: String,
         payload: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum AlertCommands {
-    /// Send an iMessage alert (port of .hex/scripts/hex-alert.sh)
-    Send {
-        severity: String,
-        agent_id: String,
-        message: String,
     },
 }
 
@@ -1065,25 +810,12 @@ enum DoctorCommands {
     Consolidate,
     /// Nightly system health audit via claude -p (port of system-introspection.sh)
     Introspect,
-    /// Map agent activity to OKRs, assess coverage, write report (port of goal-alignment.sh)
-    #[command(name = "goal-alignment")]
-    GoalAlignment {
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Delete Claude project .jsonl files older than N days (port of cleanup-project-jsonl.sh)
     #[command(name = "cleanup-projects")]
     CleanupProjects {
         /// Retention period in days (default 30)
         #[arg(default_value = "30")]
         days: u32,
-    },
-    /// Validate charter → policy trigger contract for all fleet agents
-    #[command(name = "charter-triggers")]
-    CharterTriggers {
-        /// Validation mode: pre-migration (default) or post-migration
-        #[arg(long, default_value = "pre-migration")]
-        mode: String,
     },
     /// Scan for stale dependency-blocked items (port of stale_deps.py)
     #[command(name = "stale-deps")]
@@ -1359,461 +1091,10 @@ fn get_hex_dir() -> PathBuf {
     p
 }
 
-/// Discover all agents by scanning projects/*/charter.yaml.
-/// Charter file IS the registration. No hardcoded lists.
-fn discover_agents(hex_dir: &Path) -> Vec<String> {
-    let projects_dir = hex_dir.join("projects");
-    let mut agents: Vec<String> = Vec::new();
-    let entries = match std::fs::read_dir(&projects_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!(
-                "ERROR: cannot read projects directory {}: {e}",
-                projects_dir.display()
-            );
-            std::process::exit(1);
-        }
-    };
-    for entry in entries {
-        match entry {
-            Ok(e) => {
-                if e.path().join("charter.yaml").exists() {
-                    let name = e.file_name().to_string_lossy().into_owned();
-                    if !is_safe_agent_id(&name) {
-                        eprintln!(
-                            "ERROR: agent directory '{}' contains unsafe characters — skipping",
-                            name
-                        );
-                        continue;
-                    }
-                    agents.push(name);
-                }
-            }
-            Err(e) => {
-                eprintln!("WARN: cannot read entry in {}: {e}", projects_dir.display());
-            }
-        }
-    }
-    agents.sort();
-    agents
-}
-
-fn is_safe_agent_id(id: &str) -> bool {
-    !id.is_empty()
-        && id
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_')
-        && !id.contains("..")
-}
-
-fn run_agent_command(command: AgentCommands) {
-    match command {
-        AgentCommands::Wake {
-            agent_id,
-            trigger,
-            payload,
-        } => {
-            let hex_dir = get_hex_dir();
-            match wake::run(wake::WakeConfig {
-                hex_dir,
-                agent_id: agent_id.clone(),
-                trigger,
-                payload,
-            }) {
-                Ok(code) => {
-                    let home = std::env::var("HOME").unwrap_or_default();
-                    let halt_path = format!("{}/.hex-{}-HALT-loop", home, agent_id);
-                    if std::path::Path::new(&halt_path).exists() {
-                        eprintln!(
-                            "[{}] WARNING: loop.detected — HALT-loop file present, agent halted pending review",
-                            agent_id
-                        );
-                    }
-                    std::process::exit(code)
-                }
-                Err(e) => {
-                    eprintln!("wake failed: {e}");
-                    std::process::exit(1);
-                }
-            }
-        }
-        AgentCommands::Status { agent_id } => {
-            let hex_dir = get_hex_dir();
-            if let Some(id) = agent_id {
-                let state_path = hex_dir.join(format!("projects/{}/state.json", id));
-                match state::load(&state_path) {
-                    Ok(s) => {
-                        println!("Agent: {}", s.agent_id);
-                        println!("Wakes: {}", s.wake_count);
-                        println!(
-                            "Last wake: {}",
-                            s.last_wake
-                                .map(|t| t.to_rfc3339())
-                                .unwrap_or("never".into())
-                        );
-                        println!("Active queue: {} items", s.queue.active.len());
-                        println!("Blocked: {} items", s.queue.blocked.len());
-                        println!("Scheduled: {} items", s.queue.scheduled.len());
-                        println!("Inbox: {} messages", s.inbox.len());
-                        println!("Trail: {} entries", s.trail.len());
-                    }
-                    Err(e) => {
-                        eprintln!("Cannot load state for '{}': {e}", id);
-                        std::process::exit(1);
-                    }
-                }
-            } else {
-                eprintln!("Usage: hex agent status <agent-id>");
-                std::process::exit(1);
-            }
-        }
-        AgentCommands::Fleet => {
-            let hex_dir = get_hex_dir();
-            let agents = discover_agents(&hex_dir);
-
-            if agents.is_empty() {
-                eprintln!("ERROR: no agents found — no projects/*/charter.yaml files exist");
-                std::process::exit(1);
-            }
-
-            let mut errors: Vec<String> = Vec::new();
-            let mut charters: std::collections::HashMap<String, hex::types::Charter> =
-                std::collections::HashMap::new();
-
-            for id in &agents {
-                let charter_path = hex_dir.join(format!("projects/{}/charter.yaml", id));
-                match hex::charter::load(&charter_path) {
-                    Ok(c) => {
-                        if c.id != *id {
-                            errors.push(format!(
-                                "ERROR: agent '{}' charter.id is '{}' — must match directory name exactly",
-                                id, c.id
-                            ));
-                        }
-                        charters.insert(id.clone(), c);
-                    }
-                    Err(e) => {
-                        errors.push(format!("ERROR: agent '{}' has invalid charter: {e}", id));
-                    }
-                }
-            }
-
-            if !errors.is_empty() {
-                for err in &errors {
-                    eprintln!("{}", err);
-                }
-                std::process::exit(1);
-            }
-
-            println!(
-                "{:<20} {:>4} {:>6} {:>12} {:>8} {:>8}",
-                "AGENT", "CORE", "WAKES", "LAST WAKE", "ACTIVE", "BLOCKED"
-            );
-            println!("{}", "-".repeat(64));
-            for id in &agents {
-                let is_core = charters.get(id).map(|c| c.core).unwrap_or(false);
-                let core_flag = if is_core { "  ●" } else { "" };
-                let state_path = hex_dir.join(format!("projects/{}/state.json", id));
-                if let Ok(s) = state::load(&state_path) {
-                    let last = s
-                        .last_wake
-                        .map(|t| t.format("%H:%M:%S").to_string())
-                        .unwrap_or("never".into());
-                    println!(
-                        "{:<20} {:>4} {:>6} {:>12} {:>8} {:>8}",
-                        id,
-                        core_flag,
-                        s.wake_count,
-                        last,
-                        s.queue.active.len(),
-                        s.queue.blocked.len(),
-                    );
-                } else {
-                    println!(
-                        "{:<20} {:>4} {:>6} {:>12} {:>8} {:>8}",
-                        id, core_flag, 0, "never", 0, 0
-                    );
-                }
-            }
-
-            println!("\n{} agents", agents.len());
-
-            let core_agents: Vec<&String> = agents
-                .iter()
-                .filter(|id| charters.get(*id).map(|c| c.core).unwrap_or(false))
-                .collect();
-            if !core_agents.is_empty() {
-                let mut core_warnings: Vec<String> = Vec::new();
-                for id in &core_agents {
-                    let kill_switch = charters
-                        .get(*id)
-                        .map(|c| shellexpand::tilde(&c.kill_switch).to_string())
-                        .unwrap_or_default();
-                    if !kill_switch.is_empty() && Path::new(&kill_switch).exists() {
-                        core_warnings.push(format!(
-                            "WARN: core agent '{}' is HALTED — system self-healing may be degraded",
-                            id
-                        ));
-                    }
-                }
-                if !core_warnings.is_empty() {
-                    eprintln!();
-                    for w in &core_warnings {
-                        eprintln!("{}", w);
-                    }
-                }
-            }
-        }
-        AgentCommands::List { core } => {
-            let hex_dir = get_hex_dir();
-            let agents = discover_agents(&hex_dir);
-            for id in &agents {
-                if core {
-                    let charter_path = hex_dir.join(format!("projects/{}/charter.yaml", id));
-                    if let Ok(c) = hex::charter::load(&charter_path) {
-                        if !c.core {
-                            continue;
-                        }
-                    } else {
-                        continue;
-                    }
-                }
-                println!("{}", id);
-            }
-        }
-        AgentCommands::CheckCore => {
-            let hex_dir = get_hex_dir();
-            let ref_dir = hex_dir.join(".hex/reference/core-agents");
-            if !ref_dir.exists() {
-                eprintln!("ERROR: no reference core agents at {}", ref_dir.display());
-                std::process::exit(1);
-            }
-            let mut missing: Vec<String> = Vec::new();
-            let mut broken: Vec<String> = Vec::new();
-            let mut ok: Vec<String> = Vec::new();
-            let entries = match std::fs::read_dir(&ref_dir) {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!(
-                        "ERROR: cannot read reference directory {}: {e}",
-                        ref_dir.display()
-                    );
-                    std::process::exit(1);
-                }
-            };
-            {
-                for entry in entries {
-                    let entry = match entry {
-                        Ok(e) => e,
-                        Err(e) => {
-                            eprintln!("WARN: cannot read reference entry: {e}");
-                            continue;
-                        }
-                    };
-                    let fname = entry.file_name().to_string_lossy().to_string();
-                    if !fname.ends_with(".yaml") {
-                        continue;
-                    }
-                    let agent_id = fname.trim_end_matches(".yaml").to_string();
-                    let charter_path = hex_dir.join(format!("projects/{}/charter.yaml", agent_id));
-                    if !charter_path.exists() {
-                        missing.push(agent_id);
-                    } else {
-                        match hex::charter::load(&charter_path) {
-                            Ok(c) => {
-                                if !c.core {
-                                    broken.push(format!(
-                                        "{} (exists but core: false — should be core: true)",
-                                        agent_id
-                                    ));
-                                } else if c.id != agent_id {
-                                    broken.push(format!(
-                                        "{} (charter.id '{}' doesn't match directory)",
-                                        agent_id, c.id
-                                    ));
-                                } else {
-                                    ok.push(agent_id);
-                                }
-                            }
-                            Err(e) => {
-                                broken.push(format!("{} (invalid charter: {})", agent_id, e));
-                            }
-                        }
-                    }
-                }
-            }
-            let total = ok.len() + missing.len() + broken.len();
-            println!("Core agents: {}/{} healthy", ok.len(), total);
-            for id in &ok {
-                println!("  ✓ {}", id);
-            }
-            if !missing.is_empty() {
-                println!();
-                for id in &missing {
-                    println!("  MISSING: {} — not found in projects/", id);
-                }
-            }
-            if !broken.is_empty() {
-                println!();
-                for desc in &broken {
-                    println!("  BROKEN: {}", desc);
-                }
-            }
-            if !missing.is_empty() || !broken.is_empty() {
-                println!();
-                println!("Run 'hex agent restore-core' to fix missing core agents.");
-                std::process::exit(1);
-            }
-        }
-        AgentCommands::RestoreCore => {
-            let hex_dir = get_hex_dir();
-            let ref_dir = hex_dir.join(".hex/reference/core-agents");
-            if !ref_dir.exists() {
-                eprintln!("ERROR: no reference core agents at {}", ref_dir.display());
-                std::process::exit(1);
-            }
-            let mut restored = 0;
-            let mut skipped = 0;
-            let mut failed = 0;
-            let entries = match std::fs::read_dir(&ref_dir) {
-                Ok(e) => e,
-                Err(e) => {
-                    eprintln!(
-                        "ERROR: cannot read reference directory {}: {e}",
-                        ref_dir.display()
-                    );
-                    std::process::exit(1);
-                }
-            };
-            for entry in entries {
-                let entry = match entry {
-                    Ok(e) => e,
-                    Err(e) => {
-                        eprintln!("  ERROR: cannot read reference entry: {e}");
-                        failed += 1;
-                        continue;
-                    }
-                };
-                let fname = entry.file_name().to_string_lossy().to_string();
-                if !fname.ends_with(".yaml") {
-                    continue;
-                }
-                let agent_id = fname.trim_end_matches(".yaml").to_string();
-                let target_dir = hex_dir.join(format!("projects/{}", agent_id));
-                let target_charter = target_dir.join("charter.yaml");
-                if target_charter.exists() {
-                    println!(
-                        "  SKIP: {} — charter already exists (not overwriting)",
-                        agent_id
-                    );
-                    skipped += 1;
-                    continue;
-                }
-                if let Err(e) = std::fs::create_dir_all(&target_dir) {
-                    eprintln!("  ERROR: cannot create {}: {e}", target_dir.display());
-                    failed += 1;
-                    continue;
-                }
-                match std::fs::copy(entry.path(), &target_charter) {
-                    Ok(_) => {
-                        println!("  RESTORED: {} — charter created from reference", agent_id);
-                        restored += 1;
-                    }
-                    Err(e) => {
-                        eprintln!("  ERROR: cannot copy charter for {}: {e}", agent_id);
-                        failed += 1;
-                    }
-                }
-            }
-            println!();
-            if restored > 0 {
-                println!(
-                    "Restored {} core agent(s). Run 'hex agent fleet' to verify.",
-                    restored
-                );
-            } else if skipped > 0 {
-                println!("All core agents already present ({} checked).", skipped);
-            } else {
-                println!("No reference charters found.");
-            }
-            if failed > 0 {
-                eprintln!("ERROR: {} operation(s) failed during restore", failed);
-                std::process::exit(1);
-            }
-        }
-        AgentCommands::Message {
-            from,
-            to,
-            subject,
-            body,
-            initiative,
-            response_requested,
-        } => {
-            let hex_dir = get_hex_dir();
-            let bus = hex::sse::SseBus::new();
-            let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(&hex_dir));
-            let handler = hex::messaging::MessagingHandler::new(&hex_dir, bus, telemetry);
-            let content = format!("[{}] {}", subject, body);
-            handler.cli_send(&from, vec![to.clone()], &content, "agent", initiative.as_deref());
-            if response_requested {
-                let audit_dir = hex_dir.join(".hex/audit");
-                wake::auto_wake_target(&hex_dir, &to, &from, &audit_dir);
-                println!("Auto-waking {} for live response", to);
-            }
-        }
-        AgentCommands::Audit { agent, .. } => {
-            eprintln!("audit: {:?} (not yet implemented)", agent);
-            std::process::exit(1);
-        }
-        AgentCommands::Cost { agent, .. } => {
-            eprintln!("cost: {:?} (not yet implemented)", agent);
-            std::process::exit(1);
-        }
-        AgentCommands::OptimizerWake { trigger, payload } => {
-            let hex_dir = get_hex_dir();
-            let hex_bin = hex_dir.join(".hex/bin/hex");
-            let bin = if hex_bin.exists() { hex_bin } else { std::env::current_exe().unwrap_or_default() };
-            let status = std::process::Command::new(&bin)
-                .args(["agent", "wake", "boi-optimizer", "--trigger"])
-                .arg(&trigger)
-                .arg("--payload")
-                .arg(&payload)
-                .status()
-                .unwrap_or_else(|e| {
-                    eprintln!("ERROR: failed to wake boi-optimizer: {e}");
-                    std::process::exit(1);
-                });
-            std::process::exit(status.code().unwrap_or(0));
-        }
-        AgentCommands::Evolution { dry_run } => {
-            let rc = agent_evolution::run(dry_run);
-            std::process::exit(rc);
-        }
-        AgentCommands::Spawn { spec_file, dry_run } => {
-            let rc = agent_spawn::run_spawn(&spec_file, dry_run);
-            std::process::exit(rc);
-        }
-    }
-}
-
 fn main() {
-    let args: Vec<String> = std::env::args().collect();
-    let binary_name = Path::new(&args[0])
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy()
-        .to_string();
-    let effective_args = if binary_name == "hex-agent" {
-        let mut new_args = vec![args[0].clone(), "agent".to_string()];
-        new_args.extend(args[1..].to_vec());
-        new_args
-    } else {
-        args
-    };
-    let cli = Cli::parse_from(effective_args);
+    let cli = Cli::parse();
 
     match cli.command {
-        Commands::Agent { command } => run_agent_command(command),
         Commands::Extension { command } => run_extension_command(command),
         Commands::Server { command } => match command {
             ServerCommands::Start { port } => {
@@ -1830,11 +1111,6 @@ fn main() {
                     eprintln!("hex server: events engine init failed: {e}");
                     std::process::exit(1);
                 });
-                let messaging = hex::messaging::MessagingHandler::new(
-                    &hex_dir,
-                    std::sync::Arc::clone(&bus),
-                    std::sync::Arc::clone(&telemetry),
-                );
                 let assets = hex::assets::AssetsHandler::new(
                     &hex_dir,
                     std::sync::Arc::clone(&bus),
@@ -1846,7 +1122,7 @@ fn main() {
                         std::process::exit(1);
                     });
                 ext_db.scan_and_migrate(&hex_dir);
-                let server = hex::server::HexServer::new(port, hex_dir, bus, telemetry, events, messaging, assets, ext_db);
+                let server = hex::server::HexServer::new(port, bus, telemetry, events, assets, ext_db);
                 server.start();
             }
             ServerCommands::Health => {
@@ -1876,23 +1152,6 @@ fn main() {
                     let script = hex_dir.join("system/scripts/hex-asset-discover.py");
                     let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
                     std::process::exit(exec_script(&script, args));
-                }
-            }
-        }
-        Commands::Message { command } => {
-            let hex_dir = get_hex_dir();
-            let bus = hex::sse::SseBus::new();
-            let telemetry = std::sync::Arc::new(hex::telemetry::Telemetry::new(&hex_dir));
-            let handler = hex::messaging::MessagingHandler::new(&hex_dir, bus, telemetry);
-            match command {
-                MessageCommands::Send { from, to, content, msg_type, anchor } => {
-                    handler.cli_send(&from, to, &content, &msg_type, anchor.as_deref());
-                }
-                MessageCommands::List { msg_type, status, anchor } => {
-                    handler.cli_list(msg_type.as_deref(), status.as_deref(), anchor.as_deref());
-                }
-                MessageCommands::Respond { id, status, action, assets } => {
-                    handler.cli_respond(&id, &status, action.as_deref(), assets);
                 }
             }
         }
@@ -2333,14 +1592,8 @@ fn main() {
                 DoctorCommands::Introspect => {
                     std::process::exit(doctor::introspect::run(&hex_dir));
                 }
-                DoctorCommands::GoalAlignment { dry_run } => {
-                    std::process::exit(doctor::goal_alignment::run(&hex_dir, dry_run));
-                }
                 DoctorCommands::CleanupProjects { days } => {
                     std::process::exit(doctor::cleanup_projects::run(&hex_dir, days as u64));
-                }
-                DoctorCommands::CharterTriggers { mode } => {
-                    std::process::exit(charter_triggers::run(&hex_dir, &mode));
                 }
                 DoctorCommands::StaleDeps { threshold, json } => {
                     let code = doctor::stale_deps(&hex_dir, threshold, json);
@@ -2492,57 +1745,7 @@ fn main() {
                 let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
                 std::process::exit(exec_script(&script, &arg_refs));
             }
-            SpecToolCommands::ResolveOwner { spec } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/spec-owner-resolver.py");
-                std::process::exit(exec_script(&script, &[&spec]));
-            }
-            SpecToolCommands::FailureBrief { spec_id } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/build-failure-brief.py");
-                std::process::exit(exec_script(&script, &[&spec_id]));
-            }
-            SpecToolCommands::CheckCohesion { spec, all, map } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/check-cohesion.py");
-                let mut args: Vec<&str> = vec![];
-                let spec_s;
-                if let Some(ref s) = spec { spec_s = s.clone(); args.push("--spec"); args.push(&spec_s); }
-                if all { args.push("--all"); }
-                if map { args.push("--map"); }
-                std::process::exit(exec_script(&script, &args));
-            }
         },
-        Commands::Router { command } => match command {
-            RouterCommands::RouteComment { comment_id, asset, text } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/route-comment.py");
-                std::process::exit(exec_script(&script, &[&comment_id, &asset, &text]));
-            }
-        },
-        Commands::Alert { command } => match command {
-            AlertCommands::Send { severity, agent_id, message } => {
-                let hex_dir = get_hex_dir();
-                alert::run_send(&hex_dir, &severity, &agent_id, &message);
-            }
-        },
-        Commands::Synthesis { command } => {
-            let hex_dir = get_hex_dir();
-            match command {
-                SynthesisCommands::Weekly { force, dry_run } => {
-                    let script = hex_dir.join("system/scripts/weekly-synthesis-digest.sh");
-                    let mut args: Vec<&str> = vec![];
-                    if force { args.push("--force"); }
-                    if dry_run { args.push("--dry-run"); }
-                    std::process::exit(exec_script(&script, &args));
-                }
-                SynthesisCommands::Trigger { dry_run } => {
-                    let script = hex_dir.join("system/scripts/synthesis-trigger.sh");
-                    let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
-                    std::process::exit(exec_script(&script, args));
-                }
-            }
-        }
         Commands::Env { command } => env::run_env_command(command),
         Commands::Validate { command } => match command {
             ValidateCommands::BoiSpec { files } => {
@@ -2555,16 +1758,6 @@ fn main() {
                 std::process::exit(validate::run_e2e(&url, &check_api, &check_sse, timeout));
             }
         },
-        Commands::Initiative { command } => {
-            let hex_dir = get_hex_dir();
-            match command {
-                InitiativeCommands::List { status } => initiative::run_list(&hex_dir, Some(&status)),
-                InitiativeCommands::Show { id } => initiative::run_show(&hex_dir, &id),
-                InitiativeCommands::Create { name, status } => initiative::run_create(&hex_dir, &name, &status),
-                InitiativeCommands::Update { id, status } => initiative::run_update(&hex_dir, &id, &status),
-                InitiativeCommands::Close { id } => initiative::run_close(&hex_dir, &id),
-            }
-        }
         Commands::Learnings { command } => {
             let hex_dir = get_hex_dir();
             match command {

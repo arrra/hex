@@ -1,5 +1,3 @@
-pub mod agent_fleet;
-pub mod agent_liveness;
 pub mod boi_health;
 pub mod claude_md;
 pub mod codex;

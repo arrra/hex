@@ -131,41 +131,11 @@ pub fn is_allowed(hex_dir: &Path, agent_id: &str) -> bool {
         .unwrap_or(false)
 }
 
-/// Emit a policy YAML for a trigger capability into the isolated registry policies dir.
-///
-/// Writes .hex/registry/policies/registry-<id>.yaml — NEVER ~/.hex-events/policies/.
-/// The action is hard-restricted to exactly `hex agent wake <agent_id>`.
-pub fn emit_trigger_policy(
-    registry_dir: &Path,
-    cap: &TriggerCapability,
-    agent_id: &str,
-) -> Result<(), String> {
-    let policies_dir = registry_dir.join("policies");
-    fs::create_dir_all(&policies_dir).map_err(|e| format!("create policies dir: {e}"))?;
-
-    // Hard-restrict action: only "hex agent wake <agent_id>", nothing else.
-    let command = format!("hex agent wake {}", agent_id);
-
-    let yaml = format!(
-        "name: registry-{id}\n\
-         description: >\n  {desc}\n\n\
-         provides:\n  events: []\n\n\
-         requires:\n  events:\n    - {event}\n\n\
-         rules:\n  - name: registry-trigger-{id}\n    trigger:\n      event: {event}\n    actions:\n      - type: shell\n        command: \"{cmd}\"\n",
-        id = cap.id,
-        desc = cap.description,
-        event = cap.event,
-        cmd = command,
-    );
-
-    let policy_path = policies_dir.join(format!("registry-{}.yaml", cap.id));
-    let tmp_path = policies_dir.join(format!(".registry-{}.yaml.tmp", cap.id));
-    fs::write(&tmp_path, yaml.as_bytes()).map_err(|e| format!("write policy tmp: {e}"))?;
-    fs::rename(&tmp_path, &policy_path)
-        .map_err(|e| format!("rename policy to registry-{}.yaml: {e}", cap.id))?;
-
-    Ok(())
-}
+// NOTE: `emit_trigger_policy` was removed in the fleet teardown. It existed solely
+// to write a `.hex/registry/policies/registry-<id>.yaml` whose only action shelled
+// out to `hex agent wake <agent_id>`. The agent fleet and the `hex agent` CLI no
+// longer exist, so that action could never succeed. The registry still manages
+// function/trigger capabilities and reconciles policy files via `remove_capability`.
 
 /// Remove a capability by id: removes functions/<id>.json or triggers/<id>.json,
 /// the corresponding bin/<id> (if present), and the policies/registry-<id>.yaml (if present).
