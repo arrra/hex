@@ -731,45 +731,15 @@ enum HealthCommands {
     /// Verify sqlite-vec is loadable and memory.db has vectors (port of health/check-vector-search.sh)
     #[command(name = "check-vector-search")]
     CheckVectorSearch,
-    /// Detect agent dormancy and ghost-waking via composite liveness score (port of health/check-fleet-pulse.sh)
-    #[command(name = "check-fleet-pulse")]
-    CheckFleetPulse {
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Surface POLICY LOAD/VALIDATION ERROR entries from hex-events daemon log (port of health/check-hex-events-policy-load.sh)
     #[command(name = "check-policy-load")]
     CheckPolicyLoad,
-    /// Detect stalled initiatives and auto-poke owners (port of health/check-stalled-initiatives.sh)
-    #[command(name = "check-stalled-initiatives")]
-    CheckStalledInitiatives {
-        #[arg(long)]
-        dry_run: bool,
-    },
-    /// Fleet-level agent performance scorecard with coalesced Slack digest (port of health/fleet-scorecard-aggregate.py)
-    #[command(name = "fleet-scorecard")]
-    FleetScorecard {
-        /// Period: 7d, 14d, or 30d
-        #[arg(long, default_value = "7d")]
-        period: String,
-        #[arg(long)]
-        dry_run: bool,
-        /// Write output to a file
-        #[arg(long)]
-        output: Option<String>,
-    },
     /// Check daily reflection log freshness (port of health/check-reflection-liveness.sh)
     #[command(name = "check-reflection-liveness")]
     CheckReflectionLiveness,
     /// Verify failure-routing pipeline integrity (port of health/check-failure-routing-roundtrip.sh)
     #[command(name = "check-failure-routing")]
     CheckFailureRouting,
-    /// Check that initiative watchdog has run recently (port of watchdog-heartbeat-check.sh)
-    #[command(name = "check-watchdog-heartbeat")]
-    CheckWatchdogHeartbeat,
-    /// Run the initiative watchdog full check (port of watchdog-run-full.sh)
-    #[command(name = "watchdog-run")]
-    WatchdogRun,
 }
 
 #[derive(Subcommand)]
@@ -1531,31 +1501,10 @@ fn main() {
                 let script = hex_dir.join(".hex/scripts/health/check-vector-search.sh");
                 std::process::exit(exec_script(&script, &[]));
             }
-            HealthCommands::CheckFleetPulse { dry_run } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join(".hex/scripts/health/check-fleet-pulse.sh");
-                let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
-                std::process::exit(exec_script(&script, args));
-            }
             HealthCommands::CheckPolicyLoad => {
                 let hex_dir = get_hex_dir();
                 let script = hex_dir.join(".hex/scripts/health/check-hex-events-policy-load.sh");
                 std::process::exit(exec_script(&script, &[]));
-            }
-            HealthCommands::CheckStalledInitiatives { dry_run } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join(".hex/scripts/health/check-stalled-initiatives.sh");
-                let args: &[&str] = if dry_run { &["--dry-run"] } else { &[] };
-                std::process::exit(exec_script(&script, args));
-            }
-            HealthCommands::FleetScorecard { period, dry_run, output } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join(".hex/scripts/health/fleet-scorecard-aggregate.py");
-                let mut args: Vec<String> = vec!["--period".into(), period];
-                if dry_run { args.push("--dry-run".into()); }
-                if let Some(o) = output { args.push("--output".into()); args.push(o); }
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                std::process::exit(exec_script(&script, &arg_refs));
             }
             HealthCommands::CheckReflectionLiveness => {
                 let script = get_hex_dir().join(".hex/scripts/health/check-reflection-liveness.sh");
@@ -1563,16 +1512,6 @@ fn main() {
             }
             HealthCommands::CheckFailureRouting => {
                 let script = get_hex_dir().join(".hex/scripts/health/check-failure-routing-roundtrip.sh");
-                std::process::exit(exec_script(&script, &[]));
-            }
-            HealthCommands::CheckWatchdogHeartbeat => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/watchdog-heartbeat-check.sh");
-                std::process::exit(exec_script(&script, &[]));
-            }
-            HealthCommands::WatchdogRun => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/watchdog-run-full.sh");
                 std::process::exit(exec_script(&script, &[]));
             }
         },
