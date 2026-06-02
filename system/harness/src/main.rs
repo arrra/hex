@@ -985,7 +985,7 @@ fn main() {
             }
             BoiPmCommands::AutoCommit { spec_id, target_repo, manifest } => {
                 let home = std::env::var("HOME").unwrap_or_default();
-                let script = std::path::PathBuf::from(&home).join(".boi/scripts/auto-commit-boi-output.sh");
+                let script = std::path::PathBuf::from(&home).join(".hex-events/scripts/auto-commit-boi-output.sh");
                 let mut args: Vec<String> = vec![spec_id];
                 if let Some(r) = target_repo { args.push(r); } else { args.push(String::new()); }
                 if let Some(m) = manifest { args.push(m); }
