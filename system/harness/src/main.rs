@@ -8,13 +8,10 @@ mod integration_cmd;
 mod checkpoint;
 mod shutdown;
 mod startup;
-mod validate;
 mod integration_check_all;
-mod mcp;
 use hex::memory;
 mod path_map;
 mod session_reflect;
-mod today;
 mod env;
 mod hook;
 mod upgrade;
@@ -43,12 +40,6 @@ enum Commands {
         #[command(subcommand)]
         command: MemoryCommands,
     },
-    /// Agent health checks (port of .hex/scripts/health/)
-    #[command(display_order = 6)]
-    Health {
-        #[command(subcommand)]
-        command: HealthCommands,
-    },
     /// System health checks
     #[command(display_order = 5)]
     Doctor {
@@ -75,35 +66,11 @@ enum Commands {
         #[command(subcommand)]
         command: SessionCommands,
     },
-    /// Print today's date (port of .hex/scripts/today.sh)
-    #[command(display_order = 4)]
-    Today {
-        /// Optional date format, e.g. +%a (passed to strftime; mirrors shell's $1)
-        format: Option<String>,
-    },
-    /// MCP utilities
-    #[command(display_order = 30)]
-    Mcp {
-        #[command(subcommand)]
-        command: McpCommands,
-    },
-    /// Spec-tool server launcher (port of .hex/scripts/spec-tool/run.sh)
-    #[command(name = "spec-tool", display_order = 36)]
-    SpecTool {
-        #[command(subcommand)]
-        command: SpecToolCommands,
-    },
     /// Environment setup utilities (Phase 5: port of env.sh non-shell logic)
     #[command(display_order = 24)]
     Env {
         #[command(subcommand)]
         command: env::EnvCommands,
-    },
-    /// Validate BOI specs, hex extensions, and E2E test guards
-    #[command(display_order = 40)]
-    Validate {
-        #[command(subcommand)]
-        command: ValidateCommands,
     },
     /// Learnings analysis and promotion (port of system/scripts/promote-learnings.py)
     #[command(display_order = 29)]
@@ -145,46 +112,6 @@ enum Commands {
     #[command(display_order = 12)]
     Completions {
         shell: clap_complete::Shell,
-    },
-}
-
-#[derive(Subcommand)]
-enum SpecToolCommands {
-    /// Verify concrete claims in a BOI spec against the codebase (port of verify-spec-claims.py)
-    #[command(name = "verify-claims")]
-    VerifyClaims {
-        /// Spec file path to verify
-        spec_file: String,
-        /// Workspace directory to scan
-        #[arg(long)]
-        workspace: Option<String>,
-        /// Verbose output
-        #[arg(long)]
-        verbose: bool,
-    },
-}
-
-#[derive(Subcommand)]
-enum ValidateCommands {
-    /// Validate a BOI spec file for known anti-patterns (port of validate-boi-spec.py)
-    #[command(name = "boi-spec")]
-    BoiSpec {
-        /// One or more spec files to validate
-        files: Vec<String>,
-    },
-    /// HTTP-level E2E guard: verify a deployed URL is reachable and healthy (port of e2e-guard/verify.py)
-    E2e {
-        /// Base URL to test
-        url: String,
-        /// API health endpoint path (e.g. /api/health)
-        #[arg(long, default_value = "")]
-        check_api: String,
-        /// SSE event stream path (e.g. /events)
-        #[arg(long, default_value = "")]
-        check_sse: String,
-        /// Request timeout in seconds
-        #[arg(long, default_value = "30")]
-        timeout: u64,
     },
 }
 
@@ -348,6 +275,12 @@ enum MemoryCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Verify sqlite-vec is loadable and memory.db has indexed vectors
+    #[command(name = "check-vector-search")]
+    CheckVectorSearch,
+    /// Check daily reflection log freshness (evolution/reflection-log.md)
+    #[command(name = "check-reflection-liveness")]
+    CheckReflectionLiveness,
 }
 
 #[derive(Subcommand)]
@@ -409,26 +342,6 @@ enum KalshiCommands {
         #[arg(long)]
         secrets_dir: Option<std::path::PathBuf>,
     },
-}
-
-#[derive(Subcommand)]
-enum McpCommands {
-    /// Rewrite MCP OAuth auth URL so redirect_uri routes through hex-router (port of mcp-oauth-rewrite.sh)
-    #[command(name = "oauth-rewrite")]
-    OauthRewrite {
-        /// The OAuth auth URL to rewrite
-        auth_url: String,
-    },
-}
-
-#[derive(Subcommand)]
-enum HealthCommands {
-    /// Verify sqlite-vec is loadable and memory.db has vectors (port of health/check-vector-search.sh)
-    #[command(name = "check-vector-search")]
-    CheckVectorSearch,
-    /// Check daily reflection log freshness (port of health/check-reflection-liveness.sh)
-    #[command(name = "check-reflection-liveness")]
-    CheckReflectionLiveness,
 }
 
 #[derive(Subcommand)]
@@ -495,6 +408,86 @@ enum DoctorCommands {
         /// Optional spec ID to scope the pattern check
         spec_id: Option<String>,
     },
+}
+
+/// Native implementation of the former health/check-vector-search.sh.
+/// Opens memory.db via open_db (which loads sqlite-vec), then counts vec_chunks rows.
+/// Exit 0 if loadable AND count > 0; exit 1 with stderr message otherwise.
+fn check_vector_search(hex_dir: &std::path::Path) -> i32 {
+    let db_path = memory::db_path(hex_dir);
+    if !db_path.exists() {
+        eprintln!(
+            "check-vector-search: FAIL — memory.db not found at {}",
+            db_path.display()
+        );
+        return 1;
+    }
+    let conn = match memory::open_db(&db_path) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("check-vector-search: FAIL — cannot open memory.db: {e}");
+            return 1;
+        }
+    };
+    // open_db already called register_sqlite_vec(); if vec0 isn't available the
+    // COUNT query will fail with "no such module: vec0" or "no such table".
+    match conn.query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get::<_, i64>(0)) {
+        Ok(0) => {
+            eprintln!("check-vector-search: FAIL — vec_chunks is empty (no vectors indexed). Run `hex memory index --full`.");
+            1
+        }
+        Ok(n) => {
+            println!("check-vector-search: ok — {n} vectors in vec_chunks");
+            0
+        }
+        Err(e) => {
+            let msg = e.to_string();
+            if msg.contains("no such module") {
+                eprintln!("check-vector-search: FAIL — sqlite-vec extension not loadable: {msg}");
+            } else if msg.contains("no such table") {
+                eprintln!("check-vector-search: FAIL — vec_chunks table missing. Run `hex memory index --full`.");
+            } else {
+                eprintln!("check-vector-search: FAIL — sqlite error: {msg}");
+            }
+            1
+        }
+    }
+}
+
+/// Native implementation of the former health/check-reflection-liveness.sh.
+/// Checks that evolution/reflection-log.md was modified within the last 48 hours.
+/// Exit 0 if fresh; exit 1 with a clear stderr message if stale or missing.
+/// (48h threshold: a session that ran yesterday should have a reflection entry.)
+fn check_reflection_liveness(hex_dir: &std::path::Path) -> i32 {
+    let log_path = hex_dir.join("evolution/reflection-log.md");
+    if !log_path.exists() {
+        eprintln!(
+            "check-reflection-liveness: FAIL — reflection-log.md not found at {}. Run `hex session reflect` after a session.",
+            log_path.display()
+        );
+        return 1;
+    }
+    match std::fs::metadata(&log_path).and_then(|m| m.modified()) {
+        Ok(modified) => {
+            let elapsed = modified.elapsed().unwrap_or(std::time::Duration::MAX);
+            let threshold = std::time::Duration::from_secs(48 * 3600);
+            if elapsed > threshold {
+                let hours = elapsed.as_secs() / 3600;
+                eprintln!(
+                    "check-reflection-liveness: FAIL — reflection-log.md last updated {hours}h ago (threshold: 48h). Run `hex session reflect`."
+                );
+                1
+            } else {
+                let hours = elapsed.as_secs() / 3600;
+                println!("check-reflection-liveness: ok — reflection-log.md updated {hours}h ago");
+                0
+            }
+        }
+        Err(e) => {
+            eprintln!("check-reflection-liveness: FAIL — cannot read mtime of reflection-log.md: {e}");
+            1
+        }
+    }
 }
 
 /// Parse a single top-level `key: value` from raw YAML text (no nesting).
@@ -777,6 +770,12 @@ fn main() {
                 MemoryCommands::Stats { json } => {
                     memory::stats::run(&hex_dir, *json)
                 }
+                MemoryCommands::CheckVectorSearch => {
+                    check_vector_search(&hex_dir)
+                }
+                MemoryCommands::CheckReflectionLiveness => {
+                    check_reflection_liveness(&hex_dir)
+                }
                 _ => {
                     let hex_memory = hex_dir.join(".hex/scripts/bin/hex-memory");
                     let mut cmd = std::process::Command::new("bash");
@@ -808,17 +807,6 @@ fn main() {
             };
             std::process::exit(exit_code);
         }
-        Commands::Health { command } => match command {
-            HealthCommands::CheckVectorSearch => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join(".hex/scripts/health/check-vector-search.sh");
-                std::process::exit(exec_script(&script, &[]));
-            }
-            HealthCommands::CheckReflectionLiveness => {
-                let script = get_hex_dir().join(".hex/scripts/health/check-reflection-liveness.sh");
-                std::process::exit(exec_script(&script, &[]));
-            }
-        },
         Commands::Doctor { command } => {
             let hex_dir = get_hex_dir();
             match command {
@@ -913,34 +901,7 @@ fn main() {
                 session_reflect::run(session_id.as_deref(), quiet);
             }
         },
-        Commands::Today { format } => {
-            today::run(format.as_deref());
-        }
-        Commands::Mcp { command } => match command {
-            McpCommands::OauthRewrite { auth_url } => {
-                std::process::exit(mcp::oauth_rewrite(&auth_url));
-            }
-        },
-        Commands::SpecTool { command } => match command {
-            SpecToolCommands::VerifyClaims { spec_file, workspace, verbose } => {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/verify-spec-claims.py");
-                let mut args: Vec<String> = vec![spec_file];
-                if let Some(w) = workspace { args.push("--workspace".into()); args.push(w); }
-                if verbose { args.push("--verbose".into()); }
-                let arg_refs: Vec<&str> = args.iter().map(|s| s.as_str()).collect();
-                std::process::exit(exec_script(&script, &arg_refs));
-            }
-        },
         Commands::Env { command } => env::run_env_command(command),
-        Commands::Validate { command } => match command {
-            ValidateCommands::BoiSpec { files } => {
-                std::process::exit(validate::run_boi_spec(&files));
-            }
-            ValidateCommands::E2e { url, check_api, check_sse, timeout } => {
-                std::process::exit(validate::run_e2e(&url, &check_api, &check_sse, timeout));
-            }
-        },
         Commands::Learnings { command } => {
             let hex_dir = get_hex_dir();
             match command {
