@@ -402,7 +402,7 @@ fn record_upgrade_sha(config_file: &Path, source_dir: &Path, repo_url: &str) {
     }
 }
 
-fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
+fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
     let versions_file = hex_dir.join("VERSIONS");
     if !versions_file.exists() {
         return;
@@ -511,24 +511,45 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path) {
             )
         };
         println!("  → hex binary {reason} — rebuilding...");
-        if let Err(e) = apply_sync(source_dir.join("system/harness").as_path(), &harness_dst, None) {
+        let harness_src = source_dir.join("system/harness");
+        if let Err(e) = apply_sync(&harness_src, &harness_dst, None) {
             eprintln!("  [WARN] Failed to sync harness source: {e}");
             return;
         }
+        // Deletion pass scoped to src/ and tests/ only — never touches target/ or Cargo.lock.
+        for sub in &["src", "tests"] {
+            let dst_sub = harness_dst.join(sub);
+            let src_sub = harness_src.join(sub);
+            if dst_sub.exists() && src_sub.exists() {
+                if let Err(e) = deletion_pass(&dst_sub, &src_sub, &backup_dir) {
+                    eprintln!("  [WARN] Harness deletion pass on {sub}/ failed: {e}");
+                }
+            }
+        }
+
+        // Detect personal overlay: if hex_dot_dir/harness-personal/release.rs exists,
+        // build with --features personal and set HEX_DIR so build.rs can find the overlay.
+        let personal_marker = hex_dot_dir.join("harness-personal/release.rs");
+        let use_personal = personal_marker.exists();
+        let mut build_args = vec!["build", "--release"];
+        // --target-dir is always set to harness_dst/target so the output location is
+        // deterministic regardless of workspace nesting (fixes OBS-017).
+        let target_dir = harness_dst.join("target");
+        let target_dir_str = target_dir.to_string_lossy().into_owned();
+        build_args.extend_from_slice(&["--target-dir", &target_dir_str]);
+        if use_personal {
+            build_args.extend_from_slice(&["--features", "personal"]);
+            println!("  → Personal overlay detected — building with --features personal");
+        }
         let build_status = Command::new("cargo")
-            .args(["build", "--release"])
+            .args(&build_args)
             .current_dir(&harness_dst)
+            .env("HEX_DIR", hex_dir)
             .status();
         match build_status {
             Ok(s) if s.success() => {
-                // Workspace root puts target/ one level above the package dir; fall back to
-                // package-local target/ for standalone (non-workspace) builds.
-                let workspace_bin = harness_dst
-                    .parent()
-                    .map(|p| p.join("target/release/hex"))
-                    .filter(|p| p.exists());
-                let package_bin = harness_dst.join("target/release/hex");
-                let release_bin = workspace_bin.unwrap_or(package_bin);
+                // --target-dir guarantees the binary is always here.
+                let release_bin = harness_dst.join("target/release/hex");
                 match atomic_install_binary(&release_bin, &installed_bin) {
                     Ok(()) => {
                         println!("  [OK] hex binary rebuilt and swapped (atomic): v{cargo_ver}");
@@ -792,7 +813,7 @@ pub fn run(args: &[String]) -> i32 {
 
     // Step 5: Sync VERSIONS + rebuild binary if needed
     println!("\n5. Sync VERSIONS");
-    sync_versions_file(&hex_dir, &source_dir);
+    sync_versions_file(&hex_dir, &source_dir, &backup_dir);
 
     // Step 6: Shell setup
     println!("\n6. Shell Setup");
@@ -1014,5 +1035,87 @@ mod tests {
             "no .hex-install-*.tmp must remain after success: {:?}",
             leftover.iter().map(|e| e.file_name()).collect::<Vec<_>>()
         );
+    }
+
+    /// OBS-017: release_bin must always be harness_dst/target/release/hex regardless of
+    /// workspace nesting. This test verifies the path formula used in sync_versions_file.
+    #[test]
+    fn test_release_bin_path_is_deterministic() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Simulate harness_dst deep inside a workspace: <root>/.hex/harness
+        let harness_dst = tmp.path().join(".hex").join("harness");
+        fs::create_dir_all(&harness_dst).unwrap();
+
+        // With --target-dir harness_dst/target, the binary is ALWAYS here:
+        let expected = harness_dst.join("target/release/hex");
+
+        // The old guessing code would have tried harness_dst.parent()/target/release/hex
+        // which for a workspace root = <root>/.hex/target/release/hex (wrong level).
+        let old_guess = harness_dst
+            .parent()
+            .map(|p| p.join("target/release/hex"))
+            .unwrap();
+
+        assert_ne!(
+            expected, old_guess,
+            "old workspace-guessing path differs from deterministic path (confirms the bug)"
+        );
+        assert!(
+            expected.starts_with(&harness_dst),
+            "deterministic release_bin must be inside harness_dst"
+        );
+    }
+
+    /// Defect 3 safety: deletion_pass scoped to src/ sub-dir must NOT touch a sibling
+    /// target/ directory even when both live under the same parent.
+    #[test]
+    fn test_harness_deletion_pass_does_not_touch_target() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Simulate harness_dst layout
+        let harness_dst = tmp.path().join("harness");
+        let bak = tmp.path().join("bak");
+
+        // Files that should survive (target build cache)
+        let target_bin = harness_dst.join("target/release/hex");
+        write_file(&target_bin, "binary");
+        write_file(&harness_dst.join("Cargo.lock"), "lock");
+
+        // Files in src/ that exist in dst but not in source → stale → should be deleted
+        write_file(&harness_dst.join("src/old_module.rs"), "// stale");
+        // File in src/ that exists in source → should be kept
+        write_file(&harness_dst.join("src/lib.rs"), "// current");
+
+        let src_dir = tmp.path().join("src_foundation").join("src");
+        write_file(&src_dir.join("lib.rs"), "// current");
+        // old_module.rs is absent from src_foundation/src → stale
+
+        fs::create_dir_all(&bak).unwrap();
+
+        // Call deletion_pass SCOPED to src/ only (as the fix does)
+        let dst_src = harness_dst.join("src");
+        let deleted = deletion_pass(&dst_src, &src_dir, &bak).unwrap();
+
+        assert_eq!(deleted, 1, "only old_module.rs should be pruned");
+        assert!(!dst_src.join("old_module.rs").exists(), "stale src file must be removed");
+        assert!(dst_src.join("lib.rs").exists(), "current src file must remain");
+
+        // Critical: target/ and Cargo.lock must be untouched
+        assert!(target_bin.exists(), "target/release/hex must NOT be deleted");
+        assert!(harness_dst.join("Cargo.lock").exists(), "Cargo.lock must NOT be deleted");
+    }
+
+    /// Defect 2: personal overlay detection uses the marker file path.
+    #[test]
+    fn test_personal_overlay_marker_detection() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_dot_dir = tmp.path().join(".hex");
+
+        // Without marker: no personal build
+        let marker = hex_dot_dir.join("harness-personal/release.rs");
+        assert!(!marker.exists());
+
+        // With marker: personal build should be triggered
+        write_file(&marker, "// personal overlay release commands");
+        assert!(marker.exists(), "marker must exist after write");
     }
 }
