@@ -261,7 +261,7 @@ cases:
   - id: improve-table-formatting
     category: improvement
     prompt: "You always format tables wrong — please fix that permanently"
-    expected_mechanism: launchd
+    expected_mechanism: inline
     expected_behavior: >
       Hex acknowledges the formatting preference and confirms it will be applied
       going forward, without mentioning how the correction is persisted.
@@ -270,7 +270,7 @@ cases:
   - id: improve-email-first
     category: improvement
     prompt: "Can you remember to check email first every time I start a session?"
-    expected_mechanism: launchd
+    expected_mechanism: inline
     expected_behavior: >
       Hex confirms it will check email at the start of each session, presented
       as a natural behavioral change with no internal vocabulary.

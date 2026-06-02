@@ -314,26 +314,6 @@ sys.exit(0 if c and c.get('status') == 'pass' else 1)
     TOTAL=$((TOTAL + 1))
 fi
 
-# ── Test 20: Doctor events coverage ──────────────────────────────────
-echo "[20] Doctor events coverage (check_66)"
-EVENTS_COVERAGE_SCRIPT="/tmp/hex-setup/tests/test-doctor-events-coverage.sh"
-if [ -f "$EVENTS_COVERAGE_SCRIPT" ]; then
-    EVENTS_EXIT=0
-    EVENTS_OUT=$(bash "$EVENTS_COVERAGE_SCRIPT" 2>&1) || EVENTS_EXIT=$?
-    if [ "$EVENTS_EXIT" -eq 0 ]; then
-        echo "  PASS: all doctor-events-coverage assertions passed"
-        PASS=$((PASS + 1))
-    else
-        echo "  FAIL: doctor-events-coverage test had failures"
-        echo "$EVENTS_OUT" | tail -20 | sed 's/^/    /'
-        FAIL=$((FAIL + 1))
-    fi
-else
-    echo "  FAIL: test-doctor-events-coverage.sh not found at $EVENTS_COVERAGE_SCRIPT"
-    FAIL=$((FAIL + 1))
-fi
-TOTAL=$((TOTAL + 1))
-
 # ── Summary ─────────────────────────────────────────────────────────
 echo ""
 echo "========================================="

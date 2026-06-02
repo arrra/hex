@@ -15,10 +15,7 @@ tests/core-e2e/
     ├── test-boi-install.sh
     ├── test-boi-upgrade.sh
     ├── test-cli.sh
-    ├── test-events.sh
-    ├── test-messaging.sh
-    ├── test-sse.sh
-    └── test-telemetry.sh
+    └── test-messaging.sh
 ```
 
 ## Running Tests
@@ -184,7 +181,7 @@ Key assertions:
 - Smoke dispatch still works after upgrade
 - BAD case: corrupted symlink is detected by `doctor.sh` runtime check (not just file existence)
 
-### Other suites (test-cli, test-messaging, test-events, test-sse, test-telemetry)
+### Other suites (test-cli, test-messaging)
 
 These test the compiled `hex` binary directly inside the `Dockerfile` image. They do not
 spin up nested Docker — the suite itself runs inside the container via `run-all.sh --exclude boi`
