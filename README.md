@@ -471,7 +471,7 @@ v0.12.0 adds: **Upgrade reliability, shell completions, failure-revive protocol,
 - **Shell completions**: `hex completions bash|zsh|fish` generates completion scripts for all subcommands. Install snippets in README.
 - **Upgrade reliability**: 5-bug patch to `/hex-upgrade` — stale-symlink cleanup, RC file detection, hex-binary version sync via Cargo.toml. Docker E2E 101/101.
 - **Doctor enhanced**: hex events daemon status absorbed into health checks; hex-binary version-sync check added (catches binary/Cargo.toml divergence).
-- **Failure-revive protocol**: three-strike detection + spec-owner-resolver + build-failure-brief for automated BOI failure analysis.
+- **Failure-revive protocol**: three-strike detection + spec-owner-resolver + build-failure-brief for automated BOI failure analysis. _(Removed — it routed failures to the now-demolished agent fleet; rebuild planned.)_
 - **Policy validator**: `dagu` added to VALID_ACTION_TYPES, fixing false-positive validation errors.
 - **AGENTS.md**: Quick Start, Gotchas, and How to Modify sections; Layer 2 Mechanisms condensed to compact table. Cross-repo navigation links added.
 - **Cleanup**: cc-connect/slack-bot scripts removed (7 files). Attack surface reduced.
