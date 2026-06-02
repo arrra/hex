@@ -27,10 +27,16 @@ else
     assert_fail "cli-agent-removed: 'hex agent' still recognized (exit $CODE) — output: $OUT"
 fi
 
-# ── 3. hex message list ───────────────────────────────────────────────────────
+# ── 3. hex message removed (messaging/inbox teardown) ────────────────────────
+# hex message was removed in the collapse-to-cc-boi demolition.
+# Assert it is no longer a recognized subcommand.
 OUT=$("$HEX" message list 2>&1)
 CODE=$?
-assert_exit 0 "$CODE" "cli-message-list: exit 0"
+if [ "$CODE" -ne 0 ] && echo "$OUT" | grep -qi "unrecognized subcommand"; then
+    assert_pass "cli-message-removed: 'hex message' correctly absent (messaging removed)"
+else
+    assert_fail "cli-message-removed: 'hex message' still recognized (exit $CODE) — output: $OUT"
+fi
 
 # ── 5. hex events removed (event engine teardown) ────────────────────────────
 # hex events was removed in the collapse-to-cc-boi demolition.

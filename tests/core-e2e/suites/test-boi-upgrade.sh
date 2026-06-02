@@ -95,6 +95,13 @@ trap on_exit EXIT
 
 export PATH="$HOME/.boi/bin:$PATH"
 
+# Volume mounts (/repo, /boi) are owned by the host UID, not the container
+# user, so git refuses to operate on them ("detected dubious ownership").
+# This is why the clone passes on macOS Docker (ownership remapped) but fails
+# in Linux CI. Trust the mounted source paths so clones succeed.
+git config --global --add safe.directory /repo
+git config --global --add safe.directory /boi
+
 # ── 1. Clone hex-foundation + checkout old release ────────────────────────────
 echo "--- 1. clone + checkout v0.7.0 ---"
 if git clone /repo /tmp/hex > /tmp/clone.log 2>&1; then

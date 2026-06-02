@@ -40,7 +40,6 @@ RUN mkdir -p \
     $HOME/hex/.hex/telemetry \
     $HOME/hex/.hex/reference/core-agents \
     $HOME/hex/.hex/scripts \
-    $HOME/hex/system/scripts/bin \
     $HOME/hex/system/skills/memory/scripts \
     $HOME/hex/tests/core-e2e/suites
 
@@ -57,7 +56,6 @@ RUN ln -s $HOME/hex/.hex/bin/hex $HOME/hex/.hex/bin/hex-agent
 # Binary looks for these at $HEX_DIR/.hex/scripts/ (runtime install path)
 COPY system/scripts/hex-integration $HOME/hex/.hex/scripts/hex-integration
 COPY system/scripts/hex-doctor      $HOME/hex/.hex/scripts/hex-doctor
-COPY system/scripts/bin/            $HOME/hex/system/scripts/bin/
 COPY system/skills/memory/scripts/  $HOME/hex/system/skills/memory/scripts/
 
 # Core E2E test suite (helpers.sh, run-all.sh, suites/*.sh written by later tasks)
