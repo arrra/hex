@@ -268,8 +268,6 @@ enum MemoryCommands {
         /// Path to the file to distill
         path: PathBuf,
     },
-    /// Run the 6-op nightly consolidation (dedup, contradiction-sweep, prune, topic-rollup)
-    Consolidate,
     /// Show memory database statistics (facts, files, predicates, schema version)
     Stats {
         /// Output as JSON
@@ -353,8 +351,6 @@ enum DoctorCommands {
         #[arg(long)]
         kr: Option<String>,
     },
-    /// Deterministic dedup, stale reference pruning, memory reindex
-    Consolidate,
     /// Nightly system health audit via claude -p (port of system-introspection.sh)
     Introspect,
     /// Delete Claude project .jsonl files older than N days (port of cleanup-project-jsonl.sh)
@@ -717,31 +713,6 @@ fn main() {
                         }
                     }
                 }
-                MemoryCommands::Consolidate => {
-                    let db_path = memory::db_path(&hex_dir);
-                    match memory::open_db(&db_path) {
-                        Ok(mut conn) => {
-                            match memory::consolidate::run(&mut conn) {
-                                Ok(report) => {
-                                    println!(
-                                        "consolidate ok={} failed={}",
-                                        report.ok.len(),
-                                        report.failed.len()
-                                    );
-                                    if !report.failed.is_empty() { 1 } else { 0 }
-                                }
-                                Err(e) => {
-                                    eprintln!("consolidate error: {}", e);
-                                    1
-                                }
-                            }
-                        }
-                        Err(e) => {
-                            eprintln!("open_db error: {}", e);
-                            1
-                        }
-                    }
-                }
                 MemoryCommands::Stats { json } => {
                     memory::stats::run(&hex_dir, *json)
                 }
@@ -791,9 +762,6 @@ fn main() {
                 DoctorCommands::QualityCheck { spec, sweep, kr } => {
                     let code = doctor::quality_check(&hex_dir, spec.as_deref(), sweep, kr.as_deref());
                     std::process::exit(code);
-                }
-                DoctorCommands::Consolidate => {
-                    std::process::exit(doctor::consolidate::run(&hex_dir));
                 }
                 DoctorCommands::Introspect => {
                     std::process::exit(doctor::introspect::run(&hex_dir));

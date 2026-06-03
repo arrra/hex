@@ -297,7 +297,7 @@ fn normalize_path(path: &Path) -> PathBuf {
 fn check_audit_freshness(hex_dir: &Path) -> Result<String, String> {
     let evo_dir = hex_dir.join("evolution");
     if !evo_dir.is_dir() {
-        return Err("LLM consolidation stale — run /hex-consolidate".to_string());
+        return Err("LLM consolidation stale — run hex consolidate full".to_string());
     }
     let thirty_days_secs: u64 = 30 * 24 * 3600;
     let now_secs = SystemTime::now()
@@ -327,9 +327,9 @@ fn check_audit_freshness(hex_dir: &Path) -> Result<String, String> {
     }
 
     match newest_mtime {
-        None => Err("LLM consolidation stale — run /hex-consolidate".to_string()),
+        None => Err("LLM consolidation stale — run hex consolidate full".to_string()),
         Some(mtime) if now_secs.saturating_sub(mtime) > thirty_days_secs => {
-            Err("LLM consolidation stale — run /hex-consolidate".to_string())
+            Err("LLM consolidation stale — run hex consolidate full".to_string())
         }
         Some(_) => Ok("OK: LLM consolidation audit is fresh".to_string()),
     }
