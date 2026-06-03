@@ -269,6 +269,55 @@ mod tests {
         assert_eq!(learn_before, learn_after, "learnings.md must not be edited");
     }
 
+    /// Regression: the standalone `hex memory consolidate` and
+    /// `hex doctor consolidate` clap subcommands must stay folded into the
+    /// unified `hex consolidate` orchestrator. If anyone reintroduces a
+    /// `MemoryCommands::Consolidate` or `DoctorCommands::Consolidate` variant
+    /// in main.rs, this guard fires.
+    #[test]
+    fn no_standalone_memory_or_doctor_consolidate_subcommands() {
+        let main_rs = include_str!("main.rs");
+        assert!(
+            !main_rs.contains("MemoryCommands::Consolidate"),
+            "MemoryCommands::Consolidate must not be reintroduced — \
+             use the unified `hex consolidate` orchestrator instead"
+        );
+        // The Doctor enum variant pattern; tolerate the word in comments by
+        // requiring the `::Consolidate` qualified path.
+        assert!(
+            !main_rs.contains("DoctorCommands::Consolidate"),
+            "DoctorCommands::Consolidate must not be reintroduced — \
+             use the unified `hex consolidate` orchestrator instead"
+        );
+    }
+
+    /// Regression: the unified `hex consolidate` surface must expose exactly
+    /// `full` and `quick` modes. If either variant is renamed or removed, this
+    /// guard fires before the help/CLI breaks for users.
+    #[test]
+    fn consolidate_exposes_full_and_quick_modes() {
+        // The Mode enum is the single source of truth for the two modes.
+        // Exhaustive match — adding a third mode without updating the contract
+        // will fail to compile here, which is the desired tripwire.
+        for m in [Mode::Quick, Mode::Full] {
+            match m {
+                Mode::Quick => {}
+                Mode::Full => {}
+            }
+        }
+
+        // And the clap dispatch in main.rs must still wire both variants.
+        let main_rs = include_str!("main.rs");
+        assert!(
+            main_rs.contains("ConsolidateCommands::Quick"),
+            "main.rs must dispatch ConsolidateCommands::Quick"
+        );
+        assert!(
+            main_rs.contains("ConsolidateCommands::Full"),
+            "main.rs must dispatch ConsolidateCommands::Full"
+        );
+    }
+
     #[test]
     fn quick_mode_does_not_write_audit_file() {
         let dir = fake_hex_dir();
