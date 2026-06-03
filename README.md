@@ -198,7 +198,7 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 - **Asset registry** (`hex asset`) — unified `{type}:{id}` namespace for all hex artifacts
 - **Message routing** (`hex message`) — unified messaging: comments, agent messages, notifications
 - **System health** (`hex doctor`) — 55+ checks across env, memory, structure, config, companions
-- **Consolidate** (`hex memory consolidate full|quick`) — single unified consolidate command. `quick` runs Layers 1+2 (structural sweep + memory DB pass) deterministically with no LLM; `full` adds Layer 3, the LLM-assisted operating-model audit (writes `evolution/consolidation-audit-YYYY-MM-DD.md`; never auto-edits CLAUDE.md or me/learnings.md). Nests under `hex memory` (its original design home); replaces the old `/hex-consolidate` skill and the former top-level `hex consolidate` / `hex doctor consolidate` surfaces.
+- **Consolidate** (`hex memory consolidate full|quick`) — single unified consolidate command. `quick` runs the deterministic layers (structural sweep + memory DB pass + learnings promotion — scanning `me/learnings.md` for recurring patterns into `evolution/suggestions.md`) with no LLM; `full` adds the LLM-assisted operating-model audit (writes `evolution/consolidation-audit-YYYY-MM-DD.md`; never auto-edits CLAUDE.md or me/learnings.md). Nests under `hex memory` (its original design home); folds in the former `hex memory learnings promote` command and replaces the old `/hex-consolidate` skill and the former top-level `hex consolidate` / `hex doctor consolidate` surfaces.
 - **Integration lifecycle** (`hex integration`) — native Rust integration bundle management
 - **Capability system** — agents register executable functions (`capability_add`) and invoke them (`capability_call`) from trail entries. A static security guard hard-denies network egress, secrets access, `rm -rf`, and pipe-to-shell before any script is persisted. Capabilities are write-once (immutable after registration), scoped to an allowlist of pilot agents, and sandboxed with per-wake call caps, wall-clock timeouts, and output byte limits.
 
@@ -225,7 +225,6 @@ hex upgrade      — upgrade hex installation (port of upgrade.sh)
 hex capture      — zero-friction context capture
 hex synthesis    — weekly and on-demand synthesis pipeline
 hex initiative   — initiative CRUD
-hex memory learnings — learnings analysis and promotion
 hex route        — message routing and comment classification
 hex validate     — BOI spec, extension, and E2E guard validation
 hex telemetry    — telemetry file rotation and management

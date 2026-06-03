@@ -45,3 +45,6 @@ tests/test_integration.py
 
 # Compiled binaries and bytecache
 system/scripts/bin/
+
+# Local embedding model cache (fastembed/nomic) — never commit (538MB+)
+.fastembed_cache/

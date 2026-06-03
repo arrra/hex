@@ -98,20 +98,10 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum ConsolidateCommands {
-    /// Layers 1+2 only — deterministic, no LLM, no network. Safe to run nightly.
+    /// Deterministic layers only (structural + memory DB + learnings promotion). No LLM, no network. Safe to run nightly.
     Quick,
-    /// Layers 1+2+3 — adds the LLM-assisted operating-model audit.
+    /// All deterministic layers + the LLM-assisted operating-model audit.
     Full,
-}
-
-#[derive(Subcommand)]
-enum LearningsCommands {
-    /// Scan learnings.md for recurring patterns and write promotion candidates to evolution/suggestions.md
-    Promote {
-        /// Print candidates without writing any files
-        #[arg(long)]
-        dry_run: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -187,12 +177,7 @@ enum IntegrationCommands {
 enum MemoryCommands {
     /// Show memory database health/stats (alias for `stats`)
     Health,
-    /// Learnings analysis and promotion (port of system/scripts/promote-learnings.py)
-    Learnings {
-        #[command(subcommand)]
-        command: LearningsCommands,
-    },
-    /// Unified consolidation (structural + memory + operating-model audit)
+    /// Unified consolidation (structural + memory + learnings promotion + operating-model audit)
     Consolidate {
         #[command(subcommand)]
         command: ConsolidateCommands,
@@ -712,12 +697,6 @@ fn main() {
                     // `health` is a thin alias for the native memory DB stats path.
                     memory::stats::run(&hex_dir, false)
                 }
-                MemoryCommands::Learnings { command } => match command {
-                    LearningsCommands::Promote { dry_run } => {
-                        learnings::run_promote(&hex_dir, *dry_run);
-                        0
-                    }
-                },
                 MemoryCommands::Consolidate { command } => {
                     let mode = match command {
                         ConsolidateCommands::Quick => consolidate::Mode::Quick,

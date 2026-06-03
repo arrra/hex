@@ -1,13 +1,14 @@
 //! Unified `hex consolidate` orchestrator.
 //!
-//! Single entry point that runs all three consolidation layers:
-//!   L1 — structural (doctor::consolidate)        — deterministic, no LLM
-//!   L2 — memory DB    (memory::consolidate)      — deterministic, no LLM
-//!   L3 — operating-model audit (provider::generate) — FULL mode only
+//! Single entry point that runs all consolidation layers:
+//!   L1   — structural (doctor::consolidate)         — deterministic, no LLM
+//!   L2   — memory DB    (memory::consolidate)       — deterministic, no LLM
+//!   L2.5 — learnings promotion (learnings::run_promote) — deterministic, no LLM
+//!   L3   — operating-model audit (provider::generate)   — FULL mode only
 //!
 //! Modes:
-//!   Quick — L1 + L2 only (safe to run nightly).
-//!   Full  — L1 + L2 + L3 (writes an audit file for human review; never auto-edits sources).
+//!   Quick — L1 + L2 + L2.5 (deterministic; safe to run nightly).
+//!   Full  — everything + L3 (writes an audit file for human review; never auto-edits sources).
 //!
 //! Per S6 (no quiet failures): every layer's failure is surfaced loudly to
 //! stderr and reflected in the exit code. L3 failure does NOT abort L1+L2.
@@ -67,6 +68,14 @@ pub fn run(mode: Mode, hex_dir: &Path) -> i32 {
             any_fail = true;
         }
     }
+
+    // Layer 2.5 — LEARNINGS PROMOTION (deterministic, no LLM)
+    // Scans me/learnings.md + raw/reflections for recurring pattern clusters and
+    // writes promotion candidates to evolution/suggestions.md. Folded in from the
+    // former standalone `hex memory learnings promote` command — one less surface.
+    // Idempotent (processed clusters are deduped), so it's safe in `quick`/nightly.
+    println!("\n-- Layer 2.5: learnings promotion (me/learnings.md → evolution/suggestions.md) --");
+    crate::learnings::run_promote(hex_dir, false);
 
     // Layer 3 — OPERATING-MODEL AUDIT (LLM, FULL only)
     if matches!(mode, Mode::Full) {
