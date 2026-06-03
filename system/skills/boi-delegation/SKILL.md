@@ -84,7 +84,7 @@ Deterministic phases (`workspace_prepare`, `workspace_verify_in`, `validate`,
 `commit`, `workspace_verify_out`, `merge_to_integration`, `teardown`) run as
 native Rust fn-pointers via the `DETERMINISTIC_STEPS` table. See design doc
 §1 "Provider model — Goose-pattern" and the goose-as-adapter amendment
-(`~/github.com/mrap/boi-v2/docs/design/2026-05-17-goose-as-runtime-adapter.md`).
+(`~/github.com/mrap/boi/docs/design/2026-05-17-goose-as-runtime-adapter.md`).
 
 ### Binary + Data Layout
 
@@ -96,7 +96,7 @@ native Rust fn-pointers via the `DETERMINISTIC_STEPS` table. See design doc
   - `recipes/` — generated Goose recipes per phase run
   - `worktrees/` — one git worktree per task
   - `daemon.sock` — Unix-domain control socket
-- Source: `~/github.com/mrap/boi-v2/` (read-only from hex; modify via PR)
+- Source: `~/github.com/mrap/boi/` (read-only from hex; modify via PR)
 
 ### Process Model
 
@@ -106,7 +106,7 @@ control-socket listener. Write-side commands (`dispatch`, `cancel`, `unblock`,
 daemon is running. Read-only commands (`log`, `dashboard`, `spec show`,
 `traces query`, `failures top`) read SQLite/DuckDB directly.
 
-See `~/github.com/mrap/boi-v2/src/cli/mod.rs:14-29` for the process-model docs.
+See `~/github.com/mrap/boi/src/cli/mod.rs:14-29` for the process-model docs.
 
 ### Event Flow (BOI observability)
 
@@ -120,7 +120,7 @@ is no policy bridge. Completion detection is via `boi log <spec-id>` or
 
 **All specs must be TOML (`.toml`).** YAML / Markdown specs are rejected with
 typed parse errors. The full grammar lives at
-`~/github.com/mrap/boi-v2/src/config/spec.rs` — that file is the canonical
+`~/github.com/mrap/boi/src/config/spec.rs` — that file is the canonical
 schema reference.
 
 ### Required Fields (§3.1)
@@ -163,7 +163,7 @@ Any unrecognized field (typo, drifted-field) is rejected at parse time by
 ### Worked Example (the §13 typo-fix fixture)
 
 ```toml
-# ~/github.com/mrap/boi-v2/tests/fixtures/specs/01-typo-fix.toml
+# ~/github.com/mrap/boi/tests/fixtures/specs/01-typo-fix.toml
 title = "Fix a typo in the README"
 
 [contract]
@@ -350,12 +350,12 @@ conflict resolution is deferred to v1.x
 ## Pitfalls
 
 1. **BOI source repo is read-only from hex.** Modifications go through normal
-   PR review against `~/github.com/mrap/boi-v2/`.
+   PR review against `~/github.com/mrap/boi/`.
 2. **`boi daemon` MUST be running** before any write-side command. Read-only
    commands (`log`, `dashboard`, `spec show`, `traces`, `failures`) work
    regardless — they hit SQLite/DuckDB directly.
 3. **TOML only.** Any `.yaml` / `.spec.md` spec is rejected. The grammar lives
-   at `~/github.com/mrap/boi-v2/src/config/spec.rs`; defer to it when in doubt.
+   at `~/github.com/mrap/boi/src/config/spec.rs`; defer to it when in doubt.
 4. **`deny_unknown_fields` is strict.** Typos in field names fail at parse
    time with line/column. Don't paste v1 specs and hope they work.
 5. **VERBAL MONITORING = BUG.** When you leave and a spec is running, NEVER say
@@ -368,8 +368,8 @@ conflict resolution is deferred to v1.x
 
 ## Deeper Reference
 
-- Canonical design: `~/github.com/mrap/boi-v2/docs/design/2026-05-16-design.md`
-- Goose-as-adapter amendment: `~/github.com/mrap/boi-v2/docs/design/2026-05-17-goose-as-runtime-adapter.md`
-- Spec grammar: `~/github.com/mrap/boi-v2/src/config/spec.rs`
-- CLI surface: `~/github.com/mrap/boi-v2/src/cli/mod.rs`
-- §13 fixtures: `~/github.com/mrap/boi-v2/tests/fixtures/specs/0[1-5]-*.toml`
+- Canonical design: `~/github.com/mrap/boi/docs/design/2026-05-16-design.md`
+- Goose-as-adapter amendment: `~/github.com/mrap/boi/docs/design/2026-05-17-goose-as-runtime-adapter.md`
+- Spec grammar: `~/github.com/mrap/boi/src/config/spec.rs`
+- CLI surface: `~/github.com/mrap/boi/src/cli/mod.rs`
+- §13 fixtures: `~/github.com/mrap/boi/tests/fixtures/specs/0[1-5]-*.toml`

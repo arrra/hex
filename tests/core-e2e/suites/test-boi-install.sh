@@ -4,9 +4,15 @@
 # Spins up a Docker container (rust:latest base + dev tools) and:
 #   1. Clones hex-foundation from a volume mount of the local repo
 #   2. Runs install.sh non-interactively
-#   3. Asserts: binary presence, --help subcommands, version, wrapper chain
-#   4. Dispatches a smoke spec if ANTHROPIC_API_KEY is set (optional)
+#   3. Asserts: binary presence, --help subcommands, version (boi-v2 "boi 3.0.0"),
+#      wrapper chain (~/github.com/mrap/boi/boi.sh)
+#   4. Dispatches a smoke TOML spec if ANTHROPIC_API_KEY is set (optional)
 #   5. Clears all BOI state on exit so reruns are clean
+#
+# BOI NOTE: the canonical engine is mrap/boi (TOML specs, control-socket
+# daemon at ~/.boi/v2/daemon.sock, data at ~/.boi/v2/boi.db). There is no
+# `boi status` / `boi bench` / `boi version` — use `boi --version`, the daemon
+# socket for readiness, and the boi.db spec_runtime table for spec status.
 #
 # Failure dumps container logs + last 50 lines of any boi daemon log.
 #
@@ -166,8 +172,9 @@ else
     fail "help-exit: boi --help exited $HELP_EXIT"
 fi
 
-# 3d. --help lists the required subcommands
-for sub in dispatch status bench cancel; do
+# 3d. --help lists the required boi-v2 subcommands.
+# (V2 dropped `status`/`bench`; added `daemon`/`dashboard`/`log`.)
+for sub in daemon dispatch dashboard cancel; do
     if echo "$HELP_OUTPUT" | grep -q "$sub"; then
         pass "help-subcmd: '$sub' listed in --help"
     else
@@ -175,11 +182,12 @@ for sub in dispatch status bench cancel; do
     fi
 done
 
-# 3e. `boi version` output matches VERSIONS BOI_VERSION
-# VERSIONS format: BOI_VERSION=v1.0.0   boi version output: "boi 1.0.0"
+# 3e. `boi --version` output matches VERSIONS BOI_VERSION.
+# VERSIONS format: BOI_VERSION=v3.0.0   boi --version output: "boi 3.0.0"
+# (boi-v2 exposes only the `--version` flag — there is no `boi version` subcommand.)
 EXPECTED_TAGGED=$(grep "^BOI_VERSION=" /tmp/hex/VERSIONS | cut -d= -f2)
 EXPECTED_BARE="${EXPECTED_TAGGED#v}"
-VER_OUTPUT=$("$BOI" version 2>&1) || true
+VER_OUTPUT=$("$BOI" --version 2>&1) || true
 if echo "$VER_OUTPUT" | grep -qF "$EXPECTED_BARE"; then
     pass "version-match: '$VER_OUTPUT' contains '$EXPECTED_BARE' (from VERSIONS $EXPECTED_TAGGED)"
 else
@@ -206,66 +214,78 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
 fi
 
 echo "--- 4. daemon start ---"
-"$BOI" daemon start > /tmp/daemon-start.log 2>&1 || true
+# boi-v2 `daemon` runs in the foreground (blocks until SIGTERM); start it in
+# the background and wait for the control socket ~/.boi/v2/daemon.sock to appear.
+BOI_SOCK="$HOME/.boi/v2/daemon.sock"
+BOI_DB="$HOME/.boi/v2/boi.db"
+"$BOI" daemon > /tmp/daemon-start.log 2>&1 &
+DAEMON_PID=$!
 
 daemon_ready=0
 for _i in $(seq 1 20); do
-    if "$BOI" status > /dev/null 2>&1; then
+    if [ -S "$BOI_SOCK" ]; then
         daemon_ready=1; break
     fi
     sleep 0.5
 done
 
 if [ "$daemon_ready" -eq 1 ]; then
-    pass "daemon-start: BOI daemon ready within 10s"
+    pass "daemon-start: BOI daemon socket ready within 10s ($BOI_SOCK)"
 else
-    fail "daemon-start: daemon did not become ready within 10s"
+    fail "daemon-start: daemon socket did not appear within 10s"
     cat /tmp/daemon-start.log || true
+    kill "$DAEMON_PID" 2>/dev/null || true
     exit 1
 fi
 
-echo "--- 5. smoke spec ---"
+echo "--- 5. smoke spec (TOML) ---"
 SMOKE_MARKER="/tmp/boi-smoke-marker-$$"
-SMOKE_SPEC="/tmp/boi-smoke-spec-$$.yaml"
+SMOKE_SPEC="/tmp/boi-smoke-spec-$$.toml"
 cat > "$SMOKE_SPEC" << SMOKESPEC
-title: "BOI install smoke test"
-mode: execute
-tasks:
-  - id: T0001
-    title: "create marker file"
-    spec: |
-      Create the file ${SMOKE_MARKER} with content: boi-install-smoke-ok
-    verify: "test -f ${SMOKE_MARKER}"
+title = "BOI install smoke test"
+
+[contract]
+scope = "Create the file ${SMOKE_MARKER} with content: boi-install-smoke-ok"
+base_branch = "main"
+workspace = "/tmp/hex"
+
+[[tasks]]
+ref = "create-marker"
+behavior = "Create the file ${SMOKE_MARKER} containing the text boi-install-smoke-ok"
+verifications = [
+  { name = "marker-exists", command = "test -f ${SMOKE_MARKER}" },
+]
 SMOKESPEC
 pass "smoke-spec: written"
 
 echo "--- 6. dispatch + poll ---"
-SPEC_ID=$("$BOI" dispatch "$SMOKE_SPEC" 2>&1)
+# boi-v2 `dispatch` prints "Persisted spec S######## (N task(s)) — queued."
+DISPATCH_OUT=$("$BOI" dispatch "$SMOKE_SPEC" 2>&1)
 DISPATCH_EXIT=$?
+SPEC_ID=$(echo "$DISPATCH_OUT" | grep -oE 'S[0-9a-hjkmnp-tv-z]{8}' | head -1)
 if [ "$DISPATCH_EXIT" -eq 0 ] && [ -n "$SPEC_ID" ]; then
     pass "dispatch: spec enqueued (id: $SPEC_ID)"
 else
-    fail "dispatch: boi dispatch failed (exit $DISPATCH_EXIT, output: $SPEC_ID)"
+    fail "dispatch: boi dispatch failed (exit $DISPATCH_EXIT, output: $DISPATCH_OUT)"
+    kill "$DAEMON_PID" 2>/dev/null || true
     exit 1
 fi
 
-echo "  polling status (cap 120s)..."
+echo "  polling spec_runtime status (cap 120s)..."
 POLL_START=$(date +%s)
 TERMINAL=""
 while true; do
     ELAPSED=$(( $(date +%s) - POLL_START ))
     if [ "$ELAPSED" -ge 120 ]; then
         fail "dispatch-poll: timed out after 120s waiting for completion"
-        "$BOI" status "$SPEC_ID" 2>&1 | tail -20 || true
+        sqlite3 "$BOI_DB" "SELECT spec_id,status FROM spec_runtime WHERE spec_id='$SPEC_ID';" 2>&1 || true
         break
     fi
-    STATUS_JSON=$("$BOI" status "$SPEC_ID" --json 2>/dev/null || echo '{}')
-    SPEC_STATUS=$(python3 -c \
-        "import sys,json; print(json.load(sys.stdin).get('status',''))" \
-        <<< "$STATUS_JSON" 2>/dev/null || echo "")
+    SPEC_STATUS=$(sqlite3 "$BOI_DB" \
+        "SELECT status FROM spec_runtime WHERE spec_id='$SPEC_ID';" 2>/dev/null || echo "")
     case "$SPEC_STATUS" in
-        completed)        TERMINAL="completed"; break ;;
-        failed|cancelled) TERMINAL="$SPEC_STATUS"; break ;;
+        completed)       TERMINAL="completed"; break ;;
+        failed|canceled) TERMINAL="$SPEC_STATUS"; break ;;
     esac
     sleep 3
 done
@@ -275,6 +295,8 @@ if [ "$TERMINAL" = "completed" ]; then
 else
     fail "dispatch-complete: spec reached '$TERMINAL' (expected 'completed')"
 fi
+
+kill "$DAEMON_PID" 2>/dev/null || true
 
 echo "--- 7. smoke output ---"
 if [ -f "$SMOKE_MARKER" ]; then

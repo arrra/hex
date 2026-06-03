@@ -398,7 +398,7 @@ Optional blocks: `[[decision]]` for authored decisions, `[[skill]]` to declare s
 
 ### Rejected v1 fields (typed errors)
 
-The v2 parser rejects these with typed errors (see `boi-v2/src/config/spec.rs:180-191`). Do NOT include them:
+The v2 parser rejects these with typed errors (see `boi/src/config/spec.rs:180-191`). Do NOT include them:
 
 - `mode` — modes were removed; behavior is implied by the spec
 - `initiative` — field removed

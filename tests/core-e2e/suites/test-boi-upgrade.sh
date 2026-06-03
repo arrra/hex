@@ -2,16 +2,23 @@
 # test-boi-upgrade.sh — Containerized upgrade E2E for BOI.
 #
 # Catches the stale-symlink bug where upgrading hex doesn't rebuild the
-# binary, leaving new subcommands (e.g. `bench`) absent from the installed
-# binary.  This is the test that would have caught the 2026-04-29 session's
-# missing-`bench` incident.
+# binary, leaving the installed boi binary at the old version.  This is the
+# test that would have caught the 2026-04-29 session's stale-binary incident.
+#
+# BOI NOTE: canonical engine is mrap/boi. The v2.0.0 → v3.0.0 jump is a
+# CLI-breaking change *within* boi-v2 (v3 dropped `status`/`bench`, made
+# `daemon` a blocking foreground command, and switched specs to TOML). So the
+# post-upgrade assertions check only the v3.0.0 (HEAD-target) surface —
+# version bumped to 3.0.0, binary rebuilt (newer mtime), and the v3
+# subcommands (`daemon dispatch dashboard cancel`) present. We do NOT assert
+# the baseline's subcommands match HEAD's, since they legitimately differ.
 #
 # Flow in container:
-#   1. Clone hex-foundation; checkout v0.10.0 (BOI v1.1.0)
-#   2. Run install.sh — baseline install
+#   1. Clone hex-foundation (HEAD)
+#   2. Install with BOI pinned to the baseline version (v2.0.0)
 #   3. Capture version + help-line count + binary mtime
-#   4. Checkout HEAD (BOI from HEAD VERSIONS); re-run install.sh — upgrade
-#   5. Assert: version bumped, binary mtime newer, `bench` + others present
+#   4. Restore HEAD's BOI_VERSION (v3.0.0); re-run install.sh — upgrade
+#   5. Assert: version bumped to 3.0.0, binary mtime newer, v3 subcommands present
 #   6a. Smoke dispatch (optional, requires ANTHROPIC_API_KEY)
 #   6b. BAD case: corrupt symlink → run doctor → assert caught
 #
@@ -129,7 +136,9 @@ fi
 # HEAD's target BOI version (what a real upgrade lands on) and the older
 # baseline version we upgrade *from*.
 NEW_BOI_VERSION=$(grep "^BOI_VERSION=" VERSIONS | cut -d= -f2)
-BASELINE_BOI_VERSION="v1.1.0"
+# Baseline = the last boi-v2 tag before the v3.0.0 cutover. v2.0.0 builds with
+# the modern install.sh and reports a parseable "boi 2.0.0".
+BASELINE_BOI_VERSION="v2.0.0"
 
 # install.sh is the fresh-install entrypoint and refuses to run over an existing
 # target dir. boi_src ($HOME/github.com/mrap/boi) and the binary ($HOME/.boi)
@@ -158,7 +167,7 @@ if [ ! -x "$BOI" ]; then
 fi
 pass "baseline-binary: $BOI is executable after baseline install"
 
-BASELINE_VER=$("$BOI" version 2>&1 || echo "unknown")
+BASELINE_VER=$("$BOI" --version 2>&1 || echo "unknown")
 BASELINE_HELP_LINES=$("$BOI" --help 2>&1 | wc -l | tr -d ' ')
 BINARY_MTIME_BEFORE=$(stat -c %Y "$BOI" 2>/dev/null || echo "0")
 pass "baseline-captured: version='$BASELINE_VER', help-lines=$BASELINE_HELP_LINES, mtime=$BINARY_MTIME_BEFORE"
@@ -205,10 +214,10 @@ else
     pass "symlink-resolve: $BOI is a regular (non-symlink) executable"
 fi
 
-# 5c. boi version reflects new BOI_VERSION from VERSIONS
+# 5c. boi --version reflects new BOI_VERSION from VERSIONS
 EXPECTED_VER="$NEW_BOI_VERSION"
 EXPECTED_BARE="${EXPECTED_VER#v}"
-NEW_VER=$("$BOI" version 2>&1 || echo "unknown")
+NEW_VER=$("$BOI" --version 2>&1 || echo "unknown")
 if echo "$NEW_VER" | grep -qF "$EXPECTED_BARE"; then
     pass "version-match: '$NEW_VER' contains '$EXPECTED_BARE' (VERSIONS $EXPECTED_VER)"
 else
@@ -222,9 +231,11 @@ else
     fail "version-changed: version unchanged after upgrade ('$NEW_VER') — stale binary not rebuilt"
 fi
 
-# 5e. boi --help lists required subcommands including `bench` (the bug-to-catch)
+# 5e. boi --help lists the v3.0.0 subcommands. A stale (un-rebuilt) binary
+# would still be v2.0.0 and expose `status`/`bench` instead — so the presence
+# of the v3-only surface proves the rebuild happened.
 HELP_OUTPUT=$("$BOI" --help 2>&1)
-for sub in dispatch status bench cancel; do
+for sub in daemon dispatch dashboard cancel; do
     if echo "$HELP_OUTPUT" | grep -q "$sub"; then
         pass "subcmd-present: '$sub' in --help after upgrade"
     else
@@ -253,44 +264,55 @@ if [ -z "${ANTHROPIC_API_KEY:-}" ]; then
     echo "  (ANTHROPIC_API_KEY not set — skipping smoke dispatch)"
 else
     echo "--- 6a. smoke dispatch after upgrade ---"
-    "$BOI" daemon start > /tmp/daemon-start.log 2>&1 || true
+    # boi-v2 `daemon` blocks in the foreground; start it in the background and
+    # wait for the control socket.
+    BOI_SOCK="$HOME/.boi/v2/daemon.sock"
+    BOI_DB="$HOME/.boi/v2/boi.db"
+    "$BOI" daemon > /tmp/daemon-start.log 2>&1 &
+    DAEMON_PID=$!
 
     daemon_ready=0
     for _i in $(seq 1 20); do
-        if "$BOI" status > /dev/null 2>&1; then
+        if [ -S "$BOI_SOCK" ]; then
             daemon_ready=1; break
         fi
         sleep 0.5
     done
 
     if [ "$daemon_ready" -eq 1 ]; then
-        pass "smoke-daemon: BOI daemon ready after upgrade"
+        pass "smoke-daemon: BOI daemon socket ready after upgrade"
     else
-        fail "smoke-daemon: daemon not ready within 10s after upgrade"
+        fail "smoke-daemon: daemon socket not ready within 10s after upgrade"
         cat /tmp/daemon-start.log || true
     fi
 
     if [ "$daemon_ready" -eq 1 ]; then
         SMOKE_MARKER="/tmp/boi-upgrade-smoke-$$"
-        SMOKE_SPEC="/tmp/boi-upgrade-spec-$$.yaml"
+        SMOKE_SPEC="/tmp/boi-upgrade-spec-$$.toml"
         cat > "$SMOKE_SPEC" << SMOKESPEC
-title: "BOI upgrade smoke test"
-mode: execute
-tasks:
-  - id: U0001
-    title: "create upgrade marker"
-    spec: |
-      Create the file ${SMOKE_MARKER} with content: boi-upgrade-smoke-ok
-    verify: "test -f ${SMOKE_MARKER}"
+title = "BOI upgrade smoke test"
+
+[contract]
+scope = "Create the file ${SMOKE_MARKER} with content: boi-upgrade-smoke-ok"
+base_branch = "main"
+workspace = "/tmp/hex"
+
+[[tasks]]
+ref = "create-marker"
+behavior = "Create the file ${SMOKE_MARKER} containing the text boi-upgrade-smoke-ok"
+verifications = [
+  { name = "marker-exists", command = "test -f ${SMOKE_MARKER}" },
+]
 SMOKESPEC
         pass "smoke-spec: written"
 
-        SPEC_ID=$("$BOI" dispatch "$SMOKE_SPEC" 2>&1)
+        DISPATCH_OUT=$("$BOI" dispatch "$SMOKE_SPEC" 2>&1)
         DISPATCH_EXIT=$?
+        SPEC_ID=$(echo "$DISPATCH_OUT" | grep -oE 'S[0-9a-hjkmnp-tv-z]{8}' | head -1)
         if [ "$DISPATCH_EXIT" -eq 0 ] && [ -n "$SPEC_ID" ]; then
             pass "smoke-dispatch: spec enqueued (id: $SPEC_ID)"
         else
-            fail "smoke-dispatch: boi dispatch failed (exit $DISPATCH_EXIT)"
+            fail "smoke-dispatch: boi dispatch failed (exit $DISPATCH_EXIT, output: $DISPATCH_OUT)"
         fi
 
         if [ "$DISPATCH_EXIT" -eq 0 ] && [ -n "$SPEC_ID" ]; then
@@ -300,16 +322,14 @@ SMOKESPEC
                 ELAPSED=$(( $(date +%s) - POLL_START ))
                 if [ "$ELAPSED" -ge 120 ]; then
                     fail "smoke-poll: timed out after 120s"
-                    "$BOI" status "$SPEC_ID" 2>&1 | tail -20 || true
+                    sqlite3 "$BOI_DB" "SELECT spec_id,status FROM spec_runtime WHERE spec_id='$SPEC_ID';" 2>&1 || true
                     break
                 fi
-                STATUS_JSON=$("$BOI" status "$SPEC_ID" --json 2>/dev/null || echo '{}')
-                SPEC_STATUS=$(python3 -c \
-                    "import sys,json; print(json.load(sys.stdin).get('status',''))" \
-                    <<< "$STATUS_JSON" 2>/dev/null || echo "")
+                SPEC_STATUS=$(sqlite3 "$BOI_DB" \
+                    "SELECT status FROM spec_runtime WHERE spec_id='$SPEC_ID';" 2>/dev/null || echo "")
                 case "$SPEC_STATUS" in
-                    completed)        TERMINAL="completed"; break ;;
-                    failed|cancelled) TERMINAL="$SPEC_STATUS"; break ;;
+                    completed)       TERMINAL="completed"; break ;;
+                    failed|canceled) TERMINAL="$SPEC_STATUS"; break ;;
                 esac
                 sleep 3
             done
@@ -327,6 +347,8 @@ SMOKESPEC
             fi
         fi
     fi
+    # Stop the background daemon before the doctor case (which corrupts the binary).
+    kill "${DAEMON_PID:-0}" 2>/dev/null || true
 fi
 
 # ── 6b. BAD case: corrupt symlink → doctor must catch it ─────────────────────

@@ -118,7 +118,7 @@ Each is a TODO for a future iteration.
 
 hex-foundation is the versioned base for the hex agent system. It provides Standing Orders, skills, directory structure conventions, and upgrade tooling that agent instances inherit. To explore: `ls system/` for core hex files, `cat getting-started.md` for setup instructions. To upgrade an existing hex instance: run `hex upgrade` in the target workspace. See `architecture.md` for design rationale.
 
-**Related repos:** [`github.com/mrap/boi`](https://github.com/mrap/boi) (delegation engine — dispatches multi-step tasks as spec files; see its `AGENTS.md` for internals), `~/hex` (your hex workspace built on this foundation — where your agent instance lives).
+**Related repos:** [`github.com/mrap/boi`](https://github.com/mrap/boi) (delegation engine — dispatches multi-step tasks as TOML spec files; see its `AGENTS.md` for internals), `~/hex` (your hex workspace built on this foundation — where your agent instance lives).
 
 ---
 
