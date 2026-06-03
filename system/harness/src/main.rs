@@ -59,12 +59,6 @@ enum Commands {
         #[command(subcommand)]
         command: env::EnvCommands,
     },
-    /// Learnings analysis and promotion (port of system/scripts/promote-learnings.py)
-    #[command(display_order = 29)]
-    Learnings {
-        #[command(subcommand)]
-        command: LearningsCommands,
-    },
     /// Upgrade hex installation (port of system/scripts/upgrade.sh)
     #[command(display_order = 14)]
     Upgrade {
@@ -91,12 +85,6 @@ enum Commands {
     Hook {
         #[command(subcommand)]
         command: hook::HookCommands,
-    },
-    /// Unified consolidation (structural + memory + operating-model audit)
-    #[command(display_order = 6)]
-    Consolidate {
-        #[command(subcommand)]
-        command: ConsolidateCommands,
     },
     /// Print version
     #[command(display_order = 15)]
@@ -197,20 +185,18 @@ enum IntegrationCommands {
 
 #[derive(Subcommand)]
 enum MemoryCommands {
-    /// Query behavioral memory for relevant corrections
-    CheckBehavior { query: String },
-    /// Store a behavioral correction
-    Store {
-        text: String,
-        #[arg(long)]
-        rule: Option<String>,
-        #[arg(long)]
-        session: Option<String>,
-    },
-    /// Bootstrap memory from feedback files
-    Bootstrap,
-    /// Show memory health stats
+    /// Show memory database health/stats (alias for `stats`)
     Health,
+    /// Learnings analysis and promotion (port of system/scripts/promote-learnings.py)
+    Learnings {
+        #[command(subcommand)]
+        command: LearningsCommands,
+    },
+    /// Unified consolidation (structural + memory + operating-model audit)
+    Consolidate {
+        #[command(subcommand)]
+        command: ConsolidateCommands,
+    },
     /// Search indexed memory files
     Search {
         query: String,
@@ -722,33 +708,22 @@ fn main() {
                 MemoryCommands::CheckReflectionLiveness => {
                     check_reflection_liveness(&hex_dir)
                 }
-                _ => {
-                    let hex_memory = hex_dir.join(".hex/scripts/bin/hex-memory");
-                    let mut cmd = std::process::Command::new("bash");
-                    cmd.arg(&hex_memory);
-                    match &command {
-                        MemoryCommands::CheckBehavior { query } => {
-                            cmd.arg("check-behavior").arg(query);
-                        }
-                        MemoryCommands::Store { text, rule, session } => {
-                            cmd.arg("store").arg(text);
-                            if let Some(r) = rule {
-                                cmd.arg("--rule").arg(r);
-                            }
-                            if let Some(s) = session {
-                                cmd.arg("--session").arg(s);
-                            }
-                        }
-                        MemoryCommands::Bootstrap => {
-                            cmd.arg("bootstrap");
-                        }
-                        MemoryCommands::Health => {
-                            cmd.arg("health");
-                        }
-                        _ => unreachable!(),
+                MemoryCommands::Health => {
+                    // `health` is a thin alias for the native memory DB stats path.
+                    memory::stats::run(&hex_dir, false)
+                }
+                MemoryCommands::Learnings { command } => match command {
+                    LearningsCommands::Promote { dry_run } => {
+                        learnings::run_promote(&hex_dir, *dry_run);
+                        0
                     }
-                    cmd.env("HEX_DIR", &hex_dir);
-                    cmd.status().map(|s| s.code().unwrap_or(1)).unwrap_or(1)
+                },
+                MemoryCommands::Consolidate { command } => {
+                    let mode = match command {
+                        ConsolidateCommands::Quick => consolidate::Mode::Quick,
+                        ConsolidateCommands::Full => consolidate::Mode::Full,
+                    };
+                    consolidate::run(mode, &hex_dir)
                 }
             };
             std::process::exit(exit_code);
@@ -821,12 +796,6 @@ fn main() {
             }
         },
         Commands::Env { command } => env::run_env_command(command),
-        Commands::Learnings { command } => {
-            let hex_dir = get_hex_dir();
-            match command {
-                LearningsCommands::Promote { dry_run } => learnings::run_promote(&hex_dir, dry_run),
-            }
-        }
         Commands::Upgrade { args } => {
             std::process::exit(upgrade::run(&args));
         }
@@ -837,14 +806,6 @@ fn main() {
             std::process::exit(code);
         }
         Commands::Hook { command } => hook::run(command),
-        Commands::Consolidate { command } => {
-            let hex_dir = get_hex_dir();
-            let mode = match command {
-                ConsolidateCommands::Quick => consolidate::Mode::Quick,
-                ConsolidateCommands::Full => consolidate::Mode::Full,
-            };
-            std::process::exit(consolidate::run(mode, &hex_dir));
-        }
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }

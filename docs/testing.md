@@ -141,7 +141,7 @@ bash tests/eval/run_eval_macos.sh
 ## Shipped skills (as of v0.2.4)
 
 The 10 skills installed under `.hex/skills/` (verified by `test_skill_discovery.sh`).
-Note: `hex-consolidate` was removed in favor of the `hex consolidate full|quick`
+Note: `hex-consolidate` was removed in favor of the `hex memory consolidate full|quick`
 binary subcommand (the single consolidate surface — see `architecture.md`).
 
 1. `hex-startup`

@@ -25,7 +25,9 @@ fn consolidate_writes_log_and_does_not_panic() {
     let bin = env!("CARGO_BIN_EXE_hex");
 
     let output = Command::new(bin)
-        .args(["doctor", "consolidate"])
+        // Layer 1 (structural) runs as part of the unified `hex memory consolidate`
+        // orchestrator; `quick` keeps it deterministic with no LLM/network.
+        .args(["memory", "consolidate", "quick"])
         .env("HEX_DIR", hex_dir.path())
         .output()
         .expect("hex binary must run");

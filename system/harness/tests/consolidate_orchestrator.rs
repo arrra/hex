@@ -1,4 +1,4 @@
-// Red test for task Tx8a72zfh: top-level `hex consolidate` orchestrator
+// Red test for task Tx8a72zfh: `hex memory consolidate` orchestrator
 // with `full` and `quick` subcommands.
 //
 // Quick mode must run Layer 1 (doctor::consolidate) + Layer 2 (memory::consolidate)
@@ -34,13 +34,13 @@ fn build_fake_hex_dir() -> TempDir {
 fn consolidate_help_lists_full_and_quick_modes() {
     let bin = env!("CARGO_BIN_EXE_hex");
     let output = Command::new(bin)
-        .args(["consolidate", "--help"])
+        .args(["memory", "consolidate", "--help"])
         .output()
         .expect("hex binary must run");
 
     assert!(
         output.status.success(),
-        "`hex consolidate --help` must succeed; stderr: {}",
+        "`hex memory consolidate --help` must succeed; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
     let help = String::from_utf8_lossy(&output.stdout).to_lowercase();
@@ -54,7 +54,7 @@ fn consolidate_quick_runs_deterministically_with_no_network() {
     let bin = env!("CARGO_BIN_EXE_hex");
 
     let output = Command::new(bin)
-        .args(["consolidate", "quick"])
+        .args(["memory", "consolidate", "quick"])
         .env("HEX_DIR", hex_dir.path())
         // Force any accidental provider call to fail loudly — quick must not need it.
         .env_remove("OPENROUTER_API_KEY")
@@ -64,7 +64,7 @@ fn consolidate_quick_runs_deterministically_with_no_network() {
     let code = output.status.code().unwrap_or(2);
     assert!(
         code == 0 || code == 1,
-        "unexpected exit code {code} from `hex consolidate quick`; stderr: {}",
+        "unexpected exit code {code} from `hex memory consolidate quick`; stderr: {}",
         String::from_utf8_lossy(&output.stderr)
     );
 

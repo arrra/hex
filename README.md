@@ -81,7 +81,7 @@ Companion systems installed alongside:
 
 ## Core ideas
 
-**Persistent memory.** Every observation, decision, and learning gets written to a file — not summarized into a chat bubble that disappears. A SQLite FTS5 index at `.hex/memory.db` makes all of it searchable. With `fastembed` + `sqlite-vec` installed, the indexer upgrades to hybrid semantic + keyword search automatically; FTS5-only is the default when those libraries aren't present. A distill pipeline (`hex memory distill`) extracts structured facts from session transcripts using a two-phase LLM process (extract → judge), and a nightly consolidate pass (`hex consolidate quick`) prunes contradictions, staleness, and orphaned references automatically (use `hex consolidate full` for the LLM-assisted operating-model audit).
+**Persistent memory.** Every observation, decision, and learning gets written to a file — not summarized into a chat bubble that disappears. A SQLite FTS5 index at `.hex/memory.db` makes all of it searchable. With `fastembed` + `sqlite-vec` installed, the indexer upgrades to hybrid semantic + keyword search automatically; FTS5-only is the default when those libraries aren't present. A distill pipeline (`hex memory distill`) extracts structured facts from session transcripts using a two-phase LLM process (extract → judge), and a nightly consolidate pass (`hex memory consolidate quick`) prunes contradictions, staleness, and orphaned references automatically (use `hex memory consolidate full` for the LLM-assisted operating-model audit).
 
 **Operating model.** `CLAUDE.md` ships with 20 core standing orders, a learning engine that records observations to `me/learnings.md` with evidence and dates, and an improvement engine that detects friction, proposes fixes after 3+ occurrences, and tracks what ships.
 
@@ -115,7 +115,7 @@ These are Claude Code slash commands, not shell CLIs. Use them inside a `claude`
 | `/hex-debrief` | Weekly walk-through of projects, org signals, relationships, career. |
 | `/hex-decide` | Structured decision framework — context, options, reasoning, impact. |
 | `/hex-triage` | Route untriaged content from `raw/` to the right files. |
-| `/hex-doctor` | Health check. 20-point validation across env, memory, structure, config, and companions. Use `--fix` to repair auto-fixable issues, `--json` for machine-readable output. For the unified consolidate pass (structural + memory DB + optional LLM operating-model audit), use `hex consolidate quick` or `hex consolidate full`. |
+| `/hex-doctor` | Health check. 20-point validation across env, memory, structure, config, and companions. Use `--fix` to repair auto-fixable issues, `--json` for machine-readable output. For the unified consolidate pass (structural + memory DB + optional LLM operating-model audit), use `hex memory consolidate quick` or `hex memory consolidate full`. |
 | `/hex-upgrade` | Pull latest system files from hex-foundation. Handles v1→v2 layout migration. Runs doctor after. |
 
 ---
@@ -198,7 +198,7 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 - **Asset registry** (`hex asset`) — unified `{type}:{id}` namespace for all hex artifacts
 - **Message routing** (`hex message`) — unified messaging: comments, agent messages, notifications
 - **System health** (`hex doctor`) — 55+ checks across env, memory, structure, config, companions
-- **Consolidate** (`hex consolidate full|quick`) — single unified consolidate command. `quick` runs Layers 1+2 (structural sweep + memory DB pass) deterministically with no LLM; `full` adds Layer 3, the LLM-assisted operating-model audit (writes `evolution/consolidation-audit-YYYY-MM-DD.md`; never auto-edits CLAUDE.md or me/learnings.md). Replaces the old `/hex-consolidate` skill and the standalone `hex memory consolidate` / `hex doctor consolidate` subcommands.
+- **Consolidate** (`hex memory consolidate full|quick`) — single unified consolidate command. `quick` runs Layers 1+2 (structural sweep + memory DB pass) deterministically with no LLM; `full` adds Layer 3, the LLM-assisted operating-model audit (writes `evolution/consolidation-audit-YYYY-MM-DD.md`; never auto-edits CLAUDE.md or me/learnings.md). Nests under `hex memory` (its original design home); replaces the old `/hex-consolidate` skill and the former top-level `hex consolidate` / `hex doctor consolidate` surfaces.
 - **Integration lifecycle** (`hex integration`) — native Rust integration bundle management
 - **Capability system** — agents register executable functions (`capability_add`) and invoke them (`capability_call`) from trail entries. A static security guard hard-denies network egress, secrets access, `rm -rf`, and pipe-to-shell before any script is persisted. Capabilities are write-once (immutable after registration), scoped to an allowlist of pilot agents, and sandboxed with per-wake call caps, wall-clock timeouts, and output byte limits.
 
@@ -225,7 +225,7 @@ hex upgrade      — upgrade hex installation (port of upgrade.sh)
 hex capture      — zero-friction context capture
 hex synthesis    — weekly and on-demand synthesis pipeline
 hex initiative   — initiative CRUD
-hex learnings    — learnings analysis and promotion
+hex memory learnings — learnings analysis and promotion
 hex route        — message routing and comment classification
 hex validate     — BOI spec, extension, and E2E guard validation
 hex telemetry    — telemetry file rotation and management
