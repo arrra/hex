@@ -325,7 +325,8 @@ fn get_source_dir(args: &Args, hex_dir: &Path) -> Result<PathBuf, String> {
 
     let cache_dir = hex_dir.join(".hex/.upgrade-cache");
 
-    if cache_dir.join(".git").exists() {
+    let mut cached = false;
+    if cache_is_healthy(&cache_dir) {
         println!("  → Pulling latest from {repo_url}");
         let result = Command::new("git")
             .arg("-C")
@@ -340,24 +341,21 @@ fn get_source_dir(args: &Args, hex_dir: &Path) -> Result<PathBuf, String> {
                 } else {
                     print!("  → {msg}");
                 }
+                cached = true;
             }
             _ => {
                 println!("  [WARN] Fast-forward pull failed. Re-cloning.");
-                let _ = fs::remove_dir_all(&cache_dir);
             }
         }
     }
 
-    if !cache_dir.join(".git").exists() {
-        println!("  → Cloning {repo_url}");
-        let status = Command::new("git")
-            .args(["clone", "--depth", "1", &repo_url])
-            .arg(&cache_dir)
-            .status()
-            .map_err(|e| format!("git clone failed: {e}"))?;
-        if !status.success() {
-            return Err(format!("git clone of {repo_url} failed"));
-        }
+    if !cached {
+        // The cache is missing, corrupt, or stale. Clear whatever is there so
+        // the clone has a free path, then clone into a temp dir outside
+        // ~/hex/.hex (where macOS blocks git's own `.git` writes) and move it
+        // into place — directory moves into that path are permitted.
+        clear_cache_dir(&cache_dir)?;
+        clone_into_cache(&repo_url, &cache_dir)?;
         let layout = path_map::detect_layout(cache_dir.to_str().unwrap_or(""));
         if layout == "unknown" {
             return Err("Clone succeeded but no recognized hex layout found. Wrong repo?".to_string());
@@ -366,6 +364,118 @@ fn get_source_dir(args: &Args, hex_dir: &Path) -> Result<PathBuf, String> {
 
     println!("  [OK] Source ready");
     Ok(cache_dir)
+}
+
+/// A cache is healthy iff it owns its own git directory — i.e.
+/// `git -C <cache_dir> rev-parse --absolute-git-dir` succeeds AND resolves to
+/// `<cache_dir>/.git`. A bare-existence `.git` check is not enough: a corrupt
+/// partial clone (a `.git/` with no HEAD/objects/refs) makes git resolve up the
+/// directory tree to a parent repo, so pulls silently operate on the wrong repo.
+fn cache_is_healthy(cache_dir: &Path) -> bool {
+    let out = match Command::new("git")
+        .arg("-C")
+        .arg(cache_dir)
+        .args(["rev-parse", "--absolute-git-dir"])
+        .output()
+    {
+        Ok(out) if out.status.success() => out,
+        _ => return false,
+    };
+    let reported = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    let reported = match fs::canonicalize(&reported) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    let expected = match fs::canonicalize(cache_dir.join(".git")) {
+        Ok(p) => p,
+        Err(_) => return false,
+    };
+    reported == expected
+}
+
+/// Remove an unhealthy/corrupt cache robustly. Prefer `remove_dir_all`; if that
+/// fails (macOS blocks deleting protected `.git` files under ~/hex/.hex), move
+/// it aside to a unique sibling so the cache path is free. Loud `Err` if neither
+/// works — never silently proceed onto a still-occupied path.
+fn clear_cache_dir(cache_dir: &Path) -> Result<(), String> {
+    if !cache_dir.exists() {
+        return Ok(());
+    }
+    if fs::remove_dir_all(cache_dir).is_ok() {
+        return Ok(());
+    }
+    for n in 0..1000 {
+        let aside = cache_dir.with_extension(format!("corrupt-{n}"));
+        if aside.exists() {
+            continue;
+        }
+        match fs::rename(cache_dir, &aside) {
+            Ok(()) => {
+                println!("  [WARN] Could not delete corrupt cache; moved aside to {}", aside.display());
+                return Ok(());
+            }
+            Err(_) => continue,
+        }
+    }
+    Err(format!(
+        "Could not clear corrupt cache at {} (remove and move-aside both failed)",
+        cache_dir.display()
+    ))
+}
+
+/// Clone into a temp dir under the system temp (where git can write `.git`),
+/// then move it into `cache_dir`. The whole-directory move into ~/hex/.hex is
+/// permitted even though git's own `.git` writes there are not. Falls back to
+/// `mv` on a cross-device rename (temp on a different volume). The temp dir is
+/// cleaned up on any failure.
+fn clone_into_cache(repo_url: &str, cache_dir: &Path) -> Result<(), String> {
+    println!("  → Cloning {repo_url}");
+
+    let unique = format!(
+        "hex-upgrade-cache-{}-{}",
+        std::process::id(),
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_nanos())
+            .unwrap_or(0)
+    );
+    let tmp = std::env::temp_dir().join(unique);
+
+    let status = Command::new("git")
+        .args(["clone", "--depth", "1", repo_url])
+        .arg(&tmp)
+        .status()
+        .map_err(|e| format!("git clone failed: {e}"))?;
+    if !status.success() {
+        let _ = fs::remove_dir_all(&tmp);
+        return Err(format!("git clone of {repo_url} failed"));
+    }
+
+    if let Some(parent) = cache_dir.parent() {
+        let _ = fs::create_dir_all(parent);
+    }
+
+    match fs::rename(&tmp, cache_dir) {
+        Ok(()) => Ok(()),
+        Err(rename_err) => {
+            // Cross-device (EXDEV) rename can't move across volumes — shell out
+            // to `mv`, which falls back to copy+remove.
+            let moved = Command::new("mv")
+                .arg(&tmp)
+                .arg(cache_dir)
+                .status();
+            match moved {
+                Ok(s) if s.success() => Ok(()),
+                _ => {
+                    let _ = fs::remove_dir_all(&tmp);
+                    Err(format!(
+                        "Could not move clone into place at {} ({rename_err})",
+                        cache_dir.display()
+                    ))
+                }
+            }
+        }
+    }
 }
 
 fn load_config_repo(config_file: &Path) -> Option<String> {
@@ -1163,5 +1273,41 @@ mod tests {
         // With marker: personal build should be triggered
         write_file(&marker, "// personal overlay release commands");
         assert!(marker.exists(), "marker must exist after write");
+    }
+
+    /// Cache health check: a real `git init` repo is healthy; a headless `.git`
+    /// shell (only config, no HEAD/objects) is NOT (git would resolve up-tree);
+    /// a missing dir is NOT. No network — uses a local `git init`.
+    #[test]
+    fn test_cache_is_healthy() {
+        let tmp = tempfile::tempdir().unwrap();
+
+        // Missing dir → unhealthy.
+        let missing = tmp.path().join("missing");
+        assert!(!cache_is_healthy(&missing));
+
+        // Real repo → healthy.
+        let good = tmp.path().join("good");
+        fs::create_dir_all(&good).unwrap();
+        let init = Command::new("git")
+            .arg("-C")
+            .arg(&good)
+            .args(["init", "-q"])
+            .status();
+        // Skip the healthy assertion if git is unavailable in the test env.
+        if matches!(init, Ok(s) if s.success()) {
+            assert!(cache_is_healthy(&good), "a real git init repo must be healthy");
+        }
+
+        // Headless .git shell (config + hook samples only, no HEAD) → unhealthy.
+        // Nest it inside `good` so any up-tree resolution would find good/.git
+        // and wrongly pass a naive existence check.
+        let corrupt = good.join("corrupt");
+        write_file(&corrupt.join(".git/config"), "[core]\n");
+        write_file(&corrupt.join(".git/hooks/pre-commit.sample"), "#!/bin/sh\n");
+        assert!(
+            !cache_is_healthy(&corrupt),
+            "a headless .git shell must be unhealthy (must not resolve up-tree)"
+        );
     }
 }
