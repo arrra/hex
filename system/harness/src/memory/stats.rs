@@ -83,9 +83,18 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
 
     let db_size_bytes = db_path.metadata().map(|m| m.len()).unwrap_or(0);
 
+    // `hex memory consolidate` stamps this key on every run (see
+    // memory::consolidate::stamp_last_consolidated). The old query read
+    // `MAX(last_consolidated) FROM topics`, but topic-rollup is a no-op and the
+    // topics table stays empty — so it printed "never" no matter how many
+    // consolidations ran. Read the metadata key the consolidator actually writes.
     let last_consolidated: Option<String> = conn
-        .query_row("SELECT MAX(last_consolidated) FROM topics", [], |r| r.get(0))
-        .unwrap_or(None);
+        .query_row(
+            "SELECT value FROM metadata WHERE key = 'last_consolidated'",
+            [],
+            |r| r.get(0),
+        )
+        .ok();
 
     let schema_version: Option<i64> = conn
         .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
@@ -233,6 +242,38 @@ mod tests {
         print_table(&report);
         // schema_version is set by apply_plan2
         assert_eq!(report.schema_version, Some(4));
+    }
+
+    #[test]
+    fn stats_reads_last_consolidated_from_metadata() {
+        // Regression: stats must read the metadata key the consolidator writes,
+        // not MAX(last_consolidated) FROM topics (which is always empty → "never").
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        std::fs::create_dir_all(hex_root.join(".hex")).unwrap();
+
+        let db_path = super::super::db_path(hex_root);
+        let conn = super::super::open_db(&db_path).unwrap();
+        seed_db(&conn).unwrap();
+
+        // No stamp yet → "never".
+        let report = gather(&conn, &db_path).unwrap();
+        assert!(report.last_consolidated.is_none(), "should be unset before a run");
+
+        // Simulate what memory::consolidate stamps.
+        conn.execute_batch(
+            "CREATE TABLE IF NOT EXISTS metadata (key TEXT PRIMARY KEY, value TEXT NOT NULL);
+             INSERT OR REPLACE INTO metadata (key, value) \
+             VALUES ('last_consolidated', '2026-06-03T00:00:00-04:00');",
+        )
+        .unwrap();
+
+        let report = gather(&conn, &db_path).unwrap();
+        assert_eq!(
+            report.last_consolidated.as_deref(),
+            Some("2026-06-03T00:00:00-04:00"),
+            "stats must surface the stamped last_consolidated value"
+        );
     }
 
     #[test]
