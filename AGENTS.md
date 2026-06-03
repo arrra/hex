@@ -483,6 +483,17 @@ hex memory index --stats           # Show stats
 
 **Rule:** Search memory before guessing. Don't rely on what's in the current context window.
 
+### Consolidate (single command, two modes)
+```bash
+hex consolidate quick   # Layers 1+2: structural sweep + memory DB pass. Deterministic, no LLM, safe for nightly/unattended runs.
+hex consolidate full    # Layers 1+2+3: adds operating-model audit (LLM-assisted). Writes evolution/consolidation-audit-YYYY-MM-DD.md for human review — never auto-edits CLAUDE.md or me/learnings.md.
+```
+
+`hex consolidate` is the ONLY way to consolidate. The old `/hex-consolidate`
+skill and the standalone `hex memory consolidate` / `hex doctor consolidate`
+subcommands have been removed (see
+`me/decisions/consolidate-single-command-2026-06-02.md`).
+
 ---
 
 ## Context Management
