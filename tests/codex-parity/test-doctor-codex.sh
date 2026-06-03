@@ -75,18 +75,20 @@ else
     fi
 fi
 
-echo "[2] hex doctor check-codex subcommand exists"
+echo "[2] codex checks present in hex doctor run (--filter codex)"
 TOTAL=$((TOTAL + 1))
-CODEX_OUT=$(hex doctor check-codex 2>&1 || true)
+# `hex doctor check-codex` was removed — its 5 checks are registered in the
+# unified doctor framework; `run --filter codex` is the superset entrypoint.
+CODEX_OUT=$(hex doctor run --filter codex 2>&1 || true)
 if [ -n "$CODEX_OUT" ]; then
-    echo "  PASS: hex doctor check-codex runs and produces output"
+    echo "  PASS: hex doctor run --filter codex runs and produces output"
     PASS=$((PASS + 1))
 else
-    echo "  FAIL: hex doctor check-codex produced no output"
+    echo "  FAIL: hex doctor run --filter codex produced no output"
     FAIL=$((FAIL + 1))
 fi
 
-echo "[3] check-codex covers required health areas"
+echo "[3] codex checks cover required health areas"
 
 TOTAL=$((TOTAL + 1))
 if echo "$CODEX_OUT" | grep -qi "codex.*path\|cli-on-path\|found at\|not found"; then

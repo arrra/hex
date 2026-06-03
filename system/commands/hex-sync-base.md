@@ -65,15 +65,14 @@ Path map by layout:
 | `.hex/hooks/` | `dot-claude/hooks/` | `system/hooks/` (if present) |
 | `CLAUDE.md` | `CLAUDE.md` | `templates/CLAUDE.md` |
 
-Use `hex path-map` subcommands for programmatic access:
-- `hex path-map v1-to-v2 <path>` → translates v1 path to v2
-- `hex path-map v2-to-v1 <path>` → translates v2 path to v1
-- `hex path-map detect-layout <root>` → returns "v1" or "v2"
-
-Run layout detection first:
+Detect the upstream layout inline (the `system/` dir marks the v2 foundation layout;
+`dot-claude/` marks the legacy v1 layout):
 ```bash
-LAYOUT=$(hex path-map detect-layout "$BASE_DIR")
+if [ -d "$BASE_DIR/system" ]; then LAYOUT=v2
+elif [ -d "$BASE_DIR/dot-claude" ]; then LAYOUT=v1
+else LAYOUT=unknown; fi
 ```
+Then translate paths using the mapping table above.
 
 ## Guards
 

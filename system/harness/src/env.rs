@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
 pub enum EnvCommands {
-    /// Detect HEX_DIR using env > AGENT_DIR > parent-of-script precedence
-    #[command(name = "detect-hex-dir")]
+    /// Detect HEX_DIR using env > AGENT_DIR > parent-of-script precedence.
+    /// Internal: diagnostic; env.sh bootstraps HEX_DIR inline (can't call the
+    /// binary before PATH exists).
+    #[command(name = "detect-hex-dir", hide = true)]
     DetectHexDir {
         /// Path to env.sh for auto-detection (env.sh lives at $HEX_DIR/.hex/scripts/env.sh)
         #[arg(long)]
@@ -22,7 +24,9 @@ pub enum EnvCommands {
         #[arg(long)]
         hex_dir: Option<PathBuf>,
     },
-    /// Pretty-print all env values for diagnostics
+    /// Pretty-print all env values for diagnostics.
+    /// Internal: diagnostic only, no scripted callers.
+    #[command(hide = true)]
     Show {
         /// Override HEX_DIR
         #[arg(long)]

@@ -59,10 +59,10 @@ enum Commands {
         #[command(subcommand)]
         command: env::EnvCommands,
     },
-    /// Upgrade hex installation (port of system/scripts/upgrade.sh)
+    /// Upgrade hex installation (native git pull + cargo build + codesign + atomic swap)
     #[command(display_order = 14)]
     Upgrade {
-        /// Extra arguments forwarded to upgrade.sh
+        /// Extra arguments forwarded to the upgrade flow (e.g. --local <path>)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
@@ -163,20 +163,10 @@ enum IntegrationCommands {
         #[arg(long, default_value = "all")]
         tier: String,
     },
-    /// Post weekly integrations summary to #integrations (port of integrations-digest.sh)
-    Digest,
-    /// Run one integration sub-check, update state, emit events (port of hex-integration-check.sh)
-    #[command(name = "run-check")]
-    RunCheck {
-        /// Integration name to check
-        name: String,
-    },
 }
 
 #[derive(Subcommand)]
 enum MemoryCommands {
-    /// Show memory database health/stats (alias for `stats`)
-    Health,
     /// Unified consolidation (structural + memory + learnings promotion + operating-model audit)
     Consolidate {
         #[command(subcommand)]
@@ -218,23 +208,18 @@ enum MemoryCommands {
         #[arg(long)]
         force: bool,
     },
-    /// Retrieve workspace memory relevant to a query (FTS5 contextual recall)
+    /// Retrieve workspace memory relevant to a query (FTS5 contextual recall).
+    /// Internal: invoked by the memory-injection hook / BOI consumers, not humans.
+    #[command(hide = true)]
     Recall {
         query: String,
         /// Apply the private filter (for BOI worker consumers)
         #[arg(long)]
         agent: bool,
     },
-    /// Run the memory smoke-eval + consumption-rate check (nightly)
-    Eval {
-        /// Print only the 7-day consumption rate (decimal) and exit 0.
-        #[arg(long = "rate-only")]
-        rate_only: bool,
-    },
-    /// Check LLM provider reachability (exits 0 ok, 2 deferred, 3 upstream)
-    #[command(name = "llm-check")]
-    LlmCheck,
-    /// Distill facts from a file into the memory facts layer
+    /// Distill facts from a file into the memory facts layer.
+    /// Internal: pipeline plumbing, not a human-facing command.
+    #[command(hide = true)]
     Distill {
         /// Path to the file to distill
         path: PathBuf,
@@ -245,12 +230,6 @@ enum MemoryCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Verify sqlite-vec is loadable and memory.db has indexed vectors
-    #[command(name = "check-vector-search")]
-    CheckVectorSearch,
-    /// Check daily reflection log freshness (evolution/reflection-log.md)
-    #[command(name = "check-reflection-liveness")]
-    CheckReflectionLiveness,
 }
 
 #[derive(Subcommand)]
@@ -277,7 +256,9 @@ enum SessionCommands {
         /// Session ID to deregister (from startup output); omit to get manual instructions
         session_id: Option<String>,
     },
-    /// Post-session reflection: update reflection-log.md and persist eval_records to memory.db
+    /// Post-session reflection: update reflection-log.md and persist eval_records to memory.db.
+    /// Internal: invoked by the Stop hook + checkpoint; the AI reflection is the /hex-reflect skill.
+    #[command(hide = true)]
     Reflect {
         /// Session identifier to record in the reflection log
         #[arg(long)]
@@ -306,31 +287,6 @@ enum DoctorCommands {
     },
     /// List all registered checks
     List,
-    /// Check Codex CLI + config health (port of doctor-checks/codex.sh)
-    #[command(name = "check-codex")]
-    CheckCodex,
-    /// Gaming detector for BOI initiative loop specs (port of quality-check.py)
-    #[command(name = "quality-check")]
-    QualityCheck {
-        /// Check a specific spec by ID
-        #[arg(long)]
-        spec: Option<String>,
-        /// Sweep all open specs
-        #[arg(long)]
-        sweep: bool,
-        /// Check a specific KR path
-        #[arg(long)]
-        kr: Option<String>,
-    },
-    /// Nightly system health audit via claude -p (port of system-introspection.sh)
-    Introspect,
-    /// Delete Claude project .jsonl files older than N days (port of cleanup-project-jsonl.sh)
-    #[command(name = "cleanup-projects")]
-    CleanupProjects {
-        /// Retention period in days (default 30)
-        #[arg(default_value = "30")]
-        days: u32,
-    },
     /// Scan for stale dependency-blocked items (port of stale_deps.py)
     #[command(name = "stale-deps")]
     StaleDeps {
@@ -341,121 +297,6 @@ enum DoctorCommands {
         #[arg(long)]
         json: bool,
     },
-    /// Detect three-strike failure patterns in the BOI queue (port of detect-failure-pattern.py)
-    #[command(name = "detect-failure-pattern")]
-    DetectFailurePattern {
-        /// Lookback window in seconds
-        #[arg(long, default_value = "86400")]
-        window: u64,
-        /// Optional spec ID to scope the pattern check
-        spec_id: Option<String>,
-    },
-}
-
-/// Native implementation of the former health/check-vector-search.sh.
-/// Opens memory.db via open_db (which loads sqlite-vec), then counts vec_chunks rows.
-/// Exit 0 if loadable AND count > 0; exit 1 with stderr message otherwise.
-fn check_vector_search(hex_dir: &std::path::Path) -> i32 {
-    let db_path = memory::db_path(hex_dir);
-    if !db_path.exists() {
-        eprintln!(
-            "check-vector-search: FAIL — memory.db not found at {}",
-            db_path.display()
-        );
-        return 1;
-    }
-    let conn = match memory::open_db(&db_path) {
-        Ok(c) => c,
-        Err(e) => {
-            eprintln!("check-vector-search: FAIL — cannot open memory.db: {e}");
-            return 1;
-        }
-    };
-    // open_db already called register_sqlite_vec(); if vec0 isn't available the
-    // COUNT query will fail with "no such module: vec0" or "no such table".
-    match conn.query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get::<_, i64>(0)) {
-        Ok(0) => {
-            eprintln!("check-vector-search: FAIL — vec_chunks is empty (no vectors indexed). Run `hex memory index --full`.");
-            1
-        }
-        Ok(n) => {
-            println!("check-vector-search: ok — {n} vectors in vec_chunks");
-            0
-        }
-        Err(e) => {
-            let msg = e.to_string();
-            if msg.contains("no such module") {
-                eprintln!("check-vector-search: FAIL — sqlite-vec extension not loadable: {msg}");
-            } else if msg.contains("no such table") {
-                eprintln!("check-vector-search: FAIL — vec_chunks table missing. Run `hex memory index --full`.");
-            } else {
-                eprintln!("check-vector-search: FAIL — sqlite error: {msg}");
-            }
-            1
-        }
-    }
-}
-
-/// Native implementation of the former health/check-reflection-liveness.sh.
-/// Checks that evolution/reflection-log.md was modified within the last 48 hours.
-/// Exit 0 if fresh; exit 1 with a clear stderr message if stale or missing.
-/// (48h threshold: a session that ran yesterday should have a reflection entry.)
-fn check_reflection_liveness(hex_dir: &std::path::Path) -> i32 {
-    let log_path = hex_dir.join("evolution/reflection-log.md");
-    if !log_path.exists() {
-        eprintln!(
-            "check-reflection-liveness: FAIL — reflection-log.md not found at {}. Run `hex session reflect` after a session.",
-            log_path.display()
-        );
-        return 1;
-    }
-    match std::fs::metadata(&log_path).and_then(|m| m.modified()) {
-        Ok(modified) => {
-            let elapsed = modified.elapsed().unwrap_or(std::time::Duration::MAX);
-            let threshold = std::time::Duration::from_secs(48 * 3600);
-            if elapsed > threshold {
-                let hours = elapsed.as_secs() / 3600;
-                eprintln!(
-                    "check-reflection-liveness: FAIL — reflection-log.md last updated {hours}h ago (threshold: 48h). Run `hex session reflect`."
-                );
-                1
-            } else {
-                let hours = elapsed.as_secs() / 3600;
-                println!("check-reflection-liveness: ok — reflection-log.md updated {hours}h ago");
-                0
-            }
-        }
-        Err(e) => {
-            eprintln!("check-reflection-liveness: FAIL — cannot read mtime of reflection-log.md: {e}");
-            1
-        }
-    }
-}
-
-/// Parse a single top-level `key: value` from raw YAML text (no nesting).
-/// Run a shell or Python script, streaming stdout/stderr, return exit code.
-fn exec_script(script: &Path, args: &[&str]) -> i32 {
-    if !script.exists() {
-        eprintln!("ERROR: script not found: {}", script.display());
-        return 1;
-    }
-    let ext = script.extension().and_then(|e| e.to_str()).unwrap_or("");
-    let mut cmd = if ext == "py" {
-        let mut c = std::process::Command::new("python3");
-        c.arg(script);
-        c
-    } else {
-        let mut c = std::process::Command::new("bash");
-        c.arg(script);
-        c
-    };
-    for a in args { cmd.arg(a); }
-    cmd.stdout(std::process::Stdio::inherit());
-    cmd.stderr(std::process::Stdio::inherit());
-    match cmd.status() {
-        Ok(s) => s.code().unwrap_or(1),
-        Err(e) => { eprintln!("ERROR: failed to exec {}: {e}", script.display()); 1 }
-    }
 }
 
 fn get_hex_dir() -> PathBuf {
@@ -531,16 +372,6 @@ fn main() {
                 let code = integration_check_all::run(&hex_dir, tier);
                 std::process::exit(code);
             }
-            if let IntegrationCommands::Digest = command {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/integrations-digest.sh");
-                std::process::exit(exec_script(&script, &[]));
-            }
-            if let IntegrationCommands::RunCheck { ref name } = command {
-                let hex_dir = get_hex_dir();
-                let script = hex_dir.join("system/scripts/hex-integration-check.sh");
-                std::process::exit(exec_script(&script, &[name]));
-            }
             // Native Rust ports of Python integration commands
             if let IntegrationCommands::List = command {
                 let hex_dir = get_hex_dir();
@@ -595,8 +426,6 @@ fn main() {
                 #[cfg(feature = "personal")]
                 IntegrationCommands::GranolaMcp => unreachable!(),
                 IntegrationCommands::CheckAll { .. } => unreachable!(),
-                IntegrationCommands::Digest => unreachable!(),
-                IntegrationCommands::RunCheck { .. } => unreachable!(),
             };
             let mut cmd = std::process::Command::new("bash");
             cmd.arg(&script).arg(subcmd);
@@ -639,26 +468,6 @@ fn main() {
                 MemoryCommands::Recall { query, agent } => {
                     memory::recall::run(&hex_dir, query, *agent)
                 }
-                MemoryCommands::Eval { rate_only } => {
-                    if *rate_only { memory::eval::run_rate_only(&hex_dir) }
-                    else { memory::eval::run(&hex_dir) }
-                }
-                MemoryCommands::LlmCheck => {
-                    match memory::provider::health_check() {
-                        Ok(_) => {
-                            println!("provider OK");
-                            0
-                        }
-                        Err(memory::provider::ProviderError::Deferred(msg)) => {
-                            eprintln!("provider DEFERRED: {}", msg);
-                            2
-                        }
-                        Err(memory::provider::ProviderError::Upstream(msg)) => {
-                            eprintln!("provider UPSTREAM error: {}", msg);
-                            3
-                        }
-                    }
-                }
                 MemoryCommands::Distill { path } => {
                     let db_path = memory::db_path(&hex_dir);
                     match memory::open_db(&db_path) {
@@ -687,16 +496,6 @@ fn main() {
                 MemoryCommands::Stats { json } => {
                     memory::stats::run(&hex_dir, *json)
                 }
-                MemoryCommands::CheckVectorSearch => {
-                    check_vector_search(&hex_dir)
-                }
-                MemoryCommands::CheckReflectionLiveness => {
-                    check_reflection_liveness(&hex_dir)
-                }
-                MemoryCommands::Health => {
-                    // `health` is a thin alias for the native memory DB stats path.
-                    memory::stats::run(&hex_dir, false)
-                }
                 MemoryCommands::Consolidate { command } => {
                     let mode = match command {
                         ConsolidateCommands::Quick => consolidate::Mode::Quick,
@@ -710,25 +509,8 @@ fn main() {
         Commands::Doctor { command } => {
             let hex_dir = get_hex_dir();
             match command {
-                DoctorCommands::CheckCodex => {
-                    doctor::check_codex(&hex_dir);
-                }
-                DoctorCommands::QualityCheck { spec, sweep, kr } => {
-                    let code = doctor::quality_check(&hex_dir, spec.as_deref(), sweep, kr.as_deref());
-                    std::process::exit(code);
-                }
-                DoctorCommands::Introspect => {
-                    std::process::exit(doctor::introspect::run(&hex_dir));
-                }
-                DoctorCommands::CleanupProjects { days } => {
-                    std::process::exit(doctor::cleanup_projects::run(&hex_dir, days as u64));
-                }
                 DoctorCommands::StaleDeps { threshold, json } => {
                     let code = doctor::stale_deps(&hex_dir, threshold, json);
-                    std::process::exit(code);
-                }
-                DoctorCommands::DetectFailurePattern { window, spec_id } => {
-                    let code = doctor::detect_failure_pattern(window, spec_id.as_deref());
                     std::process::exit(code);
                 }
                 DoctorCommands::Run { fix, smoke: _, quiet, json, filter } => {

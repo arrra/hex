@@ -42,7 +42,7 @@ pub fn run(hex_dir: &Path, tier: &str) -> i32 {
         return 0;
     }
 
-    let harness = hex_dir.join("system/scripts/hex-integration-check.sh");
+    let harness = crate::integration_cmd::harness_script(hex_dir);
 
     // Run checks in parallel (mirrors xargs -P 8 behaviour)
     let failures = Arc::new(Mutex::new(0u32));

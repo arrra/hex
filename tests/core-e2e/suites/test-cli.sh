@@ -119,14 +119,14 @@ else
     assert_fail "cli-integration-list: unexpected exit $CODE — output: $OUT"
 fi
 
-# ── 13. hex memory health ─────────────────────────────────────────────────────
-OUT=$("$HEX" memory health 2>&1)
+# ── 13. hex memory stats (was `memory health`, removed as a pure alias) ───────
+OUT=$("$HEX" memory stats 2>&1)
 CODE=$?
 # Graceful error if memory DB not initialised is also acceptable
-if [ "$CODE" -eq 0 ] || echo "$OUT" | grep -qi "health\|memory\|ok\|no\|not found\|missing"; then
-    assert_pass "cli-memory-health: accessible (exit $CODE)"
+if [ "$CODE" -eq 0 ] || echo "$OUT" | grep -qi "stats\|memory\|facts\|not found\|missing"; then
+    assert_pass "cli-memory-stats: accessible (exit $CODE)"
 else
-    assert_fail "cli-memory-health: unexpected exit $CODE — output: $OUT"
+    assert_fail "cli-memory-stats: unexpected exit $CODE — output: $OUT"
 fi
 
 # ── 14. hex doctor --quiet ────────────────────────────────────────────────────

@@ -142,12 +142,7 @@ pub fn run(hex_dir: &Path, args: StartupArgs) -> i32 {
         step_priorities(hex_dir, &mut state);
     }
 
-    // Step 13: Daemon status (solo or quick)
-    if state.is_solo || args.quick {
-        step_daemon_status(&scripts_dir, &mut state);
-    }
-
-    // Step 14: Update notice (always)
+    // Step 13: Update notice (always)
     step_update_notice(&hex_system_dir);
 
     // Step 15: Summary + exit
@@ -447,47 +442,6 @@ fn step_priorities(hex_dir: &Path, state: &mut State) {
     }
 }
 
-fn step_daemon_status(scripts_dir: &Path, state: &mut State) {
-    header("9. Daemon Status");
-
-    let script = scripts_dir.join("hex-daemons.sh");
-    if !script.exists() {
-        info("hex-daemons.sh not found — skipping");
-        return;
-    }
-
-    let output = Command::new("bash")
-        .arg(&script)
-        .arg("status")
-        .output();
-
-    match output {
-        Ok(out) => {
-            // Strip ANSI escape codes from daemon output
-            let raw = String::from_utf8_lossy(&out.stdout);
-            let stripped = strip_ansi(&raw);
-            let mut any_down = false;
-            for line in stripped.lines() {
-                if line.contains("[WARN]") || line.contains("[FAIL]") || line.contains("[DOWN]") {
-                    warn_line(line.trim(), state);
-                    any_down = true;
-                } else if line.contains("[OK]") || line.contains("[PASS]") {
-                    pass(line.trim());
-                } else if !line.trim().is_empty() {
-                    info(line.trim());
-                }
-            }
-            if any_down {
-                info("Run 'hex-daemons.sh start' to start daemons manually");
-            }
-        }
-        Err(_) => {
-            // || true — tolerate
-            info("Daemon status unavailable");
-        }
-    }
-}
-
 fn step_update_notice(hex_system_dir: &Path) {
     let update_file = hex_system_dir.join(".update-available");
     if update_file.exists() {
@@ -545,7 +499,6 @@ fn run_single_step(
         "integrations" => step_integrations(hex_dir, state),
         "evolution" => step_evolution(hex_dir, scripts_dir, hex_system_dir, state),
         "priorities" => step_priorities(hex_dir, state),
-        "daemon" => step_daemon_status(scripts_dir, state),
         other => {
             eprintln!("hex session startup: unknown step '{}'. Use --status to list steps.", other);
             return 1;
@@ -558,28 +511,6 @@ fn run_single_step(
 
 // ── Utilities ────────────────────────────────────────────────────────────────
 
-/// Strip ANSI escape sequences from a string (mirrors `sed 's/\x1b\[[0-9;]*m//g'`).
-fn strip_ansi(s: &str) -> String {
-    let mut out = String::with_capacity(s.len());
-    let mut chars = s.chars().peekable();
-    while let Some(c) = chars.next() {
-        if c == '\x1b' {
-            if chars.peek() == Some(&'[') {
-                chars.next();
-                // consume until 'm' or end
-                for ch in chars.by_ref() {
-                    if ch == 'm' {
-                        break;
-                    }
-                }
-            }
-        } else {
-            out.push(c);
-        }
-    }
-    out
-}
-
 /// Ordered list of named steps — used for --status, --step validation, and unit tests.
 pub fn step_names() -> Vec<&'static str> {
     vec![
@@ -591,7 +522,6 @@ pub fn step_names() -> Vec<&'static str> {
         "integrations",
         "evolution",
         "priorities",
-        "daemon",
     ]
 }
 
@@ -604,8 +534,8 @@ mod tests {
     #[test]
     fn step_sequence_matches_inventory() {
         let steps = step_names();
-        // 9 named steps in startup sequence order (hex-events removed)
-        assert_eq!(steps.len(), 9);
+        // 8 named steps in startup sequence order (hex-events + daemon-status removed)
+        assert_eq!(steps.len(), 8);
         assert_eq!(steps[0], "env");
         assert_eq!(steps[1], "session");
         assert_eq!(steps[2], "transcripts");
@@ -614,19 +544,6 @@ mod tests {
         assert_eq!(steps[5], "integrations");
         assert_eq!(steps[6], "evolution");
         assert_eq!(steps[7], "priorities");
-        assert_eq!(steps[8], "daemon");
-    }
-
-    #[test]
-    fn strip_ansi_removes_escape_sequences() {
-        let input = "\x1b[32m[PASS]\x1b[0m message";
-        assert_eq!(strip_ansi(input), "[PASS] message");
-    }
-
-    #[test]
-    fn strip_ansi_passthrough_plain() {
-        let input = "plain text no escapes";
-        assert_eq!(strip_ansi(input), input);
     }
 
     #[test]
