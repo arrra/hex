@@ -7,6 +7,7 @@ pub mod git;
 pub mod hex_binary;
 pub mod hex_dir;
 pub mod hex_structure;
+pub mod iii_engine_health;
 pub mod llm_preference;
 pub mod llm_provider;
 pub mod me_md;

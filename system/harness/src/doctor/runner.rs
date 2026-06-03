@@ -54,6 +54,7 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::reflection_liveness::ReflectionLogFresh),
         Box::new(checks::scripts_exec::ScriptsExecutable),
         Box::new(checks::boi_health::BoiHealth),
+        Box::new(checks::iii_engine_health::IiiEngineHealth),
         Box::new(checks::python::PythonVersion),
         Box::new(checks::hex_binary::HexBinaryOnPath),
         // Config checks
