@@ -2,6 +2,7 @@ use clap::{CommandFactory, Parser, Subcommand};
 use std::io;
 use std::path::{Path, PathBuf};
 
+mod consolidate;
 mod doctor;
 mod integration;
 mod integration_cmd;
@@ -91,6 +92,12 @@ enum Commands {
         #[command(subcommand)]
         command: hook::HookCommands,
     },
+    /// Unified consolidation (structural + memory + operating-model audit)
+    #[command(display_order = 6)]
+    Consolidate {
+        #[command(subcommand)]
+        command: ConsolidateCommands,
+    },
     /// Print version
     #[command(display_order = 15)]
     Version,
@@ -99,6 +106,14 @@ enum Commands {
     Completions {
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Subcommand)]
+enum ConsolidateCommands {
+    /// Layers 1+2 only — deterministic, no LLM, no network. Safe to run nightly.
+    Quick,
+    /// Layers 1+2+3 — adds the LLM-assisted operating-model audit.
+    Full,
 }
 
 #[derive(Subcommand)]
@@ -854,6 +869,14 @@ fn main() {
             std::process::exit(code);
         }
         Commands::Hook { command } => hook::run(command),
+        Commands::Consolidate { command } => {
+            let hex_dir = get_hex_dir();
+            let mode = match command {
+                ConsolidateCommands::Quick => consolidate::Mode::Quick,
+                ConsolidateCommands::Full => consolidate::Mode::Full,
+            };
+            std::process::exit(consolidate::run(mode, &hex_dir));
+        }
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }
