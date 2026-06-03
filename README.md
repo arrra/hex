@@ -67,7 +67,7 @@ After install, `~/hex/` contains:
 
 Companion systems installed alongside:
 
-- **[`~/.boi`](https://github.com/mrap/boi)** — parallel Claude Code worker dispatch
+- **[`~/.boi`](https://github.com/mrap/boi-v2)** — parallel Claude Code worker dispatch
 - **`~/.hex-events`** — reactive event policies (deployed from `system/events/` — no external repo)
 
 ### Auto-configured by install.sh
