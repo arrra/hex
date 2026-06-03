@@ -379,24 +379,6 @@ if [ -f "$CAREER_PIPELINE_CHECK" ]; then
   fi
 fi
 
-# ─── Fleet Pulse check ───────────────────────────────────────────────────────
-# Note: SCRIPTS_DIR may be overridden by sourced check files; use absolute path.
-FLEET_PULSE_CHECK="$HEX_DIR/.hex/scripts/health/check-fleet-pulse.sh"
-if [ -f "$FLEET_PULSE_CHECK" ]; then
-  MODULE_COUNT=$((MODULE_COUNT + 1))
-  echo ""
-  echo -e "${BOLD}Fleet Pulse${RESET}"
-  echo "  ─────────────────────────────────────────"
-  fleet_pulse_out=""
-  fleet_pulse_exit=0
-  fleet_pulse_out="$(bash "$FLEET_PULSE_CHECK" --dry-run 2>&1)" || fleet_pulse_exit=$?
-  if [ "$fleet_pulse_exit" -eq 0 ]; then
-    _pass "$fleet_pulse_out"
-  else
-    _error "$fleet_pulse_out"
-  fi
-fi
-
 # ─── Stalled Initiative Monitor check ────────────────────────────────────────
 STALLED_INIT_CHECK="$HEX_DIR/.hex/scripts/health/check-stalled-initiatives.sh"
 if [ -f "$STALLED_INIT_CHECK" ]; then

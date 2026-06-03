@@ -133,7 +133,7 @@ fn is_trivial(query: &str) -> bool {
 }
 
 /// Run recall for `query`. `for_agent` = true applies the private filter
-/// (fleet agents get non-private chunks only — spec §7).
+/// (BOI workers get non-private chunks only — spec §7).
 pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
     let t0 = std::time::Instant::now();
 

@@ -3,9 +3,7 @@
 #
 # Enforces the full release pipeline mechanically:
 #   1. Docker E2E (both suites)
-#   2. Sentinel security review request
-#   3. Push to origin
-#   4. Fleet notification
+#   2. Push to origin
 #
 # Direct `git push` is blocked by the repo's pre-push hook unless
 # HEX_RELEASE_PIPELINE=1 is set (which only this script sets).
@@ -251,18 +249,6 @@ if $DRY_RUN; then
   exit 0
 fi
 
-# ── Sentinel notification ────────────────────────────────────────────────────
-bold "Notify: Sentinel"
-HEX_AGENT="${HEX_DIR:-$HOME/hex}/.hex/bin/hex-agent"
-if [ -x "$HEX_AGENT" ]; then
-  "$HEX_AGENT" message hex-main sentinel \
-    --subject "REVIEW REQUEST: hex-foundation $VERSION ($SHA)" \
-    --body "Security review. $FILE_COUNT files. Docker E2E: $E2E_OUTCOME. gitleaks: PASS." \
-    2>/dev/null && green "  Sentinel notified ✓" || echo "  Sentinel notify failed (non-blocking)"
-else
-  echo "  hex-agent not found — skipping sentinel notify"
-fi
-
 # ── Push ─────────────────────────────────────────────────────────────────────
 bold "Push"
 HEX_RELEASE_PIPELINE=1 git push origin main 2>&1
@@ -295,20 +281,6 @@ else
   red "  Tag v$VERSION on origin points to $REMOTE_TAG_SHA, not $FULL_SHA"
   red "  Refusing to silently overwrite a divergent remote tag."
   exit 1
-fi
-
-# ── Fleet notification ───────────────────────────────────────────────────────
-bold "Notify: Fleet"
-if [ -x "$HEX_AGENT" ]; then
-  "$HEX_AGENT" message hex-main releaser \
-    --subject "RELEASE: hex-foundation $VERSION ($SHA) pushed" \
-    --body "Docker E2E: $E2E_OUTCOME. Sentinel notified. $FILE_COUNT files. Write release notes." \
-    2>/dev/null && green "  Releaser notified ✓" || true
-
-  "$HEX_AGENT" message hex-main hex-ops \
-    --subject "hex-foundation $VERSION ($SHA) pushed" \
-    --body "Verify local instance. Run doctor." \
-    2>/dev/null && green "  Hex-ops notified ✓" || true
 fi
 
 bold ""
