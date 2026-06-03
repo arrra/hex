@@ -703,6 +703,29 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
         }
     }
 
+    // Single-instance guard: a slow run (e.g. a large append-only file re-embed)
+    // must not pile up behind the 15-min cron. Hold an exclusive lock for the
+    // duration; if another run holds it, skip cleanly (exit 0 — overlap is normal).
+    use fs2::FileExt;
+    let lock_path = db_path.with_file_name("memory-index.lock");
+    let lock_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("hex memory index: cannot open lock {}: {e}", lock_path.display());
+            return 1;
+        }
+    };
+    if lock_file.try_lock_exclusive().is_err() {
+        println!("hex memory index: another run is in progress — skipping");
+        return 0;
+    }
+    let _index_lock = lock_file; // released when run_index returns
+
     let conn = match super::open_db(&db_path) {
         Ok(c) => c,
         Err(e) => {
