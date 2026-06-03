@@ -129,6 +129,43 @@ Then verify with:
   $(basename "$0") status
 
 EOF
+
+  # --- Render co-located worker plists (workers/<name>/launchd.plist) -------
+  # Each worker dir carries its own launchd.plist template with placeholders;
+  # we render one ~/Library/LaunchAgents/<label>.plist per worker. Generic — new
+  # workers are picked up automatically. No hardcoded user paths in the repo.
+  local node_bin runtime_path workers_root
+  node_bin="$(command -v node 2>/dev/null || true)"
+  runtime_path="${hex_dir}/.hex/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+  workers_root="${hex_dir}/.hex/iii/workers"
+  [ -d "${workers_root}" ] || workers_root="${hex_dir}/system/iii/workers"
+  if [ -z "${node_bin}" ]; then
+    loud_err "node not found on PATH — iii worker plists NOT rendered"
+  elif [ -d "${workers_root}" ]; then
+    local wdir wtmpl wname wlabel windex wlog wdest
+    for wdir in "${workers_root}"/*/; do
+      wtmpl="${wdir}launchd.plist"
+      [ -f "${wtmpl}" ] || continue
+      wname="$(basename "${wdir}")"
+      wlabel="$(plutil -extract Label raw -o - "${wtmpl}" 2>/dev/null)"
+      [ -n "${wlabel}" ] || { loud_err "worker ${wname}: no Label in launchd.plist — skipped"; continue; }
+      windex="${hex_dir}/.hex/iii/workers/${wname}/index.js"
+      wlog="${hex_dir}/.hex/logs/${wlabel}.log"
+      wdest="${HOME}/Library/LaunchAgents/${wlabel}.plist"
+      sed \
+        -e "s|NODE_PLACEHOLDER|${node_bin}|g" \
+        -e "s|INDEX_PLACEHOLDER|${windex}|g" \
+        -e "s|WORKDIR_PLACEHOLDER|${hex_dir}/.hex/iii/workers/${wname}|g" \
+        -e "s|HEXDIR_PLACEHOLDER|${hex_dir}|g" \
+        -e "s|HEXBIN_PLACEHOLDER|${hex_dir}/.hex/bin/hex|g" \
+        -e "s|PATH_PLACEHOLDER|${runtime_path}|g" \
+        -e "s|LOG_PLACEHOLDER|${wlog}|g" \
+        "${wtmpl}" > "${wdest}" \
+        || { loud_err "failed to render worker plist ${wlabel}"; continue; }
+      printf '  worker %s → %s\n    bootstrap: launchctl bootstrap gui/%s %s\n' \
+        "${wname}" "${wlabel}" "$(uid_of_user)" "${wdest}"
+    done
+  fi
 }
 
 # --- start / stop / restart -------------------------------------------------
