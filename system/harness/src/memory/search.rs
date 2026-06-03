@@ -351,7 +351,7 @@ pub fn run(hex_root: &Path, args: &SearchArgs) -> i32 {
 
     // Vector arm — best-effort. If the model or KNN fails, log loud and fall
     // back to FTS5-only (never silently degrade to nothing).
-    let vec_rowids: Vec<i64> = match super::embed::Embedder::new()
+    let vec_rowids: Vec<i64> = match super::embed::Embedder::new(hex_root)
         .and_then(|e| e.embed_query(&args.query))
     {
         Ok(qv) => super::vector::knn(&conn, &qv, args.top.max(20))

@@ -4,6 +4,8 @@
 //! different task prefixes.
 
 use fastembed::{EmbeddingModel, InitOptions, TextEmbedding};
+use std::path::Path;
+use std::time::{Duration, SystemTime};
 
 // fastembed 4.x does not auto-apply nomic task prefixes — we add them here.
 const DOC_PREFIX: &str = "search_document: ";
@@ -35,6 +37,33 @@ pub fn log_rss(label: &str) {
     }
 }
 
+/// Remove stale hf-hub `.lock` files under the fastembed cache. A SIGKILLed
+/// download/load leaves locks that block the next `TextEmbedding::try_new`. We
+/// only remove locks older than 60s so an actively-downloading sibling process
+/// (rare: worker cron overlapping a manual run) isn't disturbed.
+fn clear_stale_locks(cache_dir: &Path) {
+    if !cache_dir.is_dir() {
+        return;
+    }
+    let now = SystemTime::now();
+    for entry in walkdir::WalkDir::new(cache_dir).into_iter().flatten() {
+        let p = entry.path();
+        if p.extension().and_then(|e| e.to_str()) != Some("lock") {
+            continue;
+        }
+        let stale = entry
+            .metadata()
+            .ok()
+            .and_then(|m| m.modified().ok())
+            .and_then(|mtime| now.duration_since(mtime).ok())
+            .map(|age| age > Duration::from_secs(60))
+            .unwrap_or(true);
+        if stale && std::fs::remove_file(p).is_ok() {
+            eprintln!("hex memory: cleared stale fastembed lock {}", p.display());
+        }
+    }
+}
+
 pub struct Embedder {
     model: TextEmbedding,
 }
@@ -51,11 +80,21 @@ impl Embedder {
     /// activation tensors — easily 2+ GB on the 70-chunk CLAUDE.md batch,
     /// which OOM-killed the process in the 4 GB Docker test container.
     /// See evolution/obs-019-diagnosis.md for the full RSS trace.
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(hex_root: &Path) -> anyhow::Result<Self> {
         std::env::set_var("ORT_NUM_THREADS", "1");
         std::env::set_var("OMP_NUM_THREADS", "1");
+        // Absolute cache dir under $HEX_DIR so embedding works from ANY cwd
+        // (fastembed defaults to a cwd-relative `.fastembed_cache`; a worker
+        // running from `/` would otherwise miss the cache and fail to load).
+        let cache_dir = hex_root.join(".fastembed_cache");
+        // OBS-019 self-heal: a SIGKILLed index run leaves hf-hub `.lock` files
+        // that block TextEmbedding::try_new ("Failed to retrieve onnx/model.onnx")
+        // even when the model is fully cached. Clear stale ones first.
+        clear_stale_locks(&cache_dir);
         log_rss("embedder pre-new");
-        let model = TextEmbedding::try_new(InitOptions::new(EmbeddingModel::NomicEmbedTextV15))?;
+        let model = TextEmbedding::try_new(
+            InitOptions::new(EmbeddingModel::NomicEmbedTextV15).with_cache_dir(cache_dir),
+        )?;
         log_rss("embedder post-new");
         Ok(Self { model })
     }
@@ -77,13 +116,41 @@ impl Embedder {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use std::time::Duration;
+
+    #[test]
+    fn clear_stale_locks_removes_old_but_keeps_fresh() {
+        let tmp = tempfile::tempdir().unwrap();
+        let cache = tmp.path().join(".fastembed_cache/models--x/blobs");
+        std::fs::create_dir_all(&cache).unwrap();
+        let stale = cache.join("abc.lock");
+        let fresh = cache.join("def.lock");
+        let keep = cache.join("model.onnx");
+        std::fs::write(&stale, "").unwrap();
+        std::fs::write(&fresh, "").unwrap();
+        std::fs::write(&keep, "data").unwrap();
+        // Backdate the stale lock to 10 minutes ago.
+        let old = SystemTime::now() - Duration::from_secs(600);
+        filetime::set_file_mtime(&stale, filetime::FileTime::from_system_time(old)).unwrap();
+
+        clear_stale_locks(&tmp.path().join(".fastembed_cache"));
+
+        assert!(!stale.exists(), "stale lock should be removed");
+        assert!(fresh.exists(), "fresh lock (<60s) should be kept");
+        assert!(keep.exists(), "non-lock files untouched");
+    }
+
+    #[test]
+    fn clear_stale_locks_noop_on_missing_dir() {
+        clear_stale_locks(Path::new("/tmp/does-not-exist-hex-fastembed"));
+    }
 
     // Model-dependent: requires the nomic ONNX weights. Run explicitly with
     // `cargo test -- --ignored`. CI / the nightly eval also exercise this path.
     #[test]
     #[ignore]
     fn embeds_at_768_dimensions() {
-        let e = Embedder::new().unwrap();
+        let e = Embedder::new(Path::new(".")).unwrap();
         let q = e.embed_query("what did we decide about the memory schema").unwrap();
         assert_eq!(q.len(), super::super::vector::EMBED_DIM);
 

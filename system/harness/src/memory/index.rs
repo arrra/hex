@@ -716,7 +716,7 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
         return 1;
     }
 
-    let embedder = match super::embed::Embedder::new() {
+    let embedder = match super::embed::Embedder::new(hex_root) {
         Ok(e) => e,
         Err(e) => {
             eprintln!("hex memory index: embedding model failed to load: {e}");
@@ -1097,7 +1097,7 @@ mod tests {
         std::fs::create_dir_all(hex_root.join(".hex")).unwrap();
         let conn = super::super::open_db(&hex_root.join(".hex/memory.db")).unwrap();
         init_db(&conn).unwrap();
-        let embedder = super::super::embed::Embedder::new().unwrap();
+        let embedder = super::super::embed::Embedder::new(hex_root).unwrap();
 
         let f = hex_root.join("me/decisions/x.md");
         std::fs::create_dir_all(f.parent().unwrap()).unwrap();
@@ -1203,7 +1203,7 @@ mod tests {
         let content = "# Hello\nWorld content here.\n## More\nExtra info.";
         std::fs::write(&test_file, content).unwrap();
 
-        let embedder = super::super::embed::Embedder::new().unwrap();
+        let embedder = super::super::embed::Embedder::new(hex_root).unwrap();
         let n = index_file(&conn, &test_file, hex_root, content, 0.0, "full", &embedder).unwrap();
         assert!(n >= 2);
 
