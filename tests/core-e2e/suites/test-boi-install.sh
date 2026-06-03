@@ -97,10 +97,11 @@ export PATH="$HOME/.boi/bin:$PATH"
 
 # Volume mounts (/repo, /boi) are owned by the host UID, not the container
 # user, so git refuses to operate on them ("detected dubious ownership").
-# This is why the clone passes on macOS Docker (ownership remapped) but fails
-# in Linux CI. Trust the mounted source paths so clones succeed.
-git config --global --add safe.directory /repo
-git config --global --add safe.directory /boi
+# macOS Docker remaps ownership (so this is invisible locally) but Linux CI
+# does not. The wildcard fully opts out of the ownership check — correct for
+# an ephemeral CI container, and immune to gitdir path-matching quirks that
+# make a specific `safe.directory /repo` entry miss `/repo/.git`.
+git config --global --add safe.directory '*'
 
 # ── 1. Clone hex-foundation ────────────────────────────────────────────────────
 echo "--- 1. clone ---"
