@@ -138,7 +138,7 @@ EOF
   # .hex/iii/workers/) are picked up automatically. No user paths in the repo.
   local hex_bin runtime_path workers_root wtmpl
   hex_bin="${hex_dir}/.hex/bin/hex"
-  runtime_path="${hex_dir}/.hex/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"
+  runtime_path="${hex_dir}/.hex/bin:${HOME}/.local/bin:/usr/bin:/bin"
   workers_root="${hex_dir}/.hex/iii/workers"
   wtmpl="${hex_dir}/.hex/templates/launchd/iii-worker.plist"
   [ -f "${wtmpl}" ] || wtmpl="${hex_dir}/system/templates/launchd/iii-worker.plist"
