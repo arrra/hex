@@ -5,7 +5,7 @@
 # binary, leaving the installed boi binary at the old version.  This is the
 # test that would have caught the 2026-04-29 session's stale-binary incident.
 #
-# BOI-V2 NOTE: canonical engine is mrap/boi-v2. The v2.0.0 → v3.0.0 jump is a
+# BOI NOTE: canonical engine is mrap/boi. The v2.0.0 → v3.0.0 jump is a
 # CLI-breaking change *within* boi-v2 (v3 dropped `status`/`bench`, made
 # `daemon` a blocking foreground command, and switched specs to TOML). So the
 # post-upgrade assertions check only the v3.0.0 (HEAD-target) surface —
@@ -141,7 +141,7 @@ NEW_BOI_VERSION=$(grep "^BOI_VERSION=" VERSIONS | cut -d= -f2)
 BASELINE_BOI_VERSION="v2.0.0"
 
 # install.sh is the fresh-install entrypoint and refuses to run over an existing
-# target dir. boi_src ($HOME/github.com/mrap/boi-v2) and the binary ($HOME/.boi)
+# target dir. boi_src ($HOME/github.com/mrap/boi) and the binary ($HOME/.boi)
 # are HOME-based and shared across installs, so we point the two installs at
 # distinct target dirs: the second install proceeds and its
 # install_or_upgrade_boi sees the existing boi repo → fetch + checkout + rebuild.
@@ -403,7 +403,7 @@ fi
 INNER_EOF
 
 # ── Run the container ─────────────────────────────────────────────────────────
-BOI_SRC="$HOME/github.com/mrap/boi-v2"
+BOI_SRC="$HOME/github.com/mrap/boi"
 CONTAINER_LOG="/tmp/boi-upgrade-e2e-$$.log"
 
 DOCKER_ARGS=(
