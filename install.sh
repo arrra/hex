@@ -430,7 +430,21 @@ fi
 _harness_build_from_source() {
     echo "  Building hex from source..."
     ( cd "$SCRIPT_DIR/system/harness" && cargo build --release 2>&1 ) || return 1
-    cp "$SCRIPT_DIR/system/harness/target/release/hex" "$TARGET_DIR/.hex/bin/hex"
+    # When system/harness is a member of a workspace (root Cargo.toml), cargo
+    # emits to the workspace-root target dir, NOT system/harness/target. Probe
+    # both so the cp doesn't silently fail and fall back to a network download.
+    local built=""
+    local candidate
+    for candidate in \
+        "$SCRIPT_DIR/system/harness/target/release/hex" \
+        "$SCRIPT_DIR/target/release/hex"; do
+        if [ -x "$candidate" ]; then built="$candidate"; break; fi
+    done
+    if [ -z "$built" ]; then
+        echo "  hex binary not found after build (checked system/harness/target and workspace target)" >&2
+        return 1
+    fi
+    cp "$built" "$TARGET_DIR/.hex/bin/hex"
     chmod +x "$TARGET_DIR/.hex/bin/hex"
     ln -sf hex "$TARGET_DIR/.hex/bin/hex-agent"
 }

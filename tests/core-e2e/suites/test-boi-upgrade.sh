@@ -348,6 +348,11 @@ fi
 # reported as "[WARN] boi-health: ~/.boi/bin/boi not found" and the run exits
 # non-zero when any check warns/errors.
 HEX_BIN="$HEAD_TARGET/.hex/bin/hex"
+if [ -x "$HEX_BIN" ]; then
+    pass "doctor-binary: hex installed at $HEX_BIN"
+else
+    fail "doctor-binary: hex NOT installed at $HEX_BIN (install.sh failed to place the binary)"
+fi
 DOCTOR_OUT=$(HEX_DIR="$HEAD_TARGET" "$HEX_BIN" doctor run 2>&1) || DOCTOR_RC=$?
 DOCTOR_RC=${DOCTOR_RC:-0}
 
