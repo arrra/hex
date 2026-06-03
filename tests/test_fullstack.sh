@@ -60,11 +60,11 @@ for file in CLAUDE.md AGENTS.md todo.md me/me.md me/learnings.md \
 done
 
 # ═══════════════════════════════════════════════════
-# SECTION 4: Commands (all 10 in .claude/commands/)
+# SECTION 4: Commands (in .claude/commands/)
 # ═══════════════════════════════════════════════════
 echo "[4/9] Commands"
 for cmd in hex-startup hex-checkpoint hex-shutdown hex-consolidate \
-           hex-reflect hex-debrief hex-triage hex-decide hex-doctor hex-upgrade; do
+           hex-reflect hex-triage hex-decide hex-doctor hex-upgrade; do
     check "command: //$cmd" test -f "/tmp/test-hex/.claude/commands/$cmd.md"
 done
 

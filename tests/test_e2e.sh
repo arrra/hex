@@ -158,7 +158,7 @@ TOTAL=$((TOTAL + 1))
 
 # ── Test 13: Commands installed to .claude/commands/ ───────────────
 echo "[13] Commands"
-for cmd in hex-startup hex-checkpoint hex-shutdown hex-reflect hex-debrief hex-triage hex-decide hex-doctor hex-upgrade; do
+for cmd in hex-startup hex-checkpoint hex-shutdown hex-reflect hex-triage hex-decide hex-doctor hex-upgrade; do
     check "command: $cmd" test -f "/tmp/test-hex/.claude/commands/$cmd.md"
 done
 
