@@ -1,0 +1,13 @@
+# hex-memory-maintenance — declarative iii worker config.
+# Hosted by `hex iii worker run <this file>`. Each job becomes an iii function
+# that execs `command` (${HEX_DIR} expanded), bound to a cron trigger.
+worker_name: hex-memory-maintenance
+jobs:
+  - id: hex::memory::index
+    command: [hex, memory, index]
+    cron: "0 */15 * * * * *"        # every 15 minutes
+    description: Rebuild the hex memory index
+  - id: hex::memory::consolidate_full
+    command: [hex, memory, consolidate, full]
+    cron: "0 0 3 * * * *"           # 03:00 daily
+    description: Full nightly hex memory consolidation

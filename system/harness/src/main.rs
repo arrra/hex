@@ -17,6 +17,7 @@ mod env;
 mod hook;
 mod upgrade;
 mod learnings;
+mod iii_worker;
 // Personal modules (mrap-only overlay). Resolved via build.rs → OUT_DIR/personal_mods.rs.
 #[cfg(feature = "personal")]
 include!(concat!(env!("OUT_DIR"), "/personal_mods.rs"));
@@ -86,6 +87,12 @@ enum Commands {
         #[command(subcommand)]
         command: hook::HookCommands,
     },
+    /// iii substrate: host declarative workers on the iii engine
+    #[command(display_order = 14)]
+    Iii {
+        #[command(subcommand)]
+        command: IiiCommands,
+    },
     /// Print version
     #[command(display_order = 15)]
     Version,
@@ -93,6 +100,24 @@ enum Commands {
     #[command(display_order = 12)]
     Completions {
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum IiiCommands {
+    /// Worker host operations
+    Worker {
+        #[command(subcommand)]
+        command: IiiWorkerCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum IiiWorkerCommands {
+    /// Run a declarative worker from a YAML config (id + command + cron jobs)
+    Run {
+        /// Path to the worker config YAML
+        config: std::path::PathBuf,
     },
 }
 
@@ -330,6 +355,11 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
+        Commands::Iii { command } => match command {
+            IiiCommands::Worker { command } => match command {
+                IiiWorkerCommands::Run { config } => std::process::exit(iii_worker::run(&config)),
+            },
+        },
         Commands::Integration { command } => {
             if let IntegrationCommands::Template = command {
                 integration::template();

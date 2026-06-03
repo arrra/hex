@@ -159,43 +159,6 @@ fn copy_file_with_perms(src: &Path, dst: &Path) -> io::Result<()> {
     Ok(())
 }
 
-/// Best-effort: for each iii worker dir with a package.json but no node_modules,
-/// run `npm install`. Non-fatal — a missing/failed npm is a loud WARN, never an
-/// upgrade failure. Worker deps shouldn't block the rest of hex from upgrading.
-fn ensure_iii_worker_deps(workers_dir: &Path) {
-    if !workers_dir.is_dir() {
-        return;
-    }
-    let Ok(entries) = fs::read_dir(workers_dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let dir = entry.path();
-        if !dir.is_dir() || !dir.join("package.json").is_file() {
-            continue;
-        }
-        if dir.join("node_modules").is_dir() {
-            continue; // deps already present
-        }
-        println!("  → npm install for iii worker {}", dir.display());
-        match std::process::Command::new("npm")
-            .arg("install")
-            .current_dir(&dir)
-            .status()
-        {
-            Ok(s) if s.success() => println!("  [OK] worker deps installed"),
-            Ok(s) => eprintln!(
-                "  [WARN] npm install failed ({s}) in {} — worker may not start",
-                dir.display()
-            ),
-            Err(e) => eprintln!(
-                "  [WARN] npm unavailable ({e}) — iii worker deps not installed in {}",
-                dir.display()
-            ),
-        }
-    }
-}
-
 /// Detect which files in src_dir differ from dst_dir.
 /// Returns (changed, new_count, unchanged, log_lines).
 fn detect_changes(
@@ -851,9 +814,6 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    // Ensure iii worker node_modules exist (node_modules is gitignored, not synced).
-    ensure_iii_worker_deps(&hex_dot_dir.join("iii/workers"));
-
     // Mirror commands to runtime slash-command dir
     let runtime_cmd_dir = hex_dir.join(".claude/commands");
     if src_dirs.commands.exists() {
@@ -1039,20 +999,6 @@ mod tests {
         assert!(src_dirs.iii.ends_with("system/iii"));
         assert!(src_dirs.templates.ends_with("system/templates"));
         assert!(src_dirs.version_txt.is_some());
-    }
-
-    #[test]
-    fn ensure_iii_worker_deps_is_safe_when_missing_or_already_installed() {
-        let tmp = tempfile::tempdir().unwrap();
-        // Missing workers dir → no panic, no-op.
-        ensure_iii_worker_deps(&tmp.path().join("does-not-exist"));
-        // Worker with package.json AND node_modules → skipped (npm never invoked).
-        let w = tmp.path().join("workers/foo");
-        fs::create_dir_all(w.join("node_modules")).unwrap();
-        fs::write(w.join("package.json"), "{}").unwrap();
-        ensure_iii_worker_deps(&tmp.path().join("workers"));
-        // node_modules still present (we didn't touch it).
-        assert!(w.join("node_modules").is_dir());
     }
 
     #[test]

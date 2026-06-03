@@ -130,34 +130,33 @@ Then verify with:
 
 EOF
 
-  # --- Render co-located worker plists (workers/<name>/launchd.plist) -------
-  # Each worker dir carries its own launchd.plist template with placeholders;
-  # we render one ~/Library/LaunchAgents/<label>.plist per worker. Generic — new
-  # workers are picked up automatically. No hardcoded user paths in the repo.
-  local node_bin runtime_path workers_root
-  node_bin="$(command -v node 2>/dev/null || true)"
+  # --- Render a launchd plist per worker config (workers/<name>.yaml) -------
+  # Each worker is a declarative YAML config hosted by `hex iii worker run`.
+  # We render the generic iii-worker.plist template into ~/Library/LaunchAgents/
+  # com.hex.iii-<name>.plist, one per config. No node, no per-worker binary —
+  # the hex binary is the host. New workers (incl. personal ones dropped into
+  # .hex/iii/workers/) are picked up automatically. No user paths in the repo.
+  local hex_bin runtime_path workers_root wtmpl
+  hex_bin="${hex_dir}/.hex/bin/hex"
   runtime_path="${hex_dir}/.hex/bin:${HOME}/.local/bin:/opt/homebrew/bin:/usr/bin:/bin"
   workers_root="${hex_dir}/.hex/iii/workers"
-  [ -d "${workers_root}" ] || workers_root="${hex_dir}/system/iii/workers"
-  if [ -z "${node_bin}" ]; then
-    loud_err "node not found on PATH — iii worker plists NOT rendered"
+  wtmpl="${hex_dir}/.hex/templates/launchd/iii-worker.plist"
+  [ -f "${wtmpl}" ] || wtmpl="${hex_dir}/system/templates/launchd/iii-worker.plist"
+  if [ ! -f "${wtmpl}" ]; then
+    loud_err "iii-worker.plist template not found — worker plists NOT rendered"
   elif [ -d "${workers_root}" ]; then
-    local wdir wtmpl wname wlabel windex wlog wdest
-    for wdir in "${workers_root}"/*/; do
-      wtmpl="${wdir}launchd.plist"
-      [ -f "${wtmpl}" ] || continue
-      wname="$(basename "${wdir}")"
-      wlabel="$(plutil -extract Label raw -o - "${wtmpl}" 2>/dev/null)"
-      [ -n "${wlabel}" ] || { loud_err "worker ${wname}: no Label in launchd.plist — skipped"; continue; }
-      windex="${hex_dir}/.hex/iii/workers/${wname}/index.js"
+    local wcfg wname wlabel wlog wdest
+    for wcfg in "${workers_root}"/*.yaml; do
+      [ -f "${wcfg}" ] || continue
+      wname="$(basename "${wcfg}" .yaml)"
+      wlabel="com.hex.iii-${wname}"
       wlog="${hex_dir}/.hex/logs/${wlabel}.log"
       wdest="${HOME}/Library/LaunchAgents/${wlabel}.plist"
       sed \
-        -e "s|NODE_PLACEHOLDER|${node_bin}|g" \
-        -e "s|INDEX_PLACEHOLDER|${windex}|g" \
-        -e "s|WORKDIR_PLACEHOLDER|${hex_dir}/.hex/iii/workers/${wname}|g" \
+        -e "s|LABEL_PLACEHOLDER|${wlabel}|g" \
+        -e "s|HEXBIN_PLACEHOLDER|${hex_bin}|g" \
+        -e "s|CONFIG_PLACEHOLDER|${wcfg}|g" \
         -e "s|HEXDIR_PLACEHOLDER|${hex_dir}|g" \
-        -e "s|HEXBIN_PLACEHOLDER|${hex_dir}/.hex/bin/hex|g" \
         -e "s|PATH_PLACEHOLDER|${runtime_path}|g" \
         -e "s|LOG_PLACEHOLDER|${wlog}|g" \
         "${wtmpl}" > "${wdest}" \
