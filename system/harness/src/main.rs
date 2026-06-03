@@ -250,7 +250,7 @@ enum MemoryCommands {
     /// Retrieve workspace memory relevant to a query (FTS5 contextual recall)
     Recall {
         query: String,
-        /// Apply the private filter (for fleet-agent / BOI consumers)
+        /// Apply the private filter (for BOI worker consumers)
         #[arg(long)]
         agent: bool,
     },
