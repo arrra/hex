@@ -27,18 +27,19 @@ impl DoctorCheck for BoiHealth {
             }
         };
 
-        // Check VERSIONS file
-        let versions_file = ctx.home.join(".boi/VERSIONS");
-        if !versions_file.is_file() {
-            return CheckResult::warn(format!("boi {} present but VERSIONS file missing", version));
+        // boi-v2 control-socket daemon: the daemon binds ~/.boi/v2/daemon.sock.
+        // (The old V1 ~/.boi/VERSIONS file + ~/.boi/bin/boi-wrapper checks were
+        // dropped at the v3.0.0 cutover — boi-v2 creates neither.)
+        // `boi --version` already prints "boi <semver>", so `version` carries
+        // the "boi" prefix — don't prepend it again.
+        let socket = ctx.home.join(".boi/v2/daemon.sock");
+        if !socket.exists() {
+            return CheckResult::warn(format!(
+                "{} present but daemon socket ~/.boi/v2/daemon.sock missing (daemon not running?)",
+                version
+            ));
         }
 
-        // Check wrapper script
-        let wrapper = ctx.home.join(".boi/bin/boi-wrapper");
-        if !wrapper.is_file() {
-            return CheckResult::warn(format!("boi {} present but wrapper script missing", version));
-        }
-
-        CheckResult::pass(format!("boi {} healthy", version))
+        CheckResult::pass(format!("{} healthy", version))
     }
 }

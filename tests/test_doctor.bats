@@ -1,124 +1,116 @@
 #!/usr/bin/env bats
-# Unit tests for doctor.sh BOI checks (check_17).
-# Uses DOCTOR_SOURCE_ONLY=1 to source functions without executing the full suite.
+# Unit tests for the canonical Rust doctor's boi-health check (check_17 /
+# `boi_health.rs`).
+#
+# History: these tests used to source a shell `check_17` in
+# `system/scripts/doctor.sh`. That file was removed in the doctor cutover
+# (commit 790b6d35 "feat(harness): doctor cutover — hex doctor replaces
+# doctor.sh") — the Rust harness (`hex doctor run`) is now the only live
+# doctor. These tests drive that binary directly.
+#
+# V2 cutover (boi-v2, "boi 3.0.0"): the check is binary-present →
+# `--version` ok → control-socket `~/.boi/v2/daemon.sock` present → pass;
+# warn otherwise. The old V1 VERSIONS-mismatch and `boi-wrapper` assertions
+# are gone (boi-v2 creates neither).
+#
+# `ctx.home` is read from $HOME and the boi paths hang off it, so we point
+# HOME at a throwaway dir to stage each state. HEX_DIR must be a real hex
+# workspace (the doctor refuses to run otherwise), so we point it at the repo.
 
-DOCTOR_SH="${BATS_TEST_DIRNAME}/../system/scripts/doctor.sh"
+REPO_ROOT="$(cd "${BATS_TEST_DIRNAME}/.." && pwd)"
+
+# Prefer the workspace-root release build; fall back to the harness-local one.
+if [ -x "${REPO_ROOT}/target/release/hex" ]; then
+  HEX_BIN="${REPO_ROOT}/target/release/hex"
+elif [ -x "${REPO_ROOT}/system/harness/target/release/hex" ]; then
+  HEX_BIN="${REPO_ROOT}/system/harness/target/release/hex"
+else
+  HEX_BIN=""
+fi
 
 # ── Helpers ──────────────────────────────────────────────────────────────────
 
-# Write a fake boi binary that responds to --help, --version, status.
-# Usage: make_fake_boi <path> <help_exit> <version_str> <status_exit>
+# Write a fake boi-v2 binary that prints "boi 3.0.0" for --version.
+# Usage: make_fake_boi <path> <version_exit> <version_str>
 make_fake_boi() {
-  local path="$1" help_exit="${2:-0}" version_str="${3:-boi 1.0.0}" status_exit="${4:-0}"
+  local path="$1" version_exit="${2:-0}" version_str="${3:-boi 3.0.0}"
   mkdir -p "$(dirname "$path")"
   cat > "$path" << EOF
 #!/bin/bash
 case "\$1" in
-  --help)    printf "dispatch\\nstatus\\nbench\\ncancel\\n"; exit $help_exit ;;
-  --version) echo "$version_str"; exit 0 ;;
-  status)    exit $status_exit ;;
-  *)         exit 0 ;;
+  --version|-V) echo "$version_str"; exit $version_exit ;;
+  *)            exit 0 ;;
 esac
 EOF
   chmod +x "$path"
 }
 
+# Bind a unix-domain socket at the given path (the boi-v2 daemon control socket).
+make_socket() {
+  local path="$1"
+  mkdir -p "$(dirname "$path")"
+  python3 -c "import socket; s=socket.socket(socket.AF_UNIX); s.bind('$path')"
+}
+
+# Run the boi-health check in isolation and capture its JSON status.
+# Sets: $boi_status (pass|warning|error), $output (raw json)
+run_boi_health() {
+  # `hex doctor run` exits non-zero when any check warns/errors — that's the
+  # signal under test here, not a harness failure. Capture output regardless.
+  output=$(HEX_DIR="$REPO_ROOT" HOME="$FAKE_HOME" \
+    "$HEX_BIN" doctor run --filter boi --json 2>&1) || true
+  boi_status=$(python3 -c \
+    "import sys,json; d=json.load(sys.stdin); print(d['checks'][0]['status'] if d.get('checks') else 'none')" \
+    <<< "$output" 2>/dev/null || echo "parse-error")
+}
+
 # ── Setup / teardown ─────────────────────────────────────────────────────────
 
 setup() {
+  if [ -z "$HEX_BIN" ]; then
+    skip "hex binary not built (run: cargo build --release)"
+  fi
   FAKE_HOME=$(mktemp -d)
-  FAKE_HEX=$(mktemp -d)
-  mkdir -p "$FAKE_HEX/.hex"
-  printf 'BOI_VERSION=v1.0.0\nHARNESS_VERSION=v0.8.0\n' > "$FAKE_HEX/VERSIONS"
-
-  # Variables doctor.sh reads at source time
-  export HEX_DIR="$FAKE_HEX"
-  export HOME="$FAKE_HOME"
-
-  # Source the file in test-only mode; doctor.sh sets -uo pipefail — reset after.
-  # shellcheck disable=SC1090
-  DOCTOR_SOURCE_ONLY=1 source "$DOCTOR_SH"
-  set +euo pipefail  # restore bats-compatible options
-
-  # Reset counters and override output helpers to capture results silently
-  PASS_COUNT=0; WARN_COUNT=0; ERROR_COUNT=0; FIXED_COUNT=0
-  HAS_ERRORS=false; HAS_WARNINGS=false
-  FIX=false; JSON_MODE=false; QUIET=false
-
-  _pass()  { PASS_COUNT=$((PASS_COUNT + 1)); }
-  _warn()  { WARN_COUNT=$((WARN_COUNT + 1)); HAS_WARNINGS=true; }
-  _error() { ERROR_COUNT=$((ERROR_COUNT + 1)); HAS_ERRORS=true; }
-  _info()  { :; }
-  _fixed() { FIXED_COUNT=$((FIXED_COUNT + 1)); }
-  _rec()   { :; }
 }
 
 teardown() {
-  rm -rf "$FAKE_HOME" "$FAKE_HEX"
+  rm -rf "$FAKE_HOME"
 }
 
 # ── Tests ─────────────────────────────────────────────────────────────────────
 
-@test "check_17: BOI not installed → non-critical (no error)" {
+@test "boi-health: binary missing → warning (non-critical, not error)" {
   # No binary at ~/.boi/bin/boi
-  check_17
-  [ "$ERROR_COUNT" -eq 0 ]
+  run_boi_health
+  [ "$boi_status" = "warning" ]
 }
 
-@test "check_17: dangling symlink at ~/.boi/bin/boi → error" {
+@test "boi-health: dangling symlink at ~/.boi/bin/boi → warning" {
   mkdir -p "$FAKE_HOME/.boi/bin"
   ln -s "/nonexistent/boi_gone_$$" "$FAKE_HOME/.boi/bin/boi"
-  check_17
-  [ "$ERROR_COUNT" -ge 1 ]
+  run_boi_health
+  # is_file() follows the symlink → target absent → "boi not found" warning.
+  [ "$boi_status" = "warning" ]
 }
 
-@test "check_17: boi --help exits non-zero → error" {
-  make_fake_boi "$FAKE_HOME/.boi/bin/boi" 1 "boi 1.0.0" 0
-  check_17
-  [ "$ERROR_COUNT" -ge 1 ]
+@test "boi-health: boi --version fails → warning" {
+  make_fake_boi "$FAKE_HOME/.boi/bin/boi" 1 "boi 3.0.0"
+  run_boi_health
+  [ "$boi_status" = "warning" ]
 }
 
-@test "check_17: boi --version mismatches VERSIONS → error" {
-  # Binary reports 0.5.0 but VERSIONS says v1.0.0
-  make_fake_boi "$FAKE_HOME/.boi/bin/boi" 0 "boi 0.5.0" 0
-  check_17
-  [ "$ERROR_COUNT" -ge 1 ]
+@test "boi-health: binary + version ok but daemon socket missing → warning" {
+  make_fake_boi "$FAKE_HOME/.boi/bin/boi" 0 "boi 3.0.0"
+  # No ~/.boi/v2/daemon.sock
+  run_boi_health
+  [ "$boi_status" = "warning" ]
+  echo "$output" | grep -q "daemon.sock"
 }
 
-@test "check_17: boi status exits non-zero → warning not error" {
-  make_fake_boi "$FAKE_HOME/.boi/bin/boi" 0 "boi 1.0.0" 1
-  check_17
-  [ "$WARN_COUNT" -ge 1 ]
-  # Should still record passes for --help and --version
-  [ "$PASS_COUNT" -ge 1 ]
-}
-
-@test "check_17: wrapper missing → warning not error" {
-  make_fake_boi "$FAKE_HOME/.boi/bin/boi" 0 "boi 1.0.0" 0
-  # No wrapper at ~/.boi/boi
-  check_17
-  [ "$WARN_COUNT" -ge 1 ]
-  [ "$ERROR_COUNT" -eq 0 ]
-}
-
-@test "check_17: broken wrapper chain → error" {
-  make_fake_boi "$FAKE_HOME/.boi/bin/boi" 0 "boi 1.0.0" 0
-  # Wrapper that always fails
-  mkdir -p "$FAKE_HOME/.boi"
-  printf '#!/bin/bash\nexit 1\n' > "$FAKE_HOME/.boi/boi"
-  chmod +x "$FAKE_HOME/.boi/boi"
-  check_17
-  [ "$ERROR_COUNT" -ge 1 ]
-}
-
-@test "check_17: all healthy → no errors or warnings" {
-  make_fake_boi "$FAKE_HOME/.boi/bin/boi" 0 "boi 1.0.0" 0
-  # Wrapper that delegates to the real binary
-  mkdir -p "$FAKE_HOME/.boi"
-  printf '#!/bin/bash\nexec "%s/.boi/bin/boi" "$@"\n' "$FAKE_HOME" > "$FAKE_HOME/.boi/boi"
-  chmod +x "$FAKE_HOME/.boi/boi"
-  check_17
-  [ "$ERROR_COUNT" -eq 0 ]
-  [ "$WARN_COUNT" -eq 0 ]
-  [ "$PASS_COUNT" -ge 4 ]
+@test "boi-health: binary + version + daemon socket → pass" {
+  make_fake_boi "$FAKE_HOME/.boi/bin/boi" 0 "boi 3.0.0"
+  make_socket "$FAKE_HOME/.boi/v2/daemon.sock"
+  run_boi_health
+  [ "$boi_status" = "pass" ]
+  echo "$output" | grep -q "healthy"
 }
