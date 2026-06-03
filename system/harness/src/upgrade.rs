@@ -29,6 +29,10 @@ struct SourceDirs {
     skills: PathBuf,
     commands: PathBuf,
     hooks: PathBuf,
+    /// Additive-only dirs: synced (add/update) but NEVER pruned, because their
+    /// deployed copies hold runtime state (`.hex/iii/data`, worker `node_modules`).
+    iii: PathBuf,
+    templates: PathBuf,
     version_txt: Option<PathBuf>,
 }
 
@@ -103,6 +107,8 @@ fn source_dirs_for_layout(layout: &str, source_root: &Path) -> Option<SourceDirs
             skills: source_root.join("dot-claude/skills"),
             commands: source_root.join("dot-claude/commands"),
             hooks: source_root.join("dot-claude/hooks"),
+            iii: source_root.join("dot-claude/iii"),
+            templates: source_root.join("dot-claude/templates"),
             version_txt: None,
         }),
         "v2" => Some(SourceDirs {
@@ -111,6 +117,8 @@ fn source_dirs_for_layout(layout: &str, source_root: &Path) -> Option<SourceDirs
             commands: source_root.join("system/commands"),
             // v2 hooks live in system/hooks/ — always sync, not just for v1
             hooks: source_root.join("system/hooks"),
+            iii: source_root.join("system/iii"),
+            templates: source_root.join("system/templates"),
             version_txt: Some(source_root.join("system/version.txt")),
         }),
         _ => None,
@@ -149,6 +157,43 @@ fn copy_file_with_perms(src: &Path, dst: &Path) -> io::Result<()> {
         fs::set_permissions(dst, perms)?;
     }
     Ok(())
+}
+
+/// Best-effort: for each iii worker dir with a package.json but no node_modules,
+/// run `npm install`. Non-fatal — a missing/failed npm is a loud WARN, never an
+/// upgrade failure. Worker deps shouldn't block the rest of hex from upgrading.
+fn ensure_iii_worker_deps(workers_dir: &Path) {
+    if !workers_dir.is_dir() {
+        return;
+    }
+    let Ok(entries) = fs::read_dir(workers_dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let dir = entry.path();
+        if !dir.is_dir() || !dir.join("package.json").is_file() {
+            continue;
+        }
+        if dir.join("node_modules").is_dir() {
+            continue; // deps already present
+        }
+        println!("  → npm install for iii worker {}", dir.display());
+        match std::process::Command::new("npm")
+            .arg("install")
+            .current_dir(&dir)
+            .status()
+        {
+            Ok(s) if s.success() => println!("  [OK] worker deps installed"),
+            Ok(s) => eprintln!(
+                "  [WARN] npm install failed ({s}) in {} — worker may not start",
+                dir.display()
+            ),
+            Err(e) => eprintln!(
+                "  [WARN] npm unavailable ({e}) — iii worker deps not installed in {}",
+                dir.display()
+            ),
+        }
+    }
 }
 
 /// Detect which files in src_dir differ from dst_dir.
@@ -731,13 +776,16 @@ pub fn run(args: &[String]) -> i32 {
     let (c3, n3, u3, log3) = detect_changes(&src_dirs.commands, &hex_dot_dir.join("commands"), "commands");
     // Always detect + sync hooks for both v1 and v2 (drift bug fix)
     let (c4, n4, u4, log4) = detect_changes(&src_dirs.hooks, &hex_dot_dir.join("hooks"), "hooks");
+    // Additive dirs (iii engine config/workers, launchd + other templates)
+    let (c5, n5, u5, log5) = detect_changes(&src_dirs.iii, &hex_dot_dir.join("iii"), "iii");
+    let (c6, n6, u6, log6) = detect_changes(&src_dirs.templates, &hex_dot_dir.join("templates"), "templates");
 
-    let total_changed = c1 + c2 + c3 + c4;
-    let total_new = n1 + n2 + n3 + n4;
-    let total_unchanged = u1 + u2 + u3 + u4;
+    let total_changed = c1 + c2 + c3 + c4 + c5 + c6;
+    let total_new = n1 + n2 + n3 + n4 + n5 + n6;
+    let total_unchanged = u1 + u2 + u3 + u4 + u5 + u6;
 
     println!("  → {total_changed} changed, {total_new} new, {total_unchanged} unchanged");
-    for line in log1.iter().chain(&log2).chain(&log3).chain(&log4) {
+    for line in log1.iter().chain(&log2).chain(&log3).chain(&log4).chain(&log5).chain(&log6) {
         println!("{line}");
     }
 
@@ -787,6 +835,24 @@ pub fn run(args: &[String]) -> i32 {
             }
         }
     }
+
+    // Additive dirs: sync (add/update) but DO NOT add to the deletion pass below,
+    // so deployed runtime state (.hex/iii/data, worker node_modules) is preserved.
+    let additive_pairs: &[(&PathBuf, PathBuf)] = &[
+        (&src_dirs.iii, hex_dot_dir.join("iii")),
+        (&src_dirs.templates, hex_dot_dir.join("templates")),
+    ];
+    for (src, dst) in additive_pairs {
+        if src.exists() {
+            match apply_sync(src, dst, Some(&backup_dir)) {
+                Ok(n) => applied += n,
+                Err(e) => eprintln!("  [WARN] Sync failed for {}: {e}", src.display()),
+            }
+        }
+    }
+
+    // Ensure iii worker node_modules exist (node_modules is gitignored, not synced).
+    ensure_iii_worker_deps(&hex_dot_dir.join("iii/workers"));
 
     // Mirror commands to runtime slash-command dir
     let runtime_cmd_dir = hex_dir.join(".claude/commands");
@@ -958,6 +1024,8 @@ mod tests {
         let src_dirs = source_dirs_for_layout("v1", source).unwrap();
         assert!(src_dirs.scripts.ends_with("dot-claude/scripts"));
         assert!(src_dirs.hooks.ends_with("dot-claude/hooks"));
+        assert!(src_dirs.iii.ends_with("dot-claude/iii"));
+        assert!(src_dirs.templates.ends_with("dot-claude/templates"));
         assert!(src_dirs.version_txt.is_none());
     }
 
@@ -968,7 +1036,23 @@ mod tests {
         let src_dirs = source_dirs_for_layout("v2", source).unwrap();
         assert!(src_dirs.scripts.ends_with("system/scripts"));
         assert!(src_dirs.hooks.ends_with("system/hooks"));
+        assert!(src_dirs.iii.ends_with("system/iii"));
+        assert!(src_dirs.templates.ends_with("system/templates"));
         assert!(src_dirs.version_txt.is_some());
+    }
+
+    #[test]
+    fn ensure_iii_worker_deps_is_safe_when_missing_or_already_installed() {
+        let tmp = tempfile::tempdir().unwrap();
+        // Missing workers dir → no panic, no-op.
+        ensure_iii_worker_deps(&tmp.path().join("does-not-exist"));
+        // Worker with package.json AND node_modules → skipped (npm never invoked).
+        let w = tmp.path().join("workers/foo");
+        fs::create_dir_all(w.join("node_modules")).unwrap();
+        fs::write(w.join("package.json"), "{}").unwrap();
+        ensure_iii_worker_deps(&tmp.path().join("workers"));
+        // node_modules still present (we didn't touch it).
+        assert!(w.join("node_modules").is_dir());
     }
 
     #[test]
