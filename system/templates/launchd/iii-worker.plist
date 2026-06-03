@@ -23,6 +23,8 @@
         <string>run</string>
         <string>CONFIG_PLACEHOLDER</string>
     </array>
+    <key>WorkingDirectory</key>
+    <string>HEXDIR_PLACEHOLDER</string>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HEX_DIR</key>

@@ -104,8 +104,13 @@ async fn run_command(id: &str, argv: &[String]) -> Result<serde_json::Value, iii
     if argv.is_empty() {
         return Err(iii_sdk::IIIError::Handler(format!("{id}: empty command")));
     }
+    // Run from $HEX_DIR so cwd-relative resources resolve (e.g. fastembed's
+    // .fastembed_cache for `hex memory index`). Defense-in-depth: the plist also
+    // sets WorkingDirectory, but don't rely on it.
+    let hex_dir = std::env::var("HEX_DIR").unwrap_or_else(|_| ".".to_string());
     let out = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
+        .current_dir(&hex_dir)
         .output()
         .await;
     match out {
