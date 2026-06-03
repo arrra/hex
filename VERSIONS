@@ -2,10 +2,12 @@
 # install.sh reads this file and clones the corresponding tags.
 #
 # To override the source repo (e.g. for forks), set these env vars before install:
-#   HEX_BOI_REPO=https://github.com/youruser/boi.git
+#   HEX_BOI_REPO=https://github.com/youruser/boi-v2.git
 #
-# To bump: tag new releases in boi, then update these values.
+# To bump: tag new releases in boi-v2, then update these values.
+# Canonical BOI is mrap/boi-v2 (TOML engine). The old mrap/boi ("boi 2.0.0", YAML)
+# is decommissioned — note the inverted version numbers (v2 engine reports 3.0.0).
 # hex-events tree removed 2026-05-24; Rust daemon is canonical, policies live at ~/.hex-events/policies/.
 
-BOI_VERSION=v2.0.0
+BOI_VERSION=v3.0.0
 HARNESS_VERSION=v0.8.0

@@ -330,13 +330,13 @@ if [ ! -f "$VERSIONS_FILE" ]; then
 fi
 BOI_VERSION=$(grep "^BOI_VERSION=" "$VERSIONS_FILE" | cut -d= -f2)
 HARNESS_VERSION=$(grep "^HARNESS_VERSION=" "$VERSIONS_FILE" | cut -d= -f2 || true)
-BOI_REPO="${HEX_BOI_REPO:-https://github.com/mrap/boi.git}"
+BOI_REPO="${HEX_BOI_REPO:-https://github.com/mrap/boi-v2.git}"
 
-# BOI — parallel worker dispatch
-# Fresh install: clone at pinned version, then run the project's own installer.
+# BOI — parallel worker dispatch (boi-v2: the canonical TOML engine).
+# Fresh install: clone at pinned version, then build the Rust binary.
 # Existing install: fetch latest tag and upgrade in place.
 install_or_upgrade_boi() {
-    local boi_src="$HOME/github.com/mrap/boi"
+    local boi_src="$HOME/github.com/mrap/boi-v2"
     mkdir -p "$HOME/.boi/bin" "$HOME/.boi/pids" "$HOME/.boi/logs" "$HOME/.boi/worktrees"
 
     # Clone or update the BOI repo
