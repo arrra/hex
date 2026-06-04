@@ -342,12 +342,13 @@ install_or_upgrade_boi() {
     # Clone or update the BOI repo
     if [ -d "$boi_src/.git" ]; then
         echo "  BOI repo exists — fetching $BOI_VERSION..."
-        # checkout -f is required: we write a generated boi.sh wrapper into the
-        # repo tree below, and boi.sh is a *tracked* file, so a plain checkout
-        # aborts ("local changes would be overwritten") and the old version
-        # ships silently. Surface failures loudly (S6) instead of `|| true`.
+        # checkout -f to discard any stray local changes (e.g. the generated
+        # boi.sh wrapper written below), then `checkout -B main` to RE-ATTACH a
+        # `main` branch at the pinned tag — never leave the repo in detached
+        # HEAD (SO #13). Surface failures loudly (S6) instead of `|| true`.
         if ! ( cd "$boi_src" && git fetch --tags origin 2>/dev/null && \
-               git checkout -f "$BOI_VERSION" 2>/dev/null ); then
+               git checkout -f "$BOI_VERSION" 2>/dev/null && \
+               git checkout -B main 2>/dev/null ); then
             echo "  BOI: failed to fetch/checkout $BOI_VERSION — boi may be stale" >&2
         fi
     else
@@ -357,6 +358,10 @@ install_or_upgrade_boi() {
             echo "  BOI: failed to clone $BOI_REPO @ $BOI_VERSION"
             return
         }
+        # `clone --branch <tag>` leaves a detached HEAD — re-attach to `main`
+        # at the pinned tag (SO #13: never leave the repo detached).
+        ( cd "$boi_src" && git checkout -B main 2>/dev/null ) || \
+            echo "  BOI: could not attach main branch after clone" >&2
     fi
 
     # Build the Rust binary
