@@ -55,6 +55,7 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::scripts_exec::ScriptsExecutable),
         Box::new(checks::boi_health::BoiHealth),
         Box::new(checks::iii_engine_health::IiiEngineHealth),
+        Box::new(checks::telemetry_health::TelemetryHealth),
         Box::new(checks::python::PythonVersion),
         Box::new(checks::hex_binary::HexBinaryOnPath),
         // Config checks
@@ -177,5 +178,14 @@ mod tests {
     fn test_registry_has_checks() {
         let runner = Runner::all_checks();
         assert!(runner.checks.len() >= 10, "registry must have at least 10 checks");
+    }
+
+    #[test]
+    fn test_registry_includes_telemetry_health() {
+        let runner = Runner::all_checks();
+        assert!(
+            runner.checks.iter().any(|c| c.name() == "telemetry-health"),
+            "registry must include the telemetry-health doctor check"
+        );
     }
 }
