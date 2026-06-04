@@ -228,20 +228,36 @@ pub fn prune(keep_days: i64) -> rusqlite::Result<usize> {
     Ok(removed)
 }
 
+/// Shared test helpers. `HEX_DIR` is a process-global env var, so EVERY test in
+/// this crate that mutates it (here and in other modules — `iii_worker`,
+/// `memory::provider`, …) MUST serialize on this single lock. Otherwise cargo's
+/// parallel test runner lets one test swap `HEX_DIR` out from under another,
+/// which makes the telemetry store open the wrong db (disk I/O errors / lost rows).
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use std::sync::Mutex;
+pub(crate) mod test_support {
+    use std::sync::{Mutex, MutexGuard};
 
-    // HEX_DIR is process-wide; serialize tests that mutate it.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    pub(crate) static ENV_LOCK: Mutex<()> = Mutex::new(());
 
-    fn isolate() -> (tempfile::TempDir, std::sync::MutexGuard<'static, ()>) {
+    /// Hold the global HEX_DIR lock and point HEX_DIR at a fresh tempdir.
+    pub(crate) fn isolate() -> (tempfile::TempDir, MutexGuard<'static, ()>) {
         let guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
         let tmp = tempfile::tempdir().unwrap();
         std::env::set_var("HEX_DIR", tmp.path());
         (tmp, guard)
     }
+
+    /// Hold the global HEX_DIR lock without changing HEX_DIR (for tests that set
+    /// it to a fixed path themselves).
+    pub(crate) fn lock_env() -> MutexGuard<'static, ()> {
+        ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::test_support::{isolate, lock_env};
+    use super::*;
 
     #[test]
     fn record_and_recent_roundtrip() {
@@ -303,6 +319,7 @@ mod tests {
 
     #[test]
     fn record_loud_never_panics_on_bad_path() {
+        let _guard = lock_env();
         // Setting HEX_DIR to a path that cannot be created should still not panic.
         // (Use a NUL byte to force an OS-level path error.)
         std::env::set_var("HEX_DIR", "/tmp/hex-telemetry-loud-test");

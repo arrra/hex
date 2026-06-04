@@ -202,6 +202,7 @@ jobs:
 
     #[test]
     fn expand_args_substitutes_hex_dir() {
+        let _guard = crate::telemetry::test_support::lock_env();
         std::env::set_var("HEX_DIR", "/tmp/hx");
         let out = expand_args(&["bash".into(), "${HEX_DIR}/s.sh".into()]);
         assert_eq!(out, vec!["bash", "/tmp/hx/s.sh"]);
@@ -211,8 +212,7 @@ jobs:
     /// (with worker name, event id, and duration) on a successful job outcome.
     #[tokio::test]
     async fn run_command_records_telemetry_on_success() {
-        let tmp = tempfile::tempdir().unwrap();
-        std::env::set_var("HEX_DIR", tmp.path());
+        let (_tmp, _guard) = crate::telemetry::test_support::isolate();
 
         let argv: Vec<String> = vec!["true".into()];
         let res = run_command(

@@ -7,8 +7,15 @@
 // This MUST fail until the module is created and wired into lib.rs.
 
 use hex::telemetry::{self, TelemetryEvent};
+use std::sync::Mutex;
+
+// HEX_DIR is process-global; these tests run as parallel threads in one binary,
+// so serialize every HEX_DIR mutation on a single lock or they stomp each other
+// (one test's tempdir gets swapped out → wrong db opened → lost rows / I/O error).
+static ENV_LOCK: Mutex<()> = Mutex::new(());
 
 fn with_hex_dir<F: FnOnce()>(f: F) {
+    let _guard = ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
     let tmp = tempfile::tempdir().unwrap();
     std::env::set_var("HEX_DIR", tmp.path());
     f();

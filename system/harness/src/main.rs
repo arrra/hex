@@ -1,6 +1,6 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 mod consolidate;
 mod doctor;
