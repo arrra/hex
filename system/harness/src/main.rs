@@ -1,6 +1,6 @@
 use clap::{CommandFactory, Parser, Subcommand};
 use std::io;
-use std::path::{Path, PathBuf};
+use std::path::PathBuf;
 
 mod consolidate;
 mod doctor;
@@ -9,6 +9,7 @@ mod integration_cmd;
 mod checkpoint;
 mod shutdown;
 mod startup;
+mod telemetry;
 mod integration_check_all;
 use hex::memory;
 mod path_map;
@@ -93,6 +94,12 @@ enum Commands {
         #[command(subcommand)]
         command: IiiCommands,
     },
+    /// Telemetry store: query and emit events from the native SQLite log
+    #[command(display_order = 6)]
+    Telemetry {
+        #[command(subcommand)]
+        command: TelemetryCommands,
+    },
     /// Print version
     #[command(display_order = 15)]
     Version,
@@ -118,6 +125,49 @@ enum IiiWorkerCommands {
     Run {
         /// Path to the worker config YAML
         config: std::path::PathBuf,
+    },
+}
+
+#[derive(Subcommand)]
+enum TelemetryCommands {
+    /// Show recent events (newest first)
+    Recent {
+        #[arg(long, default_value_t = 20)]
+        limit: usize,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Show non-ok events since the given window (e.g. 24h, 7d)
+    Failures {
+        #[arg(long, default_value = "24h")]
+        since: String,
+        #[arg(long)]
+        json: bool,
+    },
+    /// Aggregated per-event status (last run + ok/error counts)
+    Status {
+        #[arg(long)]
+        json: bool,
+    },
+    /// Append a single event from the CLI (or shell scripts)
+    Record {
+        #[arg(long)]
+        source: String,
+        #[arg(long)]
+        event: String,
+        #[arg(long)]
+        status: String,
+        #[arg(long = "duration-ms")]
+        duration_ms: Option<i64>,
+        #[arg(long = "exit-code")]
+        exit_code: Option<i64>,
+        #[arg(long)]
+        detail: Option<String>,
+    },
+    /// Delete events older than keep-days
+    Prune {
+        #[arg(long = "keep-days", default_value_t = 30)]
+        keep_days: i64,
     },
 }
 
@@ -596,6 +646,9 @@ fn main() {
             let code = release::run(&hex_dir, release::ReleaseArgs { version, skip_e2e, dry_run });
             std::process::exit(code);
         }
+        Commands::Telemetry { command } => {
+            std::process::exit(run_telemetry(command));
+        }
         Commands::Hook { command } => hook::run(command),
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
@@ -603,6 +656,187 @@ fn main() {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "hex", &mut io::stdout());
         }
+    }
+}
+
+fn parse_since(s: &str) -> Result<chrono::Duration, String> {
+    let s = s.trim();
+    if s.is_empty() {
+        return Err("empty --since value".into());
+    }
+    let (num_str, unit) = match s.chars().last().unwrap() {
+        'h' | 'd' => (&s[..s.len() - 1], s.chars().last().unwrap()),
+        _ => (s, 'h'),
+    };
+    let n: i64 = num_str
+        .parse()
+        .map_err(|e| format!("invalid --since number `{num_str}`: {e}"))?;
+    Ok(match unit {
+        'd' => chrono::Duration::days(n),
+        _ => chrono::Duration::hours(n),
+    })
+}
+
+fn print_event_table(rows: &[telemetry::EventRow]) {
+    println!(
+        "{:<25} {:<16} {:<32} {:<8} {:>8}",
+        "TS", "SOURCE", "EVENT", "STATUS", "DUR_MS"
+    );
+    for r in rows {
+        let dur = r
+            .duration_ms
+            .map(|d| d.to_string())
+            .unwrap_or_else(|| "-".into());
+        println!(
+            "{:<25} {:<16} {:<32} {:<8} {:>8}",
+            r.ts, r.source, r.event, r.status, dur
+        );
+    }
+}
+
+fn print_event_json(rows: &[telemetry::EventRow]) {
+    let items: Vec<_> = rows
+        .iter()
+        .map(|r| {
+            serde_json::json!({
+                "id": r.id,
+                "ts": r.ts,
+                "source": r.source,
+                "event": r.event,
+                "status": r.status,
+                "duration_ms": r.duration_ms,
+                "exit_code": r.exit_code,
+                "detail": r.detail,
+            })
+        })
+        .collect();
+    println!("{}", serde_json::to_string_pretty(&items).unwrap());
+}
+
+fn run_telemetry(command: TelemetryCommands) -> i32 {
+    match command {
+        TelemetryCommands::Recent { limit, json } => match telemetry::recent(limit) {
+            Ok(rows) => {
+                if json {
+                    print_event_json(&rows);
+                } else {
+                    print_event_table(&rows);
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("telemetry recent: {e}");
+                1
+            }
+        },
+        TelemetryCommands::Failures { since, json } => {
+            let dur = match parse_since(&since) {
+                Ok(d) => d,
+                Err(e) => {
+                    eprintln!("telemetry failures: {e}");
+                    return 2;
+                }
+            };
+            let cutoff = chrono::Utc::now() - dur;
+            match telemetry::failures(cutoff) {
+                Ok(rows) => {
+                    if json {
+                        print_event_json(&rows);
+                    } else {
+                        print_event_table(&rows);
+                    }
+                    0
+                }
+                Err(e) => {
+                    eprintln!("telemetry failures: {e}");
+                    1
+                }
+            }
+        }
+        TelemetryCommands::Status { json } => match telemetry::status() {
+            Ok(rows) => {
+                if json {
+                    let items: Vec<_> = rows
+                        .iter()
+                        .map(|r| {
+                            serde_json::json!({
+                                "event": r.event,
+                                "last_ts": r.last_ts,
+                                "last_status": r.last_status,
+                                "last_duration_ms": r.last_duration_ms,
+                                "run_count": r.run_count,
+                                "ok_count": r.ok_count,
+                                "error_count": r.error_count,
+                            })
+                        })
+                        .collect();
+                    println!("{}", serde_json::to_string_pretty(&items).unwrap());
+                } else {
+                    println!(
+                        "{:<32} {:<25} {:<8} {:>5} {:>5} {:>5} {:>8}",
+                        "EVENT", "LAST_TS", "LAST", "RUNS", "OK", "ERR", "LAST_MS"
+                    );
+                    for r in &rows {
+                        let dur = r
+                            .last_duration_ms
+                            .map(|d| d.to_string())
+                            .unwrap_or_else(|| "-".into());
+                        println!(
+                            "{:<32} {:<25} {:<8} {:>5} {:>5} {:>5} {:>8}",
+                            r.event,
+                            r.last_ts,
+                            r.last_status,
+                            r.run_count,
+                            r.ok_count,
+                            r.error_count,
+                            dur
+                        );
+                    }
+                }
+                0
+            }
+            Err(e) => {
+                eprintln!("telemetry status: {e}");
+                1
+            }
+        },
+        TelemetryCommands::Record {
+            source,
+            event,
+            status,
+            duration_ms,
+            exit_code,
+            detail,
+        } => {
+            let ev = telemetry::TelemetryEvent {
+                source,
+                event,
+                status,
+                duration_ms,
+                exit_code,
+                detail,
+            };
+            match telemetry::record(&ev) {
+                Ok(()) => {
+                    println!("recorded");
+                    0
+                }
+                Err(e) => {
+                    eprintln!("telemetry record: failed: {e}");
+                    1
+                }
+            }
+        }
+        TelemetryCommands::Prune { keep_days } => match telemetry::prune(keep_days) {
+            Ok(n) => {
+                println!("pruned {} events (kept last {}d)", n, keep_days);
+                0
+            }
+            Err(e) => {
+                eprintln!("telemetry prune: {e}");
+                1
+            }
+        },
     }
 }
 

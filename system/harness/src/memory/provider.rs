@@ -105,6 +105,9 @@ mod tests {
 
     #[test]
     fn defer_when_no_key_present() {
+        // HEX_DIR is process-global; serialize with every other test that mutates
+        // it (see telemetry::test_support) so parallel tests don't stomp it.
+        let _guard = crate::telemetry::test_support::lock_env();
         std::env::remove_var("OPENROUTER_API_KEY");
         // Point HEX_DIR at a directory with no secrets file so the file
         // fallback also finds nothing.

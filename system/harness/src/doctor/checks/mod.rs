@@ -18,6 +18,7 @@ pub mod scripts_exec;
 pub mod settings_json;
 pub mod registry_health;
 pub mod symlinks;
+pub mod telemetry_health;
 pub mod timezone;
 pub mod todo_md;
 pub mod vector_search;

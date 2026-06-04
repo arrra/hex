@@ -63,12 +63,14 @@ async fn serve(cfg: WorkerConfig) -> i32 {
     for job in &cfg.jobs {
         let argv = expand_args(&job.command);
         let id_for_handler = job.id.clone();
+        let worker_name_for_handler = cfg.worker_name.clone();
         iii.register_function(
             job.id.clone(),
             iii_sdk::RegisterFunction::new_async(move |_input: serde_json::Value| {
                 let argv = argv.clone();
                 let id = id_for_handler.clone();
-                async move { run_command(&id, &argv).await }
+                let worker_name = worker_name_for_handler.clone();
+                async move { run_command(&worker_name, &id, &argv).await }
             })
             .description(job.description.clone()),
         );
@@ -100,7 +102,17 @@ fn expand_args(args: &[String]) -> Vec<String> {
 }
 
 /// Exec a command; Ok on exit 0, loud Err otherwise (S6).
-async fn run_command(id: &str, argv: &[String]) -> Result<serde_json::Value, iii_sdk::IIIError> {
+///
+/// Every outcome is also recorded to the local telemetry store via
+/// `crate::telemetry::record_loud` — this is the chokepoint that auto-traces
+/// every iii job (no per-worker opt-in needed). The telemetry write is
+/// loud-but-not-fatal: a write failure logs to stderr but never fails the
+/// observed job.
+async fn run_command(
+    worker_name: &str,
+    id: &str,
+    argv: &[String],
+) -> Result<serde_json::Value, iii_sdk::IIIError> {
     if argv.is_empty() {
         return Err(iii_sdk::IIIError::Handler(format!("{id}: empty command")));
     }
@@ -108,11 +120,13 @@ async fn run_command(id: &str, argv: &[String]) -> Result<serde_json::Value, iii
     // .fastembed_cache for `hex memory index`). Defense-in-depth: the plist also
     // sets WorkingDirectory, but don't rely on it.
     let hex_dir = std::env::var("HEX_DIR").unwrap_or_else(|_| ".".to_string());
+    let started = std::time::Instant::now();
     let out = tokio::process::Command::new(&argv[0])
         .args(&argv[1..])
         .current_dir(&hex_dir)
         .output()
         .await;
+    let duration_ms = started.elapsed().as_millis() as i64;
     match out {
         Ok(o) if o.status.success() => {
             let stdout = String::from_utf8_lossy(&o.stdout);
@@ -120,18 +134,43 @@ async fn run_command(id: &str, argv: &[String]) -> Result<serde_json::Value, iii
             tail.reverse();
             let tail: String = tail.into_iter().collect();
             println!("iii worker: {id} OK — {}", tail.replace('\n', " "));
+            crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+                source: worker_name.to_string(),
+                event: id.to_string(),
+                status: "ok".to_string(),
+                duration_ms: Some(duration_ms),
+                exit_code: Some(o.status.code().unwrap_or(0) as i64),
+                detail: Some(tail),
+            });
             Ok(serde_json::json!({ "ok": true, "id": id }))
         }
         Ok(o) => {
             let code = o.status.code().unwrap_or(-1);
-            eprintln!(
-                "iii worker: {id} FAILED (exit {code}): {}",
-                String::from_utf8_lossy(&o.stderr)
-            );
+            let stderr = String::from_utf8_lossy(&o.stderr);
+            eprintln!("iii worker: {id} FAILED (exit {code}): {}", stderr);
+            let mut tail: Vec<char> = stderr.chars().rev().take(300).collect();
+            tail.reverse();
+            let tail: String = tail.into_iter().collect();
+            crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+                source: worker_name.to_string(),
+                event: id.to_string(),
+                status: "error".to_string(),
+                duration_ms: Some(duration_ms),
+                exit_code: Some(code as i64),
+                detail: Some(tail),
+            });
             Err(iii_sdk::IIIError::Handler(format!("{id} exited {code}")))
         }
         Err(e) => {
             eprintln!("iii worker: {id} spawn failed: {e}");
+            crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+                source: worker_name.to_string(),
+                event: id.to_string(),
+                status: "spawn_error".to_string(),
+                duration_ms: Some(duration_ms),
+                exit_code: None,
+                detail: Some(format!("spawn failed: {e}")),
+            });
             Err(iii_sdk::IIIError::Handler(format!("{id} spawn failed: {e}")))
         }
     }
@@ -163,8 +202,42 @@ jobs:
 
     #[test]
     fn expand_args_substitutes_hex_dir() {
+        let _guard = crate::telemetry::test_support::lock_env();
         std::env::set_var("HEX_DIR", "/tmp/hx");
         let out = expand_args(&["bash".into(), "${HEX_DIR}/s.sh".into()]);
         assert_eq!(out, vec!["bash", "/tmp/hx/s.sh"]);
+    }
+
+    /// Red test for Tf7tqfhpp: run_command must record a telemetry event
+    /// (with worker name, event id, and duration) on a successful job outcome.
+    #[tokio::test]
+    async fn run_command_records_telemetry_on_success() {
+        let (_tmp, _guard) = crate::telemetry::test_support::isolate();
+
+        let argv: Vec<String> = vec!["true".into()];
+        let res = run_command(
+            "telemetry-test-worker",
+            "hex::telemetry::redtest::ok",
+            &argv,
+        )
+        .await;
+        assert!(res.is_ok(), "expected successful run, got {res:?}");
+
+        let rows = crate::telemetry::recent(50)
+            .expect("telemetry::recent must succeed after a recorded run");
+        let found = rows.iter().find(|r| {
+            r.event == "hex::telemetry::redtest::ok"
+                && r.source == "telemetry-test-worker"
+                && r.status == "ok"
+        });
+        assert!(
+            found.is_some(),
+            "expected telemetry row for the successful run, got rows: {rows:?}"
+        );
+        let row = found.unwrap();
+        assert!(
+            row.duration_ms.is_some(),
+            "telemetry row must include duration_ms"
+        );
     }
 }
