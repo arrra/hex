@@ -4,4 +4,5 @@ pub mod audit;
 pub mod capability_guard;
 pub mod memory;
 pub mod registry;
+pub mod telemetry;
 pub mod types;

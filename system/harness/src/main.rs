@@ -9,6 +9,7 @@ mod integration_cmd;
 mod checkpoint;
 mod shutdown;
 mod startup;
+mod telemetry;
 mod integration_check_all;
 use hex::memory;
 mod path_map;
