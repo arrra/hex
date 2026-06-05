@@ -139,6 +139,9 @@ enum TriggersCommands {
         /// JSON event payload (default `{}`)
         #[arg(long)]
         data: Option<String>,
+        /// Producer attribution (defaults to $HEX_PRODUCER or "cli")
+        #[arg(long)]
+        producer: Option<String>,
     },
 }
 
@@ -425,7 +428,7 @@ fn main() {
             WorkerCommands::Status => std::process::exit(worker_status()),
         },
         Commands::Triggers { command } => match command {
-            TriggersCommands::Emit { event, data } => {
+            TriggersCommands::Emit { event, data, producer } => {
                 let parsed: serde_json::Value = match data.as_deref() {
                     None | Some("") => serde_json::Value::Object(Default::default()),
                     Some(s) => match serde_json::from_str(s) {
@@ -436,7 +439,7 @@ fn main() {
                         }
                     },
                 };
-                match ops::emit(&event, parsed) {
+                match ops::emit(&event, parsed, producer.as_deref()) {
                     Ok(()) => std::process::exit(0),
                     Err(e) => {
                         eprintln!("{e}");
