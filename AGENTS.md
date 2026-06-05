@@ -1,4 +1,4 @@
-# hex — Agent Instructions (Codex)
+# hex — Agent Instructions
 
 ---
 
@@ -35,7 +35,7 @@ Critical path identified in `docs/refactor/harness-engineering-audit-2026-05-15.
 13 backlog items totaling ~3 months of work; 7 HIGH severity. Status:
 - C1 agents-md-verification: DONE (this section)
 - C3 session-lifecycle-state (PROGRESS.md schema): pending
-- C2 claude-md-decomposition: pending (depends on C1 + C3)
+- C2 agents-md-decomposition: pending (depends on C1 + C3)
 - C4 trail-audit-implementation: pending (depends on C1)
 - C5 verify-mechanical-enforcement: pending (depends on C3)
 
@@ -51,7 +51,7 @@ Verify: hex doctor
 **Static answer:** Read `todo.md` for the current priority list. The full critical path
 backlog is in `docs/refactor/harness-engineering-audit-2026-05-15.md`. Immediate next items:
 1. C3 — PROGRESS.md schema + minimal initial file (schema design + hex-startup/shutdown wiring)
-2. C2 — CLAUDE.md decomposition: 563-line file → ≤150-line router + topic docs in `docs/harness/`
+2. C2 — AGENTS.md decomposition: 563-line file → ≤150-line router + topic docs in `docs/harness/`
 3. C4 — Implement `hex agent audit` (currently returns "not yet implemented" in main.rs L1108)
 
 Verify: cat todo.md
@@ -109,10 +109,10 @@ Each is a TODO for a future iteration.
 <!-- hex:system-start — DO NOT EDIT BELOW THIS LINE -->
 <!-- System-managed section. Updated by `hex upgrade`. Your customizations go in "My Rules" below. -->
 
-> This file is the primary instruction file for **OpenAI Codex CLI** (`codex`).
-> For Claude Code, see CLAUDE.md. For Gemini CLI, see GEMINI.md.
-> Codex reads AGENTS.md directly — there are no slash commands or first-class
-> skills. Read this file and browse `.hex/skills/` to discover capabilities.
+> This is the primary instruction file for the hex agent system, read by your
+> agent runtime at session start. If your runtime exposes skills as first-class
+> commands, invoke them directly; otherwise read this file and browse
+> `.hex/skills/` to discover capabilities.
 
 ## Quick Start
 
@@ -132,47 +132,46 @@ You are a persistent AI agent that compounds over time.
 
 ---
 
-## Runtime Differences from Claude Code
+## Runtime Capabilities
 
-You are running as **Codex CLI**, not Claude Code. The behavioral contract is identical, but the tool model differs:
+The behavioral contract is identical across agent runtimes — only the tool model differs. Adapt to whatever your runtime provides:
 
-| Capability | Claude Code | Codex (this runtime) |
+| Capability | If your runtime has it | If not |
 |---|---|---|
-| Primary instruction file | CLAUDE.md | AGENTS.md (this file) |
-| Skills / slash commands | `/skill-name` via Skill tool | Browse `.hex/skills/*/SKILL.md` directly |
-| Hooks (PreToolUse etc.) | `.claude/settings.json` | Not available |
-| Scheduling / automation | N/A | OS-level scheduling (launchd/cron) per job |
-| Sandbox model | Permissioned tool calls | Container-level, per-session isolation |
-| CLI invocation | `claude` | `codex` |
+| Skills / slash commands | Invoke the skill directly | Browse `.hex/skills/*/SKILL.md` and follow its instructions |
+| Hooks (pre/post tool) | Use the runtime's hook config | Apply the behavior manually |
+| Scheduling / automation | — | OS-level scheduling (launchd/cron) per job |
+| Sandbox model | Whatever the runtime enforces | Per-session isolation |
+| Web access | Use the native fetch/search tool | `curl` + public APIs, or note the limitation |
 
-**Everything else is identical**: BOI dispatch, memory system, standing orders, session lifecycle.
+**Everything else is identical regardless of runtime**: BOI dispatch, memory system, standing orders, session lifecycle.
 
 ---
 
 ## Tool Equivalents
 
-Codex uses standard Unix tools. Map Claude Code abstractions to their equivalents:
+If your runtime exposes structured file/search tools, use them. If it only gives you a shell, fall back to standard Unix tools:
 
-| Claude Code Tool | Codex Equivalent | Notes |
-|---|---|---|
-| `Read` | `cat <file>` | Use `-n` for line numbers |
-| `Edit` (replace string) | `sed -i` or `patch` | Prefer `patch` for multi-line edits |
-| `Write` | Redirect or heredoc | `cat > file << 'EOF'` |
-| `Bash` | Direct shell execution | Already native |
-| `Glob` | `find <dir> -name "pattern"` | Confine `find` to the project dir |
-| `Grep` | `grep -rn` / `rg` | `rg` preferred if available |
-| `WebSearch` | **Not available** | Use `curl` + public APIs; or note the limitation |
-| `WebFetch` | `curl -sSL <url>` | Pipe to `jq` for JSON |
-| `Agent` (subagent) | `boi dispatch <spec>` | BOI handles all delegation |
-| `TodoWrite` | Write to `todo.md` | Same format, manual file write |
+| Operation | Structured tool | Shell fallback | Notes |
+|---|---|---|---|
+| Read a file | Read | `cat <file>` | Use `-n` for line numbers |
+| Edit a file | Edit (replace string) | `sed -i` or `patch` | Prefer `patch` for multi-line edits |
+| Write a file | Write | Redirect or heredoc | `cat > file << 'EOF'` |
+| Run a command | Bash | Direct shell execution | Already native |
+| Find files | Glob | `find <dir> -name "pattern"` | Confine `find` to the project dir |
+| Search contents | Grep | `grep -rn` / `rg` | `rg` preferred if available |
+| Fetch a URL | WebFetch | `curl -sSL <url>` | Pipe to `jq` for JSON |
+| Web search | WebSearch | Often unavailable | Use `curl` + public APIs, or note the limitation |
+| Delegate work | Subagent | `boi dispatch <spec>` | BOI handles all delegation |
+| Track todos | TodoWrite | Write to `todo.md` | Same format, manual file write |
 
-**WebSearch is not available.** For research tasks requiring web access, write a BOI spec with mode=generate and note the limitation in the spec context.
+**If web search is unavailable in your runtime:** for research tasks requiring web access, write a BOI spec with mode=generate and note the limitation in the spec context.
 
 ---
 
 ## Skill Discovery
 
-Codex does not have first-class skill commands. Read skills directly from disk.
+If your runtime lacks first-class skill commands, read skills directly from disk.
 
 ### Finding Skills
 
@@ -486,7 +485,7 @@ hex memory index --stats           # Show stats
 ### Consolidate (single command, two modes)
 ```bash
 hex memory consolidate quick   # Layers 1+2: structural sweep + memory DB pass. Deterministic, no LLM, safe for nightly/unattended runs.
-hex memory consolidate full    # Layers 1+2+3: adds operating-model audit (LLM-assisted). Writes evolution/consolidation-audit-YYYY-MM-DD.md for human review — never auto-edits CLAUDE.md or me/learnings.md.
+hex memory consolidate full    # Layers 1+2+3: adds operating-model audit (LLM-assisted). Writes evolution/consolidation-audit-YYYY-MM-DD.md for human review — never auto-edits AGENTS.md or me/learnings.md.
 ```
 
 `hex memory consolidate` is the ONLY way to consolidate. The old `/hex-consolidate`
@@ -579,16 +578,16 @@ Every status change gets a timestamped changelog entry at the bottom.
 
 - **`<!-- hex:system-start -->` / `<!-- hex:system-end -->` markers** delimit the managed section. `hex upgrade` replaces everything between them. Never put custom rules between these markers — they will be overwritten on the next upgrade.
 - **`## My Rules` section is user-preserved.** All instance customization goes in the `## My Rules` block below `<!-- hex:user-end -->`. It survives upgrades.
-- **`GEMINI.md` is NOT a symlink in hex instances** — it has Gemini-specific runtime differences. Treat it separately from `AGENTS.md`/`CLAUDE.md`.
+- **Not every runtime-specific instruction file is a symlink to this one.** Some hex instances ship a sibling instruction file that is a real file, not a symlink — its content can drift from `AGENTS.md`. If a sibling exists and is not a symlink, treat it separately and keep the two in sync by hand.
 - **`hex upgrade` pulls, never pushes.** Running `hex upgrade` in an instance overwrites the system section with the latest from hex-foundation. Changes to an instance don't flow back automatically.
-- **`CLAUDE.md` in this repo is a symlink to `AGENTS.md`.** If a git clone resolves it as a text file (Windows without `core.symlinks=true`), run `git checkout CLAUDE.md` to restore the symlink.
-- **Codex 32 KiB combined limit.** This file + any subdirectory AGENTS.md files must total < 32 KiB for Codex compatibility. Currently ~22 KB — keep additions modest.
+- **Sibling instruction files in this repo are symlinks to `AGENTS.md`.** `AGENTS.md` is canonical; the runtime-named variant(s) point at it so every runtime reads identical content. If a git clone resolves a symlink as a plain text file (Windows without `core.symlinks=true`), run `git checkout <file>` to restore the symlink.
+- **32 KiB combined instruction-file limit.** Some runtimes cap the total size of the instruction file plus any subdirectory `AGENTS.md` files at 32 KiB. Keep the combined total under that. Currently ~22 KB — keep additions modest.
 
 ---
 
 ## How to Modify hex-foundation
 
-1. **Edit `AGENTS.md`** (canonical). `CLAUDE.md` is a symlink — edits to `AGENTS.md` propagate automatically.
+1. **Edit `AGENTS.md`** (canonical). The runtime-named sibling file(s) are symlinks — edits to `AGENTS.md` propagate automatically.
 2. **Standing Orders changes**: edit the relevant table row above; append new rules at the bottom with today's date in a note.
 3. **Add a new skill**: create `system/skills/<name>/SKILL.md` following the template in `system/templates/`.
 4. **Distribute to instances**: after editing AGENTS.md, copy the system block to any downstream hex instance's `AGENTS.md` via `hex upgrade` (or manually copy the system section between the markers).
