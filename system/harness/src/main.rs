@@ -776,11 +776,20 @@ fn harness_staging_plist_path(hex_dir: &std::path::Path) -> PathBuf {
 
 /// Render the harness.plist template by substituting placeholders.
 fn render_harness_plist(hex_dir: &std::path::Path) -> Result<String, String> {
-    let template_path = hex_dir
+    // On a DEPLOYED box `hex upgrade` syncs templates to `.hex/templates/`; in a
+    // repo/dev checkout they live under `system/templates/`. Try the deployed
+    // path first, fall back to the repo path.
+    let deployed = hex_dir
+        .join(".hex")
+        .join("templates")
+        .join("launchd")
+        .join("harness.plist");
+    let repo = hex_dir
         .join("system")
         .join("templates")
         .join("launchd")
         .join("harness.plist");
+    let template_path = if deployed.exists() { deployed } else { repo };
     let template = std::fs::read_to_string(&template_path).map_err(|e| {
         format!(
             "hex harness: failed to read template {}: {e}",
