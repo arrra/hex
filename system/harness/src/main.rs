@@ -7,16 +7,12 @@ mod throttle;
 mod doctor;
 mod integration;
 mod integration_cmd;
-mod checkpoint;
-mod shutdown;
-mod startup;
 mod integration_check_all;
 // telemetry lives in the lib (used by the in-process worker runtime too); the
 // bin shares that one copy rather than compiling a second (mirrors hex::memory).
 use hex::memory;
 use hex::telemetry;
 mod path_map;
-mod session_reflect;
 mod env;
 mod hook;
 mod upgrade;
@@ -53,12 +49,6 @@ enum Commands {
     Doctor {
         #[command(subcommand)]
         command: DoctorCommands,
-    },
-    /// Session lifecycle commands
-    #[command(display_order = 3)]
-    Session {
-        #[command(subcommand)]
-        command: SessionCommands,
     },
     /// Environment setup utilities (Phase 5: port of env.sh non-shell logic)
     #[command(display_order = 24)]
@@ -348,43 +338,6 @@ enum MemoryCommands {
     /// Print ~10 recency-ordered pointers into the live workspace (project dirs,
     /// recent decisions, todo "Now" items). No LLM, target <200ms.
     Recent,
-}
-
-#[derive(Subcommand)]
-enum SessionCommands {
-    /// Run the hex session startup checklist (port of .hex/scripts/startup.sh)
-    Startup {
-        /// Skip slow steps (integration pulls, evolution engine, priority scoring)
-        #[arg(long)]
-        quick: bool,
-        /// Run a single named step and exit (see --status for names)
-        #[arg(long)]
-        step: Option<String>,
-        /// List available steps and exit
-        #[arg(long)]
-        status: bool,
-    },
-    /// Checkpoint the current session (port of /hex-checkpoint slash command)
-    Checkpoint {
-        /// What to work on next (used in compact suggestion and handoff)
-        focus: Option<String>,
-    },
-    /// Close the current session (port of /hex-shutdown slash command)
-    Shutdown {
-        /// Session ID to deregister (from startup output); omit to get manual instructions
-        session_id: Option<String>,
-    },
-    /// Post-session reflection: update reflection-log.md and persist eval_records to memory.db.
-    /// Internal: invoked by the Stop hook + checkpoint; the AI reflection is the /hex-reflect skill.
-    #[command(hide = true)]
-    Reflect {
-        /// Session identifier to record in the reflection log
-        #[arg(long)]
-        session_id: Option<String>,
-        /// Suppress informational output
-        #[arg(long)]
-        quiet: bool,
-    },
 }
 
 #[derive(Subcommand)]
@@ -689,29 +642,6 @@ fn main() {
                 }
             }
         }
-        Commands::Session { command } => match command {
-            SessionCommands::Startup { quick, step, status } => {
-                let hex_dir = get_hex_dir();
-                let code = startup::run(
-                    &hex_dir,
-                    startup::StartupArgs { quick, step, status },
-                );
-                std::process::exit(code);
-            }
-            SessionCommands::Checkpoint { focus } => {
-                let hex_dir = get_hex_dir();
-                let code = checkpoint::run(&hex_dir, checkpoint::CheckpointArgs { focus });
-                std::process::exit(code);
-            }
-            SessionCommands::Shutdown { session_id } => {
-                let hex_dir = get_hex_dir();
-                let code = shutdown::run(&hex_dir, shutdown::ShutdownArgs { session_id });
-                std::process::exit(code);
-            }
-            SessionCommands::Reflect { session_id, quiet } => {
-                session_reflect::run(session_id.as_deref(), quiet);
-            }
-        },
         Commands::Env { command } => env::run_env_command(command),
         Commands::Upgrade { args } => {
             std::process::exit(upgrade::run(&args));
