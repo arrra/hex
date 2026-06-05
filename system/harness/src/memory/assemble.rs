@@ -663,6 +663,58 @@ mod tests {
         );
     }
 
+    /// Merge contract — confidence formula AND char budget truncation.
+    /// confidence = move_relevance(1.0 fired) * 1/(rank+1)
+    /// budget truncation must cut the merge before exceeding the char budget.
+    #[test]
+    fn confidence_formula_and_budget_truncation() {
+        let c = fresh_db();
+        // Populate several chunks (each ~30 chars of content + path) so M1
+        // alone would exceed a small budget if truncation were absent.
+        for i in 0..10 {
+            insert_chunk(
+                &c,
+                &format!("docs/m{i}.md"),
+                "schema schema schema schema schema schema schema schema",
+                false,
+            );
+        }
+
+        // 1) confidence formula at rank 0 for a fired move must equal 1.0.
+        let full = assemble(&c, "schema", false, MAX_CONTEXT_CHARS);
+        let m1_top = full
+            .candidates
+            .iter()
+            .find(|x| x.move_id == MoveId::M1ContentMatch)
+            .expect("M1 should produce at least one candidate");
+        assert_eq!(m1_top.rank_in_move, 0, "M1 top should be rank 0");
+        assert!(m1_top.move_fired, "M1 always fires");
+        assert!(
+            (m1_top.confidence - 1.0).abs() < 1e-6,
+            "rank-0 fired confidence must be 1.0, got {}",
+            m1_top.confidence
+        );
+        // native_score must be carried separately (BM25 is negative in FTS5)
+        // — i.e. it should NOT equal the confidence value.
+        assert!(
+            (m1_top.native_score as f32 - m1_top.confidence).abs() > 1e-6
+                || m1_top.native_score == 0.0,
+            "native_score must be carried separately from confidence"
+        );
+
+        // 2) Budget truncation: a tiny budget must force the merged result
+        //    to stay at or under a small bound. (Floor candidate is allowed
+        //    to push slightly over per the facet-coverage contract, so we
+        //    assert the merge stopped well short of the unbounded length.)
+        let tiny = assemble(&c, "schema", false, 100);
+        assert!(
+            tiny.candidates.len() < full.candidates.len(),
+            "tiny budget ({} cands) did not truncate vs full ({} cands)",
+            tiny.candidates.len(),
+            full.candidates.len()
+        );
+    }
+
     /// Embedder-down: assemble() must not panic on a DB with no vector data
     /// / no available embedder, and must still return FTS+facts results.
     #[test]
