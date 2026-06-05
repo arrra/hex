@@ -1,10 +1,10 @@
-use std::fs;
-use std::io::Write;
 use std::path::PathBuf;
 
 /// Post-session reflection — Rust port of the former session-reflect script.
-/// Post-session reflection orchestrator: appends a timestamped entry to
-/// evolution/reflection-log.md, then calls session_delta directly in Rust.
+/// Phase A: no longer writes to evolution/reflection-log.md. The command is
+/// kept registered (and exits 0) so the existing Stop hook keeps succeeding
+/// until Phase B removes both together. Only the harmless eval_records insert
+/// remains.
 pub fn run(session_id: Option<&str>, quiet: bool) {
     run_in(&resolve_hex_dir(), session_id, quiet);
 }
@@ -25,36 +25,8 @@ fn run_in(hex_dir: &PathBuf, session_id: Option<&str>, quiet: bool) {
         println!("session-reflect: starting post-session reflection");
     }
 
-    let reflection_log = hex_dir.join("evolution/reflection-log.md");
-    if let Some(parent) = reflection_log.parent() {
-        fs::create_dir_all(parent).unwrap_or_else(|e| {
-            eprintln!("session-reflect: cannot create log dir: {e}");
-            std::process::exit(1);
-        });
-    }
-
-    let timestamp = chrono::Local::now().format("%Y-%m-%d %H:%M").to_string();
-
-    let mut entry = format!("\n## {} — session reflection\n", timestamp);
-    if let Some(id) = session_id {
-        if !id.is_empty() {
-            entry.push_str(&format!("Session: {}\n", id));
-        }
-    }
-    entry.push_str("(reflection placeholder — see observations.md)\n");
-
-    let mut file = fs::OpenOptions::new()
-        .create(true)
-        .append(true)
-        .open(&reflection_log)
-        .unwrap_or_else(|e| {
-            eprintln!("session-reflect: cannot open reflection log: {e}");
-            std::process::exit(1);
-        });
-    file.write_all(entry.as_bytes()).unwrap_or_else(|e| {
-        eprintln!("session-reflect: cannot write reflection log: {e}");
-        std::process::exit(1);
-    });
+    // Phase A: do NOT write to evolution/reflection-log.md. The placeholder
+    // line was noisy and added no signal; consolidate is the source of truth.
 
     let sid = session_id.unwrap_or("");
     run_session_delta(hex_dir, sid);
@@ -123,7 +95,8 @@ mod tests {
     use std::io::Read;
 
     #[test]
-    fn appends_timestamped_entry_to_log() {
+    fn does_not_create_reflection_log_when_absent() {
+        // Phase A: session-reflect must not create or write to reflection-log.md.
         let dir = tempfile::tempdir().expect("tempdir");
         let hex_dir = dir.path().to_path_buf();
         fs::create_dir_all(hex_dir.join("evolution")).unwrap();
@@ -131,35 +104,35 @@ mod tests {
         run_in(&hex_dir, Some("test-session-123"), true);
 
         let log_path = hex_dir.join("evolution/reflection-log.md");
-        assert!(log_path.exists(), "reflection-log.md must be created");
-
-        let mut contents = String::new();
-        fs::File::open(&log_path)
-            .unwrap()
-            .read_to_string(&mut contents)
-            .unwrap();
-
-        assert!(contents.contains("session reflection"), "log must contain 'session reflection'");
-        assert!(contents.contains("test-session-123"), "log must contain session id");
-        assert!(contents.contains("reflection placeholder"), "log must contain placeholder");
+        assert!(
+            !log_path.exists(),
+            "reflection-log.md must NOT be created by session-reflect"
+        );
     }
 
     #[test]
-    fn no_session_id_omits_session_line() {
+    fn does_not_append_to_pre_existing_reflection_log() {
+        // If reflection-log.md already exists, session-reflect must not append to it.
         let dir = tempfile::tempdir().expect("tempdir");
         let hex_dir = dir.path().to_path_buf();
         fs::create_dir_all(hex_dir.join("evolution")).unwrap();
 
+        let log_path = hex_dir.join("evolution/reflection-log.md");
+        std::fs::write(&log_path, "pre-existing\n").unwrap();
+        let before = std::fs::metadata(&log_path).unwrap().len();
+
         run_in(&hex_dir, None, true);
 
-        let log_path = hex_dir.join("evolution/reflection-log.md");
+        let after = std::fs::metadata(&log_path).unwrap().len();
+        assert_eq!(before, after, "reflection-log.md size must not change");
+
         let mut contents = String::new();
         fs::File::open(&log_path)
             .unwrap()
             .read_to_string(&mut contents)
             .unwrap();
-
-        assert!(!contents.contains("Session:"), "no session id should produce no 'Session:' line");
+        assert!(!contents.contains("session reflection"));
+        assert!(!contents.contains("placeholder"));
     }
 
     #[test]
@@ -169,6 +142,35 @@ mod tests {
         fs::create_dir_all(hex_dir.join("evolution")).unwrap();
         // No memory.db — should complete without error
         run_in(&hex_dir, Some("abc"), true);
+    }
+
+    #[test]
+    fn does_not_write_any_entry_to_reflection_log() {
+        // Phase A de-risk: session-reflect must STOP writing any line to
+        // evolution/reflection-log.md. The file should either not be created,
+        // or contain no entry written by this command.
+        let dir = tempfile::tempdir().expect("tempdir");
+        let hex_dir = dir.path().to_path_buf();
+        fs::create_dir_all(hex_dir.join("evolution")).unwrap();
+
+        run_in(&hex_dir, Some("phase-a-test-001"), true);
+
+        let log_path = hex_dir.join("evolution/reflection-log.md");
+        if log_path.exists() {
+            let mut contents = String::new();
+            fs::File::open(&log_path)
+                .unwrap()
+                .read_to_string(&mut contents)
+                .unwrap();
+            assert!(
+                !contents.contains("placeholder"),
+                "reflection-log.md must NOT contain placeholder text, got: {contents}"
+            );
+            assert!(
+                !contents.contains("session reflection"),
+                "reflection-log.md must NOT contain a session-reflect-written entry, got: {contents}"
+            );
+        }
     }
 
     #[test]
