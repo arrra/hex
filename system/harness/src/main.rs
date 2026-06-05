@@ -19,6 +19,7 @@ mod hook;
 mod upgrade;
 mod learnings;
 mod iii_worker;
+mod ops;
 // Personal modules (mrap-only overlay). Resolved via build.rs → OUT_DIR/personal_mods.rs.
 #[cfg(feature = "personal")]
 include!(concat!(env!("OUT_DIR"), "/personal_mods.rs"));
@@ -88,11 +89,17 @@ enum Commands {
         #[command(subcommand)]
         command: hook::HookCommands,
     },
-    /// iii substrate: host declarative workers on the iii engine
+    /// Run and inspect hex declarative workers
     #[command(display_order = 14)]
-    Iii {
+    Worker {
         #[command(subcommand)]
-        command: IiiCommands,
+        command: WorkerCommands,
+    },
+    /// Emit hex events into the trigger substrate
+    #[command(display_order = 14)]
+    Triggers {
+        #[command(subcommand)]
+        command: TriggersCommands,
     },
     /// Telemetry store: query and emit events from the native SQLite log
     #[command(display_order = 6)]
@@ -111,20 +118,27 @@ enum Commands {
 }
 
 #[derive(Subcommand)]
-enum IiiCommands {
-    /// Worker host operations
-    Worker {
-        #[command(subcommand)]
-        command: IiiWorkerCommands,
-    },
-}
-
-#[derive(Subcommand)]
-enum IiiWorkerCommands {
+enum WorkerCommands {
     /// Run a declarative worker from a YAML config (id + command + cron jobs)
     Run {
         /// Path to the worker config YAML
         config: std::path::PathBuf,
+    },
+    /// List discoverable worker configs (.hex/iii/workers/*.yaml)
+    List,
+    /// Report iii engine health (the substrate workers run on)
+    Status,
+}
+
+#[derive(Subcommand)]
+enum TriggersCommands {
+    /// Emit a hex event into the trigger substrate
+    Emit {
+        /// Event name (e.g. boi.spec.complete)
+        event: String,
+        /// JSON event payload (default `{}`)
+        #[arg(long)]
+        data: Option<String>,
     },
 }
 
@@ -405,10 +419,31 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Iii { command } => match command {
-            IiiCommands::Worker { command } => match command {
-                IiiWorkerCommands::Run { config } => std::process::exit(iii_worker::run(&config)),
-            },
+        Commands::Worker { command } => match command {
+            WorkerCommands::Run { config } => std::process::exit(iii_worker::run(&config)),
+            WorkerCommands::List => std::process::exit(worker_list()),
+            WorkerCommands::Status => std::process::exit(worker_status()),
+        },
+        Commands::Triggers { command } => match command {
+            TriggersCommands::Emit { event, data } => {
+                let parsed: serde_json::Value = match data.as_deref() {
+                    None | Some("") => serde_json::Value::Object(Default::default()),
+                    Some(s) => match serde_json::from_str(s) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("hex triggers emit: --data is not valid JSON: {e}");
+                            std::process::exit(2);
+                        }
+                    },
+                };
+                match ops::emit(&event, parsed) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
+            }
         },
         Commands::Integration { command } => {
             if let IntegrationCommands::Template = command {
@@ -656,6 +691,57 @@ fn main() {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "hex", &mut io::stdout());
         }
+    }
+}
+
+/// List worker configs under `.hex/iii/workers/*.yaml`.
+fn worker_list() -> i32 {
+    let hex_dir = get_hex_dir();
+    let workers_dir = hex_dir.join(".hex").join("iii").join("workers");
+    if !workers_dir.exists() {
+        eprintln!(
+            "no worker config dir: {} does not exist",
+            workers_dir.display()
+        );
+        return 0;
+    }
+    let entries = match std::fs::read_dir(&workers_dir) {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("failed to read {}: {e}", workers_dir.display());
+            return 1;
+        }
+    };
+    let mut paths: Vec<PathBuf> = entries
+        .filter_map(Result::ok)
+        .map(|e| e.path())
+        .filter(|p| {
+            p.extension()
+                .and_then(|s| s.to_str())
+                .map(|s| s == "yaml" || s == "yml")
+                .unwrap_or(false)
+        })
+        .collect();
+    paths.sort();
+    for p in paths {
+        println!("{}", p.display());
+    }
+    0
+}
+
+/// Report iii engine health (the substrate workers run on).
+fn worker_status() -> i32 {
+    let ctx = doctor::check::Context {
+        hex_dir: get_hex_dir(),
+        home: PathBuf::from(std::env::var("HOME").unwrap_or_default()),
+        fix: false,
+    };
+    use doctor::check::DoctorCheck;
+    let result = doctor::checks::iii_engine_health::IiiEngineHealth.run(&ctx);
+    println!("{:?}: {}", result.status, result.message);
+    match result.status {
+        doctor::check::Status::Pass | doctor::check::Status::Skip => 0,
+        _ => 1,
     }
 }
 
