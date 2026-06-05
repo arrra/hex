@@ -8,7 +8,7 @@ pub fn detect_layout(root: &str) -> &'static str {
     if root_path.join("dot-claude").is_dir() {
         return "v1";
     }
-    if root_path.join("system").is_dir() && root_path.join("templates/CLAUDE.md").is_file() {
+    if root_path.join("system").is_dir() && root_path.join("templates/AGENTS.md").is_file() {
         return "v2";
     }
     "unknown"
@@ -42,7 +42,7 @@ mod tests {
         let templates = dir.join("templates");
         fs::create_dir_all(&system).unwrap();
         fs::create_dir_all(&templates).unwrap();
-        fs::write(templates.join("CLAUDE.md"), "# test").unwrap();
+        fs::write(templates.join("AGENTS.md"), "# test").unwrap();
         assert_eq!(detect_layout(dir.to_str().unwrap()), "v2");
         fs::remove_dir_all(&dir).unwrap();
     }
@@ -57,7 +57,7 @@ mod tests {
         fs::create_dir_all(&dot_claude).unwrap();
         fs::create_dir_all(&system).unwrap();
         fs::create_dir_all(&templates).unwrap();
-        fs::write(templates.join("CLAUDE.md"), "# test").unwrap();
+        fs::write(templates.join("AGENTS.md"), "# test").unwrap();
         assert_eq!(detect_layout(dir.to_str().unwrap()), "v1");
         fs::remove_dir_all(&dir).unwrap();
     }
