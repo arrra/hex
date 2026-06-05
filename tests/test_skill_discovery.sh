@@ -66,8 +66,7 @@ echo ""
 
 # ── 2. Skill files on disk ────────────────────────────────────────
 echo "[2] Skill files on disk"
-# memory has no SKILL.md (it's a script-only skill) — check scripts dir instead
-SKILLS_WITH_SKILL_MD=(landings hex-reflect hex-decide hex-debrief hex-consolidate hex-doctor hex-checkpoint hex-shutdown hex-triage hex-startup)
+SKILLS_WITH_SKILL_MD=(landings hex-reflect hex-decide hex-debrief hex-consolidate hex-doctor hex-checkpoint hex-shutdown hex-startup memory)
 for skill in "${SKILLS_WITH_SKILL_MD[@]}"; do
     if [ -f "$INSTALL_DIR/.hex/skills/$skill/SKILL.md" ]; then
         check_pass "SKILL.md present: $skill"
@@ -75,12 +74,6 @@ for skill in "${SKILLS_WITH_SKILL_MD[@]}"; do
         check_fail "SKILL.md missing: $skill"
     fi
 done
-# memory: verify scripts directory exists
-if [ -d "$INSTALL_DIR/.hex/skills/memory/scripts" ]; then
-    check_pass "memory skill: scripts/ directory present"
-else
-    check_fail "memory skill: scripts/ directory missing"
-fi
 echo ""
 
 # ── 3. Claude Code skill discovery ───────────────────────────────
@@ -89,7 +82,7 @@ echo "    Asking Claude to list all hex skills..."
 
 # landings and memory are not slash commands — landings is a dir-based framework,
 # memory is script-only. Claude discovers via .claude/commands/; hex-upgrade IS one.
-EXPECTED_SKILLS=(hex-reflect hex-decide hex-debrief hex-consolidate hex-doctor hex-checkpoint hex-shutdown hex-triage hex-startup hex-upgrade)
+EXPECTED_SKILLS=(hex-reflect hex-decide hex-debrief hex-consolidate hex-doctor hex-checkpoint hex-shutdown hex-startup hex-upgrade)
 
 DISCOVERY_OUTPUT=$(cd "$INSTALL_DIR" && $TIMEOUT_CMD claude \
     -p "What hex skills and commands are available in this installation? List them all." \
@@ -156,10 +149,6 @@ invoke_skill "hex-doctor" \
 invoke_skill "hex-decide" \
     '/hex-decide "test decision about test fixture"' \
     "option|decision|recommend|consider|choose|trade|test fixture"
-
-invoke_skill "hex-triage" \
-    "/hex-triage" \
-    "triage|capture|untriaged|nothing|empty|no.*capture|found"
 
 echo ""
 # ── Summary ───────────────────────────────────────────────────────

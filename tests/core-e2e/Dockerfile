@@ -40,7 +40,6 @@ RUN mkdir -p \
     $HOME/hex/.hex/telemetry \
     $HOME/hex/.hex/reference/core-agents \
     $HOME/hex/.hex/scripts \
-    $HOME/hex/system/skills/memory/scripts \
     $HOME/hex/tests/core-e2e/suites
 
 # CLAUDE.md is required by get_hex_dir() to validate the workspace
@@ -52,11 +51,10 @@ COPY --from=builder /build/target/release/hex $HOME/hex/.hex/bin/hex
 COPY --from=builder /build/compiled-version.txt $HOME/hex/.hex/hex-version.txt
 RUN ln -s $HOME/hex/.hex/bin/hex $HOME/hex/.hex/bin/hex-agent
 
-# Integration, doctor, and memory scripts (hex delegates to these via bash/python3)
+# Integration and doctor scripts (hex delegates to these via bash)
 # Binary looks for these at $HEX_DIR/.hex/scripts/ (runtime install path)
 COPY system/scripts/hex-integration $HOME/hex/.hex/scripts/hex-integration
 COPY system/scripts/hex-doctor      $HOME/hex/.hex/scripts/hex-doctor
-COPY system/skills/memory/scripts/  $HOME/hex/system/skills/memory/scripts/
 
 # Core E2E test suite (helpers.sh, run-all.sh, suites/*.sh written by later tasks)
 COPY tests/core-e2e/ $HOME/hex/tests/core-e2e/

@@ -22,9 +22,8 @@ The hex memory system stores persistent facts across sessions using SQLite FTS5 
 - **hex memory index** — Index filesystem content into the SQLite database
 - **hex memory parse-transcripts** — Parse JSONL transcripts into markdown
 
-> The old Python scripts (`memory_search.py`, `memory_index.py`) were removed —
-> the memory subsystem is native to the `hex` binary now. Use the `hex memory`
-> subcommands instead.
+> The legacy Python memory scripts were removed — the memory subsystem is
+> native to the `hex` binary now. Use the `hex memory` subcommands instead.
 
 ## Usage
 

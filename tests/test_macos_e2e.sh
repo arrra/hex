@@ -155,9 +155,9 @@ run_check "Onboarding placeholder" "grep -q 'Your name here' /tmp/test-hex/me/me
 run_check "CLAUDE.md system-start" "grep -q 'hex:system-start' /tmp/test-hex/CLAUDE.md"
 run_check "CLAUDE.md user-start" "grep -q 'hex:user-start' /tmp/test-hex/CLAUDE.md"
 
-# Memory round-trip
-vm_run "cd /tmp/test-hex && python3 .hex/skills/memory/scripts/memory_save.py 'macos test sentinel' --tags 'e2e'" >/dev/null 2>&1
-SEARCH_OUT=$(vm_run "cd /tmp/test-hex && python3 .hex/skills/memory/scripts/memory_search.py 'macos sentinel' --compact" 2>&1)
+# Memory round-trip (native: write workspace file → `hex memory index` → `hex memory search`)
+vm_run "cd /tmp/test-hex && mkdir -p me && echo 'macos test sentinel for e2e' >> me/learnings.md && HEX_DIR=/tmp/test-hex hex memory index" >/dev/null 2>&1
+SEARCH_OUT=$(vm_run "cd /tmp/test-hex && HEX_DIR=/tmp/test-hex hex memory search 'macos sentinel'" 2>&1)
 if echo "$SEARCH_OUT" | grep -q "sentinel"; then
     echo "  PASS: Memory save + search round-trip"
     PASS=$((PASS + 1))
@@ -168,8 +168,8 @@ else
 fi
 
 # Memory index
-vm_run "cd /tmp/test-hex && python3 .hex/skills/memory/scripts/memory_index.py" >/dev/null 2>&1
-INDEX_STATS=$(vm_run "cd /tmp/test-hex && python3 .hex/skills/memory/scripts/memory_index.py --stats" 2>&1)
+vm_run "cd /tmp/test-hex && HEX_DIR=/tmp/test-hex hex memory index --full" >/dev/null 2>&1
+INDEX_STATS=$(vm_run "cd /tmp/test-hex && HEX_DIR=/tmp/test-hex hex memory index --stats" 2>&1)
 if echo "$INDEX_STATS" | grep -q "Files indexed:"; then
     echo "  PASS: Memory index + stats"
     PASS=$((PASS + 1))
