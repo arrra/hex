@@ -4,6 +4,7 @@ pub mod capability_exec;
 pub mod audit;
 pub mod capability_guard;
 pub mod memory;
+pub mod messages;
 pub mod ops;
 pub mod registry;
 pub mod telemetry;

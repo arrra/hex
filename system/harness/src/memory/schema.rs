@@ -91,6 +91,25 @@ CREATE TRIGGER IF NOT EXISTS facts_fts_au AFTER UPDATE ON facts BEGIN
 END;
 "#;
 
+pub const MESSAGES_DDL: &str = "
+CREATE TABLE IF NOT EXISTS messages (
+    id          TEXT PRIMARY KEY,
+    source      TEXT NOT NULL,
+    kind        TEXT NOT NULL,
+    body        TEXT,
+    reply_to    TEXT,
+    answer_json TEXT,
+    prompt_json TEXT,
+    resolved    INTEGER NOT NULL DEFAULT 0,
+    ts          TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_messages_reply_to ON messages(reply_to);
+";
+
+pub fn apply_messages_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(MESSAGES_DDL)
+}
+
 pub fn apply_plan2(conn: &Connection) -> Result<()> {
     conn.execute_batch(PLAN2_DDL)?;
     conn.execute_batch(PLAN2_VEC_DDL)?;
