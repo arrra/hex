@@ -778,19 +778,13 @@ fn restart_harness() {
     {
         return; // harness not installed — nothing to restart
     }
-    let target = format!("gui/{}/com.hex.harness", unsafe { libc::getuid() });
-    let out = Command::new("launchctl")
-        .args(["kickstart", "-k", &target])
-        .output();
-    match out {
-        Ok(o) if o.status.success() => {
-            println!("  [OK] restarted {target} — engine + workers on the new binary");
+    // Route through daemon-green so the launchctl plumbing (bootstrap retry,
+    // asuser fallback, wait-out-bootout) is owned by one crate.
+    match daemon_green::native().restart("com.hex.harness") {
+        Ok(()) => {
+            println!("  [OK] restarted com.hex.harness — engine + workers on the new binary");
         }
-        Ok(o) => eprintln!(
-            "  [WARN] could not restart {target}: {}",
-            String::from_utf8_lossy(&o.stderr).trim()
-        ),
-        Err(e) => eprintln!("  [WARN] could not restart {target}: {e}"),
+        Err(e) => eprintln!("  [WARN] could not restart com.hex.harness: {e}"),
     }
 }
 

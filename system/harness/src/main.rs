@@ -123,12 +123,20 @@ enum Commands {
 
 #[derive(Subcommand)]
 enum HarnessCommands {
-    /// Install (idempotent) and load the com.hex.harness launchd service.
+    /// Install (idempotent) and load the com.hex.harness service via daemon-green.
     Start,
-    /// Bootout the com.hex.harness launchd service.
+    /// Stop + unload the com.hex.harness service via daemon-green.
     Stop,
+    /// Restart the com.hex.harness service (pick up a new binary) via daemon-green.
+    Restart,
     /// List registered workers and report engine health.
     Status,
+    /// Tail the last N lines of the harness service log via daemon-green.
+    Logs {
+        /// Number of trailing lines to print.
+        #[arg(long, default_value_t = 200)]
+        lines: usize,
+    },
     /// Run the harness lifecycle loop (invoked by launchd; hidden from --help).
     #[command(hide = true)]
     Serve,
@@ -443,7 +451,9 @@ fn main() {
         Commands::Harness { command } => match command {
             HarnessCommands::Start => std::process::exit(harness_start()),
             HarnessCommands::Stop => std::process::exit(harness_stop()),
+            HarnessCommands::Restart => std::process::exit(harness_restart()),
             HarnessCommands::Status => std::process::exit(harness_status()),
+            HarnessCommands::Logs { lines } => std::process::exit(harness_logs(lines)),
             HarnessCommands::Serve => {
                 std::process::exit(hex::worker::runtime::serve(hex::workers::registry()))
             }
@@ -725,48 +735,26 @@ fn main() {
     }
 }
 
-/// Path to the installed `com.hex.harness` gui LaunchAgent plist under
-/// `~/Library/LaunchAgents/`. The harness is a per-user gui LaunchAgent (NOT a
-/// system daemon) because it spawns `claude` for per-task reasoning, and Claude
-/// Code auth lives in the LOGIN keychain — reachable only from a login session.
-/// See me/decisions/harness-as-launchdaemon-not-agent-2026-06-05.md (superseded).
-fn harness_plist_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(
-        PathBuf::from(home)
-            .join("Library")
-            .join("LaunchAgents")
-            .join("com.hex.harness.plist"),
-    )
-}
+/// The reverse-DNS label of the harness service. Single source of truth — all
+/// daemon-green calls go through this constant so a rename only touches one
+/// line.
+const HARNESS_LABEL: &str = "com.hex.harness";
 
-/// The current user's gui launchd domain target, e.g. `gui/501`.
-fn gui_domain() -> String {
-    format!("gui/{}", unsafe { libc::getuid() })
-}
-
-/// Render the harness.plist template by substituting placeholders.
-fn render_harness_plist(hex_dir: &std::path::Path) -> Result<String, String> {
-    // On a DEPLOYED box `hex upgrade` syncs templates to `.hex/templates/`; in a
-    // repo/dev checkout they live under `system/templates/`. Try the deployed
-    // path first, fall back to the repo path.
-    let deployed = hex_dir
-        .join(".hex")
-        .join("templates")
-        .join("launchd")
-        .join("harness.plist");
-    let repo = hex_dir
-        .join("system")
-        .join("templates")
-        .join("launchd")
-        .join("harness.plist");
-    let template_path = if deployed.exists() { deployed } else { repo };
-    let template = std::fs::read_to_string(&template_path).map_err(|e| {
-        format!(
-            "hex harness: failed to read template {}: {e}",
-            template_path.display()
-        )
-    })?;
+/// Build the platform-neutral `ServiceSpec` that daemon-green renders into the
+/// per-user launchd plist (macOS) or systemd --user unit (Linux). Reproduces
+/// the exact behavior of the old `render_harness_plist` template:
+///   - program           = $HEX_DIR/.hex/bin/hex
+///   - args              = ["harness", "serve"]
+///   - working_dir       = $HEX_DIR
+///   - env               = HEX_DIR, III_URL, PATH (homebrew prepended),
+///                         GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
+///   - keep_alive        = true (restart on crash)
+///   - run_at_load       = true (start at login)
+///   - log_path          = $HEX_DIR/.hex/logs/com.hex.harness.log
+/// daemon-green guarantees the rendered plist omits the launchd login-session
+/// detach key (verified 2026-06-05: when present, keychain reads fail rc=36;
+/// when absent, rc=0). We deliberately do NOT — and CANNOT — set it here.
+fn build_harness_spec(hex_dir: &std::path::Path) -> daemon_green::ServiceSpec {
     let hex_bin = hex_dir.join(".hex").join("bin").join("hex");
     let log_path = hex_dir
         .join(".hex")
@@ -781,106 +769,91 @@ fn render_harness_plist(hex_dir: &std::path::Path) -> Result<String, String> {
     } else {
         format!("/opt/homebrew/bin:{base_path}")
     };
-    Ok(template
-        .replace("HEXBIN_PLACEHOLDER", &hex_bin.to_string_lossy())
-        .replace("HEXDIR_PLACEHOLDER", &hex_dir.to_string_lossy())
-        .replace("LOG_PLACEHOLDER", &log_path.to_string_lossy())
-        .replace("PATH_PLACEHOLDER", &path_env))
+    daemon_green::ServiceSpec::new(HARNESS_LABEL, hex_bin)
+        .args(["harness", "serve"])
+        .env("HEX_DIR", hex_dir.to_string_lossy().into_owned())
+        .env("III_URL", "ws://127.0.0.1:49134")
+        .env("PATH", path_env)
+        .env("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
+        .working_dir(hex_dir)
+        .keep_alive(true)
+        .run_at_load(true)
+        .log_path(log_path)
 }
 
-/// `hex harness start` — install (idempotent) and load the gui LaunchAgent.
+/// `hex harness start` — install (idempotent) and load the per-user service.
 ///
-/// A gui LaunchAgent installs to `~/Library/LaunchAgents` and bootstraps into the
-/// user's gui domain — no root needed. (It must be a LaunchAgent, not a system
-/// daemon, so the harness's `claude` reasoning can reach the login keychain.)
+/// On macOS this is a gui-domain LaunchAgent (NOT a system daemon) because the
+/// harness spawns `claude` for per-task reasoning, and Claude Code auth lives
+/// in the LOGIN keychain — reachable only from a login session. On Linux it is
+/// a `systemd --user` unit. daemon-green owns the launchctl plumbing
+/// (bootstrap/kickstart, asuser fallback, wait-out-bootout retry).
 fn harness_start() -> i32 {
     let hex_dir = get_hex_dir();
-    let plist_path = match harness_plist_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("hex harness start: $HOME is not set");
-            return 1;
-        }
-    };
-    let rendered = match render_harness_plist(&hex_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("{e}");
-            return 1;
-        }
-    };
-    if let Some(parent) = plist_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!("hex harness start: failed to create {}: {e}", parent.display());
-            return 1;
-        }
-    }
-    // Idempotent: only rewrite the plist if its contents differ.
-    if std::fs::read_to_string(&plist_path).ok().as_deref() != Some(rendered.as_str()) {
-        if let Err(e) = std::fs::write(&plist_path, &rendered) {
-            eprintln!("hex harness start: failed to write {}: {e}", plist_path.display());
-            return 1;
-        }
-        eprintln!("hex harness start: wrote {}", plist_path.display());
-    } else {
-        eprintln!("hex harness start: {} already current", plist_path.display());
-    }
-    // launchd won't create the log dir.
+    // launchd / systemd won't create the log dir for us.
     let _ = std::fs::create_dir_all(hex_dir.join(".hex").join("logs"));
-
-    let domain = gui_domain();
-    // bootstrap is only idempotent if not already loaded; ignore its exit and
-    // follow with `kickstart -k` to (re)start.
-    let _ = std::process::Command::new("launchctl")
-        .args(["bootstrap", &domain, &plist_path.to_string_lossy()])
-        .status();
-    let status = std::process::Command::new("launchctl")
-        .args(["kickstart", "-k", &format!("{domain}/com.hex.harness")])
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            eprintln!("hex harness start: com.hex.harness loaded ({domain})");
+    let spec = build_harness_spec(&hex_dir);
+    let mgr = daemon_green::native();
+    if let Err(e) = mgr.install(&spec) {
+        eprintln!("hex harness start: install failed: {e}");
+        return 1;
+    }
+    match mgr.start(HARNESS_LABEL) {
+        Ok(()) => {
+            eprintln!("hex harness start: {HARNESS_LABEL} loaded");
             0
         }
-        Ok(s) => {
-            eprintln!(
-                "hex harness start: launchctl kickstart exited {}",
-                s.code().unwrap_or(-1)
-            );
-            1
-        }
         Err(e) => {
-            eprintln!("hex harness start: failed to spawn launchctl: {e}");
+            eprintln!("hex harness start: start failed: {e}");
             1
         }
     }
 }
 
-/// `hex harness stop` — bootout the gui LaunchAgent.
+/// `hex harness stop` — stop + unload the per-user service via daemon-green.
 fn harness_stop() -> i32 {
-    let plist_path = match harness_plist_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("hex harness stop: $HOME is not set");
-            return 1;
-        }
-    };
-    let domain = gui_domain();
-    let status = std::process::Command::new("launchctl")
-        .args(["bootout", &domain, &plist_path.to_string_lossy()])
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            eprintln!("hex harness stop: com.hex.harness booted out");
-            0
-        }
-        Ok(_) => {
-            // Already-stopped is not a hard failure.
-            eprintln!("hex harness stop: already stopped");
+    let mgr = daemon_green::native();
+    match mgr.stop(HARNESS_LABEL) {
+        Ok(()) => {
+            eprintln!("hex harness stop: {HARNESS_LABEL} stopped");
             0
         }
         Err(e) => {
-            eprintln!("hex harness stop: failed to spawn launchctl: {e}");
+            eprintln!("hex harness stop: {e}");
+            1
+        }
+    }
+}
+
+/// `hex harness restart` — restart the per-user service (e.g. to pick up a new
+/// binary) via daemon-green.
+fn harness_restart() -> i32 {
+    let mgr = daemon_green::native();
+    match mgr.restart(HARNESS_LABEL) {
+        Ok(()) => {
+            eprintln!("hex harness restart: {HARNESS_LABEL} restarted");
+            0
+        }
+        Err(e) => {
+            eprintln!("hex harness restart: {e}");
+            1
+        }
+    }
+}
+
+/// `hex harness logs` — tail the last N lines of the service's combined log.
+fn harness_logs(lines: usize) -> i32 {
+    let mgr = daemon_green::native();
+    match mgr.logs(HARNESS_LABEL, lines) {
+        Ok(s) => {
+            print!("{s}");
+            if !s.ends_with('\n') {
+                println!();
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("hex harness logs: {e}");
             1
         }
     }

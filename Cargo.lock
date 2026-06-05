@@ -1049,6 +1049,11 @@ dependencies = [
 ]
 
 [[package]]
+name = "daemon-green"
+version = "0.1.0"
+source = "git+https://github.com/mrap/daemon-green?rev=1a9552ce75c5bc272ab04241af2e12002a1e9cfe#1a9552ce75c5bc272ab04241af2e12002a1e9cfe"
+
+[[package]]
 name = "darling"
 version = "0.20.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1819,6 +1824,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "daemon-green",
  "dirs 5.0.1",
  "fastembed",
  "filetime",

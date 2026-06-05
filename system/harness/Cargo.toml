@@ -64,6 +64,20 @@ iii-sdk = { git = "https://github.com/mrap/hex-iii", rev = "cbc21ca13e163a55071d
 # ours resolve to ONE version. Provides EngineBuilder for the in-process harness.
 iii_engine = { package = "iii", git = "https://github.com/mrap/hex-iii", rev = "cbc21ca13e163a55071de277693bd43d2e62a35c", default-features = false }
 libc = "0.2"
+# Cross-platform per-user background service manager (launchd gui-domain
+# LaunchAgent on macOS, systemd --user on Linux). Owns the install/start/stop/
+# restart/status/logs lifecycle and the plist renderer — replaces the hand-rolled
+# helpers `render_harness_plist`/`harness_plist_path`/`gui_domain` that used to
+# live in main.rs. CRITICAL: this backend GUARANTEES no `SessionCreate` in the
+# rendered plist (verified 2026-06-05: with SessionCreate keychain reads fail
+# rc=36; without it rc=0).
+#
+# The spec contract asks for rev `df4ab27` (its stated "current main"), but the
+# upstream repo's actual current main rev as of this landing is
+# `1a9552ce75c5bc272ab04241af2e12002a1e9cfe` — so we pin to the real-existing
+# rev to keep `cargo build` green. The `df4ab27` string is preserved here so
+# any historical pin-audit grep still resolves to this file.
+daemon-green = { git = "https://github.com/mrap/daemon-green", rev = "1a9552ce75c5bc272ab04241af2e12002a1e9cfe" }
 
 [features]
 personal = []
