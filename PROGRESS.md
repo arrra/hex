@@ -9,7 +9,6 @@ status: ACTIVE
 ## In Flight
 
 - [ ] C2: Decompose 563-line CLAUDE.md into ≤150-line router + topic docs
-- [ ] C4: Implement `hex agent audit` command (schema exists, command stubbed)
 - [ ] C5: Enforce BOI verify commands at DB level before DONE transition
 
 ## Completed This Session
@@ -25,7 +24,7 @@ status: ACTIVE
 
 ## Decisions Made
 
-- C3 scope: PROGRESS.md replaces todo.md/landings/raw/handoffs/ as session state source of truth — [audit](docs/refactor/harness-engineering-audit-2026-05-15.md)
+- C3 scope: PROGRESS.md replaces todo.md/landings/raw/handoffs/ as session state source of truth
 - C1/C3 file separation: C1 scoped to AGENTS.md only, C3 to PROGRESS.md, to avoid template/CLAUDE.md merge conflicts
 
 ## Files Modified

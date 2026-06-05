@@ -31,7 +31,6 @@ Verify: hex info repo-mission
 ## Question 2 — What is the current state?
 
 **Static answer (as of 2026-05-16):** Active refactor — Phase 5+ harness engineering.
-Critical path identified in `docs/refactor/harness-engineering-audit-2026-05-15.md`.
 13 backlog items totaling ~3 months of work; 7 HIGH severity. Status:
 - C1 agents-md-verification: DONE (this section)
 - C3 session-lifecycle-state (PROGRESS.md schema): pending
@@ -48,11 +47,9 @@ Verify: hex doctor
 
 ## Question 3 — What is the next action?
 
-**Static answer:** Read `todo.md` for the current priority list. The full critical path
-backlog is in `docs/refactor/harness-engineering-audit-2026-05-15.md`. Immediate next items:
+**Static answer:** Read `todo.md` for the current priority list. Immediate next items:
 1. C3 — PROGRESS.md schema + minimal initial file (schema design + hex-startup/shutdown wiring)
 2. C2 — AGENTS.md decomposition: 563-line file → ≤150-line router + topic docs in `docs/harness/`
-3. C4 — Implement `hex agent audit` (currently returns "not yet implemented" in main.rs L1108)
 
 Verify: cat todo.md
 
@@ -64,7 +61,7 @@ Verify: cat todo.md
 coordination locks (`python3 ~/.boi/lib/coordination.py check <file_path>`). No other locking
 system is in use. Check live worker state and active agent claims:
 
-Verify: bash ~/.boi/boi status
+Verify: ~/.boi/bin/boi dashboard
 
 For file-level coordination locks on shared files (learnings.md, todo.md, evolution/, landings/):
 
@@ -86,7 +83,7 @@ Verify: cargo test --manifest-path system/harness/Cargo.toml
 
 **BOI queue integrity (worker state + spec status):**
 
-Verify: bash ~/.boi/boi status
+Verify: ~/.boi/bin/boi dashboard
 
 **BOI spec completion claims (verify outputs against codebase):**
 
@@ -116,7 +113,7 @@ Each is a TODO for a future iteration.
 
 ## Quick Start
 
-hex-foundation is the versioned base for the hex agent system. It provides Standing Orders, skills, directory structure conventions, and upgrade tooling that agent instances inherit. To explore: `ls system/` for core hex files, `cat getting-started.md` for setup instructions. To upgrade an existing hex instance: run `hex upgrade` in the target workspace. See `architecture.md` for design rationale.
+hex-foundation is the versioned base for the hex agent system. It provides Standing Orders, skills, directory structure conventions, and upgrade tooling that agent instances inherit. To explore: `ls system/` for core hex files, `cat README.md` for setup instructions. To upgrade an existing hex instance: run `hex upgrade` in the target workspace. See `docs/architecture.md` for design rationale.
 
 **Related repos:** [`github.com/mrap/boi`](https://github.com/mrap/boi) (delegation engine — dispatches multi-step tasks as TOML spec files; see its `AGENTS.md` for internals), `~/hex` (your hex workspace built on this foundation — where your agent instance lives).
 
@@ -416,7 +413,7 @@ BOI is the **ONLY** delegation system in hex. Multi-step work, research, generat
 1. Write a YAML spec file with `tasks:` array
 2. Dispatch: `bash ~/.boi/boi dispatch <spec.yaml>`
 3. Worker picks it up from queue, executes task, moves to next task
-4. Check status: `bash ~/.boi/boi status`
+4. Check status: `~/.boi/bin/boi dashboard`
 
 ### Spec Template
 
@@ -453,7 +450,7 @@ tasks:
 
 ```bash
 bash ~/.boi/boi dispatch <spec.yaml>    # enqueue a spec
-bash ~/.boi/boi status                   # queue + worker status
+~/.boi/bin/boi dashboard                   # queue + worker status
 bash ~/.boi/boi dashboard                # interactive TUI — live queue + worker view
 bash ~/.boi/boi log <queue-id>           # iteration history
 bash ~/.boi/boi cancel <queue-id>        # stop a spec
