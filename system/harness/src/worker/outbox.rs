@@ -63,6 +63,36 @@ impl Outbox {
         Ok(())
     }
 
+    /// Pop the FIRST queued emission off the durable store and return it,
+    /// rewriting the file with the remainder BEFORE returning (pop-then-deliver:
+    /// the caller delivers after this returns, so a crash mid-delivery loses the
+    /// popped entry — at-most-once — rather than re-delivering it). Returns
+    /// `None` when the outbox is empty/absent.
+    ///
+    /// This is the async-friendly sibling of `replay`: the caller drives the
+    /// loop and can `await` an async delivery between pops (the harness replays
+    /// through its live engine connection, which `replay`'s sync closure can't).
+    pub fn pop_front(&self) -> anyhow::Result<Option<Emission>> {
+        if !self.path.exists() {
+            return Ok(None);
+        }
+        let lines: Vec<String> = {
+            let f = File::open(&self.path)?;
+            BufReader::new(f)
+                .lines()
+                .collect::<std::io::Result<Vec<_>>>()?
+                .into_iter()
+                .filter(|l| !l.trim().is_empty())
+                .collect()
+        };
+        let Some((first, rest)) = lines.split_first() else {
+            return Ok(None);
+        };
+        // POP FIRST: persist the remainder before the caller delivers.
+        write_lines_atomic(&self.path, rest)?;
+        Ok(Some(Emission::from_json_line(first)?))
+    }
+
     /// Replay all queued emissions: for each entry, POP it from the
     /// durable store FIRST, THEN call `deliver`. If `deliver` panics or
     /// the process crashes mid-call, the popped entry is lost (at-most-
@@ -196,6 +226,29 @@ mod tests {
         // delivers nothing.
         let n2 = ob.replay(|_| Ok(())).unwrap();
         assert_eq!(n2, 0);
+    }
+
+    /// `pop_front` returns entries in FIFO order, popping each from the durable
+    /// file before returning it, and yields `None` once drained.
+    #[test]
+    fn pop_front_is_fifo_and_pops() {
+        let dir = tempdir();
+        let path = dir.join("outbox.jsonl");
+        let ob = Outbox::new(&path);
+        ob.append(&Emission { event: "a".into(), data: json!({ "n": 1 }) })
+            .unwrap();
+        ob.append(&Emission { event: "b".into(), data: json!({ "n": 2 }) })
+            .unwrap();
+
+        let first = ob.pop_front().unwrap().expect("first entry");
+        assert_eq!(first.event, "a");
+        // After popping the first, the file holds only the second.
+        let on_disk = std::fs::read_to_string(&path).unwrap();
+        assert!(on_disk.contains("\"b\"") && !on_disk.contains("\"a\""));
+
+        let second = ob.pop_front().unwrap().expect("second entry");
+        assert_eq!(second.event, "b");
+        assert!(ob.pop_front().unwrap().is_none(), "outbox must be drained");
     }
 
     /// CORE INVARIANT: replay POPS the entry from the durable store

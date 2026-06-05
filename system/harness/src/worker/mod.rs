@@ -26,6 +26,32 @@ pub enum TriggerSpec {
     Queue { queue: String },
 }
 
+impl TriggerSpec {
+    /// Map this spec to an iii `RegisterTriggerInput` bound to `function_id`.
+    /// The single place the typed worker triggers cross into `iii_sdk` — same
+    /// builtin_triggers surface the legacy YAML host used in `iii_worker.rs`.
+    pub fn to_register_input(
+        &self,
+        function_id: &str,
+    ) -> iii_sdk::protocol::RegisterTriggerInput {
+        use iii_sdk::builtin_triggers::{
+            CronTriggerConfig, IIITrigger, QueueTriggerConfig, StateTriggerConfig,
+        };
+        let trigger = match self {
+            TriggerSpec::Cron { expression } => {
+                IIITrigger::Cron(CronTriggerConfig::new(expression.clone()))
+            }
+            TriggerSpec::State { scope, key } => IIITrigger::State(
+                StateTriggerConfig::new().scope(scope.clone()).key(key.clone()),
+            ),
+            TriggerSpec::Queue { queue } => {
+                IIITrigger::Queue(QueueTriggerConfig::new(queue.clone()))
+            }
+        };
+        trigger.for_function(function_id.to_string())
+    }
+}
+
 pub struct Worker {
     pub name: String,
     pub handlers: Vec<(TriggerSpec, Handler)>,

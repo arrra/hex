@@ -5,13 +5,21 @@
 //! each worker's `(TriggerSpec, Handler)` pairs with iii at startup.
 
 pub mod backup;
+pub mod e2e;
 pub mod memory_maintenance;
 
 use crate::worker::Worker;
 
 /// Return all workers hosted by the hex harness.
+///
+/// The test-only `hex-e2e` worker is appended ONLY when `HEX_HARNESS_E2E=1`
+/// (set by the harness-e2e container) — it never registers in a real deployment.
 pub fn registry() -> Vec<Worker> {
-    vec![memory_maintenance::worker(), backup::worker()]
+    let mut workers = vec![memory_maintenance::worker(), backup::worker()];
+    if std::env::var("HEX_HARNESS_E2E").as_deref() == Ok("1") {
+        workers.push(e2e::worker());
+    }
+    workers
 }
 
 #[cfg(test)]

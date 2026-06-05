@@ -14,55 +14,344 @@
 //!      register → replay → reconcile order. The recorder lets a test
 //!      assert ordering without booting a real engine.
 
-use std::sync::Mutex;
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::task::JoinHandle;
 
+use super::ctx::Ctx;
+use super::event::Event;
 use super::outbox::Outbox;
 use super::Worker;
 
+/// Default in-process engine WebSocket URL the worker runtime connects to.
+const DEFAULT_ENGINE_URL: &str = "ws://127.0.0.1:49134";
+
+/// Bounded time to wait for in-flight handlers to finish on SIGTERM before
+/// forcing exit.
+const DRAIN_TIMEOUT: Duration = Duration::from_secs(30);
+
 /// Long-running serve entry — hidden behind `hex harness serve` so launchd can
-/// invoke it. This is the minimal lifecycle hook for spec S5yw25n5y task
-/// Tr5zx0eay (CLI wiring). The full register→replay→reconcile→serve loop is
-/// implemented by task Td9yr0v31; this stub performs the pure init sequence
-/// against a temp outbox and returns 0 so the CLI surface is exercisable.
+/// invoke it. One tokio runtime hosts BOTH the in-process iii engine and the
+/// worker runtime that connects to it as an SDK client:
+///
+///   build engine → spawn `engine.serve()` → connect worker → REGISTER all
+///   functions+triggers → REPLAY the durable outbox → RECONCILE → serve, then
+///   `select!` { engine exits | SIGTERM → drain in-flight → exit }.
+///
+/// Delivery is at-most-once; reliability comes from the graceful drain +
+/// shutdown-deferral outbox, not from redelivery (see hex-workers-as-rust-library).
 pub fn serve(workers: Vec<Worker>) -> i32 {
-    let rt = match tokio::runtime::Builder::new_current_thread()
-        .enable_all()
-        .build()
-    {
+    // Multi-thread runtime: the engine + SDK both want a full reactor, and
+    // handlers run on blocking threads (see the spawn_blocking below).
+    let rt = match tokio::runtime::Runtime::new() {
         Ok(rt) => rt,
         Err(e) => {
             eprintln!("hex harness serve: failed to build tokio runtime: {e}");
             return 1;
         }
     };
-    rt.block_on(async move {
-        // Place outbox under $HEX_DIR/.hex/harness/outbox.jsonl if HEX_DIR is set,
-        // otherwise fall back to a temp dir so this stub never panics.
-        let outbox_path = match std::env::var("HEX_DIR") {
-            Ok(dir) => std::path::PathBuf::from(dir)
-                .join(".hex")
-                .join("harness")
-                .join("outbox.jsonl"),
-            Err(_) => std::env::temp_dir().join("hex-harness-outbox.jsonl"),
-        };
-        if let Some(parent) = outbox_path.parent() {
-            let _ = std::fs::create_dir_all(parent);
-        }
-        let outbox = Outbox::new(outbox_path);
-        let recorder = InitRecorder::new();
-        if let Err(e) = init_with_recorder(&workers, &outbox, &recorder).await {
-            eprintln!("hex harness serve: init failed: {e}");
+    rt.block_on(run(workers))
+}
+
+/// Resolve the durable outbox path: `$HEX_DIR/.hex/harness/outbox.jsonl`,
+/// falling back to a temp file if HEX_DIR is unset (so serve never panics).
+fn outbox_path() -> std::path::PathBuf {
+    match std::env::var("HEX_DIR") {
+        Ok(dir) => std::path::PathBuf::from(dir)
+            .join(".hex")
+            .join("harness")
+            .join("outbox.jsonl"),
+        Err(_) => std::env::temp_dir().join("hex-harness-outbox.jsonl"),
+    }
+}
+
+/// The async lifecycle body. Returns the process exit code.
+async fn run(workers: Vec<Worker>) -> i32 {
+    let outbox = Arc::new(Outbox::new(outbox_path()));
+    let stopping = Arc::new(AtomicBool::new(false));
+    let inflight = Arc::new(AtomicUsize::new(0));
+
+    // 1. Build + start the in-process iii engine (default config: state/cron/
+    //    queue builtins via the inventory registry; rabbitmq dropped at the
+    //    Cargo level). `serve()` is long-lived, so it runs on its own task.
+    use iii_engine::workers::config::EngineConfig;
+    use iii_engine::EngineBuilder;
+    let engine = match EngineBuilder::new()
+        .with_config(EngineConfig::default_config())
+        .build()
+        .await
+    {
+        Ok(e) => e,
+        Err(e) => {
+            eprintln!("hex harness serve: in-process engine build failed: {e}");
             return 1;
         }
-        eprintln!(
-            "hex harness serve: init complete ({} workers registered) — stub serve, exiting cleanly",
-            workers.len()
-        );
-        0
+    };
+    let mut engine_task: JoinHandle<()> = tokio::spawn(async move {
+        if let Err(e) = engine.serve().await {
+            eprintln!("hex harness serve: in-process engine.serve() errored: {e}");
+        }
+    });
+
+    // 2. Connect the worker runtime to the in-process engine. The SDK opens the
+    //    connection on a background task and auto-retries until the engine's WS
+    //    port is up, so connecting immediately (before serve binds) is safe.
+    let url = std::env::var("III_URL").unwrap_or_else(|_| DEFAULT_ENGINE_URL.to_string());
+    let iii = iii_sdk::register_worker(&url, iii_sdk::InitOptions::default());
+
+    // 2a. REGISTER FIRST — every worker's functions + triggers — so any state
+    //     changes replayed in 2b land on a live listener (init-order rule).
+    let mut registered = 0usize;
+    for worker in workers {
+        let wname = worker.name.clone();
+        for (idx, (spec, handler)) in worker.handlers.into_iter().enumerate() {
+            let fid = format!("{wname}::{idx}");
+            let handler = Arc::new(handler);
+            let stopping_h = stopping.clone();
+            let outbox_h = outbox.clone();
+            let inflight_h = inflight.clone();
+            let fid_h = fid.clone();
+            iii.register_function(
+                fid.clone(),
+                iii_sdk::RegisterFunction::new_async(move |input: serde_json::Value| {
+                    let handler = handler.clone();
+                    let stopping = stopping_h.clone();
+                    let outbox = outbox_h.clone();
+                    let inflight = inflight_h.clone();
+                    let fid = fid_h.clone();
+                    async move {
+                        // Stop accepting NEW fires once draining (at-most-once:
+                        // the dropped fire is recovered by reconcile-on-startup).
+                        if stopping.load(Ordering::SeqCst) {
+                            return Ok(serde_json::json!({ "skipped": "draining" }));
+                        }
+                        // Track this invocation so drain can wait for it. The
+                        // guard decrements even if the handler panics.
+                        let _guard = InflightGuard::enter(&inflight);
+                        // State/event triggers deliver a StateEventData payload
+                        // `{message_type,event_type,scope,key,old_value,new_value}`
+                        // where `new_value` is the emit envelope we wrote. Cron
+                        // and other triggers deliver their own payload directly.
+                        // Unwrap `new_value` when present so `evt.data()` sees the
+                        // real {event,producer,ts,data} envelope.
+                        let envelope = match input.get("new_value") {
+                            Some(v) => v.clone(),
+                            None => input,
+                        };
+                        let evt = Event::from_envelope(envelope);
+                        let ctx = Ctx::with_runtime(stopping.clone(), outbox.clone());
+                        // Handlers are synchronous and may block (ctx.run shells
+                        // out) — run on a blocking thread so the reactor isn't
+                        // stalled. The guard above is held across this await.
+                        let res = tokio::task::spawn_blocking(move || handler(evt, ctx))
+                            .await
+                            .map_err(|e| {
+                                iii_sdk::IIIError::Handler(format!("{fid}: join error: {e}"))
+                            })?;
+                        res.map(|_| serde_json::json!({ "ok": true }))
+                            .map_err(|e| iii_sdk::IIIError::Handler(format!("{fid}: {e}")))
+                    }
+                }),
+            );
+            if let Err(e) = iii.register_trigger(spec.to_register_input(&fid)) {
+                eprintln!("hex harness serve: failed to register trigger for {fid}: {e}");
+                return 1;
+            }
+            registered += 1;
+        }
+    }
+    eprintln!("hex harness serve: registered {registered} handler(s)");
+
+    // 2a'. Wait for the worker connection to come up. The in-process engine
+    //      binds its WS port a beat after we spawn `serve()`, so the SDK retries
+    //      until it's ready; reaching Connected means the engine is live AND our
+    //      registrations have been sent. A brief settle lets the async
+    //      trigger-registration round-trips land engine-side BEFORE we replay
+    //      state changes into it — otherwise replay could fire into the void.
+    //      (Reconcile-on-startup, a later spec, is the robust fix; this is v1.)
+    wait_connected(&iii, Duration::from_secs(10)).await;
+    tokio::time::sleep(Duration::from_millis(500)).await;
+
+    // 2b. REPLAY the durable outbox (pop-then-deliver) through the harness's
+    //     LIVE engine connection. These are shutdown-window emissions deferred
+    //     on a prior stop; replaying is their FIRST engine delivery (at-most-once
+    //     holds). We deliver via the async `iii` handle, NOT the blocking
+    //     `ops::emit` — the latter spins its own tokio runtime and `block_on`,
+    //     which panics ("runtime within a runtime") here in the async context.
+    let mut replayed = 0usize;
+    loop {
+        match outbox.pop_front() {
+            Ok(Some(em)) => {
+                if let Err(e) = emit_via(&iii, &em.event, em.data).await {
+                    // Loud but non-fatal (S6): the entry is already popped
+                    // (at-most-once); a failed delivery is dropped, not retried.
+                    eprintln!(
+                        "hex harness serve: replay delivery failed for '{}' (dropped): {e}",
+                        em.event
+                    );
+                }
+                replayed += 1;
+            }
+            Ok(None) => break,
+            Err(e) => {
+                eprintln!("hex harness serve: outbox read error during replay (continuing): {e}");
+                break;
+            }
+        }
+    }
+    if replayed > 0 {
+        eprintln!("hex harness serve: replayed {replayed} deferred emission(s)");
+    }
+
+    // 2c. RECONCILE-on-startup sweep — v1 no-op hook. Per-worker reconcile
+    //     (re-deriving state values missed while down) is a later spec; the
+    //     register→replay→reconcile ordering is established here.
+
+    eprintln!("hex harness serve: up (engine in-process, {registered} handler(s)) — serving");
+
+    // 3. Serve until the engine exits unexpectedly or we get SIGTERM/SIGINT.
+    tokio::select! {
+        _ = &mut engine_task => {
+            eprintln!("hex harness serve: in-process engine exited unexpectedly");
+            return 1;
+        }
+        _ = shutdown_signal() => {
+            eprintln!("hex harness serve: shutdown signal received — draining");
+        }
+    }
+
+    // 4. Graceful drain: stop new fires, wait for in-flight handlers to finish
+    //    (any emit they make now diverts to the outbox via Ctx), bounded.
+    stopping.store(true, Ordering::SeqCst);
+    match drain_inflight(&inflight, DRAIN_TIMEOUT).await {
+        DrainOutcome::AllCompleted => {
+            eprintln!("hex harness serve: drain complete — all handlers finished")
+        }
+        DrainOutcome::TimedOut(n) => eprintln!(
+            "hex harness serve: drain timed out after {}s — {n} handler(s) still in-flight",
+            DRAIN_TIMEOUT.as_secs()
+        ),
+    }
+
+    // 5. Tear down: drop the worker connection, stop the engine task.
+    drop(iii);
+    engine_task.abort();
+    eprintln!("hex harness serve: stopped cleanly");
+    0
+}
+
+/// Deliver one emission to the engine through an EXISTING `iii` connection,
+/// async — the replay path's equivalent of `ops::emit`, minus the nested tokio
+/// runtime. Writes the same `events`-scope state envelope `ops::emit` does, so a
+/// replayed emission fires the same state triggers as a fresh one.
+async fn emit_via(
+    iii: &iii_sdk::III,
+    event: &str,
+    data: serde_json::Value,
+) -> anyhow::Result<()> {
+    let producer = crate::ops::resolve_producer(None);
+    let ts = chrono::Utc::now().to_rfc3339();
+    let target = crate::ops::emit_target(event, &producer, &ts, &data);
+    let payload = serde_json::json!({
+        "scope": target.scope,
+        "key": target.key,
+        "value": target.value,
+    });
+    iii.trigger(iii_sdk::protocol::TriggerRequest {
+        function_id: "state::set".to_string(),
+        payload,
+        action: None,
+        timeout_ms: None,
     })
+    .await
+    .map(|_| ())
+    .map_err(|e| anyhow::anyhow!("state::set failed for replayed event '{event}': {e}"))
+}
+
+/// Poll the worker connection until it reaches `Connected`, bounded by
+/// `timeout`. Doubles as the "engine is up" wait — the SDK can't connect until
+/// the in-process engine has bound its port. Loud-but-non-fatal on timeout (S6):
+/// we proceed so the harness still serves, but warn that replay may be degraded.
+async fn wait_connected(iii: &iii_sdk::III, timeout: Duration) {
+    let poll = async {
+        while !matches!(
+            iii.get_connection_state(),
+            iii_sdk::IIIConnectionState::Connected
+        ) {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    if tokio::time::timeout(timeout, poll).await.is_err() {
+        eprintln!(
+            "hex harness serve: worker connection not Connected within {}s — \
+             proceeding (outbox replay may be degraded)",
+            timeout.as_secs()
+        );
+    }
+}
+
+/// Await SIGTERM or SIGINT. SIGTERM is what launchd sends on `bootout`/stop;
+/// SIGINT covers a foreground Ctrl-C during local debugging.
+async fn shutdown_signal() {
+    use tokio::signal::unix::{signal, SignalKind};
+    let mut term = match signal(SignalKind::terminate()) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("hex harness serve: cannot install SIGTERM handler: {e}");
+            // Fall back to never-resolving so the engine task still governs exit.
+            std::future::pending::<()>().await;
+            return;
+        }
+    };
+    let mut intr = match signal(SignalKind::interrupt()) {
+        Ok(s) => s,
+        Err(_) => {
+            term.recv().await;
+            return;
+        }
+    };
+    tokio::select! {
+        _ = term.recv() => {}
+        _ = intr.recv() => {}
+    }
+}
+
+/// RAII counter for in-flight handler invocations. Increments on `enter`,
+/// decrements on `Drop` (so a panicking handler still releases its slot).
+struct InflightGuard {
+    counter: Arc<AtomicUsize>,
+}
+
+impl InflightGuard {
+    fn enter(counter: &Arc<AtomicUsize>) -> Self {
+        counter.fetch_add(1, Ordering::SeqCst);
+        InflightGuard {
+            counter: counter.clone(),
+        }
+    }
+}
+
+impl Drop for InflightGuard {
+    fn drop(&mut self) {
+        self.counter.fetch_sub(1, Ordering::SeqCst);
+    }
+}
+
+/// Wait until the in-flight counter reaches zero, bounded by `timeout`.
+/// App-layer drain: the SDK detach-spawns each invocation (no JoinHandle to
+/// us), so we track completion via the shared counter instead.
+async fn drain_inflight(inflight: &AtomicUsize, timeout: Duration) -> DrainOutcome {
+    let poll = async {
+        while inflight.load(Ordering::SeqCst) > 0 {
+            tokio::time::sleep(Duration::from_millis(50)).await;
+        }
+    };
+    match tokio::time::timeout(timeout, poll).await {
+        Ok(()) => DrainOutcome::AllCompleted,
+        Err(_) => DrainOutcome::TimedOut(inflight.load(Ordering::SeqCst)),
+    }
 }
 
 /// Where a `Ctx::emit` call should be routed.

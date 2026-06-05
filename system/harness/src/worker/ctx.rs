@@ -1,28 +1,72 @@
 //! `Ctx` — the handle passed to a worker handler. Provides emit/state/run.
 //!
-//! `emit` delegates to `crate::ops::emit` in normal operation. The runtime
-//! wraps this with diversion-to-outbox during the shutdown drain window.
+//! `emit` delegates to `crate::ops::emit` in normal operation. During the
+//! shutdown drain window the runtime hands handlers a Ctx whose `emit`
+//! DIVERTS to the durable outbox instead of the engine — the at-most-once
+//! shutdown-deferral rule (see hex-workers-as-rust-library decision). Because
+//! a diverted emission was never delivered to the engine, replaying it on the
+//! next init is a FIRST delivery → at-most-once preserved, no double-fire.
 
 use anyhow::{anyhow, Error};
 use serde_json::Value;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::Arc;
+
+use super::outbox::{Emission, Outbox};
+
+/// Runtime wiring a live Ctx carries so `emit` can divert during shutdown.
+struct CtxRuntime {
+    /// Flipped true once the harness begins draining. While true, `emit`
+    /// diverts to the outbox instead of delivering to the engine.
+    stopping: Arc<AtomicBool>,
+    /// Durable on-disk outbox for shutdown-window emissions.
+    outbox: Arc<Outbox>,
+}
 
 /// Handler-facing context. Created by the runtime per invocation.
-pub struct Ctx;
+///
+/// A bare `Ctx::new()` (used in tests and non-runtime callers) always emits
+/// to the engine. A `Ctx::with_runtime(...)` consults the shared `stopping`
+/// flag and diverts to the outbox during the drain window.
+pub struct Ctx {
+    rt: Option<CtxRuntime>,
+}
 
 impl Ctx {
-    /// Construct a plain Ctx (the runtime will replace this with a richer
-    /// constructor once the lifecycle wires the outbox in).
+    /// Construct a plain Ctx with no shutdown-diversion wiring — `emit`
+    /// always delivers to the engine.
     pub fn new() -> Self {
-        Ctx
+        Ctx { rt: None }
     }
 
-    /// Emit an event. In normal operation this delegates to `ops::emit`,
-    /// which writes the `{event,producer,ts,data}` envelope to iii state.
+    /// Construct a runtime-wired Ctx. `emit` delivers to the engine in normal
+    /// operation, but diverts to `outbox` once `stopping` is set.
+    pub fn with_runtime(stopping: Arc<AtomicBool>, outbox: Arc<Outbox>) -> Self {
+        Ctx {
+            rt: Some(CtxRuntime { stopping, outbox }),
+        }
+    }
+
+    /// Emit an event. In normal operation this delegates to `ops::emit`, which
+    /// writes the `{event,producer,ts,data}` envelope to iii state. During the
+    /// shutdown drain window (runtime-wired Ctx with `stopping == true`) the
+    /// emission is diverted to the durable outbox for replay on next init.
     pub fn emit(&self, event: &str, data: Value) -> Result<(), Error> {
+        if let Some(rt) = &self.rt {
+            if rt.stopping.load(Ordering::SeqCst) {
+                return rt
+                    .outbox
+                    .append(&Emission {
+                        event: event.to_string(),
+                        data,
+                    })
+                    .map_err(|e| anyhow!("Ctx::emit: outbox append failed during drain: {e}"));
+            }
+        }
         crate::ops::emit(event, data, None).map_err(|e| anyhow!(e))
     }
 
-    /// Handle for direct state access (placeholder; expanded by runtime task).
+    /// Handle for direct state access (placeholder; expanded by a later spec).
     pub fn state(&self) -> StateHandle {
         StateHandle
     }
@@ -46,3 +90,37 @@ impl Default for Ctx {
 }
 
 pub struct StateHandle;
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use serde_json::json;
+    use tempfile::tempdir;
+
+    /// A runtime-wired Ctx, while stopping, must divert emit to the outbox
+    /// (NOT attempt a live engine connection). Asserted by reading the outbox
+    /// file back — the emission lands on disk.
+    #[test]
+    fn emit_diverts_to_outbox_while_stopping() {
+        let dir = tempdir().unwrap();
+        let path = dir.path().join("outbox.jsonl");
+        let outbox = Arc::new(Outbox::new(&path));
+        let stopping = Arc::new(AtomicBool::new(true));
+        let ctx = Ctx::with_runtime(stopping, outbox.clone());
+
+        ctx.emit("landings.updated", json!({ "spec_id": "S1" }))
+            .expect("diverted emit must succeed");
+
+        // The emission must be durably on disk, replayable on next init.
+        let mut replayed = Vec::new();
+        let n = outbox
+            .replay(|e| {
+                replayed.push(e);
+                Ok(())
+            })
+            .unwrap();
+        assert_eq!(n, 1, "exactly one diverted emission must be queued");
+        assert_eq!(replayed[0].event, "landings.updated");
+        assert_eq!(replayed[0].data["spec_id"], "S1");
+    }
+}
