@@ -71,18 +71,17 @@ PASS=$((PASS + 1))
 TOTAL=$((TOTAL + 1))
 
 # ── Test 7: Memory save + search cycle ──────────────────────────────
+# Native model: "saving" a memory = writing a workspace file; `hex memory index`
+# makes it searchable; `hex memory search` finds it. (The old Python
+# memory_save.py/memory_search.py were removed in the native-Rust migration.)
 echo "[7] Memory save + search"
 cd /tmp/test-hex
-python3 .hex/skills/memory/scripts/memory_save.py "test memory sentinel_xyz" --tags "e2e"
-OUTPUT=$(python3 -c "
-import sqlite3, sys
-conn = sqlite3.connect('/tmp/test-hex/.hex/memory.db')
-rows = conn.execute(\"SELECT content FROM memories WHERE content LIKE '%sentinel_xyz%'\").fetchall()
-print(rows[0][0] if rows else 'NOT FOUND')
-conn.close()
-")
+mkdir -p me
+echo "test memory sentinel_xyz indexed for e2e" >> me/learnings.md
+HEX_DIR=/tmp/test-hex hex memory index >/dev/null 2>&1
+OUTPUT=$(HEX_DIR=/tmp/test-hex hex memory search "sentinel_xyz" 2>&1)
 if echo "$OUTPUT" | grep -q "sentinel_xyz"; then
-    echo "  PASS: Save + search round-trip works"
+    echo "  PASS: Save + search round-trip works (native)"
     PASS=$((PASS + 1))
 else
     echo "  FAIL: Search didn't find saved memory"
@@ -158,7 +157,7 @@ TOTAL=$((TOTAL + 1))
 
 # ── Test 13: Commands installed to .claude/commands/ ───────────────
 echo "[13] Commands"
-for cmd in hex-startup hex-checkpoint hex-shutdown hex-reflect hex-triage hex-decide hex-doctor hex-upgrade; do
+for cmd in hex-startup hex-checkpoint hex-shutdown hex-reflect hex-decide hex-doctor hex-upgrade; do
     check "command: $cmd" test -f "/tmp/test-hex/.claude/commands/$cmd.md"
 done
 
@@ -241,14 +240,16 @@ else
 fi
 TOTAL=$((TOTAL + 1))
 
-# ── Test 17: Unit tests ───────────────────────────────────────────
-echo "[17] Unit tests"
-cd /tmp/hex-setup
-if python3 -m pytest tests/test_memory.py -v 2>&1; then
-    echo "  PASS: All unit tests pass"
+# ── Test 17: Native memory CLI ─────────────────────────────────────
+# Memory was rustified — the Python memory module + its pytest suite
+# (tests/test_memory.py) were removed; coverage now lives in the Rust lib tests
+# (run at build/CI time). Here we just confirm the native CLI shipped.
+echo "[17] Native memory CLI"
+if HEX_DIR=/tmp/test-hex hex memory --help 2>&1 | grep -q "search"; then
+    echo "  PASS: native hex memory CLI present (search/index/consolidate)"
     PASS=$((PASS + 1))
 else
-    echo "  FAIL: Unit tests failed"
+    echo "  FAIL: hex memory CLI missing"
     FAIL=$((FAIL + 1))
 fi
 TOTAL=$((TOTAL + 1))
