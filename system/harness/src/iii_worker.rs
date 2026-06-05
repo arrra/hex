@@ -497,6 +497,43 @@ jobs:
         assert_eq!(parsed, payload);
     }
 
+    /// Red test for Te1vr4v6a: the repo must ship ONE example reactive worker
+    /// config demonstrating a state trigger, beside the existing
+    /// `memory-maintenance.yaml` example. The file must parse into a
+    /// WorkerConfig whose first job builds a state trigger.
+    #[test]
+    fn reactive_example_config_parses_into_state_trigger() {
+        // Repo root = two levels above this crate (system/harness/).
+        let manifest = std::path::PathBuf::from(env!("CARGO_MANIFEST_DIR"));
+        let repo_root = manifest
+            .parent()
+            .and_then(|p| p.parent())
+            .expect("repo root must exist");
+        let example = repo_root.join("system/iii/workers/reactive-example.yaml");
+        assert!(
+            example.exists(),
+            "expected example reactive worker config at {}",
+            example.display()
+        );
+        let text = std::fs::read_to_string(&example)
+            .expect("example reactive worker config must be readable");
+        let cfg: WorkerConfig = serde_yaml::from_str(&text)
+            .expect("example reactive worker config must parse");
+        assert!(!cfg.jobs.is_empty(), "example must declare at least one job");
+        let job = cfg
+            .jobs
+            .iter()
+            .find(|j| {
+                j.trigger
+                    .as_ref()
+                    .and_then(|t| t.state.as_ref())
+                    .is_some()
+            })
+            .expect("example must include a job with a state trigger");
+        let input = build_trigger(job).expect("state-triggered example must build");
+        assert_eq!(input.trigger_type, "state");
+    }
+
     /// A job specifying BOTH a bare `cron` and a `trigger` block must Err.
     #[test]
     fn both_cron_and_trigger_is_error() {
