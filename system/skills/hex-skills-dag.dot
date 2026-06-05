@@ -8,13 +8,6 @@ digraph hex_skills {
   nodesep=0.6;
   ranksep=0.8;
 
-  // Session lifecycle
-  "hex-startup" [fillcolor="#b8e6c8"];
-  "hex-shutdown" [fillcolor="#b8e6c8"];
-  "hex-checkpoint" [fillcolor="#b8e6c8"];
-  "hex-reflect" [fillcolor="#b8e6c8"];
-  "hex-save" [fillcolor="#b8e6c8"];
-
   // Core infrastructure
   "memory" [fillcolor="#99ccff", penwidth=2];
   "hex-doctor" [fillcolor="#99ccff"];
@@ -44,15 +37,6 @@ digraph hex_skills {
   "hex-scout" [fillcolor="#e8e8e8"];
   "hex-bookmarks" [fillcolor="#e8e8e8"];
   "hex-ui" [fillcolor="#e8e8e8"];
-
-  // Edges — session lifecycle
-  "hex-startup" -> "hex-doctor";
-  "hex-startup" -> "memory";
-  "hex-shutdown" -> "hex-checkpoint";
-  "hex-checkpoint" -> "memory";
-  "hex-checkpoint" -> "hex-reflect";
-  "hex-reflect" -> "memory";
-  "hex-save" -> "memory";
 
   // Edges — connected
   "hex-doctor" -> "memory";
