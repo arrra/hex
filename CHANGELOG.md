@@ -2,6 +2,21 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-06-05] — harness lifecycle adopts daemon-green (v0.31.0)
+
+The hex harness no longer hand-rolls launchctl/plist logic. `hex harness
+start/stop/status/restart/logs` now route through the standalone **daemon-green**
+crate (github.com/mrap/daemon-green, pinned), which renders the gui-domain
+LaunchAgent (NO SessionCreate), bootstraps `gui/<uid>` with the wait-out-bootout +
+retry + asuser robustness, and on Linux drives `systemd --user`. Same crate now
+backs `boi daemon` too — one cross-platform, SSH-safe, sudo-free service manager.
+
+### Changed
+- `harness_start/stop/status` reimplemented via `daemon_green::native()`; added
+  `hex harness restart` + `hex harness logs`.
+### Removed
+- Hand-rolled `render_harness_plist` / `harness_plist_path` / `gui_domain` helpers.
+
 ## [2026-06-05] — harness plist: remove SessionCreate (it BLOCKS the login keychain) (v0.30.4)
 
 Empirically verified (keychain-launchagent-test on the live box): a gui LaunchAgent
