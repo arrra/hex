@@ -256,6 +256,7 @@ fi
 # reference HEX_RUNTIME or .codex/ as a fallback.
 CLAUDE_PATH_FILES=$(grep -rln '\.claude/' . \
     --exclude-dir=.git \
+    --exclude-dir=.hex \
     --exclude-dir=tests \
     --exclude-dir=eval \
     --include="*.sh" --include="*.py" 2>/dev/null \
