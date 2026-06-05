@@ -1,5 +1,5 @@
 # hex-reactive-example — declarative iii worker config (event-triggered).
-# Hosted by `hex iii worker run <this file>`. Demonstrates a STATE trigger:
+# Hosted by `hex worker run <this file>`. Demonstrates a STATE trigger:
 # the job's command is invoked whenever iii state under the `boi` scope
 # changes. The trigger event payload is delivered via the `III_EVENT`
 # environment variable as a JSON string.

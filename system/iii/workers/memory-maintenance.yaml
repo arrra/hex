@@ -1,5 +1,5 @@
 # hex-memory-maintenance — declarative iii worker config.
-# Hosted by `hex iii worker run <this file>`. Each job becomes an iii function
+# Hosted by `hex worker run <this file>`. Each job becomes an iii function
 # that execs `command` (${HEX_DIR} expanded), bound to a cron trigger.
 worker_name: hex-memory-maintenance
 jobs:

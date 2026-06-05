@@ -131,7 +131,7 @@ Then verify with:
 EOF
 
   # --- Render a launchd plist per worker config (workers/<name>.yaml) -------
-  # Each worker is a declarative YAML config hosted by `hex iii worker run`.
+  # Each worker is a declarative YAML config hosted by `hex worker run`.
   # We render the generic iii-worker.plist template into ~/Library/LaunchAgents/
   # com.hex.iii-<name>.plist, one per config. No node, no per-worker binary —
   # the hex binary is the host. New workers (incl. personal ones dropped into

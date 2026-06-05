@@ -18,7 +18,6 @@
     <key>ProgramArguments</key>
     <array>
         <string>HEXBIN_PLACEHOLDER</string>
-        <string>iii</string>
         <string>worker</string>
         <string>run</string>
         <string>CONFIG_PLACEHOLDER</string>
