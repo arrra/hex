@@ -24,10 +24,115 @@ pub struct Job {
     pub id: String,
     /// argv to exec. `${HEX_DIR}` is expanded from the environment.
     pub command: Vec<String>,
-    /// 7-field cron expression (sec min hour day month weekday year).
-    pub cron: String,
+    /// Legacy bare cron expression (7-field: sec min hour day month weekday year).
+    /// Sugar for `trigger: { cron: { expression: ... } }`. Mutually exclusive
+    /// with the structured `trigger` block — exactly one of {cron, trigger}
+    /// must be present per job (S6: validation is loud, not silent).
+    #[serde(default)]
+    pub cron: Option<String>,
+    /// Structured trigger spec (cron|state|queue). Mutually exclusive with the
+    /// bare `cron` field above.
+    #[serde(default)]
+    pub trigger: Option<TriggerSpec>,
     #[serde(default)]
     pub description: String,
+}
+
+/// Declarative trigger spec. The YAML key (`cron`/`state`/`queue`) selects the
+/// trigger family; the inner block is the typed config. Modeled as a struct of
+/// optional fields (not a Rust enum) so that serde_yaml's externally-tagged
+/// map form works uniformly with serde_json. Exactly one of the inner fields
+/// must be Some — enforced in `build_trigger`.
+///
+/// Maps 1:1 to `iii_sdk::builtin_triggers::IIITrigger::{Cron,State,Queue}`.
+#[derive(Debug, Deserialize, Clone, Default)]
+pub struct TriggerSpec {
+    #[serde(default)]
+    pub cron: Option<CronSpec>,
+    #[serde(default)]
+    pub state: Option<StateSpec>,
+    #[serde(default)]
+    pub queue: Option<QueueSpec>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct CronSpec {
+    pub expression: String,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct StateSpec {
+    #[serde(default)]
+    pub scope: Option<String>,
+    #[serde(default)]
+    pub key: Option<String>,
+}
+
+#[derive(Debug, Deserialize, Clone)]
+pub struct QueueSpec {
+    /// Queue topic / name to subscribe to.
+    pub queue: String,
+}
+
+/// Pure builder — maps a Job to a `RegisterTriggerInput` for the engine.
+///
+/// Exactly one of {`job.cron`, `job.trigger`} must be present. Zero or both is
+/// a LOUD validation error (S6); the caller (serve) exits nonzero on Err.
+pub fn build_trigger(
+    job: &Job,
+) -> Result<iii_sdk::protocol::RegisterTriggerInput, String> {
+    use iii_sdk::builtin_triggers::{
+        CronTriggerConfig, IIITrigger, QueueTriggerConfig, StateTriggerConfig,
+    };
+    if job.cron.is_some() && job.trigger.is_some() {
+        return Err(format!(
+            "job {}: must specify exactly one of `cron` or `trigger`, not both",
+            job.id
+        ));
+    }
+    if let Some(expr) = &job.cron {
+        let t = IIITrigger::Cron(CronTriggerConfig::new(expr.clone()));
+        return Ok(t.for_function(job.id.clone()));
+    }
+    let trig = job.trigger.as_ref().ok_or_else(|| {
+        format!(
+            "job {}: must specify exactly one of `cron` or `trigger` (both missing)",
+            job.id
+        )
+    })?;
+    let set_count = [trig.cron.is_some(), trig.state.is_some(), trig.queue.is_some()]
+        .into_iter()
+        .filter(|b| *b)
+        .count();
+    if set_count == 0 {
+        return Err(format!(
+            "job {}: `trigger` block must specify exactly one of cron/state/queue (none set)",
+            job.id
+        ));
+    }
+    if set_count > 1 {
+        return Err(format!(
+            "job {}: `trigger` block must specify exactly one of cron/state/queue (multiple set)",
+            job.id
+        ));
+    }
+    let iii_trigger = if let Some(c) = &trig.cron {
+        IIITrigger::Cron(CronTriggerConfig::new(c.expression.clone()))
+    } else if let Some(s) = &trig.state {
+        let mut cfg = StateTriggerConfig::new();
+        if let Some(scope) = &s.scope {
+            cfg = cfg.scope(scope.clone());
+        }
+        if let Some(key) = &s.key {
+            cfg = cfg.key(key.clone());
+        }
+        IIITrigger::State(cfg)
+    } else if let Some(q) = &trig.queue {
+        IIITrigger::Queue(QueueTriggerConfig::new(q.queue.clone()))
+    } else {
+        unreachable!("set_count==1 guarantees one branch");
+    };
+    Ok(iii_trigger.for_function(job.id.clone()))
 }
 
 /// Entry point for `hex iii worker run <config>`. Returns a process exit code.
@@ -74,16 +179,22 @@ async fn serve(cfg: WorkerConfig) -> i32 {
             })
             .description(job.description.clone()),
         );
-        if let Err(e) = iii.register_trigger(iii_sdk::RegisterTriggerInput {
-            trigger_type: "cron".to_string(),
-            function_id: job.id.clone(),
-            config: serde_json::json!({ "expression": job.cron }),
-            metadata: None,
-        }) {
-            eprintln!("iii worker: failed to register cron for {}: {e}", job.id);
+        let trigger_input = match build_trigger(job) {
+            Ok(t) => t,
+            Err(e) => {
+                eprintln!("iii worker: invalid trigger for {}: {e}", job.id);
+                return 1;
+            }
+        };
+        let trigger_type = trigger_input.trigger_type.clone();
+        if let Err(e) = iii.register_trigger(trigger_input) {
+            eprintln!(
+                "iii worker: failed to register {trigger_type} trigger for {}: {e}",
+                job.id
+            );
             return 1;
         }
-        println!("  registered {} (cron {})", job.id, job.cron);
+        println!("  registered {} ({})", job.id, trigger_type);
     }
 
     println!("iii worker '{}' running ({} job(s))", cfg.worker_name, cfg.jobs.len());
@@ -238,6 +349,111 @@ jobs:
         assert!(
             row.duration_ms.is_some(),
             "telemetry row must include duration_ms"
+        );
+    }
+
+    // -- Red tests for Tfry002tv: event triggers (cron back-compat + state + queue) --
+
+    /// Legacy bare top-level `cron: "..."` must still parse and must build a
+    /// RegisterTriggerInput with trigger_type == "cron".
+    #[test]
+    fn legacy_bare_cron_parses_and_builds_cron_trigger() {
+        let yaml = r#"
+worker_name: legacy
+jobs:
+  - id: legacy::job
+    command: [echo, hi]
+    cron: "0 */15 * * * * *"
+"#;
+        let cfg: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.jobs.len(), 1);
+        let job = &cfg.jobs[0];
+        let input = build_trigger(job).expect("legacy cron must build a trigger");
+        assert_eq!(input.trigger_type, "cron");
+        assert_eq!(input.function_id, "legacy::job");
+        // Cron expression should be carried through in the config payload.
+        let s = serde_json::to_string(&input.config).unwrap();
+        assert!(
+            s.contains("0 */15 * * * * *"),
+            "cron expression missing from config payload: {s}"
+        );
+    }
+
+    /// A `trigger: { state: { scope: ... } }` job must parse and build a
+    /// RegisterTriggerInput with trigger_type == "state".
+    #[test]
+    fn state_trigger_parses_and_builds_state_trigger() {
+        let yaml = r#"
+worker_name: reactive
+jobs:
+  - id: react::on_boi
+    command: [echo, hi]
+    trigger:
+      state:
+        scope: boi
+"#;
+        let cfg: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(cfg.jobs.len(), 1);
+        let job = &cfg.jobs[0];
+        let input = build_trigger(job).expect("state trigger must build");
+        assert_eq!(input.trigger_type, "state");
+        assert_eq!(input.function_id, "react::on_boi");
+        let s = serde_json::to_string(&input.config).unwrap();
+        assert!(s.contains("boi"), "scope 'boi' missing from config: {s}");
+    }
+
+    /// A `trigger: { queue: { queue: ... } }` job must parse and build a queue trigger.
+    #[test]
+    fn queue_trigger_parses_and_builds_queue_trigger() {
+        let yaml = r#"
+worker_name: q
+jobs:
+  - id: q::handle
+    command: [echo, hi]
+    trigger:
+      queue:
+        queue: emails
+"#;
+        let cfg: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        let input = build_trigger(&cfg.jobs[0]).expect("queue trigger must build");
+        assert_eq!(input.trigger_type, "queue");
+    }
+
+    /// A job with neither cron nor trigger must be a loud validation error (S6).
+    #[test]
+    fn neither_cron_nor_trigger_is_error() {
+        let yaml = r#"
+worker_name: bad
+jobs:
+  - id: bad::none
+    command: [echo, hi]
+"#;
+        let cfg: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        let res = build_trigger(&cfg.jobs[0]);
+        assert!(
+            res.is_err(),
+            "job with neither cron nor trigger must Err, got {res:?}"
+        );
+    }
+
+    /// A job specifying BOTH a bare `cron` and a `trigger` block must Err.
+    #[test]
+    fn both_cron_and_trigger_is_error() {
+        let yaml = r#"
+worker_name: bad
+jobs:
+  - id: bad::both
+    command: [echo, hi]
+    cron: "0 0 * * * * *"
+    trigger:
+      state:
+        scope: boi
+"#;
+        let cfg: WorkerConfig = serde_yaml::from_str(yaml).unwrap();
+        let res = build_trigger(&cfg.jobs[0]);
+        assert!(
+            res.is_err(),
+            "job with both cron and trigger must Err, got {res:?}"
         );
     }
 }
