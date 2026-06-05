@@ -16,7 +16,7 @@ INTERVAL="${HEX_WATCHER_INTERVAL:-5}"
 
 print_once() {
   printf '\n=== hex-watcher %s ===\n' "$(date '+%H:%M:%S')"
-  $BOI_CMD status 2>&1 | head -40 || echo "[boi status failed]"
+  $BOI_CMD spec list 2>&1 | head -40 || echo "[boi spec list failed]"
   echo
 }
 

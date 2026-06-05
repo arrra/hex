@@ -29,8 +29,12 @@ if [ -z "${HEX_DIR:-}" ]; then
   exit 1
 fi
 
-# --- LLM CLI abstraction ---
-source "$HEX_DIR/.hex/scripts/llm-cli.sh"
+# --- LLM CLI: claude -p (S6: fail LOUD if missing) ---
+if ! command -v claude >/dev/null 2>&1; then
+    echo "meeting-prep: FATAL — \`claude\` CLI not found on PATH" >&2
+    exit 1
+fi
+LLM_CLI="claude"
 
 # --- Config ---
 TZ_FILE="$HEX_DIR/.hex/timezone"
@@ -557,7 +561,7 @@ RESPONSE=$(
         unset "$var"
     done
     cd "$HEX_DIR"
-    timeout 90 llm_exec "$(cat "$PROMPT_TMP")" 2>/dev/null
+    timeout 90 claude -p "$(cat "$PROMPT_TMP")" 2>/dev/null
 ) || {
     EXIT_CODE=$?
     log "$LLM_CLI failed (exit: $EXIT_CODE)"
