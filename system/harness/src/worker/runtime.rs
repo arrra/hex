@@ -113,6 +113,7 @@ async fn run(workers: Vec<Worker>) -> i32 {
             let outbox_h = outbox.clone();
             let inflight_h = inflight.clone();
             let fid_h = fid.clone();
+            let wname_h = wname.clone();
             iii.register_function(
                 fid.clone(),
                 iii_sdk::RegisterFunction::new_async(move |input: serde_json::Value| {
@@ -121,6 +122,7 @@ async fn run(workers: Vec<Worker>) -> i32 {
                     let outbox = outbox_h.clone();
                     let inflight = inflight_h.clone();
                     let fid = fid_h.clone();
+                    let wname = wname_h.clone();
                     async move {
                         // Stop accepting NEW fires once draining (at-most-once:
                         // the dropped fire is recovered by reconcile-on-startup).
@@ -145,13 +147,37 @@ async fn run(workers: Vec<Worker>) -> i32 {
                         // Handlers are synchronous and may block (ctx.run shells
                         // out) — run on a blocking thread so the reactor isn't
                         // stalled. The guard above is held across this await.
-                        let res = tokio::task::spawn_blocking(move || handler(evt, ctx))
-                            .await
-                            .map_err(|e| {
-                                iii_sdk::IIIError::Handler(format!("{fid}: join error: {e}"))
-                            })?;
-                        res.map(|_| serde_json::json!({ "ok": true }))
-                            .map_err(|e| iii_sdk::IIIError::Handler(format!("{fid}: {e}")))
+                        let started = std::time::Instant::now();
+                        let res = tokio::task::spawn_blocking(move || handler(evt, ctx)).await;
+                        let duration_ms = started.elapsed().as_millis() as i64;
+                        // Auto-trace every handler invocation to the telemetry
+                        // store — the chokepoint the old YAML host gave us, kept
+                        // here so the Rust harness doesn't lose observability.
+                        // Loud-but-not-fatal: a telemetry write never fails the job.
+                        let record = |status: &str, detail: Option<String>| {
+                            crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+                                source: wname.clone(),
+                                event: fid.clone(),
+                                status: status.to_string(),
+                                duration_ms: Some(duration_ms),
+                                exit_code: None,
+                                detail,
+                            });
+                        };
+                        match res {
+                            Ok(Ok(())) => {
+                                record("ok", None);
+                                Ok(serde_json::json!({ "ok": true }))
+                            }
+                            Ok(Err(e)) => {
+                                record("error", Some(e.to_string()));
+                                Err(iii_sdk::IIIError::Handler(format!("{fid}: {e}")))
+                            }
+                            Err(e) => {
+                                record("panic", Some(e.to_string()));
+                                Err(iii_sdk::IIIError::Handler(format!("{fid}: join error: {e}")))
+                            }
+                        }
                     }
                 }),
             );

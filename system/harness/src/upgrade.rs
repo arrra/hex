@@ -758,13 +758,11 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                                 println!("  → Recorded installed SHA: {}...", &sha[..sha.len().min(8)]);
                             }
                         }
-                        // The binary changed, but long-running iii workers
-                        // (`hex iii worker run`, launchd-supervised) still hold the
-                        // OLD binary in memory — so any worker-side code change is
-                        // silently stale until restart. Kick them so they reload.
-                        // (The iii ENGINE is the `iii` binary, not `hex`, so it is
-                        // deliberately NOT restarted here.)
-                        restart_iii_workers();
+                        // The binary changed, but the long-running harness
+                        // (`com.hex.harness`, launchd-supervised) still holds the
+                        // OLD binary in memory — engine + every worker run inside
+                        // it. Restart it so the whole stack reloads the new binary.
+                        restart_harness();
                     }
                     Err(e) => { eprintln!("  [FAIL] atomic binary install failed: {e}"); return; }
                 }
@@ -778,51 +776,39 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
     }
 }
 
-/// Restart every launchd-supervised iii **worker** so it reloads the freshly
-/// swapped `hex` binary. Skips `com.hex.iii-engine` (that runs the `iii` binary,
-/// which `hex upgrade` doesn't touch). Best-effort + loud: a missing LaunchAgents
-/// dir or a kickstart failure is reported, never silently swallowed (S6).
-fn restart_iii_workers() {
+/// Restart the single launchd-supervised harness (`com.hex.harness`) so it
+/// reloads the freshly swapped `hex` binary — the in-process engine AND every
+/// typed worker run inside it, so one kickstart reloads the whole stack. Only
+/// kickstarts if the service is already loaded (an upgrade shouldn't install the
+/// harness on a box that wasn't running it). Best-effort + loud: a kickstart
+/// failure is reported, never silently swallowed (S6).
+fn restart_harness() {
+    const LABEL: &str = "com.hex.harness";
     let home = match std::env::var("HOME") {
         Ok(h) => h,
         Err(_) => return,
     };
-    let agents_dir = Path::new(&home).join("Library/LaunchAgents");
-    let entries = match fs::read_dir(&agents_dir) {
-        Ok(e) => e,
-        Err(_) => return, // no LaunchAgents dir — nothing to restart
-    };
-    let mut restarted = 0;
-    for entry in entries.flatten() {
-        let name = entry.file_name();
-        let name = name.to_string_lossy();
-        // iii worker plists only; the engine is the `iii` binary, leave it alone.
-        if !(name.starts_with("com.hex.iii-") && name.ends_with(".plist")) {
-            continue;
-        }
-        if name == "com.hex.iii-engine.plist" {
-            continue;
-        }
-        let label = name.trim_end_matches(".plist");
-        // `launchctl kickstart -k gui/<uid>/<label>` — kill if running, then start.
-        let out = Command::new("sh")
-            .arg("-c")
-            .arg(format!("launchctl kickstart -k gui/$(id -u)/{label}"))
-            .output();
-        match out {
-            Ok(o) if o.status.success() => {
-                println!("  [OK] restarted iii worker {label} (reloads new binary)");
-                restarted += 1;
-            }
-            Ok(o) => eprintln!(
-                "  [WARN] could not restart iii worker {label}: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ),
-            Err(e) => eprintln!("  [WARN] could not restart iii worker {label}: {e}"),
-        }
+    // Only restart if the harness plist is actually installed.
+    let plist = Path::new(&home)
+        .join("Library/LaunchAgents")
+        .join(format!("{LABEL}.plist"));
+    if !plist.exists() {
+        return; // harness not installed on this box — nothing to restart
     }
-    if restarted > 0 {
-        println!("  → {restarted} iii worker(s) now running the new binary");
+    // `launchctl kickstart -k gui/<uid>/<label>` — kill if running, then start.
+    let out = Command::new("sh")
+        .arg("-c")
+        .arg(format!("launchctl kickstart -k gui/$(id -u)/{LABEL}"))
+        .output();
+    match out {
+        Ok(o) if o.status.success() => {
+            println!("  [OK] restarted {LABEL} — engine + workers now on the new binary");
+        }
+        Ok(o) => eprintln!(
+            "  [WARN] could not restart {LABEL}: {}",
+            String::from_utf8_lossy(&o.stderr).trim()
+        ),
+        Err(e) => eprintln!("  [WARN] could not restart {LABEL}: {e}"),
     }
 }
 

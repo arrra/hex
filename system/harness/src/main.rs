@@ -10,17 +10,20 @@ mod integration_cmd;
 mod checkpoint;
 mod shutdown;
 mod startup;
-mod telemetry;
 mod integration_check_all;
+// telemetry lives in the lib (used by the in-process worker runtime too); the
+// bin shares that one copy rather than compiling a second (mirrors hex::memory).
 use hex::memory;
+use hex::telemetry;
 mod path_map;
 mod session_reflect;
 mod env;
 mod hook;
 mod upgrade;
 mod learnings;
-mod iii_worker;
-mod ops;
+// ops lives in the lib (the in-process worker runtime calls it too); the bin
+// shares that one copy rather than compiling a second (mirrors hex::memory).
+use hex::ops;
 // Personal modules (mrap-only overlay). Resolved via build.rs → OUT_DIR/personal_mods.rs.
 #[cfg(feature = "personal")]
 include!(concat!(env!("OUT_DIR"), "/personal_mods.rs"));
@@ -90,12 +93,6 @@ enum Commands {
         #[command(subcommand)]
         command: hook::HookCommands,
     },
-    /// Run and inspect hex declarative workers
-    #[command(display_order = 14)]
-    Worker {
-        #[command(subcommand)]
-        command: WorkerCommands,
-    },
     /// Hex harness lifecycle (single-process drain-aware host for typed Rust workers)
     #[command(display_order = 14)]
     Harness {
@@ -135,19 +132,6 @@ enum HarnessCommands {
     /// Run the harness lifecycle loop (invoked by launchd; hidden from --help).
     #[command(hide = true)]
     Serve,
-}
-
-#[derive(Subcommand)]
-enum WorkerCommands {
-    /// Run a declarative worker from a YAML config (id + command + cron jobs)
-    Run {
-        /// Path to the worker config YAML
-        config: std::path::PathBuf,
-    },
-    /// List discoverable worker configs (.hex/iii/workers/*.yaml)
-    List,
-    /// Report iii engine health (the substrate workers run on)
-    Status,
 }
 
 #[derive(Subcommand)]
@@ -453,11 +437,6 @@ fn main() {
     let cli = Cli::parse();
 
     match cli.command {
-        Commands::Worker { command } => match command {
-            WorkerCommands::Run { config } => std::process::exit(iii_worker::run(&config)),
-            WorkerCommands::List => std::process::exit(worker_list()),
-            WorkerCommands::Status => std::process::exit(worker_status()),
-        },
         Commands::Harness { command } => match command {
             HarnessCommands::Start => std::process::exit(harness_start()),
             HarnessCommands::Stop => std::process::exit(harness_stop()),
@@ -737,57 +716,6 @@ fn main() {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "hex", &mut io::stdout());
         }
-    }
-}
-
-/// List worker configs under `.hex/iii/workers/*.yaml`.
-fn worker_list() -> i32 {
-    let hex_dir = get_hex_dir();
-    let workers_dir = hex_dir.join(".hex").join("iii").join("workers");
-    if !workers_dir.exists() {
-        eprintln!(
-            "no worker config dir: {} does not exist",
-            workers_dir.display()
-        );
-        return 0;
-    }
-    let entries = match std::fs::read_dir(&workers_dir) {
-        Ok(e) => e,
-        Err(e) => {
-            eprintln!("failed to read {}: {e}", workers_dir.display());
-            return 1;
-        }
-    };
-    let mut paths: Vec<PathBuf> = entries
-        .filter_map(Result::ok)
-        .map(|e| e.path())
-        .filter(|p| {
-            p.extension()
-                .and_then(|s| s.to_str())
-                .map(|s| s == "yaml" || s == "yml")
-                .unwrap_or(false)
-        })
-        .collect();
-    paths.sort();
-    for p in paths {
-        println!("{}", p.display());
-    }
-    0
-}
-
-/// Report iii engine health (the substrate workers run on).
-fn worker_status() -> i32 {
-    let ctx = doctor::check::Context {
-        hex_dir: get_hex_dir(),
-        home: PathBuf::from(std::env::var("HOME").unwrap_or_default()),
-        fix: false,
-    };
-    use doctor::check::DoctorCheck;
-    let result = doctor::checks::iii_engine_health::IiiEngineHealth.run(&ctx);
-    println!("{:?}: {}", result.status, result.message);
-    match result.status {
-        doctor::check::Status::Pass | doctor::check::Status::Skip => 0,
-        _ => 1,
     }
 }
 

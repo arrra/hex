@@ -1,7 +1,7 @@
 //! CLI surface guards for the new `hex harness` command tree (spec S5yw25n5y, task Tr5zx0eay).
 //!  - `hex harness --help` must succeed and advertise start/stop/status (NOT serve — serve is hidden).
 //!  - A `serve` subcommand must still exist (hidden) so launchd can invoke `hex harness serve`.
-//!  - The existing `hex worker` command must remain (additive build — old path intact).
+//!  - The old `hex worker` command must be GONE (subtractive cleanup — YAML host removed).
 //!  - system/templates/launchd/harness.plist must exist with ProgramArguments [hex, harness, serve].
 //!
 //! These tests fail before the CLI is wired and pass after.
@@ -52,18 +52,25 @@ fn hex_harness_serve_subcommand_exists_but_hidden() {
 }
 
 #[test]
-fn hex_worker_command_remains_after_harness_added() {
-    // Additive: the old `hex worker` path must NOT be removed by this spec.
+fn hex_worker_command_is_removed() {
+    // Subtractive cleanup: the YAML worker host (`hex worker`) is gone — the
+    // typed Rust worker registry hosted by `hex harness` replaces it. The old
+    // subcommand must no longer resolve.
     let out = Command::new(bin())
         .args(["worker", "run", "--help"])
         .output()
         .expect("run hex worker run --help");
     assert!(
-        out.status.success(),
-        "`hex worker run --help` must still succeed (additive — old path intact). \
+        !out.status.success(),
+        "`hex worker` must be REMOVED (subtractive cleanup), but the command succeeded. \
          stdout: {} stderr: {}",
         String::from_utf8_lossy(&out.stdout),
         String::from_utf8_lossy(&out.stderr),
+    );
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    assert!(
+        stderr.contains("unrecognized subcommand") || stderr.contains("worker"),
+        "removing `hex worker` should yield an unrecognized-subcommand error; got:\n{stderr}"
     );
 }
 

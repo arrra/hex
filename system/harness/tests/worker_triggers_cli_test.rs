@@ -1,7 +1,9 @@
 //! CLI surface guards for the iii→hex abstraction (spec Skt0r3dbg, task Ta5c1w89b):
 //!  - the old `hex iii ...` command tree must be GONE (no alias).
-//!  - `hex worker run --help` and `hex worker --help` must succeed.
 //!  - `hex triggers emit --help` must succeed.
+//!
+//! (The `hex worker` YAML-host command was removed in the subtractive cleanup;
+//! its absence is asserted by harness_cli_test::hex_worker_command_is_removed.)
 //!
 //! These tests fail before the CLI is refactored and pass after.
 
@@ -39,31 +41,6 @@ fn hex_iii_command_tree_is_removed() {
     assert!(
         !has_iii,
         "top-level `hex --help` must not advertise an `iii` subcommand; got:\n{help}"
-    );
-}
-
-#[test]
-fn hex_worker_run_help_exists() {
-    let out = Command::new(bin())
-        .args(["worker", "--help"])
-        .output()
-        .expect("run hex worker --help");
-    assert!(
-        out.status.success(),
-        "`hex worker --help` must succeed. stdout: {} stderr: {}",
-        String::from_utf8_lossy(&out.stdout),
-        String::from_utf8_lossy(&out.stderr),
-    );
-
-    let run = Command::new(bin())
-        .args(["worker", "run", "--help"])
-        .output()
-        .expect("run hex worker run --help");
-    assert!(
-        run.status.success(),
-        "`hex worker run --help` must succeed. stdout: {} stderr: {}",
-        String::from_utf8_lossy(&run.stdout),
-        String::from_utf8_lossy(&run.stderr),
     );
 }
 
