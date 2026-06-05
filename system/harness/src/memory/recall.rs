@@ -19,6 +19,7 @@ pub struct FactHit {
     pub predicate: String,
     pub object: String,
     pub importance: f32,
+    pub private: bool,
 }
 
 pub struct RecallV2 {
@@ -62,7 +63,7 @@ fn facts_recall(
         Vec::new()
     } else {
         conn.prepare(
-            "SELECT f.subject, f.predicate, f.object, f.importance
+            "SELECT f.subject, f.predicate, f.object, f.importance, f.private
              FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
              WHERE facts_fts MATCH ?1 AND f.tombstone = 0
              ORDER BY bm25(facts_fts), f.importance DESC LIMIT ?2",
@@ -73,6 +74,7 @@ fn facts_recall(
                 predicate: r.get(1)?,
                 object: r.get(2)?,
                 importance: r.get(3)?,
+                private: r.get::<_, i64>(4)? != 0,
             })
         })?
         .filter_map(Result::ok)
@@ -86,7 +88,7 @@ fn facts_recall(
         if tok.len() < 3 { continue; }
         let pattern = format!("%:{tok}%");
         let mut q = conn.prepare(
-            "SELECT subject, predicate, object, importance FROM facts
+            "SELECT subject, predicate, object, importance, private FROM facts
              WHERE subject LIKE ?1 AND tombstone = 0
              ORDER BY importance DESC LIMIT 3",
         )?;
@@ -97,6 +99,7 @@ fn facts_recall(
                     predicate: r.get(1)?,
                     object: r.get(2)?,
                     importance: r.get(3)?,
+                    private: r.get::<_, i64>(4)? != 0,
                 })
             })?
             .filter_map(Result::ok)
@@ -143,30 +146,98 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
             facts_injected: 0, chunks_injected: 0,
             latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
         };
-        log_recall(hex_root, &outcome);
+        log_recall(hex_root, &outcome, &LogExtras::default());
         return outcome;
     }
 
     let db = super::db_path(hex_root);
-    let (results, facts) = match super::open_db(&db) {
+    let (filtered, facts, extras): (
+        Vec<super::search::SearchResult>,
+        Vec<FactHit>,
+        LogExtras,
+    ) = match super::open_db(&db) {
         Ok(conn) => {
-            let chunks = super::search::search_fts_public(&conn, query, TOP_K * 3, None)
-                .unwrap_or_default();
-            let f = facts_recall(&conn, query, TOP_K).unwrap_or_default();
-            (chunks, f)
+            // Route the hot path through the v1 ContextAssembler.
+            let assembled = super::assemble::assemble(
+                &conn,
+                query,
+                for_agent,
+                MAX_CONTEXT_CHARS,
+            );
+
+            // Capture per-move stats for the recall-log (calibration seam —
+            // raw native scores per move; top_confidence alone is useless).
+            let per_move_stats: Vec<serde_json::Value> = assembled
+                .per_move_stats
+                .iter()
+                .map(|s| {
+                    json!({
+                        "move_id": move_id_str(s.move_id),
+                        "fired": s.fired,
+                        "candidate_count": s.candidate_count,
+                        "top_native_scores": s.top_native_scores,
+                        "native_score": s.top_native_scores.first().copied(),
+                    })
+                })
+                .collect();
+
+            // Identify M1's top-1 (first candidate from M1 in the merged
+            // list — floor places it first). Used for the ablation control.
+            let m1_top1_key: Option<String> = assembled
+                .candidates
+                .iter()
+                .find(|c| c.move_id == super::assemble::MoveId::M1ContentMatch)
+                .map(|c| c.dedup_key.clone());
+
+            // Ablation dedup_keys (the merge with M1 top-1 removed).
+            let ablation_dedup_keys: Vec<String> = assembled
+                .candidates
+                .iter()
+                .filter(|c| Some(&c.dedup_key) != m1_top1_key.as_ref())
+                .map(|c| c.dedup_key.clone())
+                .collect();
+
+            // Partition merged candidates by kind. Order within each kind is
+            // preserved, so the first Chunk == M1's top-1 (when M1 fired).
+            let mut chunks: Vec<super::search::SearchResult> = Vec::new();
+            let mut fs: Vec<FactHit> = Vec::new();
+            let mut m1_is_chunk = false;
+            for cand in assembled.candidates {
+                let is_m1_top1 =
+                    Some(&cand.dedup_key) == m1_top1_key.as_ref();
+                match cand.kind {
+                    super::assemble::CandidateKind::Chunk(c) => {
+                        if is_m1_top1 {
+                            m1_is_chunk = true;
+                        }
+                        chunks.push(c);
+                    }
+                    super::assemble::CandidateKind::Fact(f) => fs.push(f),
+                }
+            }
+
+            // Render ablation context block to measure total_chars. M1 only
+            // produces chunks today, so dropping its top-1 = drop chunks[0].
+            let ablation_chars = if m1_is_chunk && !chunks.is_empty() {
+                format_context_v2(&chunks[1..], &fs).len()
+            } else {
+                format_context_v2(&chunks, &fs).len()
+            };
+
+            let extras = LogExtras {
+                per_move_stats,
+                ablation: json!({
+                    "dedup_keys": ablation_dedup_keys,
+                    "total_chars": ablation_chars,
+                }),
+            };
+            (chunks, fs, extras)
         }
         Err(e) => {
-            // Fail-fast: dependency unreachable → inject nothing, loudly.
             eprintln!("[memory recall] cannot open {}: {e}", db.display());
-            (vec![], vec![])
+            (vec![], vec![], LogExtras::default())
         }
     };
-
-    let filtered: Vec<_> = results
-        .into_iter()
-        .filter(|r| !(for_agent && r.private))
-        .take(TOP_K)
-        .collect();
 
     let injected = !filtered.is_empty() || !facts.is_empty();
     let outcome = if injected {
@@ -186,8 +257,24 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
             latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
         }
     };
-    log_recall(hex_root, &outcome);
+    log_recall(hex_root, &outcome, &extras);
     outcome
+}
+
+#[derive(Default)]
+struct LogExtras {
+    per_move_stats: Vec<serde_json::Value>,
+    ablation: serde_json::Value,
+}
+
+fn move_id_str(m: super::assemble::MoveId) -> &'static str {
+    use super::assemble::MoveId::*;
+    match m {
+        M1ContentMatch => "M1",
+        M2EntityFilter => "M2",
+        M3PredicateQuery => "M3",
+        M4TemporalSelect => "M4",
+    }
 }
 
 fn format_context_v2(results: &[super::search::SearchResult], facts: &[FactHit]) -> String {
@@ -239,7 +326,7 @@ fn format_context_v2(results: &[super::search::SearchResult], facts: &[FactHit])
 
 /// Append a JSONL line to `.hex/memory/recall-log.jsonl` for the nightly eval.
 /// Best-effort — never panics.
-fn log_recall(hex_root: &Path, o: &RecallOutcome) {
+fn log_recall(hex_root: &Path, o: &RecallOutcome, extras: &LogExtras) {
     let dir = hex_root.join(".hex/memory");
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(mut f) = std::fs::OpenOptions::new()
@@ -253,6 +340,8 @@ fn log_recall(hex_root: &Path, o: &RecallOutcome) {
                 "injected": o.injected, "gated": o.gated,
                 "result_count": o.result_count, "latency_ms": o.latency_ms,
                 "facts_injected": o.facts_injected, "chunks_injected": o.chunks_injected,
+                "per_move_stats": extras.per_move_stats,
+                "ablation_without_top1": extras.ablation,
             })
         );
     }
@@ -300,6 +389,162 @@ mod tests {
 mod plan2_tests {
     use super::*;
     use rusqlite::Connection;
+
+    /// RED test for T5ffsh4b0 — `recall::recall` (hot path) MUST route
+    /// through `assemble::assemble`, which adds the predicate-cue path
+    /// (M3) the legacy FTS-only `facts_recall` lacks.
+    ///
+    /// The query word "preference" is a M3 cue mapped to the stored
+    /// predicate "prefers". The fact's content shares NO tokens with the
+    /// query, so the legacy FTS path returns nothing. Only an assemble-
+    /// routed `recall()` surfaces the fact and reports `injected=true`.
+    #[test]
+    fn recall_routes_through_assemble_predicate_cue() {
+        use std::path::PathBuf;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hex_root: PathBuf = tmp.path().to_path_buf();
+        let db_path = crate::memory::db_path(&hex_root);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        crate::memory::vector::register_sqlite_vec();
+        let c = rusqlite::Connection::open(&db_path).unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+             VALUES ('f1','project:hex','prefers','vim keybindings',0.9,'2026-06-04','2026-06-04',0)",
+            [],
+        )
+        .unwrap();
+        drop(c);
+
+        // Query shares NO tokens with the stored fact text. Tokens after
+        // stopword filtering: "editor", "preference" — neither appears in
+        // any facts_fts column ("project", "hex", "prefers", "vim",
+        // "keybindings"). The legacy facts_recall therefore returns 0,
+        // recall() reports injected=false. After T5ffsh4b0 wires
+        // assemble::assemble, M3 maps "preference" → predicate "prefers"
+        // and the fact is surfaced.
+        let o = recall(&hex_root, "what is the editor preference here", false);
+
+        assert!(
+            o.injected,
+            "recall must route through assemble — predicate-cue ('preference' → 'prefers') \
+             should surface the fact even when no token FTS-matches"
+        );
+        assert!(
+            o.facts_injected >= 1,
+            "expected ≥1 fact via M3 predicate cue, got {}",
+            o.facts_injected
+        );
+        assert!(
+            o.context.contains("prefers") && o.context.contains("vim keybindings"),
+            "context block must contain the M3-surfaced fact; got: {:?}",
+            o.context
+        );
+    }
+
+    /// RED test for Tsztwz7dd — `log_recall` MUST extend the JSONL line
+    /// emitted to `.hex/memory/recall-log.jsonl` with:
+    ///   (a) a per-move breakdown that carries the raw `native_score`(s)
+    ///       for every move (M1/M2/M3/M4), and
+    ///   (b) an `ablation_without_top1` field — the merge result with M1's
+    ///       top-1 removed — so lift of the top candidate is measurable
+    ///       offline.
+    ///
+    /// Logging `top_confidence` alone is worthless (it is ~always 0.5).
+    /// The native scores and the ablation are the calibration seam.
+    #[test]
+    fn recall_log_carries_native_score_and_ablation() {
+        use std::path::PathBuf;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hex_root: PathBuf = tmp.path().to_path_buf();
+        let db_path = crate::memory::db_path(&hex_root);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        crate::memory::vector::register_sqlite_vec();
+        let c = rusqlite::Connection::open(&db_path).unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        // A fact M3 can surface via the predicate cue ("decided").
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+             VALUES ('f1','project:hex','decided','use sqlite-vec',0.9,'2026-06-04','2026-06-04',0)",
+            [],
+        )
+        .unwrap();
+        drop(c);
+
+        let _ = recall(
+            &hex_root,
+            "what did we decide about the memory layer",
+            false,
+        );
+
+        let log_path = hex_root.join(".hex/memory/recall-log.jsonl");
+        let raw = std::fs::read_to_string(&log_path)
+            .expect("recall-log.jsonl must be written by log_recall");
+        let last = raw
+            .lines()
+            .filter(|l| !l.trim().is_empty())
+            .last()
+            .expect("recall-log.jsonl must contain at least one line");
+        let v: serde_json::Value =
+            serde_json::from_str(last).expect("recall-log line must be valid JSON");
+
+        // (a) per-move breakdown with native_score(s).
+        let stats = v
+            .get("per_move_stats")
+            .expect("recall-log line must include `per_move_stats`");
+        let arr = stats
+            .as_array()
+            .expect("`per_move_stats` must be an array of move entries");
+        assert!(
+            arr.len() >= 4,
+            "expected per_move_stats for all 4 moves (M1/M2/M3/M4), got {}",
+            arr.len()
+        );
+        for entry in arr {
+            assert!(
+                entry.get("move_id").is_some(),
+                "per_move_stats entry missing `move_id`: {entry}"
+            );
+            assert!(
+                entry.get("fired").is_some(),
+                "per_move_stats entry missing `fired`: {entry}"
+            );
+            assert!(
+                entry.get("candidate_count").is_some(),
+                "per_move_stats entry missing `candidate_count`: {entry}"
+            );
+            assert!(
+                entry.get("top_native_scores").is_some()
+                    || entry.get("native_scores").is_some()
+                    || entry.get("native_score").is_some(),
+                "per_move_stats entry missing native_score field (top_native_scores / native_scores / native_score): {entry}"
+            );
+        }
+        // Native score must also be discoverable by raw substring — the spec
+        // verification greps for it.
+        assert!(
+            raw.contains("native_score"),
+            "recall-log line must mention `native_score` (raw: {raw})"
+        );
+
+        // (b) ablation_without_top1.
+        let ablation = v
+            .get("ablation_without_top1")
+            .expect("recall-log line must include `ablation_without_top1`");
+        assert!(
+            ablation.get("dedup_keys").is_some(),
+            "`ablation_without_top1` must include `dedup_keys`: {ablation}"
+        );
+        assert!(
+            ablation.get("total_chars").is_some()
+                || ablation.get("chars").is_some(),
+            "`ablation_without_top1` must include a char total (`total_chars` or `chars`): {ablation}"
+        );
+    }
 
     #[test]
     fn recall_returns_facts_alongside_chunks() {
