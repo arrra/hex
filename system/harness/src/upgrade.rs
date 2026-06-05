@@ -520,6 +520,80 @@ fn record_upgrade_sha(config_file: &Path, source_dir: &Path, repo_url: &str) {
     }
 }
 
+/// Pure decision: is the installed binary stale relative to source?
+///
+/// A binary-only change (new/edited Rust source under `system/harness/src/`
+/// with the SAME Cargo version) touches zero *synced* files, so the
+/// file-diff gate would report "nothing to do" and skip the rebuild
+/// (OBS-028). This captures the same version/SHA test the rebuild step uses
+/// so the "anything to do?" gate can honor binary-only changes. Factored out
+/// to keep the gate and the rebuild step from ever diverging.
+fn binary_needs_rebuild(
+    installed_ver: Option<&str>,
+    cargo_ver: &str,
+    installed_sha: Option<&str>,
+    source_sha: Option<&str>,
+) -> bool {
+    let version_mismatch = installed_ver != Some(cargo_ver);
+    let sha_mismatch = source_sha.is_some() && installed_sha != source_sha;
+    version_mismatch || sha_mismatch
+}
+
+/// Gather inputs and decide whether the binary is stale. Returns false
+/// ("nothing to do") when VERSIONS or Cargo.toml is absent, matching
+/// `sync_versions_file`'s own preconditions — if those are missing the
+/// rebuild step no-ops anyway, so the gate shouldn't proceed on its account.
+fn binary_is_stale(hex_dir: &Path, source_dir: &Path) -> bool {
+    let versions_file = hex_dir.join("VERSIONS");
+    let cargo_toml = source_dir.join("system/harness/Cargo.toml");
+    if !versions_file.exists() || !cargo_toml.exists() {
+        return false;
+    }
+    let cargo_ver = fs::read_to_string(&cargo_toml).ok().and_then(|c| {
+        c.lines()
+            .find(|l| l.starts_with("version"))
+            .and_then(|l| l.splitn(2, '"').nth(1))
+            .and_then(|s| s.splitn(2, '"').next())
+            .map(|s| s.to_string())
+    });
+    let Some(cargo_ver) = cargo_ver else {
+        return false;
+    };
+
+    let hex_dot_dir = hex_dir.join(".hex");
+    let installed_ver = Command::new(hex_dot_dir.join("bin/hex"))
+        .arg("--version")
+        .output()
+        .ok()
+        .and_then(|o| {
+            String::from_utf8(o.stdout)
+                .ok()
+                .and_then(|s| s.split_whitespace().nth(1).map(|v| v.to_string()))
+        });
+    let installed_sha = fs::read_to_string(hex_dot_dir.join("bin/hex.sha"))
+        .ok()
+        .map(|s| s.trim().to_string());
+    let source_sha = Command::new("git")
+        .arg("-C")
+        .arg(source_dir)
+        .args(["rev-parse", "HEAD"])
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                Some(String::from_utf8_lossy(&o.stdout).trim().to_string())
+            } else {
+                None
+            }
+        });
+    binary_needs_rebuild(
+        installed_ver.as_deref(),
+        &cargo_ver,
+        installed_sha.as_deref(),
+        source_sha.as_deref(),
+    )
+}
+
 fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
     let versions_file = hex_dir.join("VERSIONS");
     if !versions_file.exists() {
@@ -611,10 +685,16 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
             }
         });
 
+    // `version_mismatch` drives the human-readable reason below; the actual
+    // rebuild decision is `binary_needs_rebuild` (shared with the upstream gate).
     let version_mismatch = installed_ver.as_deref() != Some(&cargo_ver);
-    let sha_mismatch = source_sha.is_some() && installed_sha.as_deref() != source_sha.as_deref();
 
-    if version_mismatch || sha_mismatch {
+    if binary_needs_rebuild(
+        installed_ver.as_deref(),
+        &cargo_ver,
+        installed_sha.as_deref(),
+        source_sha.as_deref(),
+    ) {
         let harness_dst = hex_dot_dir.join("harness");
         let reason = if version_mismatch {
             format!(
@@ -930,9 +1010,19 @@ pub fn run(args: &[String]) -> i32 {
         }
     }
 
-    if total_changed == 0 && total_new == 0 && !version_changed {
+    // OBS-028: a binary-only change (Rust source moved, same Cargo version, no
+    // synced files changed) must still trigger a rebuild. Without this the gate
+    // below early-returns "Nothing to do" before Step 5 ever runs, and the
+    // upgrade silently ships nothing while reporting success.
+    let binary_stale = binary_is_stale(&hex_dir, &source_dir);
+
+    if total_changed == 0 && total_new == 0 && !version_changed && !binary_stale {
         println!("  [OK] Everything is up to date. Nothing to do.");
         return 0;
+    }
+
+    if binary_stale && total_changed == 0 && total_new == 0 && !version_changed {
+        println!("  → Binary stale (source moved, no synced files changed) — will rebuild.");
     }
 
     if cfg.dry_run {
@@ -1047,6 +1137,56 @@ mod tests {
     fn write_file(path: &Path, content: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
+    }
+
+    // OBS-028 regression: the exact case that shipped nothing — same Cargo
+    // version, installed binary built at an older commit. Must rebuild.
+    #[test]
+    fn binary_needs_rebuild_on_sha_mismatch_same_version() {
+        assert!(binary_needs_rebuild(
+            Some("0.29.0"),
+            "0.29.0",
+            Some("9ecdfb29"),
+            Some("b1b38e50"),
+        ));
+    }
+
+    #[test]
+    fn binary_needs_rebuild_false_when_sha_and_version_match() {
+        assert!(!binary_needs_rebuild(
+            Some("0.29.0"),
+            "0.29.0",
+            Some("b1b38e50"),
+            Some("b1b38e50"),
+        ));
+    }
+
+    #[test]
+    fn binary_needs_rebuild_on_version_mismatch() {
+        assert!(binary_needs_rebuild(
+            Some("0.28.0"),
+            "0.29.0",
+            Some("b1b38e50"),
+            Some("b1b38e50"),
+        ));
+    }
+
+    #[test]
+    fn binary_needs_rebuild_true_when_installed_missing() {
+        // No installed binary / --version failed → must build.
+        assert!(binary_needs_rebuild(None, "0.29.0", None, Some("b1b38e50")));
+    }
+
+    #[test]
+    fn binary_needs_rebuild_ignores_sha_when_source_sha_unknown() {
+        // git rev-parse failed (source_sha None): don't rebuild on SHA alone
+        // when the version already matches — avoids needless rebuilds offline.
+        assert!(!binary_needs_rebuild(
+            Some("0.29.0"),
+            "0.29.0",
+            Some("9ecdfb29"),
+            None,
+        ));
     }
 
     #[test]
