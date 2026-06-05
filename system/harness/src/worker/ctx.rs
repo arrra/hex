@@ -76,10 +76,39 @@ impl Ctx {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| anyhow!("Ctx::run called with empty argv"))?;
-        std::process::Command::new(program)
+        let out = std::process::Command::new(program)
             .args(args)
             .output()
-            .map_err(|e| anyhow!("Ctx::run spawn failed: {e}"))
+            .map_err(|e| anyhow!("Ctx::run spawn failed for `{program}`: {e}"))?;
+        // A non-zero exit is a FAILURE — surface it (with the command, exit code,
+        // and a stderr/stdout tail) so the harness records WHY in telemetry. The
+        // old behavior returned Ok regardless of exit code, which made every
+        // failing cron log as `status=ok` with empty `detail` (regression after
+        // the bake-in dropped iii_worker::run_command's exit-code check).
+        if !out.status.success() {
+            let code = out
+                .status
+                .code()
+                .map(|c| c.to_string())
+                .unwrap_or_else(|| "signal".to_string());
+            let tail = |bytes: &[u8]| {
+                let s = String::from_utf8_lossy(bytes);
+                let t = s.trim();
+                // last ~500 chars, single-lined for the telemetry detail column
+                let start = t.len().saturating_sub(500);
+                t[start..].replace('\n', " ")
+            };
+            let stderr_tail = tail(&out.stderr);
+            let detail = if stderr_tail.is_empty() {
+                tail(&out.stdout)
+            } else {
+                stderr_tail
+            };
+            return Err(anyhow!(
+                "`{program}` exited {code}: {detail}"
+            ));
+        }
+        Ok(out)
     }
 }
 
@@ -122,5 +151,35 @@ mod tests {
         assert_eq!(n, 1, "exactly one diverted emission must be queued");
         assert_eq!(replayed[0].event, "landings.updated");
         assert_eq!(replayed[0].data["spec_id"], "S1");
+    }
+
+    /// A command that exits non-zero must return Err (so the harness records a
+    /// failure in telemetry), and the error must carry the stderr tail so the
+    /// `detail` column says WHY — not a silent `ok`.
+    #[test]
+    fn run_errors_with_stderr_on_nonzero_exit() {
+        let ctx = Ctx::new();
+        let argv: Vec<String> = vec![
+            "sh".into(),
+            "-c".into(),
+            "echo boom-from-stderr >&2; exit 7".into(),
+        ];
+        let err = ctx.run(&argv).expect_err("non-zero exit must be an Err");
+        let msg = err.to_string();
+        assert!(msg.contains("exited 7"), "error must carry exit code; got: {msg}");
+        assert!(
+            msg.contains("boom-from-stderr"),
+            "error must carry the stderr tail; got: {msg}"
+        );
+    }
+
+    /// A successful command still returns Ok(Output).
+    #[test]
+    fn run_ok_on_success() {
+        let ctx = Ctx::new();
+        let out = ctx
+            .run(&["sh".into(), "-c".into(), "exit 0".into()])
+            .expect("exit 0 must be Ok");
+        assert!(out.status.success());
     }
 }
