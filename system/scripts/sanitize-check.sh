@@ -264,8 +264,6 @@ CLAUDE_PATH_FILES=$(grep -rln '\.claude/' . \
     | grep -v '/runtime\.sh$' \
     | grep -v '/doctor\.sh$' \
     | grep -v '/install\.sh$' \
-    | grep -v '/bootstrap-migrate\.sh$' \
-    | grep -v '/migrate-v1-to-v2\.sh$' \
     | grep -v '/backup_session\.sh$' \
     | grep -v '/consolidate\.sh$' \
     | grep -v '/cleanup-project-jsonl\.sh$' \

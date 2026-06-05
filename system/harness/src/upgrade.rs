@@ -4,7 +4,7 @@
 //! Preserves: memory.db, settings.local.json, user data, AGENTS.md
 //!
 //! Drift bug fix: the bash shim omitted hooks sync for v2 layout. This
-//! implementation syncs hooks unconditionally for both v1 and v2.
+//! implementation syncs hooks unconditionally.
 
 use std::fs;
 use std::io;
@@ -102,20 +102,10 @@ fn hex_dir_from_env() -> Option<PathBuf> {
 
 fn source_dirs_for_layout(layout: &str, source_root: &Path) -> Option<SourceDirs> {
     match layout {
-        "v1" => Some(SourceDirs {
-            scripts: source_root.join("dot-claude/scripts"),
-            skills: source_root.join("dot-claude/skills"),
-            commands: source_root.join("dot-claude/commands"),
-            hooks: source_root.join("dot-claude/hooks"),
-            iii: source_root.join("dot-claude/iii"),
-            templates: source_root.join("dot-claude/templates"),
-            version_txt: None,
-        }),
         "v2" => Some(SourceDirs {
             scripts: source_root.join("system/scripts"),
             skills: source_root.join("system/skills"),
             commands: source_root.join("system/commands"),
-            // v2 hooks live in system/hooks/ — always sync, not just for v1
             hooks: source_root.join("system/hooks"),
             iii: source_root.join("system/iii"),
             templates: source_root.join("system/templates"),
@@ -316,7 +306,7 @@ fn get_source_dir(args: &Args, hex_dir: &Path) -> Result<PathBuf, String> {
         let layout = path_map::detect_layout(p.to_str().unwrap_or(""));
         if layout == "unknown" {
             return Err(format!(
-                "No recognized hex layout at {local} (expected dot-claude/ for v1, or system/ + templates/AGENTS.md for v2)"
+                "No recognized hex layout at {local} (expected system/ + templates/AGENTS.md)"
             ));
         }
         println!("  → Using local checkout: {local}");
@@ -942,7 +932,7 @@ pub fn run(args: &[String]) -> i32 {
 
     let layout = path_map::detect_layout(source_dir.to_str().unwrap_or(""));
     if layout == "unknown" {
-        eprintln!("  [FAIL] Unknown source layout at {} (not v1 or v2)", source_dir.display());
+        eprintln!("  [FAIL] Unknown source layout at {} (expected v2)", source_dir.display());
         return 1;
     }
     println!("  → Source layout: {layout}");
@@ -960,7 +950,6 @@ pub fn run(args: &[String]) -> i32 {
     let (c1, n1, u1, log1) = detect_changes(&src_dirs.scripts, &hex_dot_dir.join("scripts"), "scripts");
     let (c2, n2, u2, log2) = detect_changes(&src_dirs.skills, &hex_dot_dir.join("skills"), "skills");
     let (c3, n3, u3, log3) = detect_changes(&src_dirs.commands, &hex_dot_dir.join("commands"), "commands");
-    // Always detect + sync hooks for both v1 and v2 (drift bug fix)
     let (c4, n4, u4, log4) = detect_changes(&src_dirs.hooks, &hex_dot_dir.join("hooks"), "hooks");
     // Additive dirs (iii engine config/workers, launchd + other templates)
     let (c5, n5, u5, log5) = detect_changes(&src_dirs.iii, &hex_dot_dir.join("iii"), "iii");
@@ -1018,7 +1007,6 @@ pub fn run(args: &[String]) -> i32 {
         (&src_dirs.scripts, hex_dot_dir.join("scripts")),
         (&src_dirs.skills, hex_dot_dir.join("skills")),
         (&src_dirs.commands, hex_dot_dir.join("commands")),
-        // Hooks synced for ALL layouts (v1 and v2) — this is the drift bug fix
         (&src_dirs.hooks, hex_dot_dir.join("hooks")),
     ];
 
@@ -1276,18 +1264,6 @@ mod tests {
         let args = vec!["--repo".to_string(), "https://example.com/repo.git".to_string()];
         let cfg = parse_args(&args).unwrap();
         assert_eq!(cfg.repo_url.as_deref(), Some("https://example.com/repo.git"));
-    }
-
-    #[test]
-    fn test_v1_source_dirs() {
-        let tmp = tempfile::tempdir().unwrap();
-        let source = tmp.path();
-        let src_dirs = source_dirs_for_layout("v1", source).unwrap();
-        assert!(src_dirs.scripts.ends_with("dot-claude/scripts"));
-        assert!(src_dirs.hooks.ends_with("dot-claude/hooks"));
-        assert!(src_dirs.iii.ends_with("dot-claude/iii"));
-        assert!(src_dirs.templates.ends_with("dot-claude/templates"));
-        assert!(src_dirs.version_txt.is_none());
     }
 
     #[test]

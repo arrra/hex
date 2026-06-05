@@ -15,16 +15,6 @@ git clone https://github.com/mrap/hex-foundation /tmp/hex-setup && bash /tmp/hex
 
 Your agent walks you through setup on first run. Three questions, then you're working.
 
-### Already running hex v1? Migrate to v2
-
-If your existing hex instance has `.claude/scripts/`, `.claude/skills/`, etc., you're on the v1 layout. `/hex-upgrade` won't cleanly pull foundation v0.2.1+ content until you migrate. One line from your hex dir:
-
-```bash
-bash <(curl -fsSL https://raw.githubusercontent.com/mrap/hex-foundation/v0.2.2/bootstrap-migrate.sh)
-```
-
-Full guide: [docs/migrate-v1-to-v2.md](./docs/migrate-v1-to-v2.md).
-
 ### Prerequisites
 
 - Python 3.9+
@@ -114,7 +104,7 @@ These are Claude Code slash commands, not shell CLIs. Use them inside a `claude`
 | `/hex-decide` | Structured decision framework — context, options, reasoning, impact. |
 | `/hex-triage` | Route untriaged content from `raw/` to the right files. |
 | `/hex-doctor` | Health check. 20-point validation across env, memory, structure, config, and companions. Use `--fix` to repair auto-fixable issues, `--json` for machine-readable output. For the unified consolidate pass (structural + memory DB + optional LLM operating-model audit), use `hex memory consolidate quick` or `hex memory consolidate full`. |
-| `/hex-upgrade` | Pull latest system files from hex-foundation. Handles v1→v2 layout migration. Runs doctor after. |
+| `/hex-upgrade` | Pull latest system files from hex-foundation. Runs doctor after. |
 
 ---
 
@@ -135,7 +125,7 @@ Options:
 What it does:
 
 1. Backs up `.hex/` to `.hex-upgrade-backup-YYYYMMDD/`
-2. Detects source layout (v1 `dot-claude/` or v2 `system/`) and maps paths accordingly
+2. Detects source layout (`system/` + `templates/`) and maps paths accordingly
 3. Replaces `.hex/` (preserving `memory.db`)
 4. Deletion pass: removes files no longer present in foundation (backed up before deletion)
 5. Rebuilds the `hex` binary if the Cargo.toml version changed; verifies the installed binary matches
@@ -314,7 +304,6 @@ Key test files:
 | `tests/test_skill_frontmatter.sh` | Every SKILL.md has valid YAML frontmatter |
 | `tests/test_skill_refs.sh` | All paths referenced inside SKILL.md resolve |
 | `tests/test_e2e.sh` | Full install + doctor + upgrade lifecycle |
-| `tests/migrate/test-migrate.sh` | v1 → v2 migration correctness |
 | `tests/core-e2e/run-all.sh` | Hex primitives + BOI integration (containerized; CI-gated) |
 
 To run the full suite locally:
