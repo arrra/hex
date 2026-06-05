@@ -7,3 +7,5 @@ pub mod ops;
 pub mod registry;
 pub mod telemetry;
 pub mod types;
+pub mod worker;
+pub mod workers;

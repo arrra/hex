@@ -96,6 +96,12 @@ enum Commands {
         #[command(subcommand)]
         command: WorkerCommands,
     },
+    /// Hex harness lifecycle (single-process drain-aware host for typed Rust workers)
+    #[command(display_order = 14)]
+    Harness {
+        #[command(subcommand)]
+        command: HarnessCommands,
+    },
     /// Emit hex events into the trigger substrate
     #[command(display_order = 14)]
     Triggers {
@@ -116,6 +122,19 @@ enum Commands {
     Completions {
         shell: clap_complete::Shell,
     },
+}
+
+#[derive(Subcommand)]
+enum HarnessCommands {
+    /// Install (idempotent) and load the com.hex.harness launchd service.
+    Start,
+    /// Bootout the com.hex.harness launchd service.
+    Stop,
+    /// List registered workers and report engine health.
+    Status,
+    /// Run the harness lifecycle loop (invoked by launchd; hidden from --help).
+    #[command(hide = true)]
+    Serve,
 }
 
 #[derive(Subcommand)]
@@ -436,6 +455,14 @@ fn main() {
             WorkerCommands::List => std::process::exit(worker_list()),
             WorkerCommands::Status => std::process::exit(worker_status()),
         },
+        Commands::Harness { command } => match command {
+            HarnessCommands::Start => std::process::exit(harness_start()),
+            HarnessCommands::Stop => std::process::exit(harness_stop()),
+            HarnessCommands::Status => std::process::exit(harness_status()),
+            HarnessCommands::Serve => {
+                std::process::exit(hex::worker::runtime::serve(hex::workers::registry()))
+            }
+        },
         Commands::Triggers { command } => match command {
             TriggersCommands::Emit { event, data, producer } => {
                 let parsed: serde_json::Value = match data.as_deref() {
@@ -751,6 +778,200 @@ fn worker_status() -> i32 {
     use doctor::check::DoctorCheck;
     let result = doctor::checks::iii_engine_health::IiiEngineHealth.run(&ctx);
     println!("{:?}: {}", result.status, result.message);
+    match result.status {
+        doctor::check::Status::Pass | doctor::check::Status::Skip => 0,
+        _ => 1,
+    }
+}
+
+/// Resolve the current numeric UID (shells out to `id -u` — avoids a libc dep).
+fn current_uid() -> String {
+    std::process::Command::new("id")
+        .arg("-u")
+        .output()
+        .ok()
+        .and_then(|o| {
+            if o.status.success() {
+                String::from_utf8(o.stdout)
+                    .ok()
+                    .map(|s| s.trim().to_string())
+            } else {
+                None
+            }
+        })
+        .unwrap_or_else(|| "501".to_string())
+}
+
+/// Resolve the path to the installed `com.hex.harness` launchd plist under
+/// `~/Library/LaunchAgents/`.
+fn harness_plist_path() -> Option<PathBuf> {
+    let home = std::env::var("HOME").ok()?;
+    Some(
+        PathBuf::from(home)
+            .join("Library")
+            .join("LaunchAgents")
+            .join("com.hex.harness.plist"),
+    )
+}
+
+/// Render the harness.plist template by substituting placeholders.
+fn render_harness_plist(hex_dir: &std::path::Path) -> Result<String, String> {
+    let template_path = hex_dir
+        .join("system")
+        .join("templates")
+        .join("launchd")
+        .join("harness.plist");
+    let template = std::fs::read_to_string(&template_path).map_err(|e| {
+        format!(
+            "hex harness: failed to read template {}: {e}",
+            template_path.display()
+        )
+    })?;
+    let hex_bin = hex_dir.join(".hex").join("bin").join("hex");
+    let log_path = hex_dir
+        .join(".hex")
+        .join("logs")
+        .join("com.hex.harness.log");
+    let path_env = std::env::var("PATH")
+        .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+    Ok(template
+        .replace("HEXBIN_PLACEHOLDER", &hex_bin.to_string_lossy())
+        .replace("HEXDIR_PLACEHOLDER", &hex_dir.to_string_lossy())
+        .replace("LOG_PLACEHOLDER", &log_path.to_string_lossy())
+        .replace("PATH_PLACEHOLDER", &path_env))
+}
+
+/// `hex harness start` — install (idempotent) and load the launchd service.
+fn harness_start() -> i32 {
+    let hex_dir = get_hex_dir();
+    let plist_path = match harness_plist_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("hex harness start: $HOME is not set");
+            return 1;
+        }
+    };
+    let rendered = match render_harness_plist(&hex_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("{e}");
+            return 1;
+        }
+    };
+    if let Some(parent) = plist_path.parent() {
+        if let Err(e) = std::fs::create_dir_all(parent) {
+            eprintln!(
+                "hex harness start: failed to create {}: {e}",
+                parent.display()
+            );
+            return 1;
+        }
+    }
+    // Idempotent: only rewrite the plist if its contents differ.
+    let current = std::fs::read_to_string(&plist_path).ok();
+    if current.as_deref() != Some(rendered.as_str()) {
+        if let Err(e) = std::fs::write(&plist_path, &rendered) {
+            eprintln!(
+                "hex harness start: failed to write {}: {e}",
+                plist_path.display()
+            );
+            return 1;
+        }
+        eprintln!("hex harness start: wrote {}", plist_path.display());
+    } else {
+        eprintln!(
+            "hex harness start: {} already current",
+            plist_path.display()
+        );
+    }
+    // Ensure log dir exists (launchd will not create it).
+    if let Some(parent) = hex_dir.join(".hex").join("logs").parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let _ = std::fs::create_dir_all(hex_dir.join(".hex").join("logs"));
+
+    let uid = current_uid();
+    let domain = format!("gui/{uid}");
+    // `bootstrap` is idempotent only if the service is not already loaded;
+    // ignore its exit code and follow with `kickstart -k` to (re)start.
+    let _ = std::process::Command::new("launchctl")
+        .args(["bootstrap", &domain, &plist_path.to_string_lossy()])
+        .status();
+    let status = std::process::Command::new("launchctl")
+        .args([
+            "kickstart",
+            "-k",
+            &format!("{domain}/com.hex.harness"),
+        ])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            eprintln!("hex harness start: com.hex.harness loaded");
+            0
+        }
+        Ok(s) => {
+            eprintln!(
+                "hex harness start: launchctl kickstart exited {}",
+                s.code().unwrap_or(-1)
+            );
+            1
+        }
+        Err(e) => {
+            eprintln!("hex harness start: failed to spawn launchctl: {e}");
+            1
+        }
+    }
+}
+
+/// `hex harness stop` — bootout the launchd service.
+fn harness_stop() -> i32 {
+    let plist_path = match harness_plist_path() {
+        Some(p) => p,
+        None => {
+            eprintln!("hex harness stop: $HOME is not set");
+            return 1;
+        }
+    };
+    let uid = current_uid();
+    let domain = format!("gui/{uid}");
+    let status = std::process::Command::new("launchctl")
+        .args(["bootout", &domain, &plist_path.to_string_lossy()])
+        .status();
+    match status {
+        Ok(s) if s.success() => {
+            eprintln!("hex harness stop: com.hex.harness booted out");
+            0
+        }
+        Ok(s) => {
+            eprintln!(
+                "hex harness stop: launchctl bootout exited {}",
+                s.code().unwrap_or(-1)
+            );
+            // Already-stopped is not a hard failure.
+            0
+        }
+        Err(e) => {
+            eprintln!("hex harness stop: failed to spawn launchctl: {e}");
+            1
+        }
+    }
+}
+
+/// `hex harness status` — print registered workers + engine health.
+fn harness_status() -> i32 {
+    let workers = hex::workers::registry();
+    println!("Registered workers ({}):", workers.len());
+    for w in &workers {
+        println!("  - {} ({} handler(s))", w.name, w.handlers.len());
+    }
+    let ctx = doctor::check::Context {
+        hex_dir: get_hex_dir(),
+        home: PathBuf::from(std::env::var("HOME").unwrap_or_default()),
+        fix: false,
+    };
+    use doctor::check::DoctorCheck;
+    let result = doctor::checks::iii_engine_health::IiiEngineHealth.run(&ctx);
+    println!("iii engine: {:?} — {}", result.status, result.message);
     match result.status {
         doctor::check::Status::Pass | doctor::check::Status::Skip => 0,
         _ => 1,
