@@ -271,7 +271,7 @@ gate's environment isn't what you'd assume. Specific footguns:
 | `cargo build && ...` in verify | Prepend `export PATH="/opt/homebrew/bin:$PATH" &&` before any non-coreutils binary (cargo, node, etc.). Exit 127 = command not found. |
 | `cmd 2>&1 \| tail -5 \| grep "..."` | Never pipe through `tail`/`head` before checking exit status — the tail's exit code wins. Use `cmd > /tmp/log && grep "..." /tmp/log` instead. |
 | Checking `.hex/bin/hex` after a build | That's the *deployed* binary (yesterday's). Use `target/release/hex` — the freshly built one. |
-| `hex agent fleet \| grep -c '^[a-z]'` from worker | Worker is in a task worktree; `hex agent fleet` reads `$HEX_DIR` (main workspace) and ignores worktree edits. Check **artifacts the worker created**, not derived state. |
+| Querying main-workspace state (e.g. `$HEX_DIR`-rooted commands) from worker | Worker is in a task worktree; commands that read `$HEX_DIR` (main workspace) ignore worktree edits. Check **artifacts the worker created**, not derived state. |
 | `grep -q -v "ERROR"` | Inverted flag combo. Use `! grep -q "ERROR"` instead. |
 | `... \| wc -l \| grep -q "^14$"` | macOS `wc -l` pads with whitespace (`      14`). Use `count=$(... \| wc -l \| tr -d ' '); test "$count" = "14"` instead. |
 | Multi-line `python3 -c "..."` with indented lines | `IndentationError: unexpected indent`. Python `-c` doesn't strip indentation. Use `python3 - <<'PYEOF' ... PYEOF` heredoc instead; or single-line semicolon-separated. |
