@@ -106,4 +106,16 @@ fn harness_plist_template_exists_and_invokes_hex_harness_serve() {
         body.contains("com.hex.harness"),
         "harness.plist must use the com.hex.harness label; got:\n{body}"
     );
+    // LaunchDaemon form (not a gui LaunchAgent): must declare a UserName so it
+    // runs as the user while surviving logout / no-login-session.
+    assert!(
+        body.contains("<key>UserName</key>"),
+        "harness.plist must declare a UserName (system LaunchDaemon form); got:\n{body}"
+    );
+    // The folded-in backup worker needs the file keyring backend (gws can't reach
+    // the login keychain from a headless daemon).
+    assert!(
+        body.contains("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND"),
+        "harness.plist must set GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND for headless gws; got:\n{body}"
+    );
 }

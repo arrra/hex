@@ -20,13 +20,12 @@ pub struct IiiEngineHealth;
 impl DoctorCheck for IiiEngineHealth {
     fn name(&self) -> &str { "iii-engine-health" }
     fn category(&self) -> Category { Category::Health }
-    fn run(&self, ctx: &Context) -> CheckResult {
-        // The engine runs inside com.hex.harness. If that service isn't
-        // installed, the substrate isn't in use on this box — skip quietly.
-        let harness_plist = ctx
-            .home
-            .join("Library/LaunchAgents")
-            .join("com.hex.harness.plist");
+    fn run(&self, _ctx: &Context) -> CheckResult {
+        // The engine runs inside com.hex.harness, installed as a SYSTEM
+        // LaunchDaemon. If that service isn't installed, the substrate isn't in
+        // use on this box — skip quietly.
+        let harness_plist =
+            std::path::Path::new("/Library/LaunchDaemons/com.hex.harness.plist");
         if !harness_plist.exists() {
             return CheckResult::skip("com.hex.harness not installed — engine check skipped");
         }

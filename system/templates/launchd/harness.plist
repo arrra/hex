@@ -1,12 +1,20 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Hex harness launchd template (spec S5yw25n5y, task Tr5zx0eay).
+  Hex harness launchd template (spec S5yw25n5y; LaunchDaemon form 2026-06-05).
+
+  This is a SYSTEM LaunchDaemon (installed to /Library/LaunchDaemons), NOT a
+  per-user gui LaunchAgent: `UserName` runs it as the user (correct file
+  ownership, not root) while surviving logout / no-login-session / session churn.
+  A gui/<uid> agent dies on Log Out; this does not. (FileVault still requires one
+  manual disk unlock per reboot — by design; the daemon survives session churn
+  while the machine is up, not unattended reboots.)
 
   `hex harness start` renders this template by substituting:
     HEXBIN_PLACEHOLDER -> $HEX_DIR/.hex/bin/hex
     HEXDIR_PLACEHOLDER -> $HEX_DIR
-    PATH_PLACEHOLDER   -> runtime PATH
+    USER_PLACEHOLDER   -> the target user (SUDO_USER/USER) — runs as that user
+    PATH_PLACEHOLDER   -> runtime PATH (homebrew prepended)
     LOG_PLACEHOLDER    -> $HEX_DIR/.hex/logs/com.hex.harness.log
 
   The harness is a single-process drain-aware host for the typed Rust workers
@@ -17,6 +25,8 @@
 <dict>
     <key>Label</key>
     <string>com.hex.harness</string>
+    <key>UserName</key>
+    <string>USER_PLACEHOLDER</string>
     <key>ProgramArguments</key>
     <array>
         <string>HEXBIN_PLACEHOLDER</string>
@@ -33,6 +43,12 @@
         <string>ws://127.0.0.1:49134</string>
         <key>PATH</key>
         <string>PATH_PLACEHOLDER</string>
+        <!-- The folded-in backup worker uploads via the `gws` Drive API; gws's
+             default keyring is the macOS login keychain, unreachable from a
+             headless daemon (→ "Platform secure storage failure"). Force the
+             file keyring backend so backups work with no GUI session. -->
+        <key>GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND</key>
+        <string>file</string>
     </dict>
     <key>RunAtLoad</key>
     <true/>

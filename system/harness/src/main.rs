@@ -719,34 +719,50 @@ fn main() {
     }
 }
 
-/// Resolve the current numeric UID (shells out to `id -u` — avoids a libc dep).
-fn current_uid() -> String {
-    std::process::Command::new("id")
-        .arg("-u")
-        .output()
-        .ok()
-        .and_then(|o| {
-            if o.status.success() {
-                String::from_utf8(o.stdout)
-                    .ok()
-                    .map(|s| s.trim().to_string())
-            } else {
-                None
-            }
-        })
-        .unwrap_or_else(|| "501".to_string())
+/// Installed location of the harness LaunchDaemon plist (system domain). Writing
+/// here needs root, so the unprivileged agent stages a copy and prints the sudo
+/// install. The harness is a system LaunchDaemon (UserName=<user>), NOT a gui
+/// LaunchAgent — so it survives logout / no-login-session (see
+/// me/decisions/harness-as-launchdaemon-not-agent-2026-06-05.md).
+const HARNESS_DAEMON_PLIST: &str = "/Library/LaunchDaemons/com.hex.harness.plist";
+/// launchctl service target in the system domain.
+const HARNESS_SERVICE_TARGET: &str = "system/com.hex.harness";
+
+/// True if the current process is running as root (euid 0).
+fn is_root() -> bool {
+    unsafe { libc::geteuid() == 0 }
 }
 
-/// Resolve the path to the installed `com.hex.harness` launchd plist under
-/// `~/Library/LaunchAgents/`.
-fn harness_plist_path() -> Option<PathBuf> {
-    let home = std::env::var("HOME").ok()?;
-    Some(
-        PathBuf::from(home)
-            .join("Library")
-            .join("LaunchAgents")
-            .join("com.hex.harness.plist"),
-    )
+/// The user the daemon should run as. Under `sudo`, `$USER` is root, so prefer
+/// `$SUDO_USER`; fall back to `$USER` then `id -un`. On this box → `mrap`.
+fn target_user() -> String {
+    if let Ok(u) = std::env::var("SUDO_USER") {
+        if !u.is_empty() {
+            return u;
+        }
+    }
+    if let Ok(u) = std::env::var("USER") {
+        if !u.is_empty() && u != "root" {
+            return u;
+        }
+    }
+    std::process::Command::new("id")
+        .arg("-un")
+        .output()
+        .ok()
+        .and_then(|o| String::from_utf8(o.stdout).ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty())
+        .unwrap_or_else(|| "mrap".to_string())
+}
+
+/// Agent-writable staging path for the rendered plist (the agent can't write
+/// `/Library/LaunchDaemons`): `$HEX_DIR/.hex/harness/com.hex.harness.plist`.
+fn harness_staging_plist_path(hex_dir: &std::path::Path) -> PathBuf {
+    hex_dir
+        .join(".hex")
+        .join("harness")
+        .join("com.hex.harness.plist")
 }
 
 /// Render the harness.plist template by substituting placeholders.
@@ -767,25 +783,32 @@ fn render_harness_plist(hex_dir: &std::path::Path) -> Result<String, String> {
         .join(".hex")
         .join("logs")
         .join("com.hex.harness.log");
-    let path_env = std::env::var("PATH")
-        .unwrap_or_else(|_| "/usr/local/bin:/usr/bin:/bin".to_string());
+    // Daemons inherit a minimal launchd env — guarantee homebrew is on PATH so
+    // the folded-in workers (gws, cargo, etc.) resolve.
+    let base_path =
+        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
+    let path_env = if base_path.split(':').any(|p| p == "/opt/homebrew/bin") {
+        base_path
+    } else {
+        format!("/opt/homebrew/bin:{base_path}")
+    };
     Ok(template
         .replace("HEXBIN_PLACEHOLDER", &hex_bin.to_string_lossy())
         .replace("HEXDIR_PLACEHOLDER", &hex_dir.to_string_lossy())
+        .replace("USER_PLACEHOLDER", &target_user())
         .replace("LOG_PLACEHOLDER", &log_path.to_string_lossy())
         .replace("PATH_PLACEHOLDER", &path_env))
 }
 
-/// `hex harness start` — install (idempotent) and load the launchd service.
+/// `hex harness start` — install the system LaunchDaemon and bootstrap it.
+///
+/// Installing into `/Library/LaunchDaemons` and bootstrapping the `system`
+/// domain require root. Run as root (`sudo hex harness start`) → done directly.
+/// Otherwise the rendered plist is STAGED under `$HEX_DIR` and the exact
+/// privileged commands are PRINTED — the sandboxed agent cannot bootstrap
+/// system/gui domains (launchctl returns an I/O error), so it must not pretend to.
 fn harness_start() -> i32 {
     let hex_dir = get_hex_dir();
-    let plist_path = match harness_plist_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("hex harness start: $HOME is not set");
-            return 1;
-        }
-    };
     let rendered = match render_harness_plist(&hex_dir) {
         Ok(s) => s,
         Err(e) => {
@@ -793,96 +816,97 @@ fn harness_start() -> i32 {
             return 1;
         }
     };
-    if let Some(parent) = plist_path.parent() {
-        if let Err(e) = std::fs::create_dir_all(parent) {
-            eprintln!(
-                "hex harness start: failed to create {}: {e}",
-                parent.display()
-            );
-            return 1;
-        }
-    }
-    // Idempotent: only rewrite the plist if its contents differ.
-    let current = std::fs::read_to_string(&plist_path).ok();
-    if current.as_deref() != Some(rendered.as_str()) {
-        if let Err(e) = std::fs::write(&plist_path, &rendered) {
-            eprintln!(
-                "hex harness start: failed to write {}: {e}",
-                plist_path.display()
-            );
-            return 1;
-        }
-        eprintln!("hex harness start: wrote {}", plist_path.display());
-    } else {
-        eprintln!(
-            "hex harness start: {} already current",
-            plist_path.display()
-        );
-    }
-    // Ensure log dir exists (launchd will not create it).
-    if let Some(parent) = hex_dir.join(".hex").join("logs").parent() {
-        let _ = std::fs::create_dir_all(parent);
-    }
+    // launchd won't create the log dir; the staging dir holds the rendered plist.
     let _ = std::fs::create_dir_all(hex_dir.join(".hex").join("logs"));
+    let staging = harness_staging_plist_path(&hex_dir);
+    if let Some(p) = staging.parent() {
+        let _ = std::fs::create_dir_all(p);
+    }
+    if let Err(e) = std::fs::write(&staging, &rendered) {
+        eprintln!(
+            "hex harness start: failed to stage plist {}: {e}",
+            staging.display()
+        );
+        return 1;
+    }
 
-    let uid = current_uid();
-    let domain = format!("gui/{uid}");
-    // `bootstrap` is idempotent only if the service is not already loaded;
-    // ignore its exit code and follow with `kickstart -k` to (re)start.
-    let _ = std::process::Command::new("launchctl")
-        .args(["bootstrap", &domain, &plist_path.to_string_lossy()])
-        .status();
-    let status = std::process::Command::new("launchctl")
-        .args([
-            "kickstart",
-            "-k",
-            &format!("{domain}/com.hex.harness"),
-        ])
-        .status();
-    match status {
-        Ok(s) if s.success() => {
-            eprintln!("hex harness start: com.hex.harness loaded");
-            0
+    if is_root() {
+        if let Err(e) = std::fs::copy(&staging, HARNESS_DAEMON_PLIST) {
+            eprintln!("hex harness start: failed to install {HARNESS_DAEMON_PLIST}: {e}");
+            return 1;
         }
-        Ok(s) => {
-            eprintln!(
-                "hex harness start: launchctl kickstart exited {}",
-                s.code().unwrap_or(-1)
-            );
-            1
+        // launchd refuses daemon plists that aren't root-owned / are group- or
+        // world-writable.
+        let _ = std::process::Command::new("chown")
+            .args(["root:wheel", HARNESS_DAEMON_PLIST])
+            .status();
+        let _ = std::process::Command::new("chmod")
+            .args(["644", HARNESS_DAEMON_PLIST])
+            .status();
+        // bootout first (ignore "not loaded"), then bootstrap + kickstart.
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootout", HARNESS_SERVICE_TARGET])
+            .status();
+        let _ = std::process::Command::new("launchctl")
+            .args(["bootstrap", "system", HARNESS_DAEMON_PLIST])
+            .status();
+        let status = std::process::Command::new("launchctl")
+            .args(["kickstart", "-k", HARNESS_SERVICE_TARGET])
+            .status();
+        match status {
+            Ok(s) if s.success() => {
+                eprintln!("hex harness start: {HARNESS_SERVICE_TARGET} loaded");
+                0
+            }
+            Ok(s) => {
+                eprintln!(
+                    "hex harness start: launchctl kickstart exited {}",
+                    s.code().unwrap_or(-1)
+                );
+                1
+            }
+            Err(e) => {
+                eprintln!("hex harness start: failed to spawn launchctl: {e}");
+                1
+            }
         }
-        Err(e) => {
-            eprintln!("hex harness start: failed to spawn launchctl: {e}");
-            1
-        }
+    } else {
+        let staged = staging.display();
+        println!("hex harness start: staged the LaunchDaemon plist at {staged}");
+        println!(
+            "Run these to install it (root required — /Library/LaunchDaemons + system domain):"
+        );
+        println!();
+        println!("  sudo cp {staged} {HARNESS_DAEMON_PLIST}");
+        println!("  sudo chown root:wheel {HARNESS_DAEMON_PLIST}");
+        println!("  sudo chmod 644 {HARNESS_DAEMON_PLIST}");
+        println!("  sudo launchctl bootout {HARNESS_SERVICE_TARGET} 2>/dev/null || true");
+        println!("  sudo launchctl bootstrap system {HARNESS_DAEMON_PLIST}");
+        println!("  sudo launchctl kickstart -k {HARNESS_SERVICE_TARGET}");
+        println!();
+        println!("(Or simply re-run as: sudo hex harness start)");
+        0
     }
 }
 
-/// `hex harness stop` — bootout the launchd service.
+/// `hex harness stop` — bootout the system LaunchDaemon (root required).
 fn harness_stop() -> i32 {
-    let plist_path = match harness_plist_path() {
-        Some(p) => p,
-        None => {
-            eprintln!("hex harness stop: $HOME is not set");
-            return 1;
-        }
-    };
-    let uid = current_uid();
-    let domain = format!("gui/{uid}");
+    if !is_root() {
+        println!("hex harness stop: needs root. Run:");
+        println!("  sudo launchctl bootout {HARNESS_SERVICE_TARGET}");
+        return 0;
+    }
     let status = std::process::Command::new("launchctl")
-        .args(["bootout", &domain, &plist_path.to_string_lossy()])
+        .args(["bootout", HARNESS_SERVICE_TARGET])
         .status();
     match status {
         Ok(s) if s.success() => {
-            eprintln!("hex harness stop: com.hex.harness booted out");
+            eprintln!("hex harness stop: {HARNESS_SERVICE_TARGET} booted out");
             0
         }
-        Ok(s) => {
-            eprintln!(
-                "hex harness stop: launchctl bootout exited {}",
-                s.code().unwrap_or(-1)
-            );
+        Ok(_) => {
             // Already-stopped is not a hard failure.
+            eprintln!("hex harness stop: already stopped");
             0
         }
         Err(e) => {

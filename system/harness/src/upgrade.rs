@@ -1,7 +1,7 @@
 //! Real port of the hex upgrade subcommand.
 //!
 //! Upgrades: scripts, skills, commands, hooks
-//! Preserves: memory.db, settings.local.json, user data, CLAUDE.md
+//! Preserves: memory.db, settings.local.json, user data, AGENTS.md
 //!
 //! Drift bug fix: the bash shim omitted hooks sync for v2 layout. This
 //! implementation syncs hooks unconditionally for both v1 and v2.
@@ -316,7 +316,7 @@ fn get_source_dir(args: &Args, hex_dir: &Path) -> Result<PathBuf, String> {
         let layout = path_map::detect_layout(p.to_str().unwrap_or(""));
         if layout == "unknown" {
             return Err(format!(
-                "No recognized hex layout at {local} (expected dot-claude/ for v1, or system/ + templates/CLAUDE.md for v2)"
+                "No recognized hex layout at {local} (expected dot-claude/ for v1, or system/ + templates/AGENTS.md for v2)"
             ));
         }
         println!("  → Using local checkout: {local}");
@@ -759,9 +759,9 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                             }
                         }
                         // The binary changed, but the long-running harness
-                        // (`com.hex.harness`, launchd-supervised) still holds the
-                        // OLD binary in memory — engine + every worker run inside
-                        // it. Restart it so the whole stack reloads the new binary.
+                        // (`com.hex.harness`, the system LaunchDaemon) still holds
+                        // the OLD binary in memory — engine + every worker run
+                        // inside it. Restart it so the whole stack reloads.
                         restart_harness();
                     }
                     Err(e) => { eprintln!("  [FAIL] atomic binary install failed: {e}"); return; }
@@ -776,39 +776,34 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
     }
 }
 
-/// Restart the single launchd-supervised harness (`com.hex.harness`) so it
-/// reloads the freshly swapped `hex` binary — the in-process engine AND every
-/// typed worker run inside it, so one kickstart reloads the whole stack. Only
-/// kickstarts if the service is already loaded (an upgrade shouldn't install the
-/// harness on a box that wasn't running it). Best-effort + loud: a kickstart
-/// failure is reported, never silently swallowed (S6).
+/// Restart the single `com.hex.harness` system LaunchDaemon so the swapped
+/// binary (engine + all workers, one process) reloads. Kickstarting a system
+/// daemon needs root: if `hex upgrade` is running as root we do it directly,
+/// otherwise we PRINT the sudo command (best-effort + loud, S6). Skipped when the
+/// daemon isn't installed (nothing to restart on this box).
 fn restart_harness() {
-    const LABEL: &str = "com.hex.harness";
-    let home = match std::env::var("HOME") {
-        Ok(h) => h,
-        Err(_) => return,
-    };
-    // Only restart if the harness plist is actually installed.
-    let plist = Path::new(&home)
-        .join("Library/LaunchAgents")
-        .join(format!("{LABEL}.plist"));
-    if !plist.exists() {
-        return; // harness not installed on this box — nothing to restart
+    const TARGET: &str = "system/com.hex.harness";
+    if !Path::new("/Library/LaunchDaemons/com.hex.harness.plist").exists() {
+        return; // harness not installed — nothing to restart
     }
-    // `launchctl kickstart -k gui/<uid>/<label>` — kill if running, then start.
-    let out = Command::new("sh")
-        .arg("-c")
-        .arg(format!("launchctl kickstart -k gui/$(id -u)/{LABEL}"))
+    let is_root = unsafe { libc::geteuid() == 0 };
+    if !is_root {
+        println!("  → harness binary updated; restart it to load the new binary:");
+        println!("      sudo launchctl kickstart -k {TARGET}");
+        return;
+    }
+    let out = Command::new("launchctl")
+        .args(["kickstart", "-k", TARGET])
         .output();
     match out {
         Ok(o) if o.status.success() => {
-            println!("  [OK] restarted {LABEL} — engine + workers now on the new binary");
+            println!("  [OK] restarted {TARGET} — engine + workers on the new binary");
         }
         Ok(o) => eprintln!(
-            "  [WARN] could not restart {LABEL}: {}",
+            "  [WARN] could not restart {TARGET}: {}",
             String::from_utf8_lossy(&o.stderr).trim()
         ),
-        Err(e) => eprintln!("  [WARN] could not restart {LABEL}: {e}"),
+        Err(e) => eprintln!("  [WARN] could not restart {TARGET}: {e}"),
     }
 }
 
@@ -1125,6 +1120,24 @@ mod tests {
         fs::write(path, content).unwrap();
     }
 
+    // Regression test for spec S90mv90b6 / task Tndh988cz: AGENTS.md is the
+    // single canonical instruction-file template. upgrade.rs must not
+    // reference the old per-runtime template path anywhere — neither in the
+    // v2-layout sentinel error string, nor in test fixtures, nor in the
+    // //! Preserves doc comment. The needle is built at runtime so this
+    // assertion itself doesn't trip the check.
+    #[test]
+    fn upgrade_rs_has_no_legacy_template_references() {
+        let src = include_str!("upgrade.rs");
+        let needle = format!("templates/{}.md", "CLAUDE");
+        assert!(
+            !src.contains(&needle),
+            "upgrade.rs must not reference the legacy per-runtime template \
+             path; the canonical template is templates/AGENTS.md (the v2 \
+             sentinel and test fixtures must be repointed)"
+        );
+    }
+
     // OBS-028 regression: the exact case that shipped nothing — same Cargo
     // version, installed binary built at an older commit. Must rebuild.
     #[test]
@@ -1184,7 +1197,7 @@ mod tests {
 
         // Set up v2 source with a hook file
         write_file(&source.join("system/hooks/scripts/my-hook.sh"), "#!/bin/bash\necho hello");
-        write_file(&source.join("templates/CLAUDE.md"), "# Claude");
+        write_file(&source.join("templates/AGENTS.md"), "# Agents");
         fs::create_dir_all(source.join("system/scripts")).unwrap();
         fs::create_dir_all(source.join("system/skills")).unwrap();
         fs::create_dir_all(source.join("system/commands")).unwrap();
@@ -1209,7 +1222,7 @@ mod tests {
         let hex_dot = tmp.path().join(".hex");
 
         write_file(&source.join("system/hooks/scripts/hook.sh"), "#!/bin/bash\nnew content");
-        write_file(&source.join("templates/CLAUDE.md"), "# Claude");
+        write_file(&source.join("templates/AGENTS.md"), "# Agents");
         // Pre-existing stale hook in destination
         write_file(&hex_dot.join("hooks/scripts/hook.sh"), "#!/bin/bash\nold content");
 
