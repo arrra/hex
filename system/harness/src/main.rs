@@ -337,6 +337,9 @@ enum MemoryCommands {
         #[arg(long)]
         json: bool,
     },
+    /// Print ~10 recency-ordered pointers into the live workspace (project dirs,
+    /// recent decisions, todo "Now" items). No LLM, target <200ms.
+    Recent,
 }
 
 #[derive(Subcommand)]
@@ -635,6 +638,9 @@ fn main() {
                 }
                 MemoryCommands::Stats { json } => {
                     memory::stats::run(&hex_dir, *json)
+                }
+                MemoryCommands::Recent => {
+                    memory::recent::run(&hex_dir)
                 }
                 MemoryCommands::Consolidate { command } => {
                     let (mode, max) = match command {
