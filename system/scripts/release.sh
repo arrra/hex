@@ -64,6 +64,17 @@ if [[ "${1:-}" == "bump-version" ]]; then
   fi
   CARGO_TOML="system/harness/Cargo.toml"
   VERSION_TXT="system/version.txt"
+  # Guard: the bump stages Cargo.toml + version.txt + Cargo.lock. Those must be
+  # clean BEFORE we touch them, so the only lockfile delta staged is the bump's
+  # own — never a pre-existing dirty Cargo.lock from a concurrent agent (a real
+  # race in this hot repo). Abort loudly rather than sweep stray changes in.
+  PRE_DIRTY=$(git status --porcelain -- "$CARGO_TOML" "$VERSION_TXT" Cargo.lock)
+  if [ -n "$PRE_DIRTY" ]; then
+    red "ABORT: bump would sweep pre-existing uncommitted changes into the bump commit:"
+    echo "$PRE_DIRTY"
+    red "Commit or stash these first, then re-run: release.sh bump-version $NEW_VERSION"
+    exit 1
+  fi
   CURRENT_VER=$(grep -E '^version' "$CARGO_TOML" | head -1 | cut -d'"' -f2)
   bold "Bumping $CURRENT_VER → $NEW_VERSION"
   sed -i '' "s/^version = \"$CURRENT_VER\"/version = \"$NEW_VERSION\"/" "$CARGO_TOML"
@@ -251,16 +262,24 @@ fi
 
 # ── Push ─────────────────────────────────────────────────────────────────────
 bold "Push"
-HEX_RELEASE_PIPELINE=1 git push origin main 2>&1
-green "  Pushed $SHA to origin/main ✓"
-
-# Verify SHA
-REMOTE_SHA_POST=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
-if [ "$FULL_SHA" = "$REMOTE_SHA_POST" ]; then
-  green "  SHA verified on remote ✓"
-else
-  red "  SHA mismatch! Local: $FULL_SHA Remote: $REMOTE_SHA_POST"
+# A rejected push MUST hard-fail the release — never report success on a push
+# that GitHub refused (S6: no quiet failures). Check the exit code, then
+# independently verify the SHA actually landed (a 0 exit is not proof on its own).
+if ! HEX_RELEASE_PIPELINE=1 git push origin main 2>&1; then
+  red "  PUSH REJECTED — origin/main was not updated. Release ABORTED."
+  red "  (Common causes: remote moved ahead, or a pre-push hook blocked it.)"
+  red "  Resolve, then re-run the release."
+  exit 1
 fi
+
+# Verify the SHA actually landed on the remote — independent of the push exit code.
+REMOTE_SHA_POST=$(git ls-remote origin refs/heads/main 2>/dev/null | cut -f1)
+if [ "$FULL_SHA" != "$REMOTE_SHA_POST" ]; then
+  red "  SHA MISMATCH after push! Local: $FULL_SHA  Remote: $REMOTE_SHA_POST"
+  red "  origin/main does not match what we pushed. Release ABORTED."
+  exit 1
+fi
+green "  Pushed $SHA to origin/main — SHA verified ✓"
 
 # ── Tag ─────────────────────────────────────────────────────────────────────
 bold "Tag"
