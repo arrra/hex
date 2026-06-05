@@ -306,7 +306,7 @@ enum MemoryCommands {
         max: bool,
     },
     /// Parse Claude JSONL transcripts to markdown
-    #[command(name = "parse-transcripts")]
+    #[command(name = "parse-transcripts", hide = true)]
     ParseTranscripts {
         #[arg(long)]
         file: Option<String>,
