@@ -27,7 +27,10 @@ pub enum Mode {
 /// Run the unified consolidation pass. Returns a process exit code.
 ///   0 — all requested layers succeeded with no issues
 ///   1 — at least one layer reported issues or hard-failed
-pub fn run(mode: Mode, hex_dir: &Path) -> i32 {
+pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
+    // Self-throttle the whole process (every thread + IO) unless --max.
+    crate::throttle::apply(max);
+
     let mut any_fail = false;
 
     println!("=== hex memory consolidate ({:?}) ===", mode);
@@ -210,7 +213,7 @@ mod tests {
     #[test]
     fn quick_mode_runs_l1_and_l2_and_writes_structural_log() {
         let dir = fake_hex_dir();
-        let code = run(Mode::Quick, dir.path());
+        let code = run(Mode::Quick, true, dir.path());
         assert!(code == 0 || code == 1, "unexpected exit code {code}");
         assert!(
             dir.path().join("evolution").join("consolidation-latest.log").exists(),
@@ -339,7 +342,7 @@ mod tests {
     #[test]
     fn quick_mode_does_not_write_audit_file() {
         let dir = fake_hex_dir();
-        let _ = run(Mode::Quick, dir.path());
+        let _ = run(Mode::Quick, true, dir.path());
         let evo = dir.path().join("evolution");
         for entry in fs::read_dir(&evo).unwrap().flatten() {
             let name = entry.file_name().to_string_lossy().to_string();

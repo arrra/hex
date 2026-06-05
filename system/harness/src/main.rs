@@ -3,6 +3,7 @@ use std::io;
 use std::path::PathBuf;
 
 mod consolidate;
+mod throttle;
 mod doctor;
 mod integration;
 mod integration_cmd;
@@ -191,9 +192,17 @@ enum TelemetryCommands {
 #[derive(Subcommand)]
 enum ConsolidateCommands {
     /// Deterministic layers only (structural + memory DB + learnings promotion). No LLM, no network. Safe to run nightly.
-    Quick,
+    Quick {
+        /// Run at full (normal) OS scheduling priority instead of background-throttled.
+        #[arg(long)]
+        max: bool,
+    },
     /// All deterministic layers + the LLM-assisted operating-model audit.
-    Full,
+    Full {
+        /// Run at full (normal) OS scheduling priority instead of background-throttled.
+        #[arg(long)]
+        max: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -615,11 +624,11 @@ fn main() {
                     memory::stats::run(&hex_dir, *json)
                 }
                 MemoryCommands::Consolidate { command } => {
-                    let mode = match command {
-                        ConsolidateCommands::Quick => consolidate::Mode::Quick,
-                        ConsolidateCommands::Full => consolidate::Mode::Full,
+                    let (mode, max) = match command {
+                        ConsolidateCommands::Quick { max } => (consolidate::Mode::Quick, *max),
+                        ConsolidateCommands::Full { max } => (consolidate::Mode::Full, *max),
                     };
-                    consolidate::run(mode, &hex_dir)
+                    consolidate::run(mode, max, &hex_dir)
                 }
             };
             std::process::exit(exit_code);
