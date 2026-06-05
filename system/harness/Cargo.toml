@@ -1,9 +1,23 @@
 [package]
-name = "hex"
+# Package renamed `hex` → `hex-harness` (2026-06-05) to disambiguate from the
+# transitive `hex` ENCODING crate the baked-in iii engine pulls (cargo `-p hex`
+# was ambiguous between the two). The binary and lib stay named `hex` (overrides
+# below), so nothing user-facing or on-disk changes — you still run `hex`, and
+# `hex::` imports still resolve.
+name = "hex-harness"
 # Source of truth for hex version. Bumped by release.sh; build.rs
 # injects this via env!("CARGO_PKG_VERSION") at compile time.
 version = "0.29.0"
 edition = "2021"
+
+# Keep the lib + bin named `hex` even though the package is `hex-harness`.
+[lib]
+name = "hex"
+path = "src/lib.rs"
+
+[[bin]]
+name = "hex"
+path = "src/main.rs"
 
 [dependencies]
 clap = { version = "4", features = ["derive"] }
