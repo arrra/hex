@@ -1,0 +1,69 @@
+//! Red test for task Tfr6deqwv: workers::registry().
+//!
+//! Asserts the Rust registry surfaces `hex-memory-maintenance` and `hex-backup`
+//! as cron workers, mirroring the existing YAML configs in
+//! `system/iii/workers/`. The two memory-maintenance jobs must match the
+//! YAML exactly: `hex memory index` @ "0 */15 * * * * *" and
+//! `hex memory consolidate full` @ "0 0 3 * * * *".
+
+use hex::worker::TriggerSpec;
+use hex::workers;
+
+fn cron_exprs(w: &hex::worker::Worker) -> Vec<String> {
+    w.handlers
+        .iter()
+        .filter_map(|(spec, _)| match spec {
+            TriggerSpec::Cron { expression } => Some(expression.clone()),
+            _ => None,
+        })
+        .collect()
+}
+
+#[test]
+fn workers_registry_contains_memory_maintenance_and_backup() {
+    let reg: Vec<hex::worker::Worker> = workers::registry();
+    let names: Vec<&str> = reg.iter().map(|w| w.name.as_str()).collect();
+    assert!(
+        names.contains(&"hex-memory-maintenance"),
+        "expected hex-memory-maintenance in registry, got {:?}",
+        names
+    );
+    assert!(
+        names.contains(&"hex-backup"),
+        "expected hex-backup in registry, got {:?}",
+        names
+    );
+}
+
+#[test]
+fn workers_registry_memory_maintenance_cron_matches_yaml() {
+    let reg = workers::registry();
+    let mm = reg
+        .iter()
+        .find(|w| w.name == "hex-memory-maintenance")
+        .expect("hex-memory-maintenance worker must be registered");
+    let exprs = cron_exprs(mm);
+    assert!(
+        exprs.iter().any(|e| e == "0 */15 * * * * *"),
+        "expected `hex memory index` cron '0 */15 * * * * *' in {:?}",
+        exprs
+    );
+    assert!(
+        exprs.iter().any(|e| e == "0 0 3 * * * *"),
+        "expected `hex memory consolidate full` cron '0 0 3 * * * *' in {:?}",
+        exprs
+    );
+}
+
+#[test]
+fn workers_registry_backup_is_cron_worker() {
+    let reg = workers::registry();
+    let bk = reg
+        .iter()
+        .find(|w| w.name == "hex-backup")
+        .expect("hex-backup worker must be registered");
+    assert!(
+        !cron_exprs(bk).is_empty(),
+        "hex-backup must have at least one cron-triggered handler"
+    );
+}
