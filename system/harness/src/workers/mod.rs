@@ -60,6 +60,51 @@ mod tests {
     }
 
     #[test]
+    fn memory_maintenance_registers_quick_and_parse_transcripts_crons() {
+        // Phase A additive redesign: the worker must also register cron jobs
+        // for `hex memory consolidate quick` and `hex memory parse-transcripts`,
+        // both on a 15-minute cadence.
+        let reg = registry();
+        let mm = reg
+            .iter()
+            .find(|w| w.name == "hex-memory-maintenance")
+            .expect("hex-memory-maintenance present");
+        let exprs = cron_exprs(mm);
+
+        // The quick-consolidate cron must be registered with a 15-min cadence.
+        assert!(
+            exprs.iter().any(|e| e == memory_maintenance::CRON_CONSOLIDATE_QUICK),
+            "expected CRON_CONSOLIDATE_QUICK to be registered, got crons: {:?}",
+            exprs
+        );
+        assert_eq!(
+            memory_maintenance::CRON_CONSOLIDATE_QUICK,
+            "0 */15 * * * * *",
+            "quick-consolidate must run every 15 minutes"
+        );
+        assert_eq!(
+            memory_maintenance::ARGV_CONSOLIDATE_QUICK,
+            &["hex", "memory", "consolidate", "quick"],
+        );
+
+        // The parse-transcripts cron must be registered with a 15-min cadence.
+        assert!(
+            exprs.iter().any(|e| e == memory_maintenance::CRON_PARSE_TRANSCRIPTS),
+            "expected CRON_PARSE_TRANSCRIPTS to be registered, got crons: {:?}",
+            exprs
+        );
+        assert_eq!(
+            memory_maintenance::CRON_PARSE_TRANSCRIPTS,
+            "0 */15 * * * * *",
+            "parse-transcripts must run every 15 minutes"
+        );
+        assert_eq!(
+            memory_maintenance::ARGV_PARSE_TRANSCRIPTS,
+            &["hex", "memory", "parse-transcripts"],
+        );
+    }
+
+    #[test]
     fn backup_is_cron_worker() {
         let reg = registry();
         let bk = reg
