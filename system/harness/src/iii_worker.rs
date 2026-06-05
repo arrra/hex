@@ -171,11 +171,11 @@ async fn serve(cfg: WorkerConfig) -> i32 {
         let worker_name_for_handler = cfg.worker_name.clone();
         iii.register_function(
             job.id.clone(),
-            iii_sdk::RegisterFunction::new_async(move |_input: serde_json::Value| {
+            iii_sdk::RegisterFunction::new_async(move |input: serde_json::Value| {
                 let argv = argv.clone();
                 let id = id_for_handler.clone();
                 let worker_name = worker_name_for_handler.clone();
-                async move { run_command(&worker_name, &id, &argv).await }
+                async move { run_command(&worker_name, &id, &argv, &input).await }
             })
             .description(job.description.clone()),
         );
@@ -212,6 +212,17 @@ fn expand_args(args: &[String]) -> Vec<String> {
     args.iter().map(|a| a.replace("${HEX_DIR}", &hex_dir)).collect()
 }
 
+/// Pure helper: serialize the trigger input JSON value for the III_EVENT env
+/// var on the spawned command. Null → empty string (so cron fires without
+/// payload don't set a useless "null"); anything else → compact JSON.
+pub(crate) fn iii_event_env(input: &serde_json::Value) -> String {
+    if input.is_null() {
+        String::new()
+    } else {
+        serde_json::to_string(input).unwrap_or_default()
+    }
+}
+
 /// Exec a command; Ok on exit 0, loud Err otherwise (S6).
 ///
 /// Every outcome is also recorded to the local telemetry store via
@@ -223,6 +234,7 @@ async fn run_command(
     worker_name: &str,
     id: &str,
     argv: &[String],
+    input: &serde_json::Value,
 ) -> Result<serde_json::Value, iii_sdk::IIIError> {
     if argv.is_empty() {
         return Err(iii_sdk::IIIError::Handler(format!("{id}: empty command")));
@@ -232,11 +244,13 @@ async fn run_command(
     // sets WorkingDirectory, but don't rely on it.
     let hex_dir = std::env::var("HEX_DIR").unwrap_or_else(|_| ".".to_string());
     let started = std::time::Instant::now();
-    let out = tokio::process::Command::new(&argv[0])
-        .args(&argv[1..])
-        .current_dir(&hex_dir)
-        .output()
-        .await;
+    let mut cmd = tokio::process::Command::new(&argv[0]);
+    cmd.args(&argv[1..]).current_dir(&hex_dir);
+    let event_payload = iii_event_env(input);
+    if !event_payload.is_empty() {
+        cmd.env("III_EVENT", &event_payload);
+    }
+    let out = cmd.output().await;
     let duration_ms = started.elapsed().as_millis() as i64;
     match out {
         Ok(o) if o.status.success() => {
@@ -330,6 +344,7 @@ jobs:
             "telemetry-test-worker",
             "hex::telemetry::redtest::ok",
             &argv,
+            &serde_json::Value::Null,
         )
         .await;
         assert!(res.is_ok(), "expected successful run, got {res:?}");
@@ -434,6 +449,52 @@ jobs:
             res.is_err(),
             "job with neither cron nor trigger must Err, got {res:?}"
         );
+    }
+
+    /// Red test for Trkhr5af6: the pure helper `iii_event_env` must serialize
+    /// the trigger input JSON value to a string suitable for the III_EVENT env
+    /// var on the spawned command. Null input yields an empty string (so cron
+    /// fires without payload don't set a useless "null"); any other JSON value
+    /// is preserved verbatim.
+    #[test]
+    fn iii_event_env_serializes_trigger_input() {
+        // Null / missing payload → empty string (don't pollute the env).
+        let empty = iii_event_env(&serde_json::Value::Null);
+        assert_eq!(
+            empty, "",
+            "null trigger input must produce empty III_EVENT, got {empty:?}"
+        );
+
+        // State-trigger style payload should round-trip as compact JSON.
+        let payload = serde_json::json!({
+            "scope": "boi",
+            "key": "landings/2026-06-04.md",
+            "value": {"status": "Done"}
+        });
+        let s = iii_event_env(&payload);
+        let parsed: serde_json::Value =
+            serde_json::from_str(&s).expect("III_EVENT value must be valid JSON");
+        assert_eq!(parsed, payload, "III_EVENT must round-trip the input payload");
+    }
+
+    /// End-to-end env plumbing: run_command must propagate the trigger input
+    /// to the spawned command via the III_EVENT environment variable.
+    #[tokio::test]
+    async fn run_command_sets_iii_event_env() {
+        let (tmp, _guard) = crate::telemetry::test_support::isolate();
+        let out_path = tmp.path().join("event.out");
+        let argv: Vec<String> = vec![
+            "sh".into(),
+            "-c".into(),
+            format!("printf %s \"$III_EVENT\" > {}", out_path.display()),
+        ];
+        let payload = serde_json::json!({"scope": "boi", "key": "k"});
+        let res = run_command("env-test", "env::test", &argv, &payload).await;
+        assert!(res.is_ok(), "expected success, got {res:?}");
+        let written = std::fs::read_to_string(&out_path).expect("env.out must exist");
+        let parsed: serde_json::Value =
+            serde_json::from_str(&written).expect("III_EVENT must be JSON");
+        assert_eq!(parsed, payload);
     }
 
     /// A job specifying BOTH a bare `cron` and a `trigger` block must Err.
