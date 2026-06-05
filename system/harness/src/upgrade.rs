@@ -759,9 +759,9 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                             }
                         }
                         // The binary changed, but the long-running harness
-                        // (`com.hex.harness`, the system LaunchDaemon) still holds
-                        // the OLD binary in memory — engine + every worker run
-                        // inside it. Restart it so the whole stack reloads.
+                        // (`com.hex.harness`, the gui LaunchAgent) still holds the
+                        // OLD binary in memory — engine + every worker run inside
+                        // it. Restart it so the whole stack reloads.
                         restart_harness();
                     }
                     Err(e) => { eprintln!("  [FAIL] atomic binary install failed: {e}"); return; }
@@ -776,34 +776,31 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
     }
 }
 
-/// Restart the single `com.hex.harness` system LaunchDaemon so the swapped
-/// binary (engine + all workers, one process) reloads. Kickstarting a system
-/// daemon needs root: if `hex upgrade` is running as root we do it directly,
-/// otherwise we PRINT the sudo command (best-effort + loud, S6). Skipped when the
-/// daemon isn't installed (nothing to restart on this box).
+/// Restart the single `com.hex.harness` gui LaunchAgent so the swapped binary
+/// (engine + all workers, one process) reloads. Kickstarting a gui-domain agent
+/// runs as the user — no root needed. Best-effort + loud (S6). Skipped when the
+/// agent isn't installed (nothing to restart on this box).
 fn restart_harness() {
-    const TARGET: &str = "system/com.hex.harness";
-    if !Path::new("/Library/LaunchDaemons/com.hex.harness.plist").exists() {
+    let Ok(home) = std::env::var("HOME") else { return };
+    if !Path::new(&home)
+        .join("Library/LaunchAgents/com.hex.harness.plist")
+        .exists()
+    {
         return; // harness not installed — nothing to restart
     }
-    let is_root = unsafe { libc::geteuid() == 0 };
-    if !is_root {
-        println!("  → harness binary updated; restart it to load the new binary:");
-        println!("      sudo launchctl kickstart -k {TARGET}");
-        return;
-    }
+    let target = format!("gui/{}/com.hex.harness", unsafe { libc::getuid() });
     let out = Command::new("launchctl")
-        .args(["kickstart", "-k", TARGET])
+        .args(["kickstart", "-k", &target])
         .output();
     match out {
         Ok(o) if o.status.success() => {
-            println!("  [OK] restarted {TARGET} — engine + workers on the new binary");
+            println!("  [OK] restarted {target} — engine + workers on the new binary");
         }
         Ok(o) => eprintln!(
-            "  [WARN] could not restart {TARGET}: {}",
+            "  [WARN] could not restart {target}: {}",
             String::from_utf8_lossy(&o.stderr).trim()
         ),
-        Err(e) => eprintln!("  [WARN] could not restart {TARGET}: {e}"),
+        Err(e) => eprintln!("  [WARN] could not restart {target}: {e}"),
     }
 }
 

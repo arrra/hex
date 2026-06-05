@@ -1,19 +1,26 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Hex harness launchd template (spec S5yw25n5y; LaunchDaemon form 2026-06-05).
+  Hex harness launchd template (spec S5yw25n5y; gui LaunchAgent + SessionCreate
+  form 2026-06-05, superseding the short-lived LaunchDaemon form).
 
-  This is a SYSTEM LaunchDaemon (installed to /Library/LaunchDaemons), NOT a
-  per-user gui LaunchAgent: `UserName` runs it as the user (correct file
-  ownership, not root) while surviving logout / no-login-session / session churn.
-  A gui/<uid> agent dies on Log Out; this does not. (FileVault still requires one
-  manual disk unlock per reboot — by design; the daemon survives session churn
-  while the machine is up, not unattended reboots.)
+  This is a per-user gui LaunchAgent (installed to ~/Library/LaunchAgents), NOT a
+  system LaunchDaemon. Reason: per the hex-as-own-harness design the harness runs
+  per-task reasoning INSIDE `claude`, and Claude Code auth lives in the macOS
+  LOGIN keychain — which a system daemon (no login session) cannot reach. A gui
+  LaunchAgent runs in the user's login session and CAN. `SessionCreate` bridges
+  the launchd-spawned process into a real security session so keychain lookups
+  succeed. (macOS 26 caveat: the SecurityAgent session is not inherited by child
+  processes — spawn `claude` as a DIRECT program, not `bash -> claude`.)
+
+  Tradeoff vs a daemon: dies on logout. Accepted — FileVault forces a GUI login
+  at every boot on this box, so there's effectively always a login session, and
+  keychain access (which the harness needs for claude) is worth more than
+  surviving an explicit logout.
 
   `hex harness start` renders this template by substituting:
     HEXBIN_PLACEHOLDER -> $HEX_DIR/.hex/bin/hex
     HEXDIR_PLACEHOLDER -> $HEX_DIR
-    USER_PLACEHOLDER   -> the target user (SUDO_USER/USER) — runs as that user
     PATH_PLACEHOLDER   -> runtime PATH (homebrew prepended)
     LOG_PLACEHOLDER    -> $HEX_DIR/.hex/logs/com.hex.harness.log
 
@@ -25,8 +32,6 @@
 <dict>
     <key>Label</key>
     <string>com.hex.harness</string>
-    <key>UserName</key>
-    <string>USER_PLACEHOLDER</string>
     <key>ProgramArguments</key>
     <array>
         <string>HEXBIN_PLACEHOLDER</string>
@@ -35,6 +40,11 @@
     </array>
     <key>WorkingDirectory</key>
     <string>HEXDIR_PLACEHOLDER</string>
+    <!-- Bridge the launchd process into a real security session so the harness
+         (and the `claude` it spawns for per-task reasoning) can read the login
+         keychain. Without this a gui LaunchAgent can fail keychain lookups. -->
+    <key>SessionCreate</key>
+    <true/>
     <key>EnvironmentVariables</key>
     <dict>
         <key>HEX_DIR</key>
@@ -43,10 +53,9 @@
         <string>ws://127.0.0.1:49134</string>
         <key>PATH</key>
         <string>PATH_PLACEHOLDER</string>
-        <!-- The folded-in backup worker uploads via the `gws` Drive API; gws's
-             default keyring is the macOS login keychain, unreachable from a
-             headless daemon (→ "Platform secure storage failure"). Force the
-             file keyring backend so backups work with no GUI session. -->
+        <!-- gws (Drive backup) keeps the FILE keyring — it's a separate secret
+             from claude's keychain auth and the file backend is robust either
+             way. (Switch to the login keychain later if we want full uniformity.) -->
         <key>GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND</key>
         <string>file</string>
     </dict>

@@ -2,6 +2,23 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-06-05] — harness runs as a gui LaunchAgent, not a system daemon (v0.30.2)
+
+Reverses the short-lived LaunchDaemon form from v0.30.0. The harness runs per-task
+reasoning inside `claude`, and Claude Code auth lives in the macOS **login
+keychain** — unreachable from a system daemon (no login session). So `com.hex.harness`
+is now a per-user **gui LaunchAgent** with `<key>SessionCreate</key>` (bridges the
+launchd process into a security session for keychain access).
+
+### Changed
+- `harness.plist` → gui LaunchAgent + `SessionCreate` (dropped `UserName`).
+- `hex harness start|stop` → user gui domain (`launchctl bootstrap gui/<uid>`), no
+  sudo, no `/Library/LaunchDaemons`.
+- doctor `iii-engine-health` + `hex upgrade` restart path → gui LaunchAgent.
+
+(`hex harness start` template-path fix from v0.30.1 retained: reads the deployed
+`.hex/templates/`, falls back to the repo layout.)
+
 ## [2026-06-05] — iii engine baked into hex; at-most-once harness daemon (v0.30.0)
 
 The iii engine is now compiled INTO the `hex` binary (forked `mrap/hex-iii`,
