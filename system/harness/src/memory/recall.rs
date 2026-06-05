@@ -19,6 +19,7 @@ pub struct FactHit {
     pub predicate: String,
     pub object: String,
     pub importance: f32,
+    pub private: bool,
 }
 
 pub struct RecallV2 {
@@ -62,7 +63,7 @@ fn facts_recall(
         Vec::new()
     } else {
         conn.prepare(
-            "SELECT f.subject, f.predicate, f.object, f.importance
+            "SELECT f.subject, f.predicate, f.object, f.importance, f.private
              FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
              WHERE facts_fts MATCH ?1 AND f.tombstone = 0
              ORDER BY bm25(facts_fts), f.importance DESC LIMIT ?2",
@@ -73,6 +74,7 @@ fn facts_recall(
                 predicate: r.get(1)?,
                 object: r.get(2)?,
                 importance: r.get(3)?,
+                private: r.get::<_, i64>(4)? != 0,
             })
         })?
         .filter_map(Result::ok)
@@ -86,7 +88,7 @@ fn facts_recall(
         if tok.len() < 3 { continue; }
         let pattern = format!("%:{tok}%");
         let mut q = conn.prepare(
-            "SELECT subject, predicate, object, importance FROM facts
+            "SELECT subject, predicate, object, importance, private FROM facts
              WHERE subject LIKE ?1 AND tombstone = 0
              ORDER BY importance DESC LIMIT 3",
         )?;
@@ -97,6 +99,7 @@ fn facts_recall(
                     predicate: r.get(1)?,
                     object: r.get(2)?,
                     importance: r.get(3)?,
+                    private: r.get::<_, i64>(4)? != 0,
                 })
             })?
             .filter_map(Result::ok)

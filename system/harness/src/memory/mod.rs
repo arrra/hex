@@ -5,6 +5,7 @@ pub mod index;
 pub mod parse_transcripts;
 pub mod predicates;
 pub mod provider;
+pub mod assemble;
 pub mod recall;
 pub mod rrf;
 pub mod schema;
