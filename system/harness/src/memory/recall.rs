@@ -151,25 +151,36 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
     }
 
     let db = super::db_path(hex_root);
-    let (results, facts) = match super::open_db(&db) {
-        Ok(conn) => {
-            let chunks = super::search::search_fts_public(&conn, query, TOP_K * 3, None)
-                .unwrap_or_default();
-            let f = facts_recall(&conn, query, TOP_K).unwrap_or_default();
-            (chunks, f)
-        }
-        Err(e) => {
-            // Fail-fast: dependency unreachable → inject nothing, loudly.
-            eprintln!("[memory recall] cannot open {}: {e}", db.display());
-            (vec![], vec![])
-        }
-    };
-
-    let filtered: Vec<_> = results
-        .into_iter()
-        .filter(|r| !(for_agent && r.private))
-        .take(TOP_K)
-        .collect();
+    let (filtered, facts): (Vec<super::search::SearchResult>, Vec<FactHit>) =
+        match super::open_db(&db) {
+            Ok(conn) => {
+                // Route the hot path through the v1 ContextAssembler. assemble()
+                // applies the for_agent private gate to facts moves (M2/M3/M4)
+                // and to M1's chunk results internally, runs the 4 parallel
+                // moves, and returns a merged candidate list under the char
+                // budget (default MAX_CONTEXT_CHARS).
+                let assembled = super::assemble::assemble(
+                    &conn,
+                    query,
+                    for_agent,
+                    MAX_CONTEXT_CHARS,
+                );
+                let mut chunks: Vec<super::search::SearchResult> = Vec::new();
+                let mut fs: Vec<FactHit> = Vec::new();
+                for cand in assembled.candidates {
+                    match cand.kind {
+                        super::assemble::CandidateKind::Chunk(c) => chunks.push(c),
+                        super::assemble::CandidateKind::Fact(f) => fs.push(f),
+                    }
+                }
+                (chunks, fs)
+            }
+            Err(e) => {
+                // Fail-fast: dependency unreachable → inject nothing, loudly.
+                eprintln!("[memory recall] cannot open {}: {e}", db.display());
+                (vec![], vec![])
+            }
+        };
 
     let injected = !filtered.is_empty() || !facts.is_empty();
     let outcome = if injected {
@@ -303,6 +314,60 @@ mod tests {
 mod plan2_tests {
     use super::*;
     use rusqlite::Connection;
+
+    /// RED test for T5ffsh4b0 — `recall::recall` (hot path) MUST route
+    /// through `assemble::assemble`, which adds the predicate-cue path
+    /// (M3) the legacy FTS-only `facts_recall` lacks.
+    ///
+    /// The query word "preference" is a M3 cue mapped to the stored
+    /// predicate "prefers". The fact's content shares NO tokens with the
+    /// query, so the legacy FTS path returns nothing. Only an assemble-
+    /// routed `recall()` surfaces the fact and reports `injected=true`.
+    #[test]
+    fn recall_routes_through_assemble_predicate_cue() {
+        use std::path::PathBuf;
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hex_root: PathBuf = tmp.path().to_path_buf();
+        let db_path = crate::memory::db_path(&hex_root);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+
+        crate::memory::vector::register_sqlite_vec();
+        let c = rusqlite::Connection::open(&db_path).unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+             VALUES ('f1','project:hex','prefers','vim keybindings',0.9,'2026-06-04','2026-06-04',0)",
+            [],
+        )
+        .unwrap();
+        drop(c);
+
+        // Query shares NO tokens with the stored fact text. Tokens after
+        // stopword filtering: "editor", "preference" — neither appears in
+        // any facts_fts column ("project", "hex", "prefers", "vim",
+        // "keybindings"). The legacy facts_recall therefore returns 0,
+        // recall() reports injected=false. After T5ffsh4b0 wires
+        // assemble::assemble, M3 maps "preference" → predicate "prefers"
+        // and the fact is surfaced.
+        let o = recall(&hex_root, "what is the editor preference here", false);
+
+        assert!(
+            o.injected,
+            "recall must route through assemble — predicate-cue ('preference' → 'prefers') \
+             should surface the fact even when no token FTS-matches"
+        );
+        assert!(
+            o.facts_injected >= 1,
+            "expected ≥1 fact via M3 predicate cue, got {}",
+            o.facts_injected
+        );
+        assert!(
+            o.context.contains("prefers") && o.context.contains("vim keybindings"),
+            "context block must contain the M3-surfaced fact; got: {:?}",
+            o.context
+        );
+    }
 
     #[test]
     fn recall_returns_facts_alongside_chunks() {
