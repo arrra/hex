@@ -317,6 +317,9 @@ enum MemoryCommands {
         full: bool,
         #[arg(long)]
         stats: bool,
+        /// Run at full (normal) OS scheduling priority instead of background-throttled
+        #[arg(long)]
+        max: bool,
     },
     /// Parse Claude JSONL transcripts to markdown
     #[command(name = "parse-transcripts")]
@@ -608,7 +611,11 @@ fn main() {
                     };
                     memory::search::run(&hex_dir, &args)
                 }
-                MemoryCommands::Index { full, stats } => {
+                MemoryCommands::Index { full, stats, max } => {
+                    // --stats is a cheap read; only throttle the heavy index path.
+                    if !*stats {
+                        throttle::apply("memory index", *max);
+                    }
                     memory::index::run(&hex_dir, *full, *stats)
                 }
                 MemoryCommands::ParseTranscripts { file, dry_run, force } => {

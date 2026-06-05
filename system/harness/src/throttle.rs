@@ -53,22 +53,24 @@ pub fn lower_to_background() -> std::io::Result<()> {
 }
 
 /// Apply throttling based on the --max flag. Prints loudly (Rule P2/S6).
-pub fn apply(max: bool) {
+/// `task` labels the message so each background command (consolidate, memory
+/// index, …) reports its own throttle state.
+pub fn apply(task: &str, max: bool) {
     if should_throttle(max) {
         match lower_to_background() {
             Ok(()) => {
                 println!(
-                    "consolidate: running at throttled (background) priority — pass --max to run at full speed"
+                    "{task}: running at throttled (background) priority — pass --max to run at full speed"
                 );
             }
             Err(e) => {
                 eprintln!(
-                    "consolidate: WARN could not lower priority: {e} — continuing at normal priority"
+                    "{task}: WARN could not lower priority: {e} — continuing at normal priority"
                 );
             }
         }
     } else {
-        println!("consolidate: running at MAX priority (--max)");
+        println!("{task}: running at MAX priority (--max)");
     }
 }
 

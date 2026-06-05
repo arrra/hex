@@ -29,7 +29,7 @@ pub enum Mode {
 ///   1 — at least one layer reported issues or hard-failed
 pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
     // Self-throttle the whole process (every thread + IO) unless --max.
-    crate::throttle::apply(max);
+    crate::throttle::apply("consolidate", max);
 
     let mut any_fail = false;
 
