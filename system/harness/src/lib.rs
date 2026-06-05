@@ -1,4 +1,5 @@
 pub mod act_evidence;
+pub mod harness;
 pub mod capability_exec;
 pub mod audit;
 pub mod capability_guard;
