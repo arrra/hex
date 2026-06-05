@@ -22,6 +22,49 @@ use tokio::task::JoinHandle;
 use super::outbox::Outbox;
 use super::Worker;
 
+/// Long-running serve entry — hidden behind `hex harness serve` so launchd can
+/// invoke it. This is the minimal lifecycle hook for spec S5yw25n5y task
+/// Tr5zx0eay (CLI wiring). The full register→replay→reconcile→serve loop is
+/// implemented by task Td9yr0v31; this stub performs the pure init sequence
+/// against a temp outbox and returns 0 so the CLI surface is exercisable.
+pub fn serve(workers: Vec<Worker>) -> i32 {
+    let rt = match tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+    {
+        Ok(rt) => rt,
+        Err(e) => {
+            eprintln!("hex harness serve: failed to build tokio runtime: {e}");
+            return 1;
+        }
+    };
+    rt.block_on(async move {
+        // Place outbox under $HEX_DIR/.hex/harness/outbox.jsonl if HEX_DIR is set,
+        // otherwise fall back to a temp dir so this stub never panics.
+        let outbox_path = match std::env::var("HEX_DIR") {
+            Ok(dir) => std::path::PathBuf::from(dir)
+                .join(".hex")
+                .join("harness")
+                .join("outbox.jsonl"),
+            Err(_) => std::env::temp_dir().join("hex-harness-outbox.jsonl"),
+        };
+        if let Some(parent) = outbox_path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        let outbox = Outbox::new(outbox_path);
+        let recorder = InitRecorder::new();
+        if let Err(e) = init_with_recorder(&workers, &outbox, &recorder).await {
+            eprintln!("hex harness serve: init failed: {e}");
+            return 1;
+        }
+        eprintln!(
+            "hex harness serve: init complete ({} workers registered) — stub serve, exiting cleanly",
+            workers.len()
+        );
+        0
+    })
+}
+
 /// Where a `Ctx::emit` call should be routed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum EmitTarget {

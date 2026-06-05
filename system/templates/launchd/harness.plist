@@ -1,0 +1,51 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hex harness launchd template (spec S5yw25n5y, task Tr5zx0eay).
+
+  `hex harness start` renders this template by substituting:
+    HEXBIN_PLACEHOLDER -> $HEX_DIR/.hex/bin/hex
+    HEXDIR_PLACEHOLDER -> $HEX_DIR
+    PATH_PLACEHOLDER   -> runtime PATH
+    LOG_PLACEHOLDER    -> $HEX_DIR/.hex/logs/com.hex.harness.log
+
+  The harness is a single-process drain-aware host for the typed Rust workers
+  in `hex::workers::registry()`. The hidden `hex harness serve` entry IS the
+  long-running process — launchd invokes it; humans use `start|stop|status`.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hex.harness</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>HEXBIN_PLACEHOLDER</string>
+        <string>harness</string>
+        <string>serve</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>HEXDIR_PLACEHOLDER</string>
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HEX_DIR</key>
+        <string>HEXDIR_PLACEHOLDER</string>
+        <key>III_URL</key>
+        <string>ws://127.0.0.1:49134</string>
+        <key>PATH</key>
+        <string>PATH_PLACEHOLDER</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>LOG_PLACEHOLDER</string>
+    <key>StandardErrorPath</key>
+    <string>LOG_PLACEHOLDER</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>
