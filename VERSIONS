@@ -8,7 +8,6 @@
 # mrap/boi is the canonical BOI engine — migrated from the old V1 (YAML, "boi
 # 2.0.0") to the v2 TOML engine (control-socket daemon, ~/.boi/v2). The v3.0.0
 # release supersedes the old 2.0.0 line (V1 lives only in git history now).
-# hex-events tree removed 2026-05-24; Rust daemon is canonical, policies live at ~/.hex-events/policies/.
 
 BOI_VERSION=v3.0.1
 HARNESS_VERSION=v0.8.0

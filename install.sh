@@ -5,8 +5,8 @@ set -euo pipefail
 # hex install — Creates a hex instance on the user's machine.
 # Usage: bash install.sh [target_dir]
 #
-# hex is an all-or-nothing package. BOI (parallel workers) and hex-events
-# (reactive automation) are integral — there are no flags to skip them.
+# hex is an all-or-nothing package. BOI (parallel workers) is integral —
+# there are no flags to skip it.
 #
 # The repo is the installer, not the workspace. This script creates a
 # separate instance directory. The repo is disposable after install.
@@ -321,8 +321,8 @@ if [ -f "$MEMORY_REQS" ]; then
 fi
 
 # Read pinned versions from VERSIONS file (keeps install.sh in lock-step with
-# tested boi/hex-events releases). Fork-friendly: HEX_BOI_REPO and
-# HEX_EVENTS_REPO env vars override the default source.
+# tested boi releases). Fork-friendly: the HEX_BOI_REPO env var overrides the
+# default source.
 VERSIONS_FILE="$SCRIPT_DIR/VERSIONS"
 if [ ! -f "$VERSIONS_FILE" ]; then
     echo "ERROR: $VERSIONS_FILE not found — this hex-foundation checkout is incomplete."
@@ -393,13 +393,7 @@ BOISH
 }
 install_or_upgrade_boi
 
-# ── Phase 5: Ensure ~/.hex-events/policies/ directory exists ──────
-# system/events/ was removed (Rust hex-events daemon is canonical).
-# Just ensure the user's policies dir exists at ~/.hex-events/policies/.
-mkdir -p "$HOME/.hex-events/policies"
-echo "  ~/.hex-events/policies/  ✓"
-
-# ── Phase 6: Register install ──────────────────────────────────────
+# ── Phase 5: Register install ──────────────────────────────────────
 
 python3 -c "
 import json, os
@@ -467,8 +461,8 @@ _harness_download_prebuilt() {
 _harness_warn_missing() {
     echo ""
     echo "WARNING: hex binary could not be built or downloaded."
-    echo "  Install Rust (https://rustup.rs) and re-run to enable the agent fleet and server."
-    echo "  Core hex functionality (BOI, hex-events, memory) still works without it."
+    echo "  Install Rust (https://rustup.rs) and re-run to build the hex binary."
+    echo "  Core shell functionality (BOI, memory scripts) still works without it."
     echo ""
 }
 

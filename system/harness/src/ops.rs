@@ -25,7 +25,7 @@ pub struct EmitTarget {
 /// `{event, producer, ts, data}`.
 ///
 /// All hex events land under the `events` scope (one state surface that
-/// `hex-events` triggers subscribe to). The event name is used verbatim as
+/// iii triggers subscribe to). The event name is used verbatim as
 /// the key so distinct events fire distinct triggers.
 ///
 /// PURE: no clock, no env reads — the caller supplies `ts` and `producer`.
