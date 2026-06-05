@@ -746,14 +746,23 @@ fn target_user() -> String {
             return u;
         }
     }
-    std::process::Command::new("id")
+    if let Some(name) = std::process::Command::new("id")
         .arg("-un")
         .output()
         .ok()
         .and_then(|o| String::from_utf8(o.stdout).ok())
         .map(|s| s.trim().to_string())
         .filter(|s| !s.is_empty())
-        .unwrap_or_else(|| "mrap".to_string())
+    {
+        return name;
+    }
+    // Last resort: $LOGNAME, else $USER (even if root). An empty result makes the
+    // plist install fail loudly rather than silently mis-own the daemon.
+    std::env::var("LOGNAME")
+        .ok()
+        .filter(|s| !s.is_empty())
+        .or_else(|| std::env::var("USER").ok().filter(|s| !s.is_empty()))
+        .unwrap_or_default()
 }
 
 /// Agent-writable staging path for the rendered plist (the agent can't write
