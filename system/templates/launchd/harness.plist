@@ -1,17 +1,22 @@
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <!--
-  Hex harness launchd template (spec S5yw25n5y; gui LaunchAgent + SessionCreate
-  form 2026-06-05, superseding the short-lived LaunchDaemon form).
+  Hex harness launchd template (spec S5yw25n5y; gui LaunchAgent form 2026-06-05).
 
   This is a per-user gui LaunchAgent (installed to ~/Library/LaunchAgents), NOT a
   system LaunchDaemon. Reason: per the hex-as-own-harness design the harness runs
   per-task reasoning INSIDE `claude`, and Claude Code auth lives in the macOS
   LOGIN keychain — which a system daemon (no login session) cannot reach. A gui
-  LaunchAgent runs in the user's login session and CAN. `SessionCreate` bridges
-  the launchd-spawned process into a real security session so keychain lookups
-  succeed. (macOS 26 caveat: the SecurityAgent session is not inherited by child
-  processes — spawn `claude` as a DIRECT program, not `bash -> claude`.)
+  LaunchAgent bootstrapped into gui/<uid> runs in the user's Aqua login session
+  and inherits its unlocked login keychain.
+
+  NO `SessionCreate`. Empirically verified 2026-06-05 (keychain-launchagent-test):
+  a gui agent WITHOUT SessionCreate reads the login keychain (rc=0); WITH it the
+  read is BLOCKED (rc=36 errSecAuthFailed). `SessionCreate=true` spawns the job
+  into a NEW audit session, DETACHING it from the Aqua session that holds the
+  unlocked login keychain (per `man launchd.plist`). So it HURTS keychain access.
+  Do not re-add it. (macOS 26: spawn `claude` as a DIRECT program, not `bash ->
+  claude`, so the keychain-ACL identity stays clean.)
 
   Tradeoff vs a daemon: dies on logout. Accepted — FileVault forces a GUI login
   at every boot on this box, so there's effectively always a login session, and
@@ -40,11 +45,9 @@
     </array>
     <key>WorkingDirectory</key>
     <string>HEXDIR_PLACEHOLDER</string>
-    <!-- Bridge the launchd process into a real security session so the harness
-         (and the `claude` it spawns for per-task reasoning) can read the login
-         keychain. Without this a gui LaunchAgent can fail keychain lookups. -->
-    <key>SessionCreate</key>
-    <true/>
+    <!-- Intentionally NO SessionCreate — it detaches the job from the Aqua login
+         session and BLOCKS login-keychain access (verified: rc=36 with it, rc=0
+         without). A plain gui/<uid> agent inherits the keychain. -->
     <key>EnvironmentVariables</key>
     <dict>
         <key>HEX_DIR</key>

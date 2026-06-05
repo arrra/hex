@@ -2,6 +2,16 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-06-05] — harness plist: remove SessionCreate (it BLOCKS the login keychain) (v0.30.4)
+
+Empirically verified (keychain-launchagent-test on the live box): a gui LaunchAgent
+WITHOUT `SessionCreate` reads the login keychain (rc=0); WITH it the read is BLOCKED
+(rc=36 errSecAuthFailed). `SessionCreate=true` spawns the job into a NEW audit
+session, detaching it from the Aqua session that holds the unlocked login keychain
+(per `man launchd.plist`). The v0.30.2 harness plist set it, defeating the very
+keychain access it was meant to grant. Removed it; harness_cli_test now asserts its
+ABSENCE. (Deployed plists need a re-render + re-bootstrap to pick this up.)
+
 ## [2026-06-05] — harness runs as a gui LaunchAgent, not a system daemon (v0.30.2)
 
 Reverses the short-lived LaunchDaemon form from v0.30.0. The harness runs per-task

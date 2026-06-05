@@ -106,11 +106,13 @@ fn harness_plist_template_exists_and_invokes_hex_harness_serve() {
         body.contains("com.hex.harness"),
         "harness.plist must use the com.hex.harness label; got:\n{body}"
     );
-    // gui LaunchAgent form: must declare SessionCreate so the harness's `claude`
-    // reasoning can reach the login keychain (a system daemon could not).
+    // gui LaunchAgent form: must NOT declare SessionCreate — it detaches the job
+    // from the Aqua login session and BLOCKS login-keychain access (verified
+    // 2026-06-05: rc=36 with it, rc=0 without). A plain gui/<uid> agent inherits
+    // the keychain.
     assert!(
-        body.contains("<key>SessionCreate</key>"),
-        "harness.plist must declare SessionCreate (gui LaunchAgent keychain bridge); got:\n{body}"
+        !body.contains("<key>SessionCreate</key>"),
+        "harness.plist must NOT set SessionCreate (it blocks login-keychain access); got:\n{body}"
     );
     // The folded-in backup worker needs the file keyring backend (gws can't reach
     // the login keychain from a headless daemon).
