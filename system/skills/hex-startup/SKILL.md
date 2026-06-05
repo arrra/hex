@@ -60,6 +60,3 @@ Then say: "You're set up. I'll learn more about how you work over the next few s
 
 Surface a brief summary: "Ready. Here's what needs attention today:" followed by top priorities, meetings to prep, overdue items, any pending improvement suggestions, and any reflection fixes applied since last session.
 
-## Step 3: Team Sync (if configured)
-
-Check `teams.json`. If teams are configured, mention any unsynced updates. Don't auto-sync. Just surface: "Team updates available. Run /hex-sync-base when ready."

@@ -26,7 +26,6 @@ digraph hex_skills {
   "hex-connect-team" [fillcolor="#ff9999", fontcolor="#990000", label="hex-connect-team\n⛔ REMOVE"];
 
   // Connected
-  "hex-triage" [fillcolor="#d4c5f9"];
   "hex-decide" [fillcolor="#d4c5f9"];
   "hex-context-sync" [fillcolor="#d4c5f9"];
   "boi-delegation" [fillcolor="#d4c5f9"];
@@ -42,14 +41,12 @@ digraph hex_skills {
   "hermes-memory-migration" [fillcolor="#e8e8e8"];
   "hex-consolidate" [fillcolor="#e8e8e8"];
   "context-save" [fillcolor="#e8e8e8"];
-  "hex-switch" [fillcolor="#e8e8e8"];
   "hex-scout" [fillcolor="#e8e8e8"];
   "hex-bookmarks" [fillcolor="#e8e8e8"];
   "hex-ui" [fillcolor="#e8e8e8"];
 
   // Edges — session lifecycle
   "hex-startup" -> "hex-doctor";
-  "hex-startup" -> "hex-triage";
   "hex-startup" -> "memory";
   "hex-shutdown" -> "hex-checkpoint";
   "hex-checkpoint" -> "memory";
