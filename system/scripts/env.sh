@@ -19,6 +19,15 @@ _tz="$(hex env tz 2>/dev/null)"
 [[ -n "${_tz:-}" && -z "${TZ:-}" ]] && export TZ="$_tz"
 unset _tz
 
+# Load secrets — 0600 *.env files (tokens/keys) under .hex/secrets/, sourced so their
+# `export`ed vars (e.g. CLAUDE_CODE_OAUTH_TOKEN) enter the agent/daemon environment.
+if [[ -d "$HEX_DIR/.hex/secrets" ]]; then
+  for _sf in "$HEX_DIR"/.hex/secrets/*.env; do
+    [[ -r "$_sf" ]] && source "$_sf"
+  done
+  unset _sf
+fi
+
 # claude() must live in shell namespace — cannot move to Rust
 claude() {
   local claude_bin
