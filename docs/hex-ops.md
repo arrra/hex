@@ -5,6 +5,54 @@ LaunchAgents, and **telemetry**.
 
 ---
 
+## LaunchAgents (launchd)
+
+hex's supervised long-running services run as **per-user gui LaunchAgents** in
+`~/Library/LaunchAgents/`, bootstrapped into the **`gui/<uid>`** domain, with
+**`SessionCreate=true`** and **no `UserName`**. Examples: `com.hex.harness` (the core
+harness); `com.mrap.boi-daemon` (the personal BOI daemon — same pattern). The code already
+implements this: `hex harness start|stop|status` targets `gui/$(id -u)/com.hex.harness` and
+`upgrade.rs` kickstarts the same target after a binary swap.
+
+### Why gui/ + SessionCreate (rationale)
+
+The harness runs per-task reasoning *inside* `claude`, and BOI workers spawn `claude`;
+Claude Code auth lives in the macOS **login keychain**. `SessionCreate=true` bridges the
+launchd job into the user's Aqua login (security) session so keychain lookups succeed. The
+alternatives cannot reach the login keychain:
+
+| Option | Login keychain | Notes |
+|---|---|---|
+| **gui/ LaunchAgent + SessionCreate** (chosen) | yes — via the Aqua session | must be bootstrapped from a real GUI login session |
+| user/ LaunchAgent (no SessionCreate) | no — no Aqua session | `SessionCreate` + `user/` also fails to bootstrap (EIO) |
+| system LaunchDaemon (`UserName=mrap`) | no — runs outside any login session | starts at boot but can't read the login keychain |
+
+FileVault forces a GUI login at every boot on this box, so there is effectively always a
+login session — the gui LaunchAgent's only downside ("dies on logout") is moot.
+
+**macOS 26 caveat:** the SecurityAgent session is NOT inherited by child processes — spawn
+`claude` as a DIRECT program, never `bash -> claude`, or it loses keychain access.
+
+### Operational gotchas (learned 2026-06-05)
+
+- **Bootstrap only from a real GUI login session.** `launchctl bootstrap` returns
+  `Input/output error` (errno 5) when run from a *detached* session — inside **tmux**,
+  under the **Happy daemon**, or over plain **SSH** — because those carry their own audit
+  session (`asid`), not the Aqua login session. The sandboxed agent shell cannot bootstrap
+  either. Run it from **Terminal.app at the Mac console or via Screen Sharing**.
+- **Reload = `bootout` THEN `bootstrap`.** `bootstrap` alone fails on an already-loaded
+  service. After editing a plist:
+  ```
+  launchctl bootout   gui/$(id -u)/com.hex.harness
+  launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hex.harness.plist
+  ```
+- **Diagnose which session you're in:** `launchctl print pid/$$ | grep -E 'asid|coalition'`.
+  If the coalition is `com.mrap.tmux-boot` (or the `asid` is not your Aqua login session),
+  `launchctl bootstrap` will EIO from there — switch to a GUI terminal.
+- **Status / health:** `launchctl print gui/$(id -u)/com.hex.harness | grep -E 'state =|pid ='`.
+
+---
+
 ## Telemetry
 
 hex telemetry is a **native, local SQLite event store** owned by the Rust
