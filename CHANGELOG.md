@@ -2,6 +2,29 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-06-05] — iii engine baked into hex; at-most-once harness daemon (v0.30.0)
+
+The iii engine is now compiled INTO the `hex` binary (forked `mrap/hex-iii`,
+pinned in lockstep with `iii-sdk`) and hosted in-process by `hex harness serve` —
+there is no separate `iii` binary or `com.hex.iii-engine` service.
+
+### Changed
+- **Engine baked in.** `hex harness serve` boots the engine in a tokio task
+  (`EngineBuilder::default_config().build().serve()`), connects the worker
+  runtime over loopback WS, and runs the whole stack as one process.
+- **Workers are typed Rust** in `hex::workers::registry()`, hosted by the single
+  `hex harness` process. At-most-once delivery with graceful drain on SIGTERM and
+  a durable shutdown-deferral outbox replayed EXACTLY ONCE on restart. Proven by
+  a vendorless container E2E (`tests/harness-e2e/`), wired into core-e2e.
+- **`hex harness` deploys as a system LaunchDaemon** (`UserName`), not a gui
+  LaunchAgent, so it survives logout / no-login-session. `start` stages the plist
+  and prints the privileged `launchctl bootstrap system …` sequence.
+
+### Removed
+- The declarative YAML worker host (`src/iii_worker.rs`) and the `hex worker` CLI.
+- Obsolete deploy artifacts: `com.hex.iii-engine.plist`, `iii-worker.plist`,
+  `scripts/iii-engine.sh`.
+
 ## [Unreleased] — Collapse hex to Claude Code + BOI
 
 Collapsed hex to Claude Code + BOI: removed the hex-events policy engine + daemon + `hex events` CLI, the SSE/HTTP server + assets + extensions + boi-web, telemetry (`hex telemetry`/`hex metrics`), the workspace picker, the `hex-event`/`hex-agents` skills, and event emission from hooks/memory. Automation moves to OS-level (launchd) per-job scheduling; there is no event bus. SSE/hex-ui is fully removed.
