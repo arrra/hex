@@ -47,7 +47,16 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
     println!("\n-- Layer 2: memory db (memory::consolidate) --");
     let db_path = crate::memory::db_path(hex_dir);
     match crate::memory::open_db(&db_path) {
-        Ok(mut conn) => match crate::memory::consolidate::run(&mut conn) {
+        Ok(mut conn) => {
+            // Phase A transcript-delta backstop: discover raw/transcripts/*.md
+            // not yet registered and run the distill watermark pipeline over the
+            // delta so corrections the live agent missed get captured. Runs
+            // BEFORE the standard ops so `catchup-distill` sees the new rows.
+            if let Err(e) = crate::memory::consolidate::op_transcript_backstop(&mut conn, hex_dir) {
+                eprintln!("Layer 2 transcript-backstop FAILED: {e}");
+                any_fail = true;
+            }
+            match crate::memory::consolidate::run(&mut conn) {
             Ok(report) => {
                 println!(
                     "Layer 2 ok={} failed={}",
@@ -65,7 +74,8 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
                 eprintln!("Layer 2 hard-failed: {e}");
                 any_fail = true;
             }
-        },
+            }
+        }
         Err(e) => {
             eprintln!("Layer 2 hard-failed: cannot open memory.db at {}: {e}", db_path.display());
             any_fail = true;
@@ -208,6 +218,77 @@ mod tests {
         fs::create_dir_all(&me).unwrap();
         fs::write(me.join("learnings.md"), "").unwrap();
         dir
+    }
+
+    /// RED test for task T36af0tn0 (Phase A transcript-delta backstop).
+    ///
+    /// Behavior under test: `consolidate::run(Mode::Quick, ...)` must include a
+    /// new layer that scans `raw/transcripts/*.md`, reads from each file's
+    /// memory.db watermark forward (reusing `memory::distill::watermark`), runs
+    /// the distill pipeline on the delta, and advances the watermark. It must
+    /// tolerate not-yet-parsed transcripts / missing LLM gracefully (no crash),
+    /// and a second run must be a no-op (exactly-once: no duplicated rows, no
+    /// regressed watermark).
+    ///
+    /// Today's `op_catchup_distill` only looks at rows ALREADY in
+    /// `transcript_files`; it never *discovers* a seeded `raw/transcripts/*.md`
+    /// that hasn't been registered by `parse-transcripts`. The backstop must
+    /// close that gap so corrections the live agent missed get captured.
+    #[test]
+    fn quick_transcript_backstop_registers_seeded_transcript_and_is_idempotent() {
+        let dir = fake_hex_dir();
+        let trans_dir = dir.path().join("raw").join("transcripts");
+        fs::create_dir_all(&trans_dir).unwrap();
+        let sample = trans_dir.join("2026-06-05.md");
+        fs::write(
+            &sample,
+            "user: please always run tests before claiming done.\n\
+             agent: noted — TDD is mandatory.\n",
+        )
+        .unwrap();
+        let sample_str = sample.to_str().unwrap().to_string();
+
+        // Disable LLM so extract is deferred — the backstop must still tolerate
+        // this without crashing (graceful gap-tolerance per the spec).
+        std::env::remove_var("OPENROUTER_API_KEY");
+
+        let code = run(Mode::Quick, true, dir.path());
+        assert!(code == 0 || code == 1, "unexpected exit code {code}");
+
+        let db = crate::memory::db_path(dir.path());
+        let conn = crate::memory::open_db(&db).unwrap();
+        let count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_files WHERE path=?1",
+                rusqlite::params![sample_str.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            count >= 1,
+            "Phase A transcript backstop must discover and register \
+             raw/transcripts/*.md in memory.db's transcript_files \
+             (none was registered for {sample_str})"
+        );
+        drop(conn);
+
+        // Second invocation must be a no-op — no duplicate row, no regression.
+        let code2 = run(Mode::Quick, true, dir.path());
+        assert!(code2 == 0 || code2 == 1, "unexpected exit code {code2}");
+
+        let conn = crate::memory::open_db(&db).unwrap();
+        let count2: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM transcript_files WHERE path=?1",
+                rusqlite::params![sample_str.as_str()],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            count, count2,
+            "second backstop run must not duplicate the transcript_files row \
+             (exactly-once contract)"
+        );
     }
 
     #[test]

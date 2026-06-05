@@ -1,4 +1,5 @@
-use rusqlite::Connection;
+use rusqlite::{Connection, OptionalExtension};
+use std::path::Path;
 
 #[derive(Default, serde::Serialize)]
 pub struct ConsolidateReport {
@@ -100,6 +101,59 @@ fn op_prune(conn: &mut Connection) -> anyhow::Result<()> {
 
 fn op_topic_rollup(_conn: &mut Connection) -> anyhow::Result<()> {
     // Not yet implemented: maintain topics/fact_topics rollup.
+    Ok(())
+}
+
+/// Phase A transcript-delta backstop.
+///
+/// Scans `raw/transcripts/*.md`, registers any not-yet-known file in
+/// `transcript_files` (reusing `memory::distill::watermark` — do NOT reinvent),
+/// then runs the existing distill pipeline on the delta from that watermark
+/// forward to capture corrections/decisions the live agent missed. Tolerates
+/// gaps gracefully: not-yet-parsed transcripts, missing LLM key, sub-threshold
+/// spans, parse failures — all are swallowed so the run continues. Idempotent:
+/// a second invocation with no new content is a no-op (no duplicated row, no
+/// regressed watermark).
+pub fn op_transcript_backstop(conn: &mut Connection, hex_dir: &Path) -> anyhow::Result<()> {
+    let dir = hex_dir.join("raw").join("transcripts");
+    if !dir.exists() {
+        return Ok(());
+    }
+
+    let mut entries: Vec<std::path::PathBuf> = std::fs::read_dir(&dir)?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.is_file() && p.extension().and_then(|s| s.to_str()) == Some("md"))
+        .collect();
+    entries.sort();
+
+    for p in entries {
+        let path_str = match p.to_str() {
+            Some(s) => s.to_string(),
+            None => continue,
+        };
+
+        // Register the file in transcript_files if absent. Reuses the
+        // watermark primitive so there's exactly one writer to that table.
+        let exists: bool = conn
+            .query_row(
+                "SELECT 1 FROM transcript_files WHERE path=?1",
+                rusqlite::params![path_str.as_str()],
+                |_| Ok(true),
+            )
+            .optional()?
+            .unwrap_or(false);
+        if !exists {
+            crate::memory::distill::watermark::advance_offset(conn, &path_str, 0)?;
+        }
+
+        // Distill the delta. Errors (LLM unavailable, parse failure, etc.) are
+        // tolerated so the backstop never crashes on partial state. The
+        // watermark advances only when extraction succeeds end-to-end.
+        if let Err(e) = crate::memory::distill::run_on_file(conn, &path_str, 0) {
+            eprintln!("transcript-backstop: distill deferred for {path_str}: {e}");
+        }
+    }
+
     Ok(())
 }
 
