@@ -49,7 +49,7 @@ The components handle execution. The feedback loops handle learning:
 |-----------|------|----------|--------------|
 | **BOI** (orchestrator) | Dispatch specs to Claude Code workers | `~/.boi/` | `cd ~/.boi && python -m pytest` |
 | **hex-ops** | Session mgmt, dashboards, LaunchAgents | `.hex/scripts/`, `.hex/bin/` | Manual inspection |
-| **hex harness** | Multi-agent fleet driver (Rust) | `.hex/bin/hex` | `cd .hex/harness && cargo test` |
+| **hex harness** | Single-process host for typed Rust workers | `.hex/bin/hex` | `cd .hex/harness && cargo test` |
 
 ---
 
@@ -82,28 +82,12 @@ The components handle execution. The feedback loops handle learning:
 ### During Work
 - BOI daemon dispatches specs to Claude Code workers in isolated worktrees
 - Landings tracked in `landings/` directory
-- Multi-agent fleet driven by `.hex/bin/hex` harness
+- Typed Rust workers hosted by the `.hex/bin/hex` harness
 
 ### Session End
 - `/hex-shutdown` deregisters session ID
 - Checkpoint written
 - Outstanding BOI work left running (daemon persists across sessions)
-
----
-
-## Multi-Agent Fleet
-
-The hex harness (`.hex/bin/hex`) drives a fleet of autonomous agents. Each agent has a charter (`projects/<agent-id>/charter.yaml`) defining its scope, KPIs, and autonomy tier.
-
-Key commands:
-```bash
-hex agent fleet                    # Fleet overview
-hex agent wake <id> --trigger <e>  # Run agent shift
-hex agent status <id>              # Single agent detail
-hex agent message <from> <to> ...  # Async inter-agent message
-```
-
-Full multi-agent reference: [multi-agent.md](multi-agent.md).
 
 ---
 
@@ -436,6 +420,4 @@ For use by `hex-feedback-loops.py`:
 
 | Doc | Contents |
 |-----|----------|
-| [orchestrator-interface.md](orchestrator-interface.md) | Orchestrator interface, BOI setup, roll-your-own guide |
 | [hex-ops.md](hex-ops.md) | Scripts reference, LaunchAgents, session protocol, memory system |
-| [multi-agent.md](multi-agent.md) | Agent fleet, harness mechanics, state model, gates, messaging, CLI |
