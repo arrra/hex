@@ -56,6 +56,15 @@ fn main() {
     }
     entries.sort();
 
+    // Loud (S6) on ident collision — two files mapping to the same mod ident
+    // would otherwise surface as an opaque rustc "defined multiple times" error.
+    let mut seen = std::collections::HashSet::new();
+    for (ident, path) in &entries {
+        if !seen.insert(ident.clone()) {
+            panic!("hex module: ident collision on '{ident}' (from '{path}') — rename the file");
+        }
+    }
+
     let mut gen = String::new();
     for (ident, path) in &entries {
         gen.push_str(&format!("#[path = \"{path}\"] pub mod {ident};\n"));
@@ -108,6 +117,9 @@ fn collect_worker_files(
                     path.display(), ident
                 );
             }
+            // Per-file rerun trigger so edits to a nested module rebuild
+            // (the per-root dir watch alone can miss deep-subdir file changes).
+            println!("cargo:rerun-if-changed={}", path.display());
             out.push((ident, path.to_str().unwrap().to_string()));
         }
     }
