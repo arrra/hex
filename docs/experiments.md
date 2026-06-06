@@ -2,7 +2,7 @@
 
 **Status:** Canonical reference  
 **Date:** 2026-04-22  
-**Relates to:** architecture.md, multi-agent.md
+**Relates to:** architecture.md
 
 ---
 
@@ -268,26 +268,24 @@ With `--json`: machine-readable output for agent consumption.
 
 ## 6. Integration points
 
-### Agent integration
+### Claude Code integration
 
-Agents propose experiments via a new charter action type:
+A Claude Code session proposes an experiment by writing the YAML and running
+`hex experiment create <file>` inline. Baselining, activation, and measurement
+are driven by the human operator (or a scheduled OS-level job) — never by the
+session that authored the change. This separation exists because the author
+cannot objectively measure a change they shipped.
 
-```yaml
-- type: experiment_propose
-  file: /tmp/exp-draft.yaml
-  rationale: "BOI is wasting compute on stalled specs"
-```
+Status is queried for reasoning:
 
-The harness runs `hex experiment create <file>`, records the experiment ID in the agent's state (`active_experiments: [exp-001]`), and feeds validation errors back on the agent's next wake.
-
-Agents do NOT run `baseline`, `activate`, or `measure` — those require human or scheduled triggers. This separation prevents agents from closing experiments they authored.
-
-Agents query experiment status for reasoning:
 ```bash
 hex experiment status exp-001 --json
 ```
 
-Harness rate-limits proposals: agents with ≥3 active (non-terminal) experiments cannot propose more. Duplicate hypothesis (exact match) is rejected.
+There is no charter-action mechanism, no agent fleet, no "next wake" feedback
+loop, and no harness rate-limiter — those framings were demolished. Discipline
+("don't run more than ~3 concurrent experiments") is a human convention, not a
+machine-enforced cap.
 
 ### BOI integration
 
@@ -315,9 +313,12 @@ exit(0 if d['state']=='VERDICT_PASS' else 1)"
 
 At `measure` time, the runner reads `.hex/cost/ledger.jsonl` and sums API spend from `activated_at` to `now`. Written to `post_change.experiment_window_cost_usd`. Optionally surfaced as a guardrail via the `__experiment_window_cost__` sentinel.
 
-### Fleet-wide view
+### Workspace-wide view
 
-The hex-ops agent wake includes `hex experiment status` in its context when ≥1 non-terminal experiment exists. The doctor watchdog flags stale experiments as part of health checks.
+Run `hex experiment status` to see all open experiments at a glance. The
+`hex doctor` watchdog may flag stale experiments as part of its health
+checks. There is no fleet-wide aggregation or background "wake" context —
+those framings were demolished.
 
 ---
 
@@ -402,7 +403,7 @@ One primary metric per experiment. If you're tempted to add a second, you're hed
 Agents propose experiments but cannot baseline, activate, or measure them. This separation exists because an agent cannot objectively measure a change it authored and has incentive to validate.
 
 **Too many concurrent experiments.**  
-The harness caps agents at 3 active experiments. Humans should apply similar discipline — too many open experiments means none get properly measured.
+Keep concurrent experiments small (rule of thumb: ≤3). Too many open experiments means none get properly measured.
 
 **Forgetting rollback plans.**  
 Every experiment file requires a `rollback_plan.commands` block. Write it before you ship the change, not after you discover the verdict is FAIL.

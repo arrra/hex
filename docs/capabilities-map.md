@@ -134,8 +134,6 @@
   _via built-in · [cron system]_
 - 🟢 **Hex Dashboard Auto-Update** — Slack canvas dashboard refreshed every 2 hours via cron
   _via cron+script · [.claude/scripts/generate-hex-dashboard.py]_
-- 🟢 **Morning Brief** — Daily 6am brief — priorities, landings, north star, open threads
-  _via cron+script · [.claude/morning-brief.md]_
 - 🔵 **Agent Browser** — Browser automation via the agent-browser CLI (Vercel). Rust-native, token-efficient alternative to Playwright for AI agent browser control. Use for web scraping, e2e testing, form filling, and control
   _via skill · [~/.hex/legacy-skills/skills/software-development/agent-browser/SKILL.md]_
 
@@ -148,8 +146,6 @@
   _via skill · [.claude/skills/conjecture-criticism/]_
 - 🟢 **Evolution Engine** — 5-phase improvement loop — observe, record, suggest, implement, track
   _via process · [evolution/]_
-- 🟢 **Hex Reflect** — >
-  _via hex-skill · [~/.claude/skills/hex-reflect/SKILL.md]_
 - 🟢 **Session Reflection** — Post-conversation analysis extracting learnings and failure patterns
   _via skill · [.claude/skills/reflect/]_
 - 🟢 **Standing Orders** — 34 behavioral rules from real usage friction, with escalation mechanisms
@@ -212,8 +208,6 @@
 ## 🎨 Creative
 *Image gen, ASCII art, music, diagrams*
 
-- 🟢 **Hex Startup** — >
-  _via hex-skill · [~/.claude/skills/hex-startup/SKILL.md]_
 - 🔵 **Ascii Art** — Generate ASCII art using pyfiglet (571 fonts), cowsay, boxes, toilet, image-to-ascii, remote APIs (asciified, ascii.co.uk), and LLM fallback. No API keys required.
   _via skill · [~/.hex/legacy-skills/skills/creative/ascii-art/SKILL.md]_
 - 🔵 **Ascii Video** — Production pipeline for ASCII art video — any format. Converts video/audio/images/generative input into colored ASCII character video output (MP4, GIF, image sequence). Covers: video-to-ASCII conversi
@@ -372,8 +366,6 @@
   _via hex-skill · [~/.claude/skills/gws-gmail-triage/SKILL.md]_
 - 🟢 **Gws Shared** — gws CLI: Shared patterns for authentication, global flags, and output formatting.
   _via hex-skill · [~/.claude/skills/gws-shared/SKILL.md]_
-- 🟢 **Hex Checkpoint** — >
-  _via hex-skill · [~/.claude/skills/hex-checkpoint/SKILL.md]_
 - 🟢 **Hex Connect Team** — >
   _via hex-skill · [~/.claude/skills/hex-connect-team/SKILL.md]_
 - 🟢 **Hex Context Sync** — Weekly context sync — walk through projects, org signals, relationships, and career
@@ -386,8 +378,6 @@
   _via hex-skill · [~/.claude/skills/hex-doctor/SKILL.md]_
 - 🟢 **Hex Save** — >
   _via hex-skill · [~/.claude/skills/hex-save/SKILL.md]_
-- 🟢 **Hex Shutdown** — >
-  _via hex-skill · [~/.claude/skills/hex-shutdown/SKILL.md]_
 - 🟢 **Hex Switch** — >
   _via hex-skill · [~/.claude/skills/hex-switch/SKILL.md]_
 - 🟢 **Hex Sync** — >

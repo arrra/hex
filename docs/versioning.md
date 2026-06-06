@@ -22,6 +22,10 @@ system/harness/Cargo.toml (source of truth)
 
 ## Releasing a New Version
 
+> **Note:** `system/scripts/release.sh` is **retiring — new pipeline** is being built.
+> The flow below documents the current behavior only until the replacement lands;
+> do not invest in extending it.
+
 Use `release.sh bump-version <new-version>` in hex-foundation:
 
 ```sh

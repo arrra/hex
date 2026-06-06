@@ -61,7 +61,7 @@ Installs hex to a temp dir and verifies that every path reference inside SKILL.m
 
 Runs Claude Code in `--print` mode inside a fresh hex install and asserts:
 
-1. All 11 shipped skills appear in Claude's response to a discovery prompt.
+1. All currently shipped skills appear in Claude's response to a discovery prompt (session-lifecycle skills `hex-startup`, `hex-checkpoint`, `hex-shutdown`, `hex-reflect` were demolished and must not be expected here).
 2. At least 3 skills (`/hex-doctor`, `/hex-decide`, `/hex-triage`) can be invoked without crashing.
 
 Requires `~/.hex-test.env` with `ANTHROPIC_API_KEY`.
@@ -88,7 +88,7 @@ bash tests/codex-parity/run-all.sh
 | `test-boi-dispatch-codex.sh` | Minimal spec with `runtime=codex` completes and produces output | Yes |
 | `test-memory-search.sh` | Memory search index and CLI work identically under the Codex runtime | No |
 
-Gate 5 in `system/scripts/release.sh` runs this suite and blocks on failure; structural tests always run, live tests are skipped when no key is present.
+Gate 5 in `system/scripts/release.sh` runs this suite and blocks on failure; structural tests always run, live tests are skipped when no key is present. (Note: `release.sh` is **retiring — new pipeline** is being built; references here remain only until the replacement lands.)
 
 ## Running locally
 
@@ -138,19 +138,17 @@ bash tests/eval/run_eval_docker.sh --live --case skill-discovery-codex
 bash tests/eval/run_eval_macos.sh
 ```
 
-## Shipped skills (as of v0.2.4)
+## Shipped skills
 
-The 10 skills installed under `.hex/skills/` (verified by `test_skill_discovery.sh`).
+The skills installed under `.hex/skills/` (verified by `test_skill_discovery.sh`).
 Note: `hex-consolidate` was removed in favor of the `hex memory consolidate full|quick`
 binary subcommand (the single consolidate surface — see `architecture.md`).
+The session-lifecycle skills (`hex-startup`, `hex-checkpoint`, `hex-shutdown`,
+`hex-reflect`, `hex-debrief`) were demolished — they are no longer shipped and
+must not be re-added to this test plan.
 
-1. `hex-startup`
-2. `hex-checkpoint`
-3. `hex-shutdown`
-4. `hex-reflect`
-5. `hex-debrief`
-6. `hex-decide`
-7. `hex-triage`
-8. `hex-doctor`
-9. `landings`
-10. `memory`
+1. `hex-decide`
+2. `hex-triage`
+3. `hex-doctor`
+4. `landings`
+5. `memory`
