@@ -428,6 +428,12 @@ fn main() {
             HarnessCommands::Status => std::process::exit(harness_status()),
             HarnessCommands::Logs { lines } => std::process::exit(harness_logs(lines)),
             HarnessCommands::Serve => {
+                // Bootstrap secrets before the worker runtime starts (before any
+                // thread is spawned). Reads $HEX_DIR/.hex/secrets/*.env and injects
+                // into the process env — no secrets appear in the plist.
+                if let Ok(hex_dir) = std::env::var("HEX_DIR") {
+                    bootstrap_secrets_env(std::path::Path::new(&hex_dir));
+                }
                 std::process::exit(hex::worker::runtime::serve(hex::workers::registry()))
             }
         },
@@ -732,57 +738,69 @@ fn build_harness_spec(hex_dir: &std::path::Path) -> daemon_green::ServiceSpec {
         .keep_alive(true)
         .run_at_load(true)
         .log_path(log_path);
-    // Fold in .hex/secrets/*.env so the harness's cron workers authenticate:
-    // consolidate's LLM distill (the reflection backstop) needs CLAUDE_CODE_OAUTH_TOKEN,
-    // gws backup needs its creds. launchd doesn't source env.sh and domain `setenv` is
-    // not reliably inherited. The setup-token lives in an env var (not the keychain),
-    // so a plist EnvironmentVariables entry is sufficient — no shell wrapper needed.
-    for (k, v) in load_secrets_env(hex_dir) {
-        spec = spec.env(k, v);
-    }
+    // Secrets are NOT baked into the plist. The harness reads
+    // $HEX_DIR/.hex/secrets/*.env at serve startup via bootstrap_secrets_env()
+    // (called in main() before the worker runtime starts). The plist carries
+    // only non-secret config: HEX_DIR, PATH, III_URL, log path.
     spec
 }
 
-/// Read `export KEY=VALUE` (or bare `KEY=VALUE`) pairs from `$HEX_DIR/.hex/secrets/*.env`,
-/// skipping symlinks (external/duplicate MCP `.env`s) and unreadable files. Mirrors
-/// env.sh's secrets-loading so the launchd-hosted harness gets the same credentials as
-/// an interactive shell. Re-read on every `hex harness start`, so it stays current.
-fn load_secrets_env(hex_dir: &std::path::Path) -> Vec<(String, String)> {
-    let mut out = Vec::new();
+/// Load every `*.env` file from `$HEX_DIR/.hex/secrets/` into the process
+/// environment. Called at `hex harness serve` startup, before any thread is
+/// spawned. Follows symlinks (metadata()) so symlinked secrets files work.
+///
+/// # Safety
+/// Must be called before any thread is spawned. std::env::set_var is unsound
+/// in a multi-threaded context.
+#[allow(unsafe_code)]
+fn bootstrap_secrets_env(hex_dir: &std::path::Path) {
+    use std::os::unix::fs::PermissionsExt;
     let dir = hex_dir.join(".hex").join("secrets");
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return out;
+    let entries = match std::fs::read_dir(&dir) {
+        Ok(e) => e,
+        Err(_) => return,
     };
     for entry in entries.flatten() {
         let path = entry.path();
         if path.extension().and_then(|s| s.to_str()) != Some("env") {
             continue;
         }
-        if std::fs::symlink_metadata(&path)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(true)
-        {
+        // metadata() follows symlinks — symlinked secrets files are intentional.
+        let mode = path
+            .metadata()
+            .map(|m| m.permissions().mode() & 0o077)
+            .unwrap_or(0o077);
+        if mode != 0 {
+            eprintln!(
+                "hex harness: skipping {} — unsafe permissions (run: chmod 600 {})",
+                path.display(),
+                path.display()
+            );
             continue;
         }
-        let Ok(content) = std::fs::read_to_string(&path) else {
-            continue;
-        };
-        for line in content.lines() {
-            let trimmed = line.trim();
-            let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
-            if trimmed.is_empty() || trimmed.starts_with('#') {
+        let content = match std::fs::read_to_string(&path) {
+            Ok(c) => c,
+            Err(e) => {
+                eprintln!("hex harness: skipping {}: {e}", path.display());
                 continue;
             }
-            if let Some((k, v)) = trimmed.split_once('=') {
+        };
+        for raw in content.lines() {
+            let line = raw.trim().strip_prefix("export").unwrap_or(raw.trim()).trim();
+            if line.is_empty() || line.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = line.split_once('=') {
                 let k = k.trim();
-                let v = v.trim().trim_matches('"').trim_matches('\'');
+                let v = v.trim().trim_matches('\'').trim_matches('"');
                 if !k.is_empty() {
-                    out.push((k.to_string(), v.to_string()));
+                    // SAFETY: called before worker runtime spawns threads.
+                    unsafe { std::env::set_var(k, v) };
+                    eprintln!("hex harness: loaded {k} from {}", path.display());
                 }
             }
         }
     }
-    out
 }
 
 /// `hex harness start` — install (idempotent) and load the per-user service.
