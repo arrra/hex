@@ -7,6 +7,8 @@
 use crate::harness::{Answer, Prompt};
 use rusqlite::{params, Connection};
 
+pub mod resolve;
+
 #[derive(Debug, Clone)]
 pub struct StoredMessage {
     pub id: String,
