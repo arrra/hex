@@ -101,6 +101,12 @@ enum Commands {
         #[command(subcommand)]
         command: TelemetryCommands,
     },
+    /// Questions & replies: ask a structured question, reply to one by id.
+    #[command(display_order = 4)]
+    Messages {
+        #[command(subcommand)]
+        command: MessagesCommands,
+    },
     /// Print version
     #[command(display_order = 15)]
     Version,
@@ -108,6 +114,20 @@ enum Commands {
     #[command(display_order = 12)]
     Completions {
         shell: clap_complete::Shell,
+    },
+}
+
+#[derive(Subcommand)]
+enum MessagesCommands {
+    /// Submit a message; prints the Result (and any question's options + ids).
+    Submit { text: String },
+    /// Reply to a question by id. Selection = `b` or `a,c` (option ids); plus optional --text.
+    Reply {
+        question_id: String,
+        #[arg(default_value = "")]
+        selection: String,
+        #[arg(long)]
+        text: Option<String>,
     },
 }
 
@@ -655,6 +675,9 @@ fn main() {
         Commands::Telemetry { command } => {
             std::process::exit(run_telemetry(command));
         }
+        Commands::Messages { command } => {
+            std::process::exit(run_messages(command));
+        }
         Commands::Hook { command } => hook::run(command),
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
@@ -913,6 +936,51 @@ fn print_event_json(rows: &[telemetry::EventRow]) {
         })
         .collect();
     println!("{}", serde_json::to_string_pretty(&items).unwrap());
+}
+
+fn run_messages(command: MessagesCommands) -> i32 {
+    let hex_dir = get_hex_dir();
+    let db = hex::memory::db_path(&hex_dir);
+    let conn = match hex::memory::open_db(&db) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("hex messages: cannot open {}: {e}", db.display());
+            return 1;
+        }
+    };
+    let event = match &command {
+        MessagesCommands::Submit { text } => hex::messages::build_submit_event(text),
+        MessagesCommands::Reply {
+            question_id,
+            selection,
+            text,
+        } => {
+            let ids: Vec<&str> = selection
+                .split(',')
+                .map(|s| s.trim())
+                .filter(|s| !s.is_empty())
+                .collect();
+            hex::messages::build_reply_event(question_id, &ids, text.clone())
+        }
+    };
+    match hex::harness::submit(&conn, &event, hex::worker::run::run_worker) {
+        Ok(r) => {
+            if let Some(p) = &r.prompt {
+                println!("hex asks (question {}): {}", p.id, p.text);
+                for o in &p.options {
+                    println!("  [{}] {} — {}", o.id, o.label, o.description);
+                }
+                println!("(reply: hex messages reply {} <id[,id]> [--text ...])", p.id);
+            } else {
+                println!("{}", r.output);
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("hex messages: {e}");
+            1
+        }
+    }
 }
 
 fn run_telemetry(command: TelemetryCommands) -> i32 {

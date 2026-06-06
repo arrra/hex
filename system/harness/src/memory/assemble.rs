@@ -507,6 +507,22 @@ pub fn assemble(
     }
 }
 
+/// Render assembled candidates into the worker-facing context block. This is the
+/// layer above which `submit()` prepends the reply "pin".
+///
+/// NOTE: `Candidate` has NO `content` field and NO `Default` derive (verified
+/// 2026-06-05). Text lives inside `CandidateKind`.
+pub fn render_candidates(ctx: &AssembledContext) -> String {
+    ctx.candidates
+        .iter()
+        .map(|c| match &c.kind {
+            CandidateKind::Chunk(s) => s.content.clone(),
+            CandidateKind::Fact(f) => format!("{} {} {}", f.subject, f.predicate, f.object),
+        })
+        .collect::<Vec<_>>()
+        .join("\n\n")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -735,5 +751,32 @@ mod tests {
             !r.candidates.is_empty(),
             "assemble returned no candidates even though FTS+facts are populated"
         );
+    }
+
+    #[test]
+    fn render_candidates_joins_content() {
+        let mk = |txt: &str| Candidate {
+            kind: CandidateKind::Chunk(SearchResult {
+                rowid: 0,
+                source_path: "p".into(),
+                heading: "h".into(),
+                chunk_index: "0".into(),
+                content: txt.into(),
+                private: false,
+                score: 0.0,
+            }),
+            move_id: MoveId::M1ContentMatch,
+            move_fired: true,
+            native_score: 0.0,
+            rank_in_move: 0,
+            confidence: 1.0,
+            dedup_key: txt.into(),
+        };
+        let ctx = AssembledContext {
+            candidates: vec![mk("alpha"), mk("beta")],
+            per_move_stats: vec![],
+        };
+        let s = render_candidates(&ctx);
+        assert!(s.contains("alpha") && s.contains("beta"));
     }
 }
