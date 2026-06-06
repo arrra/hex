@@ -13,7 +13,19 @@ const TRANSCRIPT_HOT_DAYS: i64 = 7;
 
 const INDEX_DIRS: &[&str] = &[".", "me", "projects", "people", "evolution", "landings"];
 
-const SKIP_PATTERNS: &[&str] = &[".hex", ".claude", ".sessions", "node_modules", ".git"];
+// `_archive` / `hex-archive`: archived (dead) projects must never be embedded — a single
+// archive sweep can move thousands of files in, triggering a multi-hour re-embed that holds
+// the index lock, bloats memory.db, and pollutes search with dead content. See
+// me/decisions/prune-archived-projects-2026-06-06.
+const SKIP_PATTERNS: &[&str] = &[
+    ".hex",
+    ".claude",
+    ".sessions",
+    "node_modules",
+    ".git",
+    "_archive",
+    "hex-archive",
+];
 
 // (subdir, strategy): "full" | "tiered" | "exclude"
 const TIERED_RAW_DIRS: &[(&str, &str)] = &[
@@ -1110,6 +1122,19 @@ mod tests {
         assert!(is_private("raw/transcripts/2026-05-01.md"));
         assert!(!is_private("projects/foo/context.md"));
         assert!(!is_private("CLAUDE.md"));
+    }
+
+    #[test]
+    fn test_should_skip_excludes_archives() {
+        // Archived projects must NOT be indexed. A big archive sweep (e.g. moving dead
+        // projects under projects/_archive/) otherwise triggers a multi-hour re-embed and
+        // pollutes search with dead content (cf. me/decisions/prune-archived-projects-2026-06-06).
+        assert!(should_skip("projects/_archive/foo/context.md"));
+        assert!(should_skip("projects/_archive/integrations-bakeoff/x.md"));
+        assert!(should_skip("hex-archive/projects/foo/bar.md"));
+        // Active (non-archived) content is still indexed.
+        assert!(!should_skip("projects/active-thing/context.md"));
+        assert!(!should_skip("me/decisions/x.md"));
     }
 
     #[test]
