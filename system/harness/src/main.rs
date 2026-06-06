@@ -95,6 +95,12 @@ enum Commands {
         #[command(subcommand)]
         command: TriggersCommands,
     },
+    /// Read/write/delete iii state from the shell (operator/debug surface)
+    #[command(display_order = 14)]
+    State {
+        #[command(subcommand)]
+        command: StateCommands,
+    },
     /// Telemetry store: query and emit events from the native SQLite log
     #[command(display_order = 6)]
     Telemetry {
@@ -165,6 +171,16 @@ enum TriggersCommands {
         #[arg(long)]
         producer: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum StateCommands {
+    /// Print the JSON value at <scope>/<key>; empty + exit 1 if absent
+    Get { scope: String, key: String },
+    /// Set <scope>/<key> to <json> (a JSON literal, e.g. '{"a":1}' or '"str"')
+    Set { scope: String, key: String, json: String },
+    /// Delete <scope>/<key>
+    Delete { scope: String, key: String },
 }
 
 #[derive(Subcommand)]
@@ -457,6 +473,42 @@ fn main() {
                     }
                 }
             }
+        },
+        Commands::State { command } => match command {
+            StateCommands::Get { scope, key } => match ops::state_get(&scope, &key) {
+                Ok(Some(v)) => {
+                    println!("{}", serde_json::to_string(&v).unwrap());
+                    std::process::exit(0)
+                }
+                Ok(None) => std::process::exit(1), // absent → empty stdout, exit 1
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2)
+                }
+            },
+            StateCommands::Set { scope, key, json } => {
+                let value: serde_json::Value = match serde_json::from_str(&json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("hex state set: invalid JSON for value: {e}");
+                        std::process::exit(2)
+                    }
+                };
+                match ops::state_set(&scope, &key, &value) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2)
+                    }
+                }
+            }
+            StateCommands::Delete { scope, key } => match ops::state_delete(&scope, &key) {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2)
+                }
+            },
         },
         Commands::Integration { command } => {
             if let IntegrationCommands::Template = command {
