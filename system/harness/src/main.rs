@@ -95,7 +95,7 @@ enum Commands {
         #[command(subcommand)]
         command: TriggersCommands,
     },
-    /// Read/write/delete iii state from the shell (operator/debug surface)
+    /// Read/write/delete hex key/value state from the shell (operator/debug surface)
     #[command(display_order = 14)]
     State {
         #[command(subcommand)]
