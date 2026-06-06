@@ -584,6 +584,14 @@ fn binary_is_stale(hex_dir: &Path, source_dir: &Path) -> bool {
     )
 }
 
+/// True if the user has a personal overlay that `build.rs` compiles under
+/// `--features personal` — keyed on overlay-dir PRESENCE (`harness-personal/`
+/// integration probes, or `modules/` personal workers), not any specific file.
+/// `hex_dot_dir` is the `.hex` dir (same `HEX_DIR/.hex` build.rs scans).
+fn detect_personal_overlay(hex_dot_dir: &Path) -> bool {
+    hex_dot_dir.join("harness-personal").is_dir() || hex_dot_dir.join("modules").is_dir()
+}
+
 fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
     let versions_file = hex_dir.join("VERSIONS");
     if !versions_file.exists() {
@@ -720,8 +728,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
         // `harness-personal/` dir (integration probes) or a `modules/` dir
         // (personal workers) — NOT a specific file, so it survives files being
         // added/removed/re-homed (e.g. release.rs leaving the binary).
-        let use_personal =
-            hex_dot_dir.join("harness-personal").is_dir() || hex_dot_dir.join("modules").is_dir();
+        let use_personal = detect_personal_overlay(&hex_dot_dir);
         let mut build_args = vec!["build", "--release"];
         // --target-dir is always set to harness_dst/target so the output location is
         // deterministic regardless of workspace nesting (fixes OBS-017).
@@ -1431,15 +1438,15 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let hex_dot_dir = tmp.path().join(".hex");
 
-        // No overlay dirs → not a personal build.
-        let detect = |d: &std::path::Path| {
-            d.join("harness-personal").is_dir() || d.join("modules").is_dir()
-        };
-        assert!(!detect(&hex_dot_dir));
+        // No overlay dirs → not a personal build (exercises the real production fn).
+        assert!(!super::detect_personal_overlay(&hex_dot_dir));
 
         // A harness-personal/ overlay (e.g. an integration probe) → personal build.
         write_file(&hex_dot_dir.join("harness-personal/integration_foo.rs"), "// probe");
-        assert!(detect(&hex_dot_dir), "overlay dir present → personal build");
+        assert!(
+            super::detect_personal_overlay(&hex_dot_dir),
+            "overlay dir present → personal build"
+        );
     }
 
     /// Cache health check: a real `git init` repo is healthy; a headless `.git`
