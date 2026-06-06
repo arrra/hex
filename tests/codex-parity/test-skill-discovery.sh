@@ -79,6 +79,8 @@ TOTAL=$((TOTAL + 1))
 MISSING_COUNT=0
 for skill_dir in "$SKILLS_DIR"/*/; do
     skill_name="$(basename "$skill_dir")"
+    # Underscore-prefixed dirs (e.g. _reference/) are meta, not skills — skip.
+    case "$skill_name" in _*) continue ;; esac
     skill_md="$skill_dir/SKILL.md"
     if [ ! -f "$skill_md" ]; then
         echo "    MISSING: $skill_name/SKILL.md"
