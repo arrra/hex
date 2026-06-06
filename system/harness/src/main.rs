@@ -699,7 +699,7 @@ fn build_harness_spec(hex_dir: &std::path::Path) -> daemon_green::ServiceSpec {
     } else {
         format!("/opt/homebrew/bin:{base_path}")
     };
-    daemon_green::ServiceSpec::new(HARNESS_LABEL, hex_bin)
+    let mut spec = daemon_green::ServiceSpec::new(HARNESS_LABEL, hex_bin)
         .args(["harness", "serve"])
         .env("HEX_DIR", hex_dir.to_string_lossy().into_owned())
         .env("III_URL", "ws://127.0.0.1:49134")
@@ -708,7 +708,58 @@ fn build_harness_spec(hex_dir: &std::path::Path) -> daemon_green::ServiceSpec {
         .working_dir(hex_dir)
         .keep_alive(true)
         .run_at_load(true)
-        .log_path(log_path)
+        .log_path(log_path);
+    // Fold in .hex/secrets/*.env so the harness's cron workers authenticate:
+    // consolidate's LLM distill (the reflection backstop) needs CLAUDE_CODE_OAUTH_TOKEN,
+    // gws backup needs its creds. launchd doesn't source env.sh and domain `setenv` is
+    // not reliably inherited. The setup-token lives in an env var (not the keychain),
+    // so a plist EnvironmentVariables entry is sufficient — no shell wrapper needed.
+    for (k, v) in load_secrets_env(hex_dir) {
+        spec = spec.env(k, v);
+    }
+    spec
+}
+
+/// Read `export KEY=VALUE` (or bare `KEY=VALUE`) pairs from `$HEX_DIR/.hex/secrets/*.env`,
+/// skipping symlinks (external/duplicate MCP `.env`s) and unreadable files. Mirrors
+/// env.sh's secrets-loading so the launchd-hosted harness gets the same credentials as
+/// an interactive shell. Re-read on every `hex harness start`, so it stays current.
+fn load_secrets_env(hex_dir: &std::path::Path) -> Vec<(String, String)> {
+    let mut out = Vec::new();
+    let dir = hex_dir.join(".hex").join("secrets");
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return out;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path.extension().and_then(|s| s.to_str()) != Some("env") {
+            continue;
+        }
+        if std::fs::symlink_metadata(&path)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(true)
+        {
+            continue;
+        }
+        let Ok(content) = std::fs::read_to_string(&path) else {
+            continue;
+        };
+        for line in content.lines() {
+            let trimmed = line.trim();
+            let trimmed = trimmed.strip_prefix("export ").unwrap_or(trimmed).trim();
+            if trimmed.is_empty() || trimmed.starts_with('#') {
+                continue;
+            }
+            if let Some((k, v)) = trimmed.split_once('=') {
+                let k = k.trim();
+                let v = v.trim().trim_matches('"').trim_matches('\'');
+                if !k.is_empty() {
+                    out.push((k.to_string(), v.to_string()));
+                }
+            }
+        }
+    }
+    out
 }
 
 /// `hex harness start` — install (idempotent) and load the per-user service.
