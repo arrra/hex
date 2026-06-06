@@ -715,10 +715,13 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
             }
         }
 
-        // Detect personal overlay: if hex_dot_dir/harness-personal/release.rs exists,
-        // build with --features personal and set HEX_DIR so build.rs can find the overlay.
-        let personal_marker = hex_dot_dir.join("harness-personal/release.rs");
-        let use_personal = personal_marker.exists();
+        // Detect a personal overlay and build with --features personal (and set
+        // HEX_DIR so build.rs can find it). Keyed on overlay PRESENCE — a
+        // `harness-personal/` dir (integration probes) or a `modules/` dir
+        // (personal workers) — NOT a specific file, so it survives files being
+        // added/removed/re-homed (e.g. release.rs leaving the binary).
+        let use_personal =
+            hex_dot_dir.join("harness-personal").is_dir() || hex_dot_dir.join("modules").is_dir();
         let mut build_args = vec!["build", "--release"];
         // --target-dir is always set to harness_dst/target so the output location is
         // deterministic regardless of workspace nesting (fixes OBS-017).
@@ -1421,19 +1424,22 @@ mod tests {
         assert!(harness_dst.join("Cargo.lock").exists(), "Cargo.lock must NOT be deleted");
     }
 
-    /// Defect 2: personal overlay detection uses the marker file path.
+    /// Defect 2: personal overlay detection keys on overlay PRESENCE (a
+    /// `harness-personal/` or `modules/` dir), not a specific file.
     #[test]
     fn test_personal_overlay_marker_detection() {
         let tmp = tempfile::tempdir().unwrap();
         let hex_dot_dir = tmp.path().join(".hex");
 
-        // Without marker: no personal build
-        let marker = hex_dot_dir.join("harness-personal/release.rs");
-        assert!(!marker.exists());
+        // No overlay dirs → not a personal build.
+        let detect = |d: &std::path::Path| {
+            d.join("harness-personal").is_dir() || d.join("modules").is_dir()
+        };
+        assert!(!detect(&hex_dot_dir));
 
-        // With marker: personal build should be triggered
-        write_file(&marker, "// personal overlay release commands");
-        assert!(marker.exists(), "marker must exist after write");
+        // A harness-personal/ overlay (e.g. an integration probe) → personal build.
+        write_file(&hex_dot_dir.join("harness-personal/integration_foo.rs"), "// probe");
+        assert!(detect(&hex_dot_dir), "overlay dir present → personal build");
     }
 
     /// Cache health check: a real `git init` repo is healthy; a headless `.git`
