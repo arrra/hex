@@ -1,0 +1,4 @@
+{"kind":"prompt","text":"Storage backend?","multi":false,"options":[
+  {"id":"a","label":"sqlite","description":"use sqlite in memory.db"},
+  {"id":"x","label":"sqlite-x","description":"use sqlite in memory.db"},
+  {"id":"y","label":"postgres","description":"use a postgres server"}]}

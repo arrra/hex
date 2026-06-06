@@ -109,12 +109,19 @@ where
         },
     )?;
 
-    // 3. assemble + prepend the pin (render_candidates is the named render layer)
+    // 3. assemble context, then build the worker input = retrieved context +
+    //    the user-facing text. For a reply that text is the resolved pin (carries
+    //    the chosen option's description); for a normal message it's the body.
     let ctx = crate::memory::assemble::assemble(conn, &query, false, BUDGET);
     let rendered = crate::memory::assemble::render_candidates(&ctx);
-    let worker_input = match &pin {
-        Some(p) => format!("{p}\n{rendered}"),
-        None => rendered,
+    let user_text = match &pin {
+        Some(p) => p.clone(),
+        None => e.body.clone().unwrap_or_default(),
+    };
+    let worker_input = if rendered.trim().is_empty() {
+        user_text
+    } else {
+        format!("{rendered}\n\n{user_text}")
     };
 
     // 4. run the worker; a question output is persisted as the asked question

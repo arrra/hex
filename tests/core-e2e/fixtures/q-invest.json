@@ -1,0 +1,4 @@
+{"kind":"prompt","text":"Rebuy strategy?","multi":false,"options":[
+  {"id":"a","label":"pure","description":"keep current mix"},
+  {"id":"b","label":"tilt-BTC","description":"sell ETH on the rebuy"},
+  {"id":"c","label":"ladder","description":"ladder cash in over weeks"}]}
