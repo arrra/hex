@@ -343,9 +343,9 @@ install_or_upgrade_boi() {
     # Remove once the runaway `hex upgrade` invoker is identified + fixed.
     {
         echo "[$(date '+%F %T')] install_or_upgrade_boi BOI_VERSION=$BOI_VERSION pid=$$ ppid=$PPID"
-        ps -o pid,ppid,command -p "$PPID" 2>/dev/null
+        ps -o pid,ppid,command -p "$PPID" 2>/dev/null || true
         echo "  args: $0 $*"
-    } >> "$HOME/.boi/install-tripwire.log" 2>&1
+    } >> "$HOME/.boi/install-tripwire.log" 2>&1 || true
 
     # Clone or update the BOI repo
     if [ -d "$boi_src/.git" ]; then
