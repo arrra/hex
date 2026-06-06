@@ -1,3 +1,8 @@
+// Self-alias so module files compiled into this crate via `#[path] mod` (the
+// `*.worker.rs` overlay) can `use hex::…` uniformly, whether they live in-crate
+// (core modules) or out-of-crate (personal modules).
+extern crate self as hex;
+
 pub mod act_evidence;
 pub mod harness;
 pub mod capability_exec;
