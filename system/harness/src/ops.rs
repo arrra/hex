@@ -91,8 +91,10 @@ pub fn state_set(scope: &str, key: &str, value: &Value) -> Result<(), String> {
     call_builtin("state::set", state_payload(scope, key, Some(value))).map(|_| ())
 }
 
-/// Read a value from iii state. `Ok(None)` if the key is absent (engine
-/// returns JSON null). LOUD on transport failure (S6).
+/// Read a value from iii state. `Ok(None)` when the engine returns JSON null —
+/// normally "key absent". NOTE: a key whose stored value is literally `null` is
+/// also surfaced as `None` (the engine returns null for both), so absent and
+/// stored-null are indistinguishable here. LOUD on transport failure (S6).
 pub fn state_get(scope: &str, key: &str) -> Result<Option<Value>, String> {
     let v = call_builtin("state::get", state_payload(scope, key, None))?;
     Ok(if v.is_null() { None } else { Some(v) })

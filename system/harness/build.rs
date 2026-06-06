@@ -67,7 +67,10 @@ fn main() {
 
     let mut gen = String::new();
     for (ident, path) in &entries {
-        gen.push_str(&format!("#[path = \"{path}\"] pub mod {ident};\n"));
+        // `{path:?}` emits a properly-escaped Rust string literal (the personal
+        // root is user-controlled — a path with `"`/`\` would otherwise produce
+        // invalid generated Rust).
+        gen.push_str(&format!("#[path = {path:?}] pub mod {ident};\n"));
     }
     gen.push_str("pub fn module_registry() -> Vec<crate::worker::Worker> {\n    vec![");
     for (ident, _) in &entries {
@@ -76,7 +79,7 @@ fn main() {
     gen.push_str("]\n}\n");
     gen.push_str("pub fn module_paths() -> Vec<(String, &'static str)> {\n    vec![");
     for (ident, path) in &entries {
-        gen.push_str(&format!("({ident}::worker().name.clone(), \"{path}\"), "));
+        gen.push_str(&format!("({ident}::worker().name.clone(), {path:?}), "));
     }
     gen.push_str("]\n}\n");
     std::fs::write(format!("{out_dir}/hex_modules.rs"), gen).unwrap();
