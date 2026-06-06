@@ -121,6 +121,20 @@ enum Commands {
     Completions {
         shell: clap_complete::Shell,
     },
+    /// Inspect auto-registered worker modules
+    #[command(display_order = 14)]
+    Module {
+        #[command(subcommand)]
+        command: ModuleCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModuleCommands {
+    /// List every registered worker, its triggers, and its source
+    List,
+    /// Show one worker: triggers + source file
+    Status { name: String },
 }
 
 #[derive(Subcommand)]
@@ -743,6 +757,33 @@ fn main() {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "hex", &mut io::stdout());
         }
+        Commands::Module { command } => match command {
+            ModuleCommands::List => {
+                for w in hex::workers::registry() {
+                    let (kind, _path) = module_source(&w.name);
+                    println!("{:<28} [{}]  {}", w.name, kind, trigger_summary(&w));
+                }
+                std::process::exit(0)
+            }
+            ModuleCommands::Status { name } => {
+                match hex::workers::registry().into_iter().find(|w| w.name == name) {
+                    Some(w) => {
+                        let (kind, path) = module_source(&w.name);
+                        println!("name:     {}", w.name);
+                        println!("source:   {kind}");
+                        if !path.is_empty() {
+                            println!("file:     {path}");
+                        }
+                        println!("triggers: {}", trigger_summary(&w));
+                        std::process::exit(0)
+                    }
+                    None => {
+                        eprintln!("hex module status: no worker named '{name}'");
+                        std::process::exit(1)
+                    }
+                }
+            }
+        },
     }
 }
 
@@ -1178,6 +1219,35 @@ fn run_telemetry(command: TelemetryCommands) -> i32 {
             }
         },
     }
+}
+
+fn trigger_summary(w: &hex::worker::Worker) -> String {
+    use hex::worker::TriggerSpec::*;
+    w.handlers
+        .iter()
+        .map(|(spec, _)| match spec {
+            Cron { expression } => format!("cron({expression})"),
+            State { scope, key } => format!("state({scope}/{key})"),
+            Queue { queue } => format!("queue({queue})"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn module_source(name: &str) -> (&'static str, String) {
+    for (n, path) in hex::workers::hex_modules::module_paths() {
+        if n == name {
+            let kind = if path.contains("/src/modules/") {
+                "core"
+            } else if path.contains("/.hex/modules/") {
+                "personal"
+            } else {
+                "module"
+            };
+            return (kind, path.to_string());
+        }
+    }
+    ("builtin", String::new())
 }
 
 #[cfg(test)]
