@@ -167,10 +167,12 @@ if [ -n "$HEX_BIN" ]; then
     assert_fail "hex binary missing doctor subcommand"
   fi
 
-  if "$HEX_BIN" session --help 2>&1 | grep -q "startup"; then
-    assert_pass "hex binary includes session startup subcommand"
+  # Session-less hex: the `hex session` command group was removed (2026-06-05).
+  # Assert it's correctly absent (startup/shutdown/checkpoint/reflect all gone).
+  if "$HEX_BIN" session --help &>/dev/null; then
+    assert_fail "hex session subcommand still present (should be removed in session-less hex)"
   else
-    assert_fail "hex binary missing session startup subcommand"
+    assert_pass "hex session subcommand correctly absent (session-less hex)"
   fi
 
   # Fleet/agent teardown: `hex agent` was removed. Assert it's correctly absent.

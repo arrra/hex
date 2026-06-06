@@ -180,16 +180,18 @@ else
     TOTAL=$((TOTAL + 1))
 fi
 
-# ── Test 15: Startup runs ─────────────────────────────────────────
-echo "[15] Startup"
+# ── Test 15: Recency prime runs (session-less startup) ────────────
+# Session ceremony removed (2026-06-05). Attach behavior is now the recency
+# prime: `hex memory recent` generates the lean recency index injected by the
+# SessionStart hook. Assert it runs cleanly (replaces `hex session startup`).
+echo "[15] Recency prime (hex memory recent)"
 cd /tmp/test-hex
-STARTUP_OUT=$(HEX_DIR=/tmp/test-hex hex session startup 2>&1 || true)
-if echo "$STARTUP_OUT" | grep -q "Startup complete"; then
-    echo "  PASS: Startup runs"
+if HEX_DIR=/tmp/test-hex hex memory recent >/tmp/recent-out 2>&1; then
+    echo "  PASS: hex memory recent runs"
     PASS=$((PASS + 1))
 else
-    echo "  FAIL: Startup failed"
-    echo "  Output: $STARTUP_OUT"
+    echo "  FAIL: hex memory recent failed"
+    echo "  Output: $(cat /tmp/recent-out)"
     FAIL=$((FAIL + 1))
 fi
 TOTAL=$((TOTAL + 1))
