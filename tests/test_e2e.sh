@@ -156,9 +156,22 @@ fi
 TOTAL=$((TOTAL + 1))
 
 # ── Test 13: Commands installed to .claude/commands/ ───────────────
+# Session-less hex (2026-06-05): hex-startup/checkpoint/shutdown/reflect/save
+# commands were removed with the session ceremony. Only the surviving commands
+# are checked here.
 echo "[13] Commands"
-for cmd in hex-startup hex-checkpoint hex-shutdown hex-reflect hex-decide hex-doctor hex-upgrade; do
+for cmd in hex-decide hex-doctor hex-upgrade; do
     check "command: $cmd" test -f "/tmp/test-hex/.claude/commands/$cmd.md"
+done
+# Assert the removed session commands are correctly absent.
+for cmd in hex-startup hex-checkpoint hex-shutdown hex-reflect hex-save; do
+    if [ -f "/tmp/test-hex/.claude/commands/$cmd.md" ]; then
+        echo "  FAIL: removed command still present: $cmd"
+        FAIL=$((FAIL + 1)); TOTAL=$((TOTAL + 1))
+    else
+        echo "  PASS: removed command absent: $cmd"
+        PASS=$((PASS + 1)); TOTAL=$((TOTAL + 1))
+    fi
 done
 
 # ── Test 14: Doctor passes on fresh install ────────────────────────
