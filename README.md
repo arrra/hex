@@ -96,15 +96,13 @@ These are Claude Code slash commands, not shell CLIs. Use them inside a `claude`
 
 | Command | What it does |
 |---------|--------------|
-| `/hex-startup` | Session init. Loads priorities, today's landings, pending reflection fixes. Triggers onboarding on first run. |
-| `/hex-checkpoint` | Mid-session save. Distill pass, handoff file, landings update. |
-| `/hex-shutdown` | Session close. Quick distill, deregister session. |
-| `/hex-reflect` | Session reflection. Extract learnings, identify failures, propose standing order candidates. |
 | `/hex-debrief` | Weekly walk-through of projects, org signals, relationships, career. |
 | `/hex-decide` | Structured decision framework — context, options, reasoning, impact. |
 | `/hex-triage` | Route untriaged content from `raw/` to the right files. |
 | `/hex-doctor` | Health check. 20-point validation across env, memory, structure, config, and companions. Use `--fix` to repair auto-fixable issues, `--json` for machine-readable output. For the unified consolidate pass (structural + memory DB + optional LLM operating-model audit), use `hex memory consolidate quick` or `hex memory consolidate full`. |
 | `/hex-upgrade` | Pull latest system files from hex-foundation. Runs doctor after. |
+
+> Session-lifecycle commands (startup, checkpoint, shutdown, reflect, save) were removed — hex is sessionless and event-driven. Pre-demolition agent-fleet skills no longer ship.
 
 ---
 
@@ -162,7 +160,7 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 - **Hooks**: event names (`PreToolUse`, `PostToolUse`, `Stop`, `SessionStart`) match, but the config file is `~/.codex/config.toml` (TOML), not `.claude/settings.json` (JSON). Hook contents transfer; the installer doesn't write them for Codex.
 - **Skills**: skill format (SKILL.md) is compatible. Discovery path differs: Codex looks in `.codex/skills/`, hex installs to `.hex/skills/`.
 - **Slash commands**: Codex supports custom commands from `.claude/commands/*.md` but does not auto-invoke them — users must type `/commandname` manually. Claude Code auto-invocation does not apply.
-- **Memory**: Codex has a memory feature (`memories = true` in `config.toml`) stored at `~/.codex/memory/` globally. Claude Code auto-populates `~/.claude/projects/<dir>/` per project. Different opt-in model and path.
+- **Memory**: Codex has a memory feature (`memories = true` in `config.toml`) stored at `~/.codex/memory/` globally. (Claude Code's `~/.claude/projects/<dir>/memory` path is deprecated for hex — hex uses its own SQLite store at `.hex/memory.db`.)
 - **MCP servers**: both runtimes support MCP. Config format differs: hex uses `.mcp.json` (JSON), Codex uses `[mcp_servers]` in `config.toml` (TOML).
 - **Session resume**: supported on both; Codex uses `codex resume <SESSION_ID>` or `--last`.
 - **`CLAUDE.md`**: Codex reads it as a fallback when no `AGENTS.md` is present. `AGENTS.md` (included in this repo) is the preferred file for Codex.
@@ -180,7 +178,6 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 `hex` is a unified Rust binary — **core infrastructure**, not optional. One binary handles everything: persistent memory, session lifecycle, system health, telemetry rotation, integration bundles, hooks, the harness loop, triggers, in-place upgrades, the worker runtime, and release tooling.
 
 - **Memory** (`hex memory`) — search/index/recall/distill/consolidate over the SQLite FTS5 + vec0 store
-- **Session** (`hex session`) — session lifecycle (start, resume, stop)
 - **Doctor** (`hex doctor`) — system health checks across env, memory, structure, config, companions
 - **Telemetry** (`hex telemetry`) — telemetry file rotation and management
 - **Integration** (`hex integration`) — integration bundle lifecycle
@@ -189,14 +186,12 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 - **Triggers** (`hex triggers`) — trigger evaluation
 - **Upgrade** (`hex upgrade`) — in-place upgrade pipeline
 - **Worker** (`hex worker`) — worker process entrypoint
-- **Release** (`hex release`) — deterministic release tooling
 - **Env** (`hex env`) — environment setup utilities
 
-14 subcommands:
+12 subcommands:
 
 ```
 hex memory       — search, index, recall, distill, consolidate
-hex session      — session lifecycle (start, resume, stop)
 hex doctor       — system health checks (--fix, --json)
 hex telemetry    — telemetry file rotation and management
 hex integration  — integration bundle lifecycle
@@ -207,7 +202,6 @@ hex triggers     — trigger evaluation
 hex upgrade      — upgrade hex installation
 hex worker       — worker process entrypoint
 hex version      — print version
-hex release      — release tooling
 hex env          — environment setup utilities
 ```
 
@@ -218,12 +212,6 @@ The binary is built or downloaded automatically by `install.sh`. If it cannot be
 ### Version
 
 `system/harness/Cargo.toml` is the single source of truth. `env!("CARGO_PKG_VERSION")` embeds the version at compile time. Git tags must match — enforced by `release.sh`. See [docs/versioning.md](./docs/versioning.md).
-
-### SSE bus
-
-The server includes a real-time event bus with namespaced topics (`content.comments`, `system.boi`, `content.assets`). Clients subscribe via `GET /events/stream?topics=content.*`. Topic manifests at `.hex/sse/topics/*.yaml` define the contract — adding a topic means adding a YAML file, not editing bus code.
-
----
 
 ## Quality assurance — gaming detection
 
@@ -253,7 +241,7 @@ The antagonist runs independently — it does not trust the metric command the w
 **CLI:**
 
 ```bash
-hex doctor quality-check --spec q-123      # audit one spec
+hex doctor quality-check --spec Sxxxxxxxx  # audit one spec (Crockford base32)
 hex doctor quality-check --kr init-foo/kr-1 # reality-check a KR
 hex doctor quality-check --sweep           # scan last 24h
 ```
@@ -265,7 +253,7 @@ hex doctor quality-check --sweep           # scan last 24h
 ```
 hex-foundation/
 ├── install.sh           Single install entrypoint
-├── VERSIONS             Pinned boi version
+├── VERSIONS             Pinned BOI release
 ├── system/              → becomes ~/hex/.hex/ on install
 │   ├── harness/         ← hex binary Rust source (14 subcommands)
 │   │   ├── src/main.rs     unified CLI
@@ -275,9 +263,8 @@ hex-foundation/
 │   │   └── build.rs        injects git SHA; Cargo.toml is version source
 │   ├── scripts/         startup.sh, doctor.sh, upgrade.sh, ...
 │   ├── commands/        → copied to ~/hex/.claude/commands/ (Claude Code) and ~/hex/.hex/commands/
-│   ├── skills/          memory/, landings, hex-reflect, hex-decide,
-│   │                    hex-debrief, hex-checkpoint,
-│   │                    hex-shutdown, hex-startup, hex-event, hex-save,
+│   ├── skills/          memory/, landings, hex-decide,
+│   │                    hex-debrief, hex-event,
 │   │                    remodeling, conjecture-criticism, vibe-to-prod
 │   └── reference/       core-agents/ — agent charters
 ├── templates/           Seeds for CLAUDE.md, AGENTS.md, me.md, todo.md, decision-template.md
@@ -387,14 +374,7 @@ v0.13.1 fixes: **Doctor reliability and skip_llm WakeConfig.**
 - **BOI daemon detection**: LaunchAgent-aware detection replaces `pgrep`-based check.
 - **`skip_llm` WakeConfig**: Agents that exercise wake plumbing without needing LLM reasoning (e.g. health probes) can set `wake.skip_llm: true`. Harness bypasses shift loop and self-assessment; inbox still loads and `mark_delivered` fires. `state.json` inbox drain prevents unbounded growth on high-frequency skip_llm wakes.
 
-v0.13.0 adds: **Fleet self-driving mechanisms and agent performance review.**
-- **Fleet pulse watchdog**: `check-fleet-pulse.sh` emits `hex.agent.needs-attention` events for dormant agents. Composite liveness score with WARN/ERROR escalation tiers.
-- **Stalled initiative monitor**: `check-stalled-initiatives.sh` detects initiatives with no progress signal in 48h (commit, act trail, or KR update). Sends drive-or-close directives to initiative owners. Anti-spam guard prevents re-fire within 24h.
-- **Mike-pending board monitor**: `check-mike-pending.sh` tracks Mike-blocked items with tier labels (quiet/digest/direct-ping). Coalesced per-run alerts with DM fallback.
-- **Agent performance review**: `agent-performance-review.py` produces per-agent quality/velocity/autonomy scorecards from critic reviews, BOI DB, audit trail, and Mike-pushback signals. Composite geometric mean (0.0–1.0) with cold-start handling.
-- **Fleet scorecard aggregate**: `fleet-scorecard-aggregate.py` runs per-agent reviews and produces fleet-wide top/bottom 5, biggest movers, and Mike-pushback heatmap. Outputs a single coalesced digest — no per-agent pings.
-- **Policy templates**: `adapter/policy-templates/` gains fleet-pulse, stalled-initiative-monitor, mike-pending-escalator, and agent-performance-review-weekly templates for out-of-the-box fleet health wiring.
-- **Note**: Backlog auto-promotion (`wake.rs`) was staged but reverted — supporting modules incomplete. Tracked for v0.14.0.
+v0.13.0: _Fleet self-driving mechanisms (fleet-pulse, stalled-initiative-monitor, mike-pending-escalator, fleet-scorecard, agent-performance-review) shipped here, then removed — hex is sessionless/event-driven and the agent fleet was demolished. Entries dropped._
 
 v0.12.0 adds: **Upgrade reliability, shell completions, failure-revive protocol, and doctor improvements.**
 - **Shell completions**: `hex completions bash|zsh|fish` generates completion scripts for all subcommands. Install snippets in README.
@@ -408,28 +388,24 @@ v0.12.0 adds: **Upgrade reliability, shell completions, failure-revive protocol,
 v0.10.0 adds: **BOI v1.1.0 integration + containerized BOI E2E.**
 - **BOI v1.1.0**: pipeline-v2 phases (clean spec-pre / task / spec-post separation), interactive `boi dashboard` TUI, spec-critique↔spec-improve quality loop, deterministic phases (commit/merge/cleanup) that skip Claude. Upgrade: run `install.sh` again.
 - **Containerized BOI E2E**: `tests/core-e2e/` suites cover fresh install, upgrade (catches stale-symlink bugs), and doctor runtime checks. CI-gated via GitHub Actions core-e2e workflow.
-- **Doctor expanded**: `check_17` now runs `boi --help`, `boi --version`, and `boi status` instead of file-existence checks. Each failure includes a repair hint.
+- **Doctor expanded**: `check_17` now runs `boi --help`, `boi --version`, and `boi dashboard` instead of file-existence checks. Each failure includes a repair hint.
 
 v0.11.0 adds: **Full hex sync sweep — 93 atomic units.**
-- **New subsystems**: spec-tool (spec browsing + critic-loop UI), vibe-to-prod skill, conjecture-criticism skill, hex-fleet (system health monitor + LaunchAgent), boi-pm (BOI process monitor + LaunchAgent), hex-overseer (self-tuning monitor layer), pulse dashboard with E2E test harness, comments-service, sse-bus.
-- **Improvements**: shared `hex_utils.py` library; 7 metrics scripts (continuity, done-claim, frustration, loop-waste, etc.); 6 doctor-checks; 16 health-checks (agent memory, BOI dispatch, cc-connect, MCP servers, etc.); skills: memory, hex-event, hex-save, hex-switch, x-twitter, hex-ideate, hex-triage, hex-upgrade, hex-sync-base, secret-intake, boi-delegation; 30+ MCP integration health-check wrappers.
+- **New subsystems**: spec-tool (spec browsing + critic-loop UI), vibe-to-prod skill, conjecture-criticism skill, pulse dashboard with E2E test harness. _(comments-service, sse-bus, hex-fleet, boi-pm, hex-overseer shipped here, since removed.)_
+- **Improvements**: shared `hex_utils.py` library; 7 metrics scripts (continuity, done-claim, frustration, loop-waste, etc.); 6 doctor-checks; 16 health-checks (agent memory, BOI dispatch, MCP servers, etc.); skills: memory, hex-event, hex-switch, x-twitter, hex-ideate, hex-triage, hex-upgrade, hex-sync-base, secret-intake, boi-delegation; 30+ MCP integration health-check wrappers.
 
-v0.10.1 fixes: **Releaser auto-unblock regression.**
-- **Harness queue.rs**: `check_unblock_condition` now handles `message_reply` blocks — previously only `telemetry` and `timer` arms existed, so releaser blocks were silently permanent.
-- **Harness wake.rs**: `blocked_since` is now stamped with the server clock on apply, preventing LLM-hallucinated future timestamps from corrupting SLA math.
-- **Tests**: 4 new tests in `tests/queue_test.rs` covering the unblock path. Build break fixes: `hex_bytes::encode` alias and `hex_agent` → `hex` rename in integration tests.
+v0.10.1: _Releaser auto-unblock regression — releaser agent has since been removed with the agent fleet. Entry dropped._
 
 v0.9.0 adds: **BOI v1.0.0 Rust binary + doctor runtime checks.**
 - **BOI rewrite**: BOI is now a compiled Rust binary at `~/.boi/bin/boi`. Install clones and builds from source; `VERSIONS` pins `BOI_VERSION`.
-- **Doctor runtime checks**: `check_17` now validates `boi --help`, `boi --version` (against `VERSIONS`), `boi status` (DB queryable), dangling-symlink detection, and the full wrapper chain (`~/.boi/boi --help`). Each failure includes a repair hint.
+- **Doctor runtime checks**: `check_17` now validates `boi --help`, `boi --version` (against `VERSIONS`), `boi dashboard` (DB queryable), dangling-symlink detection, and the full wrapper chain (`~/.boi/boi --help`). Each failure includes a repair hint.
 - **Doctor unit tests**: `tests/test_doctor.bats` covers all new BOI checks (missing binary, dangling symlink, broken wrapper, version mismatch, status failure).
 
 v0.8.0 adds: **Unified `hex` binary + 3 new primitives.**
 - **Unified binary**: single Rust binary with subcommands for HTTP/SSE server, asset registry, and comment system.
 - **Asset registry**: unified `{type}:{id}` namespace for all hex artifacts (posts, proposals, specs, decisions, projects). Auto-discovery, periodic re-scan, CLI + HTTP API.
 - **Unified comments**: single comment store, embeddable widget, LLM-classified routing, action log with related assets.
-- **SSE bus**: real-time event streaming with namespaced topics (`content.*`, `system.*`), wildcard subscriptions, topic manifests as self-documenting contract.
-- **Telemetry**: append-only JSONL for all server requests and events.
+- **Telemetry**: append-only JSONL for all server requests and events. _(SSE bus shipped here, since removed.)_
 - **Version system**: `Cargo.toml` is single source of truth, `env!("CARGO_PKG_VERSION")` embeds version at compile time. (v0.11.3 removed the `version.txt` sidecar.)
 
 v0.3.0 adds: **Modular integration bundles + `hex integration` CLI.** Every external surface (API, MCP, system service, refresh flow) lives in one directory under `integrations/<name>/` — manifest, probe, runbook, secrets schema, maintenance scripts, tests. `hex integration install/uninstall/update/list/validate/status/probe/rotate` manages the lifecycle. See `docs/integrations.md` and `templates/integrations/_template/`.
