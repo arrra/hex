@@ -66,7 +66,7 @@ impl Ctx {
         crate::ops::emit(event, data, None).map_err(|e| anyhow!(e))
     }
 
-    /// Handle for direct state access (placeholder; expanded by a later spec).
+    /// Handle for direct iii state access.
     pub fn state(&self) -> StateHandle {
         StateHandle
     }
@@ -118,13 +118,51 @@ impl Default for Ctx {
     }
 }
 
+/// Handle for direct iii state access from a worker handler. Stateless — each
+/// call goes through the `ops` seam (the only iii caller). Scope/key are the
+/// module's choice; values are arbitrary JSON.
 pub struct StateHandle;
+
+impl StateHandle {
+    /// Read `scope/key`; `Ok(None)` if absent.
+    pub fn get(&self, scope: &str, key: &str) -> Result<Option<Value>, Error> {
+        crate::ops::state_get(scope, key).map_err(|e| anyhow!(e))
+    }
+    /// Write `value` at `scope/key`.
+    pub fn set(&self, scope: &str, key: &str, value: Value) -> Result<(), Error> {
+        crate::ops::state_set(scope, key, &value).map_err(|e| anyhow!(e))
+    }
+    /// Delete `scope/key`.
+    pub fn delete(&self, scope: &str, key: &str) -> Result<(), Error> {
+        crate::ops::state_delete(scope, key).map_err(|e| anyhow!(e))
+    }
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use anyhow::Error;
     use serde_json::json;
+    use serde_json::Value;
     use tempfile::tempdir;
+
+    /// StateHandle exposes get/set/delete returning anyhow::Result. This test
+    /// only checks the API compiles and is shaped as expected; live behavior is
+    /// covered by ops::state_roundtrip_live.
+    #[test]
+    fn state_handle_has_get_set_delete_api() {
+        let ctx = Ctx::new();
+        let _h = ctx.state();
+        fn _assert_api() {
+            let _: fn(&StateHandle, &str, &str) -> Result<Option<Value>, Error> =
+                StateHandle::get;
+            let _: fn(&StateHandle, &str, &str, Value) -> Result<(), Error> =
+                StateHandle::set;
+            let _: fn(&StateHandle, &str, &str) -> Result<(), Error> =
+                StateHandle::delete;
+        }
+        _assert_api();
+    }
 
     /// A runtime-wired Ctx, while stopping, must divert emit to the outbox
     /// (NOT attempt a live engine connection). Asserted by reading the outbox
