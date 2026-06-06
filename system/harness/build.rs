@@ -11,31 +11,57 @@ fn main() {
 
     println!("cargo:rustc-env=HEX_GIT_SHA={}", git_sha);
 
-    // Generate personal_mods.rs with absolute #[path] declarations for the personal feature.
-    // Resolves HEX_DIR (set by env.sh) first; otherwise $HOME/hex (install.sh default).
-    // No machine-specific path may live in source — both env vars must be set when building with --features personal.
-    let personal_dir = std::env::var("HEX_DIR")
-        .or_else(|_| std::env::var("HOME").map(|h| format!("{}/hex", h)))
-        .map(|d| format!("{}/.hex/harness-personal", d))
-        .expect("HEX_DIR or HOME must be set to locate .hex/harness-personal/");
+    let out_dir = std::env::var("OUT_DIR").unwrap();
+
+    // Generate personal_mods.rs by DISCOVERING the personal overlay's probe modules
+    // (`$HEX_DIR/.hex/harness-personal/integration_*.rs`) — never by hardcoding the
+    // user's integration names in this (general) repo. Each probe file exposes
+    // `pub fn run_probe() -> i32`; the registry maps a probe name derived from the
+    // filename (`integration_<foo>.rs` → `<foo>`, `_`→`-`) to it. Only globbed under
+    // --features personal; an absent overlay dir → an empty registry (foundation
+    // builds clean with nothing personal present).
     println!("cargo:rerun-if-env-changed=HEX_DIR");
     println!("cargo:rerun-if-env-changed=HOME");
-
-    let out_dir = std::env::var("OUT_DIR").unwrap();
-    let personal_mods = format!(
-        r#"
-#[path = "{d}/integration_apple_addressbook.rs"] mod integration_apple_addressbook;
-#[path = "{d}/integration_tailscale.rs"] mod integration_tailscale;
-#[path = "{d}/integration_mcp_exa.rs"] mod integration_mcp_exa;
-#[path = "{d}/integration_mcp_excalidraw.rs"] mod integration_mcp_excalidraw;
-#[path = "{d}/integration_mcp_plugin_ecc.rs"] mod integration_mcp_plugin_ecc;
-#[path = "{d}/integration_x_twitter.rs"] mod integration_x_twitter;
-#[path = "{d}/integration_publer.rs"] mod integration_publer;
-#[path = "{d}/integration_granola_mcp.rs"] mod integration_granola_mcp;
-#[path = "{d}/release.rs"] mod release;
-"#,
-        d = personal_dir
-    );
+    let mut probe_entries: Vec<(String, String, String)> = Vec::new(); // (mod_ident, probe_name, abs_path)
+    if std::env::var("CARGO_FEATURE_PERSONAL").is_ok() {
+        let personal_dir = std::env::var("HEX_DIR")
+            .or_else(|_| std::env::var("HOME").map(|h| format!("{}/hex", h)))
+            .map(|d| format!("{}/.hex/harness-personal", d))
+            .expect("HEX_DIR or HOME must be set to locate .hex/harness-personal/");
+        println!("cargo:rerun-if-changed={personal_dir}");
+        if let Ok(rd) = std::fs::read_dir(&personal_dir) {
+            for entry in rd.flatten() {
+                let path = entry.path();
+                let fname = match path.file_name().and_then(|s| s.to_str()) {
+                    Some(f) => f.to_string(),
+                    None => continue,
+                };
+                // Probe modules only: `integration_*.rs` (excludes release.rs, Cargo.toml, …).
+                if !(fname.starts_with("integration_") && fname.ends_with(".rs")) {
+                    continue;
+                }
+                println!("cargo:rerun-if-changed={}", path.display());
+                let ident = fname.trim_end_matches(".rs").to_string(); // e.g. integration_<foo>
+                let probe_name = ident
+                    .strip_prefix("integration_")
+                    .unwrap_or(&ident)
+                    .replace('_', "-"); // mcp-exa
+                probe_entries.push((ident, probe_name, path.to_str().unwrap().to_string()));
+            }
+        }
+    }
+    probe_entries.sort();
+    let mut personal_mods = String::new();
+    for (ident, _name, path) in &probe_entries {
+        // `{path:?}` emits an escape-safe Rust string literal (overlay path is user-controlled).
+        personal_mods.push_str(&format!("#[path = {path:?}] mod {ident};\n"));
+    }
+    personal_mods
+        .push_str("pub fn probe_registry() -> Vec<(&'static str, fn() -> i32)> {\n    vec![");
+    for (ident, name, _path) in &probe_entries {
+        personal_mods.push_str(&format!("({name:?}, {ident}::run_probe as fn() -> i32), "));
+    }
+    personal_mods.push_str("]\n}\n");
     std::fs::write(format!("{}/personal_mods.rs", out_dir), personal_mods).unwrap();
 
     // ---- hex module discovery: recursive *.worker.rs glob → hex_modules.rs ----
