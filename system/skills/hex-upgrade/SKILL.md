@@ -55,7 +55,7 @@ Show a concise summary:
 - Whether CLAUDE.md was merged
 - Any new commands or skills that were added
 - Whether VERSIONS was updated (upgrade.sh syncs `HEX_FOUNDATION_VERSION` and `BOI_VERSION` from Cargo.toml automatically)
-- Remind: "Run `/hex-startup` to load the updated configuration."
+- Note: the updated configuration loads automatically on the next hex launch (lean recency prime via `SessionStart`). hex is session-less — there is no startup command to run.
 
 ## First-Time Setup
 
