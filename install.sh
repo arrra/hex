@@ -339,6 +339,14 @@ install_or_upgrade_boi() {
     local boi_src="$HOME/github.com/mrap/boi"
     mkdir -p "$HOME/.boi/bin" "$HOME/.boi/pids" "$HOME/.boi/logs" "$HOME/.boi/worktrees"
 
+    # TRIPWIRE (2026-06-05): record who triggers the boi rebuild/symlink loop.
+    # Remove once the runaway `hex upgrade` invoker is identified + fixed.
+    {
+        echo "[$(date '+%F %T')] install_or_upgrade_boi BOI_VERSION=$BOI_VERSION pid=$$ ppid=$PPID"
+        ps -o pid,ppid,command -p "$PPID" 2>/dev/null
+        echo "  args: $0 $*"
+    } >> "$HOME/.boi/install-tripwire.log" 2>&1
+
     # Clone or update the BOI repo
     if [ -d "$boi_src/.git" ]; then
         echo "  BOI repo exists — fetching $BOI_VERSION..."
