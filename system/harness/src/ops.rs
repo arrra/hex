@@ -82,7 +82,7 @@ fn call_builtin(function_id: &str, payload: Value) -> Result<Value, String> {
             timeout_ms: None,
         })
         .await
-        .map_err(|e| format!("ops::call_builtin: {function_id} failed (url={url}): {e}"))
+        .map_err(|e| format!("{function_id} failed (url={url}): {e}"))
     })
 }
 
@@ -114,14 +114,9 @@ pub fn emit(event: &str, data: Value, producer: Option<&str>) -> Result<(), Stri
     let ts = chrono::Utc::now().to_rfc3339();
     let target = emit_target(event, &producer, &ts, &data);
 
-    let payload = json!({
-        "scope": target.scope,
-        "key": target.key,
-        "value": target.value,
-    });
-    call_builtin("state::set", payload).map(|_| ()).map_err(|e| {
-        format!("hex triggers emit: {e} (event '{}')", event)
-    })
+    call_builtin("state::set", state_payload(&target.scope, &target.key, Some(&target.value)))
+        .map(|_| ())
+        .map_err(|e| format!("hex triggers emit: {e} (event '{event}')"))
 }
 
 #[cfg(test)]
