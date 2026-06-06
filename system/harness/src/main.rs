@@ -728,7 +728,7 @@ fn build_harness_spec(hex_dir: &std::path::Path) -> daemon_green::ServiceSpec {
     } else {
         format!("/opt/homebrew/bin:{base_path}")
     };
-    let mut spec = daemon_green::ServiceSpec::new(HARNESS_LABEL, hex_bin)
+    let spec = daemon_green::ServiceSpec::new(HARNESS_LABEL, hex_bin)
         .args(["harness", "serve"])
         .env("HEX_DIR", hex_dir.to_string_lossy().into_owned())
         .env("III_URL", "ws://127.0.0.1:49134")
