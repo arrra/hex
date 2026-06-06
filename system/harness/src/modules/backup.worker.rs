@@ -7,7 +7,7 @@
 //!
 //! - id `hex::backup::daily` command `hex backup` cron `0 0 4 * * * *` (04:00 daily)
 
-use crate::worker::{ctx::Ctx, event::Event, Result, Worker};
+use hex::worker::{ctx::Ctx, event::Event, Result, Worker};
 
 /// Cron expression for the nightly backup job — 04:00 daily.
 pub const CRON_DAILY: &str = "0 0 4 * * * *";

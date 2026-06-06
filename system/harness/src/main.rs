@@ -20,9 +20,13 @@ mod learnings;
 // ops lives in the lib (the in-process worker runtime calls it too); the bin
 // shares that one copy rather than compiling a second (mirrors hex::memory).
 use hex::ops;
-// Personal modules (mrap-only overlay). Resolved via build.rs → OUT_DIR/personal_mods.rs.
+// Personal overlay (discovered, never named here). build.rs globs
+// $HEX_DIR/.hex/harness-personal/integration_*.rs → OUT_DIR/personal_mods.rs,
+// exposing `probe_registry() -> Vec<(&'static str, fn() -> i32)>`.
 #[cfg(feature = "personal")]
-include!(concat!(env!("OUT_DIR"), "/personal_mods.rs"));
+mod personal_mods {
+    include!(concat!(env!("OUT_DIR"), "/personal_mods.rs"));
+}
 #[derive(Parser)]
 #[command(name = "hex", about = "Hex harness", version)]
 struct Cli {
@@ -63,20 +67,6 @@ enum Commands {
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
     },
-    /// Deterministic LLM-free release pipeline (wraps system/scripts/release.sh)
-    #[cfg(feature = "personal")]
-    #[command(display_order = 18)]
-    Release {
-        /// Explicit release version (e.g. 1.2.3); if omitted uses Cargo.toml version
-        #[arg(long)]
-        version: Option<String>,
-        /// Skip Docker E2E and Codex parity gates (emergency bypass)
-        #[arg(long)]
-        skip_e2e: bool,
-        /// Run gates only — no push, no tag, no GitHub release
-        #[arg(long)]
-        dry_run: bool,
-    },
     /// Claude Code hook runners (port of .hex/hooks/scripts/*.sh)
     #[command(display_order = 13)]
     Hook {
@@ -94,6 +84,12 @@ enum Commands {
     Triggers {
         #[command(subcommand)]
         command: TriggersCommands,
+    },
+    /// Read/write/delete hex key/value state from the shell (operator/debug surface)
+    #[command(display_order = 14)]
+    State {
+        #[command(subcommand)]
+        command: StateCommands,
     },
     /// Telemetry store: query and emit events from the native SQLite log
     #[command(display_order = 6)]
@@ -115,6 +111,20 @@ enum Commands {
     Completions {
         shell: clap_complete::Shell,
     },
+    /// Inspect auto-registered worker modules
+    #[command(display_order = 14)]
+    Module {
+        #[command(subcommand)]
+        command: ModuleCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ModuleCommands {
+    /// List every registered worker, its triggers, and its source
+    List,
+    /// Show one worker: triggers + source file
+    Status { name: String },
 }
 
 #[derive(Subcommand)]
@@ -165,6 +175,16 @@ enum TriggersCommands {
         #[arg(long)]
         producer: Option<String>,
     },
+}
+
+#[derive(Subcommand)]
+enum StateCommands {
+    /// Print the JSON value at <scope>/<key>; empty + exit 1 if absent
+    Get { scope: String, key: String },
+    /// Set <scope>/<key> to <json> (a JSON literal, e.g. '{"a":1}' or '"str"')
+    Set { scope: String, key: String, json: String },
+    /// Delete <scope>/<key>
+    Delete { scope: String, key: String },
 }
 
 #[derive(Subcommand)]
@@ -246,38 +266,6 @@ enum IntegrationCommands {
     Rotate { name: String },
     /// Print integration health-check template to stdout (port of integrations/_template.sh)
     Template,
-    /// Run Exa MCP health probe (port of integrations/mcp-exa.sh)
-    #[cfg(feature = "personal")]
-    #[command(name = "mcp-exa")]
-    McpExa,
-    /// Run Excalidraw MCP health probe (port of integrations/mcp-excalidraw.sh)
-    #[cfg(feature = "personal")]
-    #[command(name = "mcp-excalidraw")]
-    McpExcalidraw,
-    /// Run ECC plugin health probe (port of integrations/mcp-plugin-ecc.sh)
-    #[cfg(feature = "personal")]
-    #[command(name = "mcp-plugin-ecc")]
-    McpPluginEcc,
-    /// Run X (Twitter) API bearer token probe (port of integrations/x-twitter.sh)
-    #[cfg(feature = "personal")]
-    #[command(name = "x-twitter")]
-    XTwitter,
-    /// Run Apple Contacts TCC access probe (port of integrations/apple-addressbook.sh)
-    #[cfg(feature = "personal")]
-    #[command(name = "apple-addressbook")]
-    AppleAddressbook,
-    /// Run Tailscale daemon and peer connectivity probe (port of integrations/tailscale.sh)
-    #[cfg(feature = "personal")]
-    #[command(name = "tailscale")]
-    Tailscale,
-    /// Run Publer API health probe (port of integrations/publer.sh)
-    #[cfg(feature = "personal")]
-    #[command(name = "publer")]
-    Publer,
-    /// Run Granola MCP health probe (port of integrations/granola-mcp.sh)
-    #[cfg(feature = "personal")]
-    #[command(name = "granola-mcp")]
-    GranolaMcp,
     /// Run integration checks for a tier in parallel (port of hex-integration-check-all.sh)
     #[command(name = "check-all")]
     CheckAll {
@@ -458,42 +446,46 @@ fn main() {
                 }
             }
         },
+        Commands::State { command } => match command {
+            StateCommands::Get { scope, key } => match ops::state_get(&scope, &key) {
+                Ok(Some(v)) => {
+                    println!("{}", serde_json::to_string(&v).unwrap());
+                    std::process::exit(0)
+                }
+                Ok(None) => std::process::exit(1), // absent → empty stdout, exit 1
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2)
+                }
+            },
+            StateCommands::Set { scope, key, json } => {
+                let value: serde_json::Value = match serde_json::from_str(&json) {
+                    Ok(v) => v,
+                    Err(e) => {
+                        eprintln!("hex state set: invalid JSON for value: {e}");
+                        std::process::exit(2)
+                    }
+                };
+                match ops::state_set(&scope, &key, &value) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2)
+                    }
+                }
+            }
+            StateCommands::Delete { scope, key } => match ops::state_delete(&scope, &key) {
+                Ok(()) => std::process::exit(0),
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2)
+                }
+            },
+        },
         Commands::Integration { command } => {
             if let IntegrationCommands::Template = command {
                 integration::template();
                 return;
-            }
-            #[cfg(feature = "personal")]
-            if let IntegrationCommands::McpExa = command {
-                std::process::exit(integration_mcp_exa::run_probe());
-            }
-            #[cfg(feature = "personal")]
-            if let IntegrationCommands::McpExcalidraw = command {
-                std::process::exit(integration_mcp_excalidraw::run_probe());
-            }
-            #[cfg(feature = "personal")]
-            if let IntegrationCommands::McpPluginEcc = command {
-                std::process::exit(integration_mcp_plugin_ecc::run_probe());
-            }
-            #[cfg(feature = "personal")]
-            if let IntegrationCommands::XTwitter = command {
-                std::process::exit(integration_x_twitter::run_probe());
-            }
-            #[cfg(feature = "personal")]
-            if let IntegrationCommands::AppleAddressbook = command {
-                std::process::exit(integration_apple_addressbook::run_probe());
-            }
-            #[cfg(feature = "personal")]
-            if let IntegrationCommands::Tailscale = command {
-                std::process::exit(integration_tailscale::run_probe());
-            }
-            #[cfg(feature = "personal")]
-            if let IntegrationCommands::Publer = command {
-                std::process::exit(integration_publer::run_probe());
-            }
-            #[cfg(feature = "personal")]
-            if let IntegrationCommands::GranolaMcp = command {
-                std::process::exit(integration_granola_mcp::run_probe());
             }
             if let IntegrationCommands::CheckAll { ref tier } = command {
                 let hex_dir = get_hex_dir();
@@ -510,6 +502,14 @@ fn main() {
                 std::process::exit(integration_cmd::status(&hex_dir, name.as_deref(), false));
             }
             if let IntegrationCommands::Probe { ref name } = command {
+                // Personal overlay probes (discovered, never named here) take
+                // precedence; unknown names fall through to the bundle probe.
+                #[cfg(feature = "personal")]
+                if let Some((_, f)) =
+                    personal_mods::probe_registry().iter().find(|(n, _)| n == name)
+                {
+                    std::process::exit(f());
+                }
                 let hex_dir = get_hex_dir();
                 std::process::exit(integration_cmd::probe(&hex_dir, name, false, false));
             }
@@ -537,22 +537,6 @@ fn main() {
                 IntegrationCommands::Probe { .. } => unreachable!(),
                 IntegrationCommands::Rotate { .. } => unreachable!(),
                 IntegrationCommands::Template => unreachable!(),
-                #[cfg(feature = "personal")]
-                IntegrationCommands::McpExa => unreachable!(),
-                #[cfg(feature = "personal")]
-                IntegrationCommands::McpExcalidraw => unreachable!(),
-                #[cfg(feature = "personal")]
-                IntegrationCommands::McpPluginEcc => unreachable!(),
-                #[cfg(feature = "personal")]
-                IntegrationCommands::XTwitter => unreachable!(),
-                #[cfg(feature = "personal")]
-                IntegrationCommands::AppleAddressbook => unreachable!(),
-                #[cfg(feature = "personal")]
-                IntegrationCommands::Tailscale => unreachable!(),
-                #[cfg(feature = "personal")]
-                IntegrationCommands::Publer => unreachable!(),
-                #[cfg(feature = "personal")]
-                IntegrationCommands::GranolaMcp => unreachable!(),
                 IntegrationCommands::CheckAll { .. } => unreachable!(),
             };
             let mut cmd = std::process::Command::new("bash");
@@ -672,12 +656,6 @@ fn main() {
         Commands::Upgrade { args } => {
             std::process::exit(upgrade::run(&args));
         }
-        #[cfg(feature = "personal")]
-        Commands::Release { version, skip_e2e, dry_run } => {
-            let hex_dir = get_hex_dir();
-            let code = release::run(&hex_dir, release::ReleaseArgs { version, skip_e2e, dry_run });
-            std::process::exit(code);
-        }
         Commands::Telemetry { command } => {
             std::process::exit(run_telemetry(command));
         }
@@ -691,6 +669,33 @@ fn main() {
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "hex", &mut io::stdout());
         }
+        Commands::Module { command } => match command {
+            ModuleCommands::List => {
+                for w in hex::workers::registry() {
+                    let (kind, _path) = module_source(&w.name);
+                    println!("{:<28} [{}]  {}", w.name, kind, trigger_summary(&w));
+                }
+                std::process::exit(0)
+            }
+            ModuleCommands::Status { name } => {
+                match hex::workers::registry().into_iter().find(|w| w.name == name) {
+                    Some(w) => {
+                        let (kind, path) = module_source(&w.name);
+                        println!("name:     {}", w.name);
+                        println!("source:   {kind}");
+                        if !path.is_empty() {
+                            println!("file:     {path}");
+                        }
+                        println!("triggers: {}", trigger_summary(&w));
+                        std::process::exit(0)
+                    }
+                    None => {
+                        eprintln!("hex module status: no worker named '{name}'");
+                        std::process::exit(1)
+                    }
+                }
+            }
+        },
     }
 }
 
@@ -1126,6 +1131,35 @@ fn run_telemetry(command: TelemetryCommands) -> i32 {
             }
         },
     }
+}
+
+fn trigger_summary(w: &hex::worker::Worker) -> String {
+    use hex::worker::TriggerSpec::*;
+    w.handlers
+        .iter()
+        .map(|(spec, _)| match spec {
+            Cron { expression } => format!("cron({expression})"),
+            State { scope, key } => format!("state({scope}/{key})"),
+            Queue { queue } => format!("queue({queue})"),
+        })
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+fn module_source(name: &str) -> (&'static str, String) {
+    for (n, path) in hex::workers::hex_modules::module_paths() {
+        if n == name {
+            let kind = if path.contains("/src/modules/") {
+                "core"
+            } else if path.contains("/.hex/modules/") {
+                "personal"
+            } else {
+                "module"
+            };
+            return (kind, path.to_string());
+        }
+    }
+    ("builtin", String::new())
 }
 
 #[cfg(test)]

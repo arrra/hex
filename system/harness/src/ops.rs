@@ -56,6 +56,55 @@ pub fn resolve_producer(explicit: Option<&str>) -> String {
     }
 }
 
+/// Pure: the `{scope,key[,value]}` payload for a `state::*` builtin call.
+/// `value=Some` (set) includes the value; `value=None` (get/delete) omits it.
+pub fn state_payload(scope: &str, key: &str, value: Option<&Value>) -> Value {
+    match value {
+        Some(v) => json!({ "scope": scope, "key": key, "value": v.clone() }),
+        None => json!({ "scope": scope, "key": key }),
+    }
+}
+
+/// Connect to the iii engine and invoke a builtin `function_id` with `payload`.
+/// Returns the engine's result Value. LOUD on failure (S6). The ONE place
+/// state/* builtins (and emit) cross into `iii_sdk`.
+fn call_builtin(function_id: &str, payload: Value) -> Result<Value, String> {
+    let rt = tokio::runtime::Runtime::new()
+        .map_err(|e| format!("ops::call_builtin: failed to start tokio runtime: {e}"))?;
+    rt.block_on(async move {
+        let url =
+            std::env::var("III_URL").unwrap_or_else(|_| "ws://127.0.0.1:49134".to_string());
+        let iii = iii_sdk::register_worker(&url, iii_sdk::InitOptions::default());
+        iii.trigger(iii_sdk::protocol::TriggerRequest {
+            function_id: function_id.to_string(),
+            payload,
+            action: None,
+            timeout_ms: None,
+        })
+        .await
+        .map_err(|e| format!("{function_id} failed (url={url}): {e}"))
+    })
+}
+
+/// Write a value into iii state. LOUD on failure (S6).
+pub fn state_set(scope: &str, key: &str, value: &Value) -> Result<(), String> {
+    call_builtin("state::set", state_payload(scope, key, Some(value))).map(|_| ())
+}
+
+/// Read a value from iii state. `Ok(None)` when the engine returns JSON null —
+/// normally "key absent". NOTE: a key whose stored value is literally `null` is
+/// also surfaced as `None` (the engine returns null for both), so absent and
+/// stored-null are indistinguishable here. LOUD on transport failure (S6).
+pub fn state_get(scope: &str, key: &str) -> Result<Option<Value>, String> {
+    let v = call_builtin("state::get", state_payload(scope, key, None))?;
+    Ok(if v.is_null() { None } else { Some(v) })
+}
+
+/// Delete a key from iii state. LOUD on failure (S6).
+pub fn state_delete(scope: &str, key: &str) -> Result<(), String> {
+    call_builtin("state::delete", state_payload(scope, key, None)).map(|_| ())
+}
+
 /// Connect to the iii engine (`III_URL`, default `ws://127.0.0.1:49134`) and
 /// write the event into iii state via `state::set`. State-triggered workers
 /// subscribed to the `events` scope fire as a result.
@@ -67,35 +116,9 @@ pub fn emit(event: &str, data: Value, producer: Option<&str>) -> Result<(), Stri
     let ts = chrono::Utc::now().to_rfc3339();
     let target = emit_target(event, &producer, &ts, &data);
 
-    let rt = tokio::runtime::Runtime::new()
-        .map_err(|e| format!("hex triggers emit: failed to start tokio runtime: {e}"))?;
-
-    rt.block_on(async move {
-        let url =
-            std::env::var("III_URL").unwrap_or_else(|_| "ws://127.0.0.1:49134".to_string());
-        let iii = iii_sdk::register_worker(&url, iii_sdk::InitOptions::default());
-
-        let payload = json!({
-            "scope": target.scope,
-            "key": target.key,
-            "value": target.value,
-        });
-
-        iii.trigger(iii_sdk::protocol::TriggerRequest {
-            function_id: "state::set".to_string(),
-            payload,
-            action: None,
-            timeout_ms: None,
-        })
-        .await
+    call_builtin("state::set", state_payload(&target.scope, &target.key, Some(&target.value)))
         .map(|_| ())
-        .map_err(|e| {
-            format!(
-                "hex triggers emit: state::set failed for event '{}' (url={}): {e}",
-                event, url
-            )
-        })
-    })
+        .map_err(|e| format!("hex triggers emit: {e} (event '{event}')"))
 }
 
 #[cfg(test)]
@@ -135,6 +158,19 @@ mod tests {
     }
 
     #[test]
+    fn state_payload_set_includes_value() {
+        let v = json!({"n": 1});
+        let p = state_payload("trading", "mids", Some(&v));
+        assert_eq!(p, json!({"scope": "trading", "key": "mids", "value": {"n": 1}}));
+    }
+
+    #[test]
+    fn state_payload_get_omits_value() {
+        let p = state_payload("trading", "mids", None);
+        assert_eq!(p, json!({"scope": "trading", "key": "mids"}));
+    }
+
+    #[test]
     fn resolve_producer_precedence_explicit_beats_env_beats_default() {
         let _guard = crate::telemetry::test_support::lock_env();
 
@@ -157,5 +193,18 @@ mod tests {
             Some(v) => std::env::set_var("HEX_PRODUCER", v),
             None => std::env::remove_var("HEX_PRODUCER"),
         }
+    }
+
+    /// Live round-trip against a running engine. Run: `cargo test -p hex-harness
+    /// -- --ignored state_roundtrip_live`.
+    #[test]
+    #[ignore]
+    fn state_roundtrip_live() {
+        let scope = "hex-test";
+        let key = "ops-roundtrip";
+        state_set(scope, key, &json!({"ok": true})).expect("set");
+        assert_eq!(state_get(scope, key).expect("get"), Some(json!({"ok": true})));
+        state_delete(scope, key).expect("delete");
+        assert_eq!(state_get(scope, key).expect("get-after-delete"), None);
     }
 }
