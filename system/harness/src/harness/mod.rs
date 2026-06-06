@@ -61,9 +61,147 @@ pub struct ResultOut {
     pub prompt: Option<Prompt>,
 }
 
+use crate::messages::{self, StoredMessage};
+use crate::worker::run::WorkerOutput;
+use rusqlite::Connection;
+
+const BUDGET: usize = 0; // 0 => assemble's default MAX_CONTEXT_CHARS
+
+/// The v1 vertical slice of submit(Event) -> Result. `worker` is injected for
+/// testability; production passes `crate::worker::run::run_worker`.
+pub fn submit<F>(conn: &Connection, e: &Event, worker: F) -> Result<ResultOut, String>
+where
+    F: Fn(&str) -> Result<WorkerOutput, String>,
+{
+    // 1. derive the assemble() query + optional pinned block
+    let (query, pin) = if let Some(reply_to) = &e.reply_to {
+        match messages::lookup(conn, reply_to).map_err(|x| format!("messages lookup failed: {x}"))? {
+            // S6: a dangling reply_to is a referential-integrity violation — loud, not silent.
+            None => return Err(format!("reply_to target {reply_to:?} not found (referential integrity)")),
+            Some(m) => match (&m.prompt, &e.answer) {
+                (Some(q), Some(ans)) => {
+                    let r = messages::resolve::resolve_answer(q, ans)?;
+                    (r.query, Some(r.pin))
+                }
+                (None, _) => (
+                    format!("(reply to non-question {reply_to}) {}", e.body.clone().unwrap_or_default()),
+                    Some(format!("Note: reply_to target {reply_to} is not a question.\n")),
+                ),
+                (Some(_), None) => return Err(format!("reply to question {reply_to} carried no answer")),
+            },
+        }
+    } else {
+        (e.body.clone().unwrap_or_default(), None)
+    };
+
+    // 2. persist inbound event (must-commit) + best-effort telemetry mirror
+    persist_message(
+        conn,
+        &StoredMessage {
+            id: e.id.clone(),
+            source: e.source.clone(),
+            kind: e.kind.clone(),
+            body: e.body.clone(),
+            reply_to: e.reply_to.clone(),
+            answer: e.answer.clone(),
+            prompt: None,
+            ts: e.ts.clone(),
+        },
+    )?;
+
+    // 3. assemble + prepend the pin (render_candidates is the named render layer)
+    let ctx = crate::memory::assemble::assemble(conn, &query, false, BUDGET);
+    let rendered = crate::memory::assemble::render_candidates(&ctx);
+    let worker_input = match &pin {
+        Some(p) => format!("{p}\n{rendered}"),
+        None => rendered,
+    };
+
+    // 4. run the worker; a question output is persisted as the asked question
+    match worker(&worker_input)? {
+        WorkerOutput::Answer(text) => Ok(ResultOut {
+            event_id: e.id.clone(),
+            status: "done".into(),
+            output: text,
+            prompt: None,
+        }),
+        WorkerOutput::Question(p) => {
+            persist_message(conn, &StoredMessage::question(p.id.clone(), "hex".into(), p.clone(), e.ts.clone()))?;
+            Ok(ResultOut {
+                event_id: e.id.clone(),
+                status: "done".into(),
+                output: String::new(),
+                prompt: Some(p),
+            })
+        }
+    }
+}
+
+/// Must-commit persist + best-effort telemetry mirror (full body + message id).
+fn persist_message(conn: &Connection, m: &StoredMessage) -> Result<(), String> {
+    messages::insert(conn, m).map_err(|e| format!("messages insert failed (fatal): {e}"))?;
+    crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+        source: m.source.clone(),
+        event: "message".into(),
+        status: "ok".into(),
+        duration_ms: None,
+        exit_code: None,
+        detail: Some(
+            serde_json::json!({"id": m.id, "kind": m.kind, "body": m.body, "prompt": m.prompt, "answer": m.answer})
+                .to_string(),
+        ),
+    });
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn submit_reply_pins_choice_and_persists() {
+        use rusqlite::Connection;
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_messages_schema(&c).unwrap();
+        let p = Prompt {
+            id: "Q".into(),
+            text: "Rebuy?".into(),
+            multi: false,
+            options: vec![Opt {
+                id: "b".into(),
+                label: "tilt".into(),
+                description: "sell ETH on rebuy".into(),
+            }],
+        };
+        crate::messages::insert(
+            &c,
+            &crate::messages::StoredMessage::question("Q".into(), "hex".into(), p, "t0".into()),
+        )
+        .unwrap();
+        let e = Event {
+            id: "E".into(),
+            source: "mike-cli".into(),
+            kind: "request".into(),
+            body: None,
+            reply_to: Some("Q".into()),
+            answer: Some(Answer {
+                selected: vec!["b".into()],
+                free_text: None,
+            }),
+            refs: None,
+            scope: None,
+            ts: "t1".into(),
+        };
+        // fake worker echoes its input so we can assert the pin (with b's description) reached it
+        let worker = |input: &str| Ok::<_, String>(crate::worker::run::WorkerOutput::Answer(format!("SAW::{input}")));
+        let r = submit(&c, &e, worker).unwrap();
+        assert_eq!(r.status, "done");
+        assert!(r.output.contains("sell ETH on rebuy"), "pin reached worker: {}", r.output);
+        assert!(crate::messages::lookup(&c, "E").unwrap().is_some());
+    }
 
     #[test]
     fn event_and_prompt_roundtrip_json() {

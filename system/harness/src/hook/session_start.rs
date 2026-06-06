@@ -154,25 +154,54 @@ pub fn format_blocker_output(flag_paths: &[PathBuf], hex_dir: &Path) -> String {
     parts.join("\n")
 }
 
-// ── checkpoint resume ─────────────────────────────────────────────────────────
+// ── recency prime ─────────────────────────────────────────────────────────────
 
-/// Build the checkpoint context string, capping at ~4 KB.
-pub fn format_checkpoint_output(topic: &str, content: &str) -> String {
-    const CAP: usize = 4096;
-    let preview = truncate_str(content, CAP);
-    let truncated = if content.len() > CAP {
-        format!(
-            "\n\n[…truncated, full file at projects/{}/checkpoint.md]",
-            topic
-        )
-    } else {
-        String::new()
-    };
+/// Build the recency-prime context string by driving `memory::recent` in-process.
+/// Pointers only (paths + ages); no file bodies, no LLM. Replaces the prior
+/// topic-checkpoint-resume blurb (per F-08, opaque continuity → out).
+pub fn format_recency_prime(hex_dir: &Path) -> String {
+    let pointers = crate::memory::recent::collect_text(hex_dir);
+    if pointers.is_empty() {
+        return String::new();
+    }
     format!(
-        "*** Topic-scoped session: projects/{topic}/checkpoint.md ***\n\n\
-         Picking up where the prior session left off in this topic. Below is the \
-         checkpoint content; review it before responding to the user.\n\n\
-         {preview}{truncated}"
+        "*** Session recency prime — recent workspace pointers ***\n\n\
+         Glance at these before responding; they are pointers only, not bodies.\n\n\
+         {pointers}"
+    )
+}
+
+// ── deterministic health check ────────────────────────────────────────────────
+
+/// Run the deterministic memory-health check (no LLM) and return any FAIL/WARN
+/// lines as context, or an empty string if healthy / script unavailable.
+/// Relocated from the deleted `startup.rs` step_health.
+pub fn format_health_check(hex_dir: &Path) -> String {
+    let script = hex_dir.join(".hex/skills/memory/scripts/memory_health.py");
+    if !script.is_file() {
+        return String::new();
+    }
+    let output = std::process::Command::new("python3")
+        .arg(&script)
+        .arg("--quiet")
+        .output();
+    let out = match output {
+        Ok(o) => o,
+        Err(_) => return String::new(),
+    };
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    let mut surfaced: Vec<String> = Vec::new();
+    for line in stdout.lines() {
+        if line.contains("FAIL") || line.contains("WARN") {
+            surfaced.push(line.to_string());
+        }
+    }
+    if surfaced.is_empty() {
+        return String::new();
+    }
+    format!(
+        "*** Session-start health check — FAIL/WARN ***\n\n{}",
+        surfaced.join("\n")
     )
 }
 
@@ -199,26 +228,22 @@ pub fn run() {
         return;
     }
 
-    // ── Channel → topic checkpoint resume ─────────────────────────────────────
-    let session_key = std::env::var("CC_SESSION_KEY").unwrap_or_default();
-    if let Some(topic) = resolve_topic(&session_key) {
-        let ckpt = hex_dir.join("projects").join(&topic).join("checkpoint.md");
-        if ckpt.is_file() {
-            match std::fs::read_to_string(&ckpt) {
-                Ok(raw) => {
-                    let context = format_checkpoint_output(&topic, raw.trim());
-                    emit_hook_output(&context);
-                }
-                Err(e) => {
-                    let msg = format!(
-                        "[session-start hook] failed to read checkpoint at {}: {}",
-                        ckpt.display(),
-                        e
-                    );
-                    emit_hook_output(&msg);
-                }
-            }
-        }
+    // ── Recency prime + deterministic health check ────────────────────────────
+    // Replaces the prior topic-checkpoint-resume (F-08: opaque continuity → out).
+    let mut sections: Vec<String> = Vec::new();
+
+    let health = format_health_check(&hex_dir);
+    if !health.is_empty() {
+        sections.push(health);
+    }
+
+    let prime = format_recency_prime(&hex_dir);
+    if !prime.is_empty() {
+        sections.push(prime);
+    }
+
+    if !sections.is_empty() {
+        emit_hook_output(&sections.join("\n\n"));
     }
 }
 
@@ -347,23 +372,40 @@ mod tests {
 
     // ── checkpoint preview ────────────────────────────────────────────────────
 
+    // ── recency prime (replaces topic-checkpoint-resume) ──────────────────────
+
+    /// Red test for task Texbb48j5: SessionStart must emit a recency prime
+    /// built from `memory::recent`-style pointers (todo.md `## Now`, project
+    /// dirs, recent decisions) — NOT a topic-scoped checkpoint preview.
+    ///
+    /// The implementer should add a `format_recency_prime(hex_dir: &Path) -> String`
+    /// (or similarly-named) helper that drives memory::recent in-process and
+    /// returns its text. This test will fail to compile until it exists.
     #[test]
-    fn checkpoint_no_truncation_when_short() {
-        let content = "Short content.";
-        let out = format_checkpoint_output("my-topic", content);
-        assert!(out.contains("projects/my-topic/checkpoint.md"));
-        assert!(out.contains("Short content."));
-        assert!(!out.contains("truncated"));
+    fn recency_prime_includes_todo_now_pointers() {
+        let tmp = TempDir::new().unwrap();
+        let hex_dir = tmp.path();
+        std::fs::write(
+            hex_dir.join("todo.md"),
+            "## Now\n- ship the recency prime\n- delete checkpoint resume\n\n## Later\n- nope\n",
+        )
+        .unwrap();
+        std::fs::create_dir_all(hex_dir.join("projects/example")).unwrap();
+        std::fs::write(
+            hex_dir.join("projects/example/context.md"),
+            "example project\n",
+        )
+        .unwrap();
+
+        let out = format_recency_prime(hex_dir);
+        assert!(
+            out.contains("ship the recency prime"),
+            "recency prime must surface todo.md ## Now items; got: {out}"
+        );
+        assert!(
+            !out.contains("projects/my-topic/checkpoint.md"),
+            "recency prime must NOT be the topic-checkpoint-resume blurb; got: {out}"
+        );
     }
 
-    #[test]
-    fn checkpoint_truncates_at_4kb() {
-        let content: String = "x".repeat(8000);
-        let out = format_checkpoint_output("my-topic", &content);
-        // Preview should be ≤4096 bytes of 'x' plus the message
-        assert!(out.contains("truncated"));
-        // The preview itself must not exceed 4096 x's
-        let x_count = out.chars().filter(|&c| c == 'x').count();
-        assert!(x_count <= 4096, "preview has {x_count} chars, expected ≤4096");
-    }
 }

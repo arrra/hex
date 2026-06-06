@@ -4,7 +4,7 @@
 //! (S6, no silent drop). v1 ships the schema + insert/lookup; resolution and
 //! the CLI driver land in later tasks.
 
-use crate::harness::{Answer, Prompt};
+use crate::harness::{id, Answer, Event, Prompt};
 use rusqlite::{params, Connection};
 
 pub mod resolve;
@@ -88,10 +88,86 @@ pub fn lookup(conn: &Connection, id: &str) -> rusqlite::Result<Option<StoredMess
     })
 }
 
+// ── CLI driver helpers (build the Event the `hex messages` subcommand submits) ──
+
+fn now_rfc3339() -> String {
+    chrono::Utc::now().to_rfc3339()
+}
+
+/// Build a normal submit Event from CLI text.
+pub fn build_submit_event(body: &str) -> Event {
+    Event {
+        id: id::mint(),
+        source: "mike-cli".into(),
+        kind: "request".into(),
+        body: Some(body.to_string()),
+        reply_to: None,
+        answer: None,
+        refs: None,
+        scope: None,
+        ts: now_rfc3339(),
+    }
+}
+
+/// Build a reply Event from CLI args: a target question id + selected option ids
+/// and/or free-form text.
+pub fn build_reply_event(reply_to: &str, selected: &[&str], free_text: Option<String>) -> Event {
+    Event {
+        id: id::mint(),
+        source: "mike-cli".into(),
+        kind: "request".into(),
+        body: None,
+        reply_to: Some(reply_to.to_string()),
+        answer: Some(Answer {
+            selected: selected.iter().map(|s| s.to_string()).collect(),
+            free_text,
+        }),
+        refs: None,
+        scope: None,
+        ts: now_rfc3339(),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use rusqlite::Connection;
+
+    #[test]
+    fn cli_submit_then_reply_roundtrip() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_messages_schema(&c).unwrap();
+        use crate::harness::{Opt, Prompt};
+        insert(
+            &c,
+            &StoredMessage::question(
+                "Q".into(),
+                "hex".into(),
+                Prompt {
+                    id: "Q".into(),
+                    text: "pick".into(),
+                    multi: false,
+                    options: vec![Opt {
+                        id: "b".into(),
+                        label: "tilt".into(),
+                        description: "sell ETH".into(),
+                    }],
+                },
+                "t".into(),
+            ),
+        )
+        .unwrap();
+        let e = build_reply_event("Q", &["b"], None);
+        assert_eq!(e.reply_to.as_deref(), Some("Q"));
+        assert_eq!(e.answer.as_ref().unwrap().selected, vec!["b".to_string()]);
+        // and a plain submit builds a body event
+        let s = build_submit_event("hello");
+        assert_eq!(s.body.as_deref(), Some("hello"));
+        assert!(s.reply_to.is_none());
+    }
 
     #[test]
     fn schema_creates_messages_table() {

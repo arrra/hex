@@ -173,8 +173,10 @@ fn todo_now_top3(hex_dir: &Path) -> Vec<Pointer> {
         .collect()
 }
 
-/// Collect and print up to ~10 pointer lines. Returns exit code.
-pub fn run(hex_dir: &Path) -> i32 {
+/// Collect up to ~10 pointer lines as a single newline-joined string.
+/// Pointers only — relative path + human-readable age. Used by both the CLI
+/// (`hex memory recent`) and the SessionStart hook (recency prime).
+pub fn collect_text(hex_dir: &Path) -> String {
     let mut all: Vec<Pointer> = Vec::new();
     all.extend(project_dir_mtimes(hex_dir));
     all.extend(decision_files(hex_dir, 10));
@@ -182,13 +184,21 @@ pub fn run(hex_dir: &Path) -> i32 {
 
     // Recency-ordered, newest first.
     all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
-
-    // Cap at ~10 lines total.
     all.truncate(10);
 
     let now = SystemTime::now();
-    for p in &all {
-        println!("{}  ({})", p.rel, human_age(now, p.mtime));
+    let lines: Vec<String> = all
+        .iter()
+        .map(|p| format!("{}  ({})", p.rel, human_age(now, p.mtime)))
+        .collect();
+    lines.join("\n")
+}
+
+/// Collect and print up to ~10 pointer lines. Returns exit code.
+pub fn run(hex_dir: &Path) -> i32 {
+    let text = collect_text(hex_dir);
+    if !text.is_empty() {
+        println!("{}", text);
     }
     0
 }
