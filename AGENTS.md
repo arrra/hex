@@ -33,13 +33,10 @@ Verify: hex info repo-mission
 **Static answer (as of 2026-05-16):** Active refactor — Phase 5+ harness engineering.
 13 backlog items totaling ~3 months of work; 7 HIGH severity. Status:
 - C1 agents-md-verification: DONE (this section)
-- C3 session-lifecycle-state (PROGRESS.md schema): pending
-- C2 agents-md-decomposition: pending (depends on C1 + C3)
+- C2 agents-md-decomposition: pending (depends on C1)
 - C4 trail-audit-implementation: pending (depends on C1)
-- C5 verify-mechanical-enforcement: pending (depends on C3)
 
 **Build status:** Run `cargo build` in `system/harness/` to verify binary compiles.
-Check `PROGRESS.md` at repo root (once C3 lands) for git commit hash and test status.
 
 Verify: hex doctor
 
@@ -48,8 +45,7 @@ Verify: hex doctor
 ## Question 3 — What is the next action?
 
 **Static answer:** Read `todo.md` for the current priority list. Immediate next items:
-1. C3 — PROGRESS.md schema + minimal initial file (schema design + hex-startup/shutdown wiring)
-2. C2 — AGENTS.md decomposition: 563-line file → ≤150-line router + topic docs in `docs/harness/`
+1. C2 — AGENTS.md decomposition: 563-line file → ≤150-line router + topic docs in `docs/harness/`
 
 Verify: cat todo.md
 
@@ -141,7 +137,7 @@ The behavioral contract is identical across agent runtimes — only the tool mod
 | Sandbox model | Whatever the runtime enforces | Per-session isolation |
 | Web access | Use the native fetch/search tool | `curl` + public APIs, or note the limitation |
 
-**Everything else is identical regardless of runtime**: BOI dispatch, memory system, standing orders, session lifecycle.
+**Everything else is identical regardless of runtime**: BOI dispatch, memory system, standing orders.
 
 ---
 
@@ -195,8 +191,6 @@ Each skill lives at `.hex/skills/<name>/SKILL.md`. Read the file to understand:
 | Skill | Path | Purpose |
 |---|---|---|
 | memory | `.hex/skills/memory/` | Search/save/index persistent memory |
-| morning-brief | `.hex/skills/morning-brief/` | Daily context summary |
-| session-reflection | `.hex/skills/session-reflection/` | End-of-session checkpoint |
 | boi | `.hex/skills/boi/` | BOI spec writing and dispatch |
 
 Read `cat .hex/skills/<name>/SKILL.md` before invoking any skill to get current instructions.
@@ -217,29 +211,6 @@ Read `cat .hex/skills/<name>/SKILL.md` before invoking any skill to get current 
 | `landings/` | Daily outcome targets (L1-L4 tiers) |
 | `raw/` | Unprocessed input |
 | `.hex/` | System directory. Scripts, skills, templates. |
-
----
-
-## Session Lifecycle
-
-Sessions follow a 5-state lifecycle: **FRESH → ACTIVE → WARMING → HOT → CHECKPOINT → FRESH**.
-
-**FRESH (session start):**
-Read `me/me.md`. If it contains "Your name here", run onboarding (see below). Otherwise:
-1. Read `todo.md` for current priorities
-2. Check `landings/` for today's targets
-3. Check `evolution/suggestions.md` for pending improvements
-4. Surface a brief summary: priorities, meetings to prep, overdue items
-
-**ACTIVE → WARMING (context at ~65%):**
-Note: "Context is getting full (~65%). Still have room."
-
-**WARMING → HOT (context at ~80%):**
-Tell the user: "Context is heavy (~80%). After this task, I'll checkpoint and start fresh."
-
-**HOT → CHECKPOINT:**
-1. Write a handoff file to `raw/handoffs/` with: current task, key decisions, files modified, open questions, next steps
-2. Tell the user: "Checkpointed. Starting fresh."
 
 ---
 
@@ -331,7 +302,7 @@ Write to `evolution/suggestions.md`:
 - **Status:** proposed
 ```
 
-Surface during the next morning brief. Wait for approval.
+Surface in the next session. Wait for approval.
 
 ---
 
@@ -410,33 +381,35 @@ BOI is the **ONLY** delegation system in hex. Multi-step work, research, generat
 
 ### How BOI Works
 
-1. Write a YAML spec file with `tasks:` array
-2. Dispatch: `bash ~/.boi/boi dispatch <spec.yaml>`
+1. Write a TOML spec file with `[[tasks]]` entries
+2. Dispatch: `~/.boi/bin/boi dispatch <spec.toml>`
 3. Worker picks it up from queue, executes task, moves to next task
 4. Check status: `~/.boi/bin/boi dashboard`
 
 ### Spec Template
 
-```yaml
-title: "Short descriptive title"
-mode: execute
+```toml
+title = "Short descriptive title"
+mode = "execute"
 
-context: |
-  Why this work is needed, what the end state looks like.
+context = """
+Why this work is needed, what the end state looks like.
+"""
 
-tasks:
-  - id: t-1
-    title: "First task"
-    spec: |
-      What to do. Be specific about files, functions, acceptance criteria.
-    verify: "test -f /expected/output.md"
+[[tasks]]
+id = "t-1"
+title = "First task"
+spec = """
+What to do. Be specific about files, functions, acceptance criteria.
+"""
+verify = "test -f /expected/output.md"
 
-  - id: t-2
-    title: "Second task"
-    spec: |
-      ...
-    verify: "command that returns 0 on success"
-    depends: ["t-1"]
+[[tasks]]
+id = "t-2"
+title = "Second task"
+spec = "..."
+verify = "command that returns 0 on success"
+depends = ["t-1"]
 ```
 
 ### Modes
@@ -449,11 +422,10 @@ tasks:
 ### CLI
 
 ```bash
-bash ~/.boi/boi dispatch <spec.yaml>    # enqueue a spec
-~/.boi/bin/boi dashboard                   # queue + worker status
-bash ~/.boi/boi dashboard                # interactive TUI — live queue + worker view
-bash ~/.boi/boi log <queue-id>           # iteration history
-bash ~/.boi/boi cancel <queue-id>        # stop a spec
+~/.boi/bin/boi dispatch <spec.toml>      # enqueue a spec
+~/.boi/bin/boi dashboard                 # queue + worker status / interactive TUI
+~/.boi/bin/boi log <queue-id>            # iteration history
+~/.boi/bin/boi cancel <queue-id>         # stop a spec
 ```
 
 ---
