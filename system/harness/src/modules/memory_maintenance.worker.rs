@@ -11,7 +11,7 @@
 //! The YAML file is intentionally left in place (additive migration — a later
 //! spec removes the YAML-host path).
 
-use crate::worker::{ctx::Ctx, event::Event, Result, Worker};
+use hex::worker::{ctx::Ctx, event::Event, Result, Worker};
 
 /// Cron expression for `hex::memory::index` — every 15 minutes.
 pub const CRON_INDEX: &str = "0 */15 * * * * *";
