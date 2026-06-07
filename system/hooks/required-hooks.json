@@ -1,1 +1,8 @@
-{}
+{
+  "PreToolUse": [
+    {
+      "matcher": "Write|Edit|MultiEdit|NotebookEdit",
+      "script": ".hex/hooks/scripts/worktree-guard.sh"
+    }
+  ]
+}
