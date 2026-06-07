@@ -213,6 +213,12 @@ The binary is built or downloaded automatically by `install.sh`. If it cannot be
 
 `system/harness/Cargo.toml` is the single source of truth. `env!("CARGO_PKG_VERSION")` embeds the version at compile time. Git tags must match — enforced by `release.sh`. See [docs/versioning.md](./docs/versioning.md).
 
+### Module authoring
+
+Harness behavior is built from **modules** — typed Rust workers auto-discovered by a `*.worker.rs` file convention. A module is one file exposing `pub fn worker() -> Worker`, built with the `hex::worker` API (`Worker::new(name).on_cron(...)` / `.on_event(...)` / `.on_state(...)` / `.on_queue(...)`). The build script recursively globs `*.worker.rs` from `system/harness/src/modules/` (core, shipped) and `$HEX_DIR/.hex/modules/` (personal overlay, under `--features personal`), derives a module ident from each filename, and generates the registry — no central file to edit.
+
+Installing a module is a rebuild: drop the file in a root, rebuild the harness, then `hex module list` / `hex module status <name>` to confirm it registered. See [docs/module-authoring.md](./docs/module-authoring.md) for the full guide.
+
 ## Quality assurance — gaming detection
 
 hex ships a Quality Antagonist: an adversarial checker that validates completed work is real, not gamed.
