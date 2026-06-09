@@ -134,3 +134,64 @@ This replaces the old in-memory iii observability (ephemeral, 1000-span cap,
 not queryable) and the previous `.hex/telemetry/events.db` that was removed
 when `hex-events` was deleted on 2026-06-02. The store is now rebuilt
 natively in the Rust harness.
+
+---
+
+## LLM configuration (`llm.toml`)
+
+Every LLM-backed feature in hex — memory distill (extract + judge), memory
+consolidate's operating-model audit, and the doctor provider health check —
+resolves its provider endpoint, model, max_tokens, and API key environment
+variable through a single registry. Defaults are baked in, so a fresh install
+with no config behaves exactly as today.
+
+To customize: copy `system/templates/llm.toml.example` to
+`$HEX_DIR/.hex/config/llm.toml` and edit. The example file documents the full
+schema with commented-out defaults for each known use case.
+
+### Use cases
+
+| Use case            | What it backs                                 | Built-in default                  |
+|---------------------|-----------------------------------------------|-----------------------------------|
+| `memory_extract`    | `hex memory distill` — structured extraction  | `anthropic/claude-sonnet-4.5`     |
+| `memory_judge`      | `hex memory distill` — retention judge        | `anthropic/claude-sonnet-4.5`     |
+| `consolidate_audit` | `hex memory consolidate full` — audit pass    | `anthropic/claude-sonnet-4.5`     |
+| `health_check`      | `hex doctor` — cheap provider probe           | `anthropic/claude-haiku-4.5`      |
+
+### Resolution order (highest wins)
+
+1. **Env var** `HEX_LLM_MODEL_<USE_CASE_UPPER>` — e.g.
+   `HEX_LLM_MODEL_MEMORY_EXTRACT=anthropic/claude-opus-4.5`.
+   `HEX_CONSOLIDATE_MODEL` is still honored as a back-compat alias for
+   `consolidate_audit`.
+2. **`[use_cases.<name>]`** table in `llm.toml`.
+3. **`[defaults]`** table in `llm.toml`.
+4. **Built-in registry defaults** (the values above).
+
+### Schema (excerpt)
+
+```toml
+[defaults]
+model       = "anthropic/claude-sonnet-4.5"
+base_url    = "https://openrouter.ai/api/v1/chat/completions"
+api_key_env = "OPENROUTER_API_KEY"
+
+[use_cases.memory_extract]
+model      = "..."
+max_tokens = 16384
+```
+
+`base_url` lets you point any use case at an OpenAI-compatible alternative
+(Ollama, vLLM, a self-hosted gateway). `api_key_env` names the environment
+variable to read the key from; the OpenRouter file fallback
+(`$HEX_DIR/.hex/secrets/openrouter.env`) only applies when it's left at the
+default `OPENROUTER_API_KEY`.
+
+### Failure modes
+
+- **No `llm.toml`** — built-ins are used, no warning.
+- **Malformed TOML or invalid field** — hex fails loudly to stderr and the
+  operation aborts (per S6, no quiet failures).
+- **Unknown `[use_cases.*]` table** — warning to stderr, otherwise tolerated.
+- `hex doctor` runs an `llm-config` check that validates the file when
+  present and prints the resolved model per use case.

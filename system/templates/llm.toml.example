@@ -1,0 +1,68 @@
+# hex LLM configuration — copy to $HEX_DIR/.hex/config/llm.toml to customize.
+#
+# Every LLM-backed feature in hex resolves its model, max_tokens, base URL, and
+# API key environment variable through this file. Missing file -> built-in
+# defaults (zero behavior change). Malformed file -> hex fails loudly to stderr.
+#
+# Resolution order for each field (highest wins):
+#   1. Environment variable HEX_LLM_MODEL_<USE_CASE_UPPER>
+#        e.g. HEX_LLM_MODEL_MEMORY_EXTRACT, HEX_LLM_MODEL_HEALTH_CHECK
+#        Back-compat: HEX_CONSOLIDATE_MODEL is still honored as an alias for
+#        the consolidate_audit use case.
+#   2. [use_cases.<name>] table below
+#   3. [defaults] table below
+#   4. Built-in registry defaults (the values shown in the comments)
+#
+# Known use cases:
+#   memory_extract     — distill: extract structured memory from session logs
+#   memory_judge       — distill: judge candidate memories for retention
+#   consolidate_audit  — memory consolidate full: operating-model audit
+#   health_check       — doctor: provider connectivity probe
+
+[defaults]
+# Default model for every use case unless overridden below.
+model = "anthropic/claude-sonnet-4.5"
+
+# OpenAI-compatible chat/completions endpoint. Override for Ollama, vLLM, or
+# any OpenAI-compatible gateway. Default targets OpenRouter.
+# base_url = "https://openrouter.ai/api/v1/chat/completions"
+
+# Environment variable name to read the API key from. The OpenRouter file
+# fallback ($HEX_DIR/.hex/secrets/openrouter.env) only applies when this is
+# left at the default "OPENROUTER_API_KEY".
+# api_key_env = "OPENROUTER_API_KEY"
+
+# Per-use-case overrides. Any field may be set; unset fields fall through to
+# [defaults], then to the built-in registry. Tables for unknown use cases
+# emit a stderr warning but do not fail.
+
+[use_cases.memory_extract]
+# Built-in default: anthropic/claude-sonnet-4.5, max_tokens 16384
+# model      = "anthropic/claude-sonnet-4.5"
+# max_tokens = 16384
+
+[use_cases.memory_judge]
+# Built-in default: anthropic/claude-sonnet-4.5, max_tokens 256
+# model      = "anthropic/claude-sonnet-4.5"
+# max_tokens = 256
+
+[use_cases.consolidate_audit]
+# Built-in default: anthropic/claude-sonnet-4.5, max_tokens 4096
+# model      = "anthropic/claude-sonnet-4.5"
+# max_tokens = 4096
+
+[use_cases.health_check]
+# Built-in default: anthropic/claude-haiku-4.5 (cheap probe)
+# model      = "anthropic/claude-haiku-4.5"
+# max_tokens = 64
+
+# ---------------------------------------------------------------------------
+# Example: route memory_extract through a local Ollama, keep everything else
+# on OpenRouter.
+#
+# [use_cases.memory_extract]
+# model       = "llama3.1:70b"
+# max_tokens  = 8192
+# base_url    = "http://localhost:11434/v1/chat/completions"
+# api_key_env = "OLLAMA_API_KEY"   # any non-empty value works for Ollama
+# ---------------------------------------------------------------------------
