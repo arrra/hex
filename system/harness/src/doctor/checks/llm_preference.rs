@@ -1,26 +1,23 @@
 use crate::doctor::check::{Category, CheckResult, Context, DoctorCheck};
 use std::fs;
 
-/// check_14: .hex/llm-preference file exists under HEX_SYSTEM_DIR.
+/// Legacy `.hex/llm-preference` placeholder check.
+///
+/// The placeholder file is no longer read by anything in the harness — per-use-case
+/// LLM configuration lives in `$HEX_DIR/.hex/config/llm.toml` (see `llm_config`
+/// module and the `llm-config` doctor check). This check is preserved for
+/// historical reasons but is intentionally a no-op: it never creates the file,
+/// even when `fix=true`, and reports an informational/pass status. The
+/// `StaleLlmPreferenceCheck` (in `llm_config.rs`) warns if the placeholder is
+/// still on disk and offers to remove it.
 pub struct LlmPreferenceExists;
 
 impl DoctorCheck for LlmPreferenceExists {
     fn name(&self) -> &str { "llm-preference" }
     fn category(&self) -> Category { Category::Config }
     fn run(&self, ctx: &Context) -> CheckResult {
-        let path = ctx.hex_dir.join(".hex/llm-preference");
-        if path.is_file() {
-            return CheckResult::pass(".hex/llm-preference exists");
-        }
-        if ctx.fix {
-            if let Some(parent) = path.parent() {
-                let _ = fs::create_dir_all(parent);
-            }
-            if fs::write(&path, "claude\n").is_ok() {
-                return CheckResult::fixed(".hex/llm-preference created with default");
-            }
-        }
-        CheckResult::warn(".hex/llm-preference missing")
+        let _ = &ctx.hex_dir; // silence unused warning; behavior is intentionally a no-op
+        CheckResult::pass("llm-preference placeholder no longer used (see llm-config check)")
     }
 }
 

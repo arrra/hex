@@ -72,6 +72,8 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::todo_md::TodoMdExists),
         Box::new(checks::llm_preference::LlmPreferenceExists),
         Box::new(checks::llm_preference::NoStaleLlmPreference),
+        Box::new(checks::llm_config::LlmConfigCheck),
+        Box::new(checks::llm_config::StaleLlmPreferenceCheck),
         Box::new(checks::settings_json::SettingsJsonValid),
         Box::new(checks::timezone::TimezoneValid),
         // Registry health checks
