@@ -8,6 +8,7 @@ pub mod harness;
 pub mod capability_exec;
 pub mod audit;
 pub mod capability_guard;
+pub mod llm_config;
 pub mod memory;
 pub mod messages;
 pub mod ops;

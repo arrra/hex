@@ -42,6 +42,10 @@ sqlite-vec = "0.1"
 fastembed = "4"
 anyhow = "1"
 ureq = { version = "2", features = ["json"] }
+# Per-use-case LLM config registry (spec Sy23e65a2): parse
+# $HEX_DIR/.hex/config/llm.toml. Pinned to 0.8 (current stable); pulls
+# serde_spanned/toml_edit transitively. No network/IO surface beyond parsing.
+toml = "0.8"
 ulid = "1"
 dirs = "5"
 axum = { version = "0.7", features = ["macros"] }
