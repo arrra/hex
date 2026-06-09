@@ -10,9 +10,6 @@ pub struct Candidate {
     pub importance: f32,
 }
 
-const MODEL: &str = "anthropic/claude-sonnet-4.5";
-const MAX_TOK: u32 = 16384;
-
 pub fn extract_from_span(text: &str) -> Result<Vec<Candidate>, ProviderError> {
     let template = std::fs::read_to_string(
         crate::memory::provider::hex_root().join(".hex/memory/prompts/extract.txt"),
@@ -21,7 +18,7 @@ pub fn extract_from_span(text: &str) -> Result<Vec<Candidate>, ProviderError> {
     let prompt = template.replace("{{PREDICATES}}", &predicates::vocab_for_prompt())
         + "\n\n--- TEXT ---\n"
         + text;
-    let raw = provider::generate(&prompt, MODEL, MAX_TOK)?;
+    let raw = provider::generate_for("memory_extract", &prompt)?;
     parse_response(&raw).map_err(|e| ProviderError::Upstream(format!("parse: {e}")))
 }
 

@@ -17,9 +17,6 @@ pub struct Decision {
     pub reason: String,
 }
 
-const MODEL: &str = "anthropic/claude-sonnet-4.5";
-const MAX_TOK: u32 = 256;
-
 pub fn judge(
     cand_subject: &str,
     cand_predicate: &str,
@@ -42,7 +39,7 @@ pub fn judge(
         .replace("{{OBJ}}", cand_object)
         .replace("{{CTX}}", context)
         .replace("{{EXISTING}}", &existing_md);
-    let raw = provider::generate(&prompt, MODEL, MAX_TOK)?;
+    let raw = provider::generate_for("memory_judge", &prompt)?;
     parse_decision(&raw).map_err(|e| ProviderError::Upstream(format!("judge parse: {e}")))
 }
 

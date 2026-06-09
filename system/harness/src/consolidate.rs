@@ -125,11 +125,12 @@ fn run_layer3(hex_dir: &Path) -> Result<()> {
         .with_context(|| format!("read {}", learnings_path.display()))?;
 
     let prompt = build_audit_prompt(&claude, &learnings);
-    let model = std::env::var("HEX_CONSOLIDATE_MODEL")
-        .unwrap_or_else(|_| "anthropic/claude-sonnet-4.5".to_string());
 
-    let body = crate::memory::provider::generate(&prompt, &model, 4096)
-        .map_err(|e| anyhow::anyhow!("provider::generate failed: {e}"))?;
+    // Model, max_tokens, base_url, and api_key_env all resolved via llm_config.
+    // HEX_CONSOLIDATE_MODEL remains supported as an alias for consolidate_audit
+    // inside llm_config::resolve (back-compat).
+    let body = crate::memory::provider::generate_for("consolidate_audit", &prompt)
+        .map_err(|e| anyhow::anyhow!("provider::generate_for(consolidate_audit) failed: {e}"))?;
 
     let path = write_audit_artifact(hex_dir, &body)?;
     println!("Layer 3 wrote audit: {}", path.display());

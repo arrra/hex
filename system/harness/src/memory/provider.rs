@@ -27,22 +27,32 @@ pub fn hex_root() -> PathBuf {
 }
 
 pub fn load_openrouter_key() -> Option<String> {
-    if let Ok(k) = env::var("OPENROUTER_API_KEY") {
+    load_api_key("OPENROUTER_API_KEY")
+}
+
+/// Load an API key for the given env var name. When the requested env var is
+/// the default `OPENROUTER_API_KEY`, also falls back to the
+/// `$HEX_DIR/.hex/secrets/openrouter.env` file (back-compat with the original
+/// behavior). For any other api_key_env, only the env var is consulted.
+pub fn load_api_key(api_key_env: &str) -> Option<String> {
+    if let Ok(k) = env::var(api_key_env) {
         if !k.is_empty() {
             return Some(k);
         }
     }
-    // Only check the secrets file if HEX_DIR is explicitly set — no hardcoded fallback
-    // so that test/verify environments without HEX_DIR correctly return None (Deferred).
-    if let Ok(hex_dir) = env::var("HEX_DIR") {
-        let env_file = PathBuf::from(&hex_dir).join(".hex/secrets/openrouter.env");
-        if let Ok(content) = std::fs::read_to_string(env_file) {
-            for line in content.lines() {
-                if let Some((k, v)) = line.split_once('=') {
-                    if k.trim() == "OPENROUTER_API_KEY" {
-                        let val = v.trim().trim_matches('"').to_string();
-                        if !val.is_empty() {
-                            return Some(val);
+    if api_key_env == "OPENROUTER_API_KEY" {
+        // Only check the secrets file if HEX_DIR is explicitly set — no hardcoded fallback
+        // so that test/verify environments without HEX_DIR correctly return None (Deferred).
+        if let Ok(hex_dir) = env::var("HEX_DIR") {
+            let env_file = PathBuf::from(&hex_dir).join(".hex/secrets/openrouter.env");
+            if let Ok(content) = std::fs::read_to_string(env_file) {
+                for line in content.lines() {
+                    if let Some((k, v)) = line.split_once('=') {
+                        if k.trim() == "OPENROUTER_API_KEY" {
+                            let val = v.trim().trim_matches('"').to_string();
+                            if !val.is_empty() {
+                                return Some(val);
+                            }
                         }
                     }
                 }
@@ -71,19 +81,67 @@ pub fn build_request_body(prompt: &str, model: &str, max_tokens: u32) -> serde_j
 }
 
 pub fn generate(prompt: &str, model: &str, max_tokens: u32) -> Result<String, ProviderError> {
-    let key = load_openrouter_key().ok_or_else(|| {
-        ProviderError::Deferred(
-            "OPENROUTER_API_KEY not set and .hex/secrets/openrouter.env missing or empty".into(),
-        )
+    generate_inner(
+        prompt,
+        model,
+        max_tokens,
+        "https://openrouter.ai/api/v1/chat/completions",
+        "OPENROUTER_API_KEY",
+    )
+}
+
+/// Resolve LLM config for `use_case` (via `llm_config::resolve`) and call the
+/// underlying transport. This is the preferred entry point for new code —
+/// honors per-use-case overrides for model, max_tokens, base_url, and
+/// api_key_env from `$HEX_DIR/.hex/config/llm.toml`.
+pub fn generate_for(use_case: &str, prompt: &str) -> Result<String, ProviderError> {
+    let cfg = crate::llm_config::resolve(use_case)
+        .map_err(|e| ProviderError::Deferred(format!("llm_config::resolve({use_case}): {e:#}")))?;
+    generate_inner(
+        prompt,
+        &cfg.model,
+        cfg.max_tokens,
+        &cfg.base_url,
+        &cfg.api_key_env,
+    )
+}
+
+fn generate_inner(
+    prompt: &str,
+    model: &str,
+    max_tokens: u32,
+    base_url: &str,
+    api_key_env: &str,
+) -> Result<String, ProviderError> {
+    let key = load_api_key(api_key_env).ok_or_else(|| {
+        if api_key_env == "OPENROUTER_API_KEY" {
+            ProviderError::Deferred(
+                "OPENROUTER_API_KEY not set and .hex/secrets/openrouter.env missing or empty"
+                    .into(),
+            )
+        } else {
+            ProviderError::Deferred(format!(
+                "API key env var `{api_key_env}` not set (resolved from llm.toml)"
+            ))
+        }
     })?;
 
-    let body = build_request_body(prompt, model, max_tokens);
+    // Only force anthropic-direct routing when actually posting to OpenRouter.
+    let body = if base_url.contains("openrouter.ai") {
+        build_request_body(prompt, model, max_tokens)
+    } else {
+        serde_json::json!({
+            "model": model,
+            "messages": [{"role": "user", "content": prompt}],
+            "max_tokens": max_tokens,
+        })
+    };
 
-    let resp = ureq::post("https://openrouter.ai/api/v1/chat/completions")
+    let resp = ureq::post(base_url)
         .set("Authorization", &format!("Bearer {key}"))
         .set("Content-Type", "application/json")
         .send_json(body)
-        .map_err(|e| ProviderError::Upstream(format!("openrouter: {e}")))?;
+        .map_err(|e| ProviderError::Upstream(format!("{base_url}: {e}")))?;
 
     let json: serde_json::Value = resp
         .into_json()
@@ -96,7 +154,7 @@ pub fn generate(prompt: &str, model: &str, max_tokens: u32) -> Result<String, Pr
 }
 
 pub fn health_check() -> Result<String, ProviderError> {
-    generate("Respond with a single word: OK", "anthropic/claude-haiku-4.5", 5)
+    generate_for("health_check", "Respond with a single word: OK")
 }
 
 #[cfg(test)]
@@ -138,6 +196,43 @@ mod tests {
             body["provider"].is_null(),
             "provider field must NOT be present for non-anthropic models"
         );
+    }
+
+    #[test]
+    fn generate_for_uses_resolved_api_key_env() {
+        // Red test for T13qxa0dp: provider::generate_for(use_case, prompt) must
+        // resolve config via llm_config and honor the resolved api_key_env when
+        // looking for the API key. With a custom api_key_env set in llm.toml
+        // and no value for that env var (nor OPENROUTER_API_KEY), the call
+        // must return Deferred — proving it consulted the resolved config
+        // rather than only the hardcoded OPENROUTER_API_KEY path.
+        let _guard = crate::telemetry::test_support::lock_env();
+        std::env::remove_var("OPENROUTER_API_KEY");
+        std::env::remove_var("MY_CUSTOM_LLM_KEY");
+        let td = tempfile::tempdir().unwrap();
+        std::env::set_var("HEX_DIR", td.path());
+        std::fs::create_dir_all(td.path().join(".hex/config")).unwrap();
+        std::fs::write(
+            td.path().join(".hex/config/llm.toml"),
+            r#"
+[use_cases.memory_extract]
+api_key_env = "MY_CUSTOM_LLM_KEY"
+"#,
+        )
+        .unwrap();
+
+        let result = generate_for("memory_extract", "hi");
+        std::env::remove_var("HEX_DIR");
+        match result {
+            Err(ProviderError::Deferred(msg)) => {
+                assert!(
+                    msg.contains("MY_CUSTOM_LLM_KEY"),
+                    "Deferred error should mention the resolved api_key_env \
+                     `MY_CUSTOM_LLM_KEY`, got: {msg}"
+                );
+            }
+            other => panic!("expected Deferred mentioning MY_CUSTOM_LLM_KEY, got: {other:?}"),
+        }
     }
 
     #[test]
