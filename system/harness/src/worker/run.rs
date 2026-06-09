@@ -89,15 +89,31 @@ pub fn run_worker(input: &str) -> Result<WorkerOutput, String> {
         }
         _ => {}
     }
+    // Lean-by-default: resolve via claude_runs::resolve("harness_worker") so
+    // this headless invocation does NOT inherit the workspace plugin/skill/
+    // MCP/CLAUDE.md stack. See spec Sf5bj7y1d.
+    let hex_dir = std::env::var("HEX_DIR").ok().map(std::path::PathBuf::from);
+    let resolved = crate::claude_runs::resolve("harness_worker", hex_dir.as_deref())
+        .map_err(|e| format!("claude_runs::resolve(harness_worker): {e}"))?;
+    let workspace = hex_dir
+        .clone()
+        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    let mcp_cfg = crate::claude_runs::McpConfig::load(&workspace)
+        .map_err(|e| format!("McpConfig::load: {e}"))?;
+    let lean_flags = resolved
+        .to_cli_flags(&mcp_cfg)
+        .map_err(|e| format!("to_cli_flags: {e}"))?;
+    let mut args: Vec<String> = lean_flags;
+    args.extend([
+        "-p".to_string(),
+        "--output-format".to_string(),
+        "json".to_string(),
+        "--json-schema".to_string(),
+        OUTPUT_SCHEMA.to_string(),
+        input.to_string(),
+    ]);
     let out = Command::new("claude")
-        .args([
-            "-p",
-            "--output-format",
-            "json",
-            "--json-schema",
-            OUTPUT_SCHEMA,
-            input,
-        ])
+        .args(&args)
         .output()
         .map_err(|e| format!("spawn claude failed: {e}"))?;
     if !out.status.success() {
