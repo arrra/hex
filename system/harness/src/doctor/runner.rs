@@ -62,6 +62,7 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::llm_provider::LlmProviderReachable),
         Box::new(checks::env_sh::EnvSh),
         Box::new(checks::claude_md::ClaudeMdExists),
+        Box::new(checks::claude_runs_config::ClaudeRunsConfig),
         Box::new(checks::codex_config::CodexConfigExists),
         Box::new(checks::codex::CodexCliOnPath),
         Box::new(checks::codex::CodexVersionOk),

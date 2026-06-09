@@ -5,6 +5,7 @@ extern crate self as hex;
 
 pub mod act_evidence;
 pub mod claude_runs;
+pub mod doctor;
 pub mod harness;
 pub mod capability_exec;
 pub mod audit;

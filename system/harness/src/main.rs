@@ -4,7 +4,7 @@ use std::path::PathBuf;
 
 mod consolidate;
 mod throttle;
-mod doctor;
+use hex::doctor;
 mod integration;
 mod integration_cmd;
 mod integration_check_all;

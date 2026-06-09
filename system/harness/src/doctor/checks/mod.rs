@@ -1,5 +1,6 @@
 pub mod boi_health;
 pub mod claude_md;
+pub mod claude_runs_config;
 pub mod codex;
 pub mod codex_config;
 pub mod env_sh;

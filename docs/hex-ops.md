@@ -134,3 +134,93 @@ This replaces the old in-memory iii observability (ephemeral, 1000-span cap,
 not queryable) and the previous `.hex/telemetry/events.db` that was removed
 when `hex-events` was deleted on 2026-06-02. The store is now rebuilt
 natively in the Rust harness.
+
+---
+
+## Lean Claude runs (`claude-runs.toml`)
+
+**Policy (spec Sf5bj7y1d):** every headless `claude -p` invocation hex makes
+runs as lean as possible — no plugins, no skills, no MCP servers, no hooks,
+no CLAUDE.md — unless a per-run profile explicitly re-enables specific
+functionality.
+
+This is enforced by a central profile resolver
+(`system/harness/src/claude_runs.rs`) and a tiny CLI surface:
+
+```
+hex claude-flags <profile>     # prints eval-safe shell flags for that profile
+```
+
+Built-in profiles (apply with or without a config file):
+
+| profile           | used by                                                | re-enabled |
+|-------------------|--------------------------------------------------------|-----------|
+| `default`         | fallback                                               | —         |
+| `harness_worker`  | `system/harness/src/worker/run.rs`                     | —         |
+| `meeting_prep`    | `system/scripts/meeting-prep.sh`                       | `google-calendar` MCP |
+| `eval`            | `tests/eval/run_eval.py`                               | —         |
+
+Lean default = `--bare --strict-mcp-config --mcp-config '{}'
+--disable-slash-commands`. `--bare` skips auto-discovery of hooks, LSP,
+plugin sync, auto-memory, CLAUDE.md, and plugin/MCP/skill auto-discovery.
+The explicit empty strict mcp config ensures no MCP server loads even on a
+future Claude Code version where `--bare` covers less.
+
+### Profile schema
+
+Drop a `claude-runs.toml` at `$HEX_DIR/.hex/config/claude-runs.toml` to
+override the built-ins. See `system/templates/claude-runs.toml.example` for
+a fully commented reference. Minimum:
+
+```toml
+[defaults]
+bare = true
+# disable_slash_commands = true
+# mcp_servers     = []     # names looked up in workspace .mcp.json
+# plugin_dirs     = []
+# setting_sources = []     # subset of ["user", "project", "local"]
+# allowed_tools   = []
+# extra_flags     = []     # appended verbatim
+
+[runs.harness_worker]
+# Lean — no overrides needed.
+
+[runs.meeting_prep]
+mcp_servers = ["google-calendar"]   # must resolve in workspace .mcp.json
+
+[runs.eval]
+```
+
+### Re-enable knobs (flag emission)
+
+| TOML field               | Emits                                              |
+|--------------------------|----------------------------------------------------|
+| `bare = true`            | `--bare`                                           |
+| `mcp_servers = [..]`     | `--strict-mcp-config --mcp-config '<inline json>'` containing ONLY the named servers, looked up from `.mcp.json`. Empty/absent → `'{}'`. |
+| `disable_slash_commands` | `--disable-slash-commands`                         |
+| `plugin_dirs = [..]`     | repeated `--plugin-dir <dir>`                      |
+| `setting_sources = [..]` | `--setting-sources a,b,c`                          |
+| `allowed_tools = [..]`   | `--allowedTools "..."`                             |
+| `extra_flags = [..]`     | appended verbatim                                  |
+
+Unknown profile name, malformed TOML, or `mcp_servers` naming a server
+absent from the workspace MCP config → **hard error** (Standing Order S6:
+no quiet failures). `hex doctor` runs the `claude-runs-config` check which
+absent-passes when no `claude-runs.toml` is present, and validates the file
+when one is — including resolving every named MCP server.
+
+### Using the flags
+
+Shell call sites use `hex claude-flags` with eval-style substitution:
+
+```bash
+claude $(hex claude-flags meeting_prep) -p "$(cat prompt.txt)"
+```
+
+The Rust harness call sites build the arg vector via
+`claude_runs::resolve(<profile>, Some(&hex_dir))?.to_cli_flags(&mcp)?`.
+
+**Behavior change at install time:** a machine with no
+`claude-runs.toml` will still work — the built-in profiles apply and runs
+become lean. That IS the intended default; only opt in to re-enabling
+specific functionality, per profile.
