@@ -103,6 +103,18 @@ enum Commands {
         #[command(subcommand)]
         command: MessagesCommands,
     },
+    /// Print resolved `claude -p` flags for a lean-run profile (spec Sf5bj7y1d).
+    ///
+    /// Reads built-in profiles plus optional
+    /// `$HEX_DIR/.hex/config/claude-runs.toml`. Prints the flags on a single
+    /// eval-safe line so shell call sites can do
+    /// `claude $(hex claude-flags <profile>) -p ...`. Unknown profile names
+    /// exit non-zero with a stderr explanation.
+    #[command(display_order = 14, name = "claude-flags")]
+    ClaudeFlags {
+        /// Profile name (built-ins: default, harness_worker, meeting_prep, eval)
+        profile: String,
+    },
     /// Print version
     #[command(display_order = 15)]
     Version,
@@ -665,6 +677,39 @@ fn main() {
         Commands::Hook { command } => hook::run(command),
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
+        }
+        Commands::ClaudeFlags { profile } => {
+            // Read HEX_DIR optionally — claude-flags must work even when the
+            // workspace is not yet bootstrapped (e.g. eval harness on a fresh
+            // clone), so we do NOT go through get_hex_dir()'s CLAUDE.md gate.
+            let hex_dir = std::env::var("HEX_DIR").ok().map(std::path::PathBuf::from);
+            let resolved = match hex::claude_runs::resolve(&profile, hex_dir.as_deref()) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            // Load workspace MCP config (lookup base for mcp_servers). Search
+            // from $HEX_DIR if set, else current dir.
+            let workspace = hex_dir
+                .clone()
+                .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| ".".into()));
+            let mcp_cfg = match hex::claude_runs::McpConfig::load(&workspace) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            let flags = match resolved.to_cli_flags(&mcp_cfg) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(2);
+                }
+            };
+            println!("{}", hex::claude_runs::render_shell_line(&flags));
         }
         Commands::Completions { shell } => {
             clap_complete::generate(shell, &mut Cli::command(), "hex", &mut io::stdout());
