@@ -59,9 +59,10 @@ CREATE TABLE IF NOT EXISTS fact_topics (
 );
 
 CREATE TABLE IF NOT EXISTS transcript_files (
-    path              TEXT PRIMARY KEY,
-    last_offset       INTEGER NOT NULL DEFAULT 0,
-    last_distilled_at TEXT
+    path                  TEXT PRIMARY KEY,
+    last_offset           INTEGER NOT NULL DEFAULT 0,
+    last_distilled_at     TEXT,
+    consecutive_failures  INTEGER NOT NULL DEFAULT 0
 );
 "#;
 
@@ -112,6 +113,20 @@ pub fn apply_messages_schema(conn: &Connection) -> Result<()> {
 
 pub fn apply_plan2(conn: &Connection) -> Result<()> {
     conn.execute_batch(PLAN2_DDL)?;
+    // Backfill: older DBs created before consecutive_failures was added still
+    // need the column. ALTER TABLE in SQLite errors if the column already
+    // exists, so we ignore that one specific error.
+    if let Err(e) = conn.execute(
+        "ALTER TABLE transcript_files ADD COLUMN consecutive_failures INTEGER NOT NULL DEFAULT 0",
+        [],
+    ) {
+        let msg = e.to_string();
+        if !msg.contains("duplicate column") {
+            // Loud — but tolerated, as the column may already be present in a
+            // fresh schema.
+            eprintln!("[schema] transcript_files.consecutive_failures backfill: {e}");
+        }
+    }
     conn.execute_batch(PLAN2_VEC_DDL)?;
     conn.execute_batch(PLAN2_FTS_DDL)?;
     conn.execute(

@@ -24,6 +24,9 @@ pub struct ResolvedLlm {
     pub max_tokens: u32,
     pub base_url: String,
     pub api_key_env: String,
+    /// Optional cap on estimated INPUT tokens per call. Used by distill to
+    /// slice oversize spans. None means "no input cap configured".
+    pub max_input_tokens: Option<u32>,
 }
 
 /// Built-in default for a known use case. These are the values that were
@@ -32,6 +35,7 @@ pub struct ResolvedLlm {
 struct BuiltIn {
     model: &'static str,
     max_tokens: u32,
+    max_input_tokens: Option<u32>,
 }
 
 const DEFAULT_BASE_URL: &str = "https://openrouter.ai/api/v1/chat/completions";
@@ -42,18 +46,25 @@ fn builtin(use_case: &str) -> Option<BuiltIn> {
         "memory_extract" => Some(BuiltIn {
             model: "anthropic/claude-sonnet-4.5",
             max_tokens: 16384,
+            // 48k input cap leaves comfortable headroom under the model's
+            // input limit alongside the 16384-token output cap. Anything
+            // larger gets sliced by `memory::distill::cap::cap_span`.
+            max_input_tokens: Some(48_000),
         }),
         "memory_judge" => Some(BuiltIn {
             model: "anthropic/claude-sonnet-4.5",
             max_tokens: 256,
+            max_input_tokens: None,
         }),
         "consolidate_audit" => Some(BuiltIn {
             model: "anthropic/claude-sonnet-4.5",
             max_tokens: 4096,
+            max_input_tokens: None,
         }),
         "health_check" => Some(BuiltIn {
             model: "anthropic/claude-haiku-4.5",
             max_tokens: 64,
+            max_input_tokens: None,
         }),
         _ => None,
     }
@@ -88,6 +99,8 @@ struct SectionFields {
     base_url: Option<String>,
     #[serde(default)]
     api_key_env: Option<String>,
+    #[serde(default)]
+    max_input_tokens: Option<u32>,
 }
 
 fn config_path() -> PathBuf {
@@ -181,11 +194,17 @@ pub fn resolve(use_case: &str) -> Result<ResolvedLlm> {
         .or(defaults.api_key_env)
         .unwrap_or_else(|| DEFAULT_API_KEY_ENV.to_string());
 
+    let max_input_tokens = uc
+        .max_input_tokens
+        .or(defaults.max_input_tokens)
+        .or(bi.max_input_tokens);
+
     Ok(ResolvedLlm {
         model,
         max_tokens,
         base_url,
         api_key_env,
+        max_input_tokens,
     })
 }
 
