@@ -21,9 +21,9 @@
 # impossible.
 #
 # Flagged repos: env HEX_WORKTREE_GUARD_REPOS (space/comma list of repo dir
-# basenames) overrides the default. Default: hex-foundation. Personal-data repos
-# (e.g. ~/hex) are intentionally NOT flagged — the hazard is multi-agent CODE
-# repos.
+# basenames) overrides the default. Default: hex-foundation. Personal-data
+# workspaces (the HEX_DIR checkout) are intentionally NOT flagged — the hazard
+# is multi-agent CODE repos.
 
 set -u
 

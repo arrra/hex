@@ -8,7 +8,7 @@ Hex is a Claude Code + BOI workspace: an opinionated agent runtime layer
 plus a delegation engine. There is no agent fleet, no initiative loop, no
 session-lifecycle daemon, no charter-driven autonomy tiers. Those framings
 were demolished — see the stale-references audit
-(`/Users/mrap/hex/projects/system-improvement/audits/`).
+(`$HEX_DIR/projects/system-improvement/audits/`).
 
 Two components, plainly:
 
