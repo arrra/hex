@@ -31,6 +31,41 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
     // Self-throttle the whole process (every thread + IO) unless --max.
     crate::throttle::apply("consolidate", max);
 
+    // Single-instance guard: a long backfill tick (15-min cron) and the
+    // following tick — or 03:00 full and 03:15 quick — must not race the
+    // watermark or double-pay extract calls. Reuses the same file-lock
+    // pattern as `memory::index::run_index` (`memory-index.lock` at
+    // index.rs:722). Skip cleanly if held — overlap is normal.
+    use fs2::FileExt;
+    let db_path = crate::memory::db_path(hex_dir);
+    let lock_path = db_path.with_file_name("memory-consolidate.lock");
+    if let Some(parent) = lock_path.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    let lock_file = match std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)
+    {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!(
+                "hex memory consolidate: cannot open lock {}: {e}",
+                lock_path.display()
+            );
+            return 1;
+        }
+    };
+    if lock_file.try_lock_exclusive().is_err() {
+        println!(
+            "hex memory consolidate: another run holds {} — skipping",
+            lock_path.display()
+        );
+        return 0;
+    }
+    let _consolidate_lock = lock_file; // released when run returns
+
     let mut any_fail = false;
 
     println!("=== hex memory consolidate ({:?}) ===", mode);

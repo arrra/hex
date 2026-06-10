@@ -28,6 +28,9 @@ pub fn db_path(hex_root: &Path) -> PathBuf {
 pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     vector::register_sqlite_vec();
     let conn = Connection::open(path)?;
+    // Be friendly under concurrent writers (quick + long cron tick, etc.):
+    // wait up to 5s for a competing writer to release before erroring.
+    conn.busy_timeout(std::time::Duration::from_secs(5))?;
     // Best-effort migration — log but don't fail if a DDL piece is unhappy
     // (e.g. older sqlite-vec without FLOAT[768]); the facts CLI commands will
     // surface a clearer error.

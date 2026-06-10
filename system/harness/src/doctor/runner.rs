@@ -50,6 +50,7 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::symlinks::AgentsSkillsSymlink),
         Box::new(checks::symlinks::NoBrokenSymlinks),
         Box::new(checks::memory_db::MemoryDbExists),
+        Box::new(checks::distill_strikes::DistillStrikes),
         Box::new(checks::vector_search::VectorSearchHealthy),
         Box::new(checks::reflection_liveness::ReflectionLogFresh),
         Box::new(checks::scripts_exec::ScriptsExecutable),

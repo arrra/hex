@@ -9,6 +9,10 @@ pub struct StatsReport {
     pub db_size_bytes: u64,
     pub last_consolidated: Option<String>,
     pub schema_version: Option<i64>,
+    /// Sum of `(file_size_on_disk - last_offset)` across `transcript_files`
+    /// rows where the on-disk file is larger than the recorded watermark.
+    /// Lets operators watch the distill backlog burn down slice-by-slice.
+    pub backfill_pending_bytes: i64,
 }
 
 pub fn run(hex_root: &Path, json: bool) -> i32 {
@@ -100,6 +104,32 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
         .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
         .unwrap_or(None);
 
+    // Backfill pending = sum(file_size - last_offset) across registered
+    // transcript files whose on-disk size exceeds the recorded watermark.
+    // Done in Rust so we can stat the file (SQLite has no file_size()).
+    let backfill_pending_bytes: i64 = {
+        let mut total: i64 = 0;
+        if let Ok(mut stmt) =
+            conn.prepare("SELECT path, last_offset FROM transcript_files")
+        {
+            let rows = stmt
+                .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .ok();
+            if let Some(rows) = rows {
+                for row in rows.flatten() {
+                    let (p, off) = row;
+                    if let Ok(meta) = std::fs::metadata(&p) {
+                        let size = meta.len() as i64;
+                        if size > off {
+                            total += size - off;
+                        }
+                    }
+                }
+            }
+        }
+        total
+    };
+
     Ok(StatsReport {
         files_indexed,
         total_facts,
@@ -108,6 +138,7 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
         db_size_bytes,
         last_consolidated,
         schema_version,
+        backfill_pending_bytes,
     })
 }
 
@@ -132,6 +163,12 @@ fn print_table(r: &StatsReport) {
     println!(
         "Last consolidated: {}",
         r.last_consolidated.as_deref().unwrap_or("never")
+    );
+    println!(
+        "Backfill pending:  {} bytes (~{} slices @ 48k tokens)",
+        r.backfill_pending_bytes,
+        // est slices: bytes / 3.5 chars-per-token / 48_000 tokens-per-slice
+        ((r.backfill_pending_bytes as f64) / 3.5 / 48_000.0).ceil() as i64
     );
 
     println!();
@@ -175,6 +212,7 @@ fn print_json(r: &StatsReport) {
         "db_size_bytes": r.db_size_bytes,
         "schema_version": r.schema_version,
         "last_consolidated": r.last_consolidated,
+        "backfill_pending_bytes": r.backfill_pending_bytes,
         "top_predicates": predicates,
         "top_subjects": subjects,
     });
@@ -273,6 +311,49 @@ mod tests {
             report.last_consolidated.as_deref(),
             Some("2026-06-03T00:00:00-04:00"),
             "stats must surface the stamped last_consolidated value"
+        );
+    }
+
+    /// RED test for task Tgmwwp2z9 (backfill-pending in hex memory stats).
+    ///
+    /// Behavior under test: `StatsReport` must expose a `backfill_pending_bytes`
+    /// figure equal to `sum(file_size_on_disk - last_offset)` over every row in
+    /// `transcript_files` whose on-disk file is larger than `last_offset`.
+    /// `hex memory stats` will surface this number so operators can see the
+    /// 113 MB backlog burn down slice-by-slice instead of "never". This test
+    /// fails today because the field does not exist on `StatsReport`.
+    #[test]
+    fn stats_reports_backfill_pending_bytes_from_transcript_files() {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        std::fs::create_dir_all(hex_root.join(".hex")).unwrap();
+
+        // Seed a fake transcript on disk so the implementation can stat it.
+        let trans_dir = hex_root.join("raw").join("transcripts");
+        std::fs::create_dir_all(&trans_dir).unwrap();
+        let trans_path = trans_dir.join("big.md");
+        // 1000-byte file; watermark at 400 means 600 bytes pending.
+        let body = "x".repeat(1000);
+        std::fs::write(&trans_path, &body).unwrap();
+        let trans_str = trans_path.to_str().unwrap().to_string();
+
+        let db_path = super::super::db_path(hex_root);
+        let conn = super::super::open_db(&db_path).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::index::init_db(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO transcript_files (path, last_offset, last_distilled_at) \
+             VALUES (?1, 400, datetime('now'))",
+            rusqlite::params![trans_str.as_str()],
+        )
+        .unwrap();
+
+        let report = gather(&conn, &db_path).unwrap();
+        assert_eq!(
+            report.backfill_pending_bytes, 600,
+            "stats must compute backfill_pending_bytes = sum(file_size - last_offset) \
+             over transcript_files; expected 600 (1000-byte file at offset 400)"
         );
     }
 
