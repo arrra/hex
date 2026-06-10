@@ -1,6 +1,7 @@
 pub mod capture;
 pub mod title_nudge;
 pub mod user_prompt_submit;
+pub mod worktree_guard;
 
 use clap::Subcommand;
 
@@ -14,11 +15,17 @@ pub enum HookCommands {
     /// Claude Code UserPromptSubmit hook — inject relevant workspace memory
     #[command(name = "user-prompt-submit")]
     UserPromptSubmit,
+    /// Claude Code PreToolUse hook — block edits to a flagged repo's shared
+    /// checkout (Standing Order 7: all work in worktrees). Deny-only; abstains
+    /// otherwise.
+    #[command(name = "worktree-guard")]
+    WorktreeGuard,
 }
 
 pub fn run(command: HookCommands) {
     match command {
         HookCommands::Capture => capture::run(),
         HookCommands::UserPromptSubmit => user_prompt_submit::run(),
+        HookCommands::WorktreeGuard => worktree_guard::run(),
     }
 }
