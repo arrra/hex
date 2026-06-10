@@ -562,12 +562,17 @@ RESPONSE=$(
     done
     cd "$HEX_DIR"
     # Lean-by-default profile (spec Sf5bj7y1d). `meeting_prep` re-enables only
-    # the calendar MCP server. Falls back to a no-op if the hex binary is not
-    # on PATH (e.g. legacy installs) — claude then runs with whatever defaults
-    # the workspace provides.
+    # the calendar MCP server. A resolution failure falls back to full-fat
+    # claude defaults, but NEVER silently — the degradation is logged so the
+    # lean policy being inactive is visible (no-quiet-failures doctrine).
     LEAN_FLAGS=""
     if command -v hex >/dev/null 2>&1; then
-        LEAN_FLAGS="$(hex claude-flags meeting_prep 2>/dev/null || true)"
+        if ! LEAN_FLAGS="$(hex claude-flags meeting_prep 2>>"$LOG_FILE")"; then
+            LEAN_FLAGS=""
+            log "WARN: 'hex claude-flags meeting_prep' failed — running claude FULL-FAT (lean profile inactive; see stderr above)"
+        fi
+    else
+        log "WARN: hex binary not on PATH — running claude FULL-FAT (lean profile inactive)"
     fi
     # shellcheck disable=SC2086
     timeout 90 claude $LEAN_FLAGS -p "$(cat "$PROMPT_TMP")" 2>/dev/null
