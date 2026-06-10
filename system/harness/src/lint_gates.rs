@@ -1,0 +1,407 @@
+//! Verify-gate FOOTGUN linter — shadow mode (spec S253fety6, task T33capr0f).
+//!
+//! Parses a BOI v2 TOML spec, extracts every verification command (contract
+//! and per-task), then runs the footgun ruleset against each command. The 8
+//! rules are ported faithfully from the CLAUDE.md verify-gate footgun table
+//! (and bakeoff5/harness.py FOOTGUN_RULES, lines 149–203):
+//!
+//!   1. `path-127`             — non-coreutils binary without exported PATH
+//!   2. `pipe-tail-exitcode`   — piping through tail/head before checking exit
+//!   3. `deployed-binary`      — checking `.hex/bin/hex` rather than `target/`
+//!   4. `hex-from-worker`      — verifying derived state via a `hex` subcommand
+//!   5. `inverted-grep-v`      — `grep -q -v` (or any -qv / -v -q combo)
+//!   6. `macos-wc-whitespace`  — `... | wc -l | grep -q "^N$"` (mac pads)
+//!   7. `python-c-indent`      — `python3 -c "…"` body with leading indent
+//!   8. `stderr-swallow`       — `2>/dev/null` (SO S6: no quiet failures)
+//!
+//! ## Shadow mode (default)
+//!
+//! Output is one summary line: `N gates, M flagged, shadow mode — predictions
+//! logged, not advice`. NO per-gate advice. Each gate is written as a single
+//! `intent` row in the ledger keyed by `content_hash(normalize_command(cmd))`
+//! with payload `{predicted, rules_fired, shadow:true, command, spec_id?}`.
+//! `--spec-id <id>` is supported as an amend hook for after dispatch.
+
+use serde::Serialize;
+use sha2::{Digest, Sha256};
+
+/// Prediction emitted by [`analyze_command`].
+#[derive(Debug, Clone, Serialize, PartialEq, Eq)]
+pub enum Prediction {
+    Pass,
+    Fail,
+}
+
+/// Result of running every footgun rule against one command.
+#[derive(Debug, Clone, Serialize)]
+pub struct Verdict {
+    pub predicted: Prediction,
+    /// IDs of the footgun rules that fired. Empty ⇒ `Prediction::Pass`.
+    pub rules_fired: Vec<String>,
+    /// The canonical (whitespace-collapsed) command we evaluated.
+    pub normalized: String,
+    /// Content-addressable hash of `normalized`. 64 hex chars.
+    pub content_hash: String,
+}
+
+/// Collapse runs of whitespace and trim — gates that differ only in spacing
+/// hash identically. This is the canonical form used for `content_hash`.
+pub fn normalize_command(cmd: &str) -> String {
+    cmd.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// Sha256 hex digest of [`normalize_command`]`(cmd)`. 64 chars.
+pub fn content_hash(cmd: &str) -> String {
+    let n = normalize_command(cmd);
+    let mut h = Sha256::new();
+    h.update(n.as_bytes());
+    format!("{:x}", h.finalize())
+}
+
+// ---------------------------------------------------------------------------
+// Footgun rules (8) — each is a closure `(&str) -> bool` over the RAW command,
+// keyed by a short stable id. The id is what lands in `Verdict.rules_fired`.
+// ---------------------------------------------------------------------------
+
+fn rule_path_127(cmd: &str) -> bool {
+    // Non-coreutils binary invoked without an `export PATH=` prefix.
+    const BINS: &[&str] = &[
+        "cargo ", "node ", "pnpm ", "npm ", "yarn ", "rustc ", "rustup ",
+        "deno ", "bun ",
+    ];
+    let hit = BINS.iter().any(|b| {
+        cmd.contains(b) || cmd.trim_start().starts_with(b.trim_end())
+    });
+    if !hit {
+        return false;
+    }
+    !cmd.contains("export PATH=")
+}
+
+fn rule_pipe_tail_exitcode(cmd: &str) -> bool {
+    // `... | tail ...` or `... | head ...` swallows the upstream exit code.
+    let bytes = cmd.as_bytes();
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'|' && bytes.get(i + 1) != Some(&b'|') {
+            let rest = &cmd[i + 1..].trim_start();
+            if rest.starts_with("tail ") || rest.starts_with("tail\t")
+                || rest.starts_with("head ") || rest.starts_with("head\t")
+            {
+                return true;
+            }
+        }
+        i += 1;
+    }
+    false
+}
+
+fn rule_deployed_binary(cmd: &str) -> bool {
+    // Checking the *deployed* `.hex/bin/hex` binary after a build (rather than
+    // `target/release/hex`) verifies yesterday's binary, not the fresh build.
+    cmd.contains(".hex/bin/hex")
+}
+
+fn rule_hex_from_worker(cmd: &str) -> bool {
+    // A `hex <subcommand>` invocation inside a verify-gate reads $HEX_DIR
+    // from the main workspace and ignores worktree edits. The worker should
+    // check artifacts it produced, not derived state via `hex`.
+    let t = cmd.trim_start();
+    t.starts_with("hex ") || cmd.contains(" hex ") || cmd.contains(" && hex ")
+}
+
+fn rule_inverted_grep_v(cmd: &str) -> bool {
+    cmd.contains("grep -q -v")
+        || cmd.contains("grep -qv")
+        || cmd.contains("grep -v -q")
+}
+
+fn rule_macos_wc_whitespace(cmd: &str) -> bool {
+    // `wc -l | grep -q "^N$"` — macOS pads with whitespace; the regex misses.
+    if !cmd.contains("wc -l") {
+        return false;
+    }
+    // Look for `wc -l ... | ... grep -q "^<digit>`.
+    let Some(wc_idx) = cmd.find("wc -l") else { return false };
+    let after = &cmd[wc_idx..];
+    let Some(pipe_idx) = after.find('|') else { return false };
+    let tail = &after[pipe_idx + 1..];
+    // Allow any whitespace between `|` and `grep`.
+    let tail = tail.trim_start();
+    if !tail.starts_with("grep ") {
+        return false;
+    }
+    // Look for `-q ... "^<digit>` in the tail.
+    tail.contains("-q") && (tail.contains("\"^") || tail.contains("'^"))
+}
+
+fn rule_python_c_indent(cmd: &str) -> bool {
+    // `python3 -c "..."` where the literal body has a leading-indent line.
+    let Some(idx) = cmd.find("python3 -c \"").or_else(|| cmd.find("python -c \"")) else {
+        return false;
+    };
+    let rest = &cmd[idx..];
+    let body_start = match rest.find('"') {
+        Some(p) => p + 1,
+        None => return false,
+    };
+    let body_end = match rest[body_start..].find('"') {
+        Some(p) => p,
+        None => return false,
+    };
+    let body = &rest[body_start..body_start + body_end];
+    // The body uses literal `\n` between lines in shell-source form.
+    let mut parts = body.split("\\n");
+    let _ = parts.next(); // first line — leading indent is fine
+    for ln in parts {
+        if ln.starts_with(' ') || ln.starts_with('\t') {
+            return true;
+        }
+    }
+    false
+}
+
+fn rule_stderr_swallow(cmd: &str) -> bool {
+    // `2>/dev/null` (and the spaced/&-variants) hides stderr — SO S6 violation
+    // for a verify gate, which is exactly the place a loud failure matters.
+    cmd.contains("2>/dev/null")
+        || cmd.contains("2> /dev/null")
+        || cmd.contains("&>/dev/null")
+        || cmd.contains("> /dev/null 2>&1")
+        || cmd.contains(">/dev/null 2>&1")
+}
+
+/// Static list of `(rule_id, predicate)` pairs. Order is the canonical
+/// reporting order in `rules_fired`.
+pub fn footgun_rules() -> Vec<(&'static str, fn(&str) -> bool)> {
+    vec![
+        ("path-127", rule_path_127 as fn(&str) -> bool),
+        ("pipe-tail-exitcode", rule_pipe_tail_exitcode),
+        ("deployed-binary", rule_deployed_binary),
+        ("hex-from-worker", rule_hex_from_worker),
+        ("inverted-grep-v", rule_inverted_grep_v),
+        ("macos-wc-whitespace", rule_macos_wc_whitespace),
+        ("python-c-indent", rule_python_c_indent),
+        ("stderr-swallow", rule_stderr_swallow),
+    ]
+}
+
+/// Run every footgun rule against `cmd`. Any hit ⇒ `Prediction::Fail`.
+pub fn analyze_command(cmd: &str) -> Verdict {
+    let mut fired = Vec::new();
+    for (id, pred) in footgun_rules() {
+        if pred(cmd) {
+            fired.push(id.to_string());
+        }
+    }
+    let predicted = if fired.is_empty() {
+        Prediction::Pass
+    } else {
+        Prediction::Fail
+    };
+    Verdict {
+        predicted,
+        rules_fired: fired,
+        normalized: normalize_command(cmd),
+        content_hash: content_hash(cmd),
+    }
+}
+
+/// One-line shadow-mode summary for a batch of gate commands. The output is
+/// *deliberately* free of per-gate advice — shadow mode logs predictions to
+/// the ledger; advice stays silent until the disclosed bar clears.
+pub fn shadow_summary(gates: &[String]) -> String {
+    let n = gates.len();
+    let m = gates
+        .iter()
+        .filter(|g| matches!(analyze_command(g).predicted, Prediction::Fail))
+        .count();
+    format!(
+        "{} gates, {} flagged, shadow mode — predictions logged silently",
+        n, m
+    )
+}
+
+// ---------------------------------------------------------------------------
+// BOI v2 TOML spec parsing — extract every verification command in document order.
+// ---------------------------------------------------------------------------
+
+#[derive(Debug, serde::Deserialize)]
+struct VerifEntry {
+    command: String,
+    #[serde(default)]
+    #[allow(dead_code)]
+    name: Option<String>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct ContractBlock {
+    #[serde(default)]
+    verifications: Vec<VerifEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct TaskBlock {
+    #[serde(default)]
+    verifications: Vec<VerifEntry>,
+}
+
+#[derive(Debug, serde::Deserialize)]
+struct SpecToml {
+    #[serde(default)]
+    contract: Option<ContractBlock>,
+    #[serde(default)]
+    tasks: Vec<TaskBlock>,
+}
+
+/// Errors surfaced by spec parsing. Loud per SO S6.
+#[derive(Debug)]
+pub enum LintError {
+    Io(std::io::Error),
+    Toml(String),
+}
+
+impl std::fmt::Display for LintError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            LintError::Io(e) => write!(f, "lint-gates io error: {}", e),
+            LintError::Toml(e) => write!(f, "lint-gates toml error: {}", e),
+        }
+    }
+}
+
+impl std::error::Error for LintError {}
+
+impl From<std::io::Error> for LintError {
+    fn from(e: std::io::Error) -> Self { LintError::Io(e) }
+}
+
+/// Extract every verification command (contract + per-task) from a BOI v2
+/// TOML spec, in document order.
+pub fn extract_gates_from_spec(toml_src: &str) -> Result<Vec<String>, LintError> {
+    let spec: SpecToml = toml::from_str(toml_src).map_err(|e| LintError::Toml(e.to_string()))?;
+    let mut gates = Vec::new();
+    if let Some(c) = spec.contract {
+        for v in c.verifications {
+            gates.push(v.command);
+        }
+    }
+    for t in spec.tasks {
+        for v in t.verifications {
+            gates.push(v.command);
+        }
+    }
+    Ok(gates)
+}
+
+// ---------------------------------------------------------------------------
+// Tests — per-rule positive + negative pair, hash + summary contract.
+// ---------------------------------------------------------------------------
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -- Per-rule pairs (8 rules × 2 cases each) -----------------------------
+
+    #[test]
+    fn lint_path_127_positive_and_negative() {
+        assert!(rule_path_127("cargo build && test -f target/release/hex"));
+        assert!(!rule_path_127("export PATH=/opt/homebrew/bin:$PATH && cargo build"));
+    }
+
+    #[test]
+    fn lint_pipe_tail_exitcode_positive_and_negative() {
+        assert!(rule_pipe_tail_exitcode("cargo build 2>&1 | tail -5 | grep warn"));
+        assert!(!rule_pipe_tail_exitcode("cargo build > /tmp/log && grep warn /tmp/log"));
+    }
+
+    #[test]
+    fn lint_deployed_binary_positive_and_negative() {
+        assert!(rule_deployed_binary("test -x .hex/bin/hex && .hex/bin/hex --version"));
+        assert!(!rule_deployed_binary("test -x target/release/hex"));
+    }
+
+    #[test]
+    fn lint_hex_from_worker_positive_and_negative() {
+        assert!(rule_hex_from_worker("hex doctor && echo ok"));
+        assert!(!rule_hex_from_worker("test -f system/harness/Cargo.toml"));
+    }
+
+    #[test]
+    fn lint_inverted_grep_v_positive_and_negative() {
+        assert!(rule_inverted_grep_v("grep -q -v ERROR build.log"));
+        assert!(rule_inverted_grep_v("grep -qv ERROR build.log"));
+        assert!(!rule_inverted_grep_v("! grep -q ERROR build.log"));
+    }
+
+    #[test]
+    fn lint_macos_wc_whitespace_positive_and_negative() {
+        assert!(rule_macos_wc_whitespace("ls | wc -l | grep -q \"^14$\""));
+        let neg = "count=$(ls | wc -l | tr -d ' '); test \"$count\" = \"14\"";
+        assert!(!rule_macos_wc_whitespace(neg));
+    }
+
+    #[test]
+    fn lint_python_c_indent_positive_and_negative() {
+        let pos = "python3 -c \"import x\\n    print(x)\"";
+        assert!(rule_python_c_indent(pos));
+        let neg = "python3 -c \"import x; print(x)\"";
+        assert!(!rule_python_c_indent(neg));
+    }
+
+    #[test]
+    fn lint_stderr_swallow_positive_and_negative() {
+        assert!(rule_stderr_swallow("cargo test --quiet 2>/dev/null"));
+        assert!(rule_stderr_swallow("cargo test >/dev/null 2>&1"));
+        assert!(!rule_stderr_swallow("cargo test --quiet"));
+    }
+
+    // -- Aggregate analyze_command + summary ---------------------------------
+
+    #[test]
+    fn lint_analyze_aggregates_multiple_rules() {
+        let v = analyze_command(
+            "cargo test 2>/dev/null && grep -q -v ERROR /tmp/log",
+        );
+        assert!(matches!(v.predicted, Prediction::Fail));
+        // Should fire at least the path-127, stderr-swallow, and inverted-grep-v rules.
+        assert!(v.rules_fired.iter().any(|r| r == "stderr-swallow"));
+        assert!(v.rules_fired.iter().any(|r| r == "inverted-grep-v"));
+        assert!(v.rules_fired.iter().any(|r| r == "path-127"));
+    }
+
+    #[test]
+    fn lint_extract_gates_from_minimal_spec() {
+        let src = r#"
+title = "x"
+pipeline = "standard"
+
+[contract]
+verifications = [
+  { command = "test -f foo" },
+  { command = "test -f bar" },
+]
+
+[[tasks]]
+ref = "a"
+behavior = "do a"
+verifications = [{ command = "cargo test 2>/dev/null" }]
+"#;
+        let gates = extract_gates_from_spec(src).unwrap();
+        assert_eq!(gates.len(), 3);
+        assert_eq!(gates[2], "cargo test 2>/dev/null");
+    }
+
+    #[test]
+    fn lint_shadow_summary_single_line_no_advice() {
+        let s = shadow_summary(&vec![
+            "cargo test 2>/dev/null".to_string(),
+            "test -f Cargo.toml".to_string(),
+        ]);
+        assert_eq!(s.lines().count(), 1);
+        assert!(s.contains("shadow"));
+        assert!(!s.to_lowercase().contains("advice — "));
+        assert!(s.contains("1 flagged"));
+    }
+}

@@ -135,6 +135,20 @@ enum Commands {
         #[command(subcommand)]
         command: LedgerCommands,
     },
+    /// Lint verify-gate footguns in a BOI v2 TOML spec (shadow mode by default).
+    ///
+    /// Parses every verification command (contract + per-task), runs the
+    /// 8-rule footgun ruleset, writes one `intent` ledger row per gate, and
+    /// prints a single shadow-mode summary line. NO per-gate advice is
+    /// printed until the disclosed bar clears.
+    #[command(display_order = 14, name = "lint-gates")]
+    LintGates {
+        /// Path to a BOI v2 TOML spec.
+        spec: std::path::PathBuf,
+        /// Spec id to amend prior intent rows with after dispatch.
+        #[arg(long = "spec-id")]
+        spec_id: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -829,6 +843,55 @@ fn main() {
                     }
                 }
             }
+        }
+        Commands::LintGates { spec, spec_id } => {
+            let src = match std::fs::read_to_string(&spec) {
+                Ok(s) => s,
+                Err(e) => {
+                    eprintln!("hex lint-gates: cannot read {}: {e}", spec.display());
+                    std::process::exit(2);
+                }
+            };
+            let gates = match hex::lint_gates::extract_gates_from_spec(&src) {
+                Ok(g) => g,
+                Err(e) => {
+                    eprintln!("hex lint-gates: {e}");
+                    std::process::exit(2);
+                }
+            };
+            // Open ledger and append one intent row per gate. Shadow mode.
+            let hex_dir = get_hex_dir();
+            let path = hex::ledger::default_path(&hex_dir);
+            let ledger = match hex::ledger::Ledger::open(&path) {
+                Ok(l) => l,
+                Err(e) => {
+                    eprintln!("hex lint-gates: ledger open failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+            for gate in &gates {
+                let v = hex::lint_gates::analyze_command(gate);
+                let predicted = match v.predicted {
+                    hex::lint_gates::Prediction::Pass => "pass",
+                    hex::lint_gates::Prediction::Fail => "fail",
+                };
+                let mut payload = serde_json::json!({
+                    "gate_hash": v.content_hash,
+                    "predicted": predicted,
+                    "rules_fired": v.rules_fired,
+                    "shadow": true,
+                    "command": gate,
+                });
+                if let Some(ref sid) = spec_id {
+                    payload["spec_id"] = serde_json::Value::String(sid.clone());
+                }
+                if let Err(e) = ledger.append("lint-gates", "verify-gate", "intent", &payload) {
+                    eprintln!("hex lint-gates: ledger append failed: {e}");
+                    std::process::exit(1);
+                }
+            }
+            println!("{}", hex::lint_gates::shadow_summary(&gates));
+            std::process::exit(0);
         }
     }
 }
