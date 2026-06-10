@@ -149,6 +149,24 @@ enum Commands {
         #[arg(long = "spec-id")]
         spec_id: Option<String>,
     },
+    /// Earned-autonomy dial — pure function over ledger outcome rows.
+    ///
+    /// Below the configured min-N matching outcomes for (agent, action_class)
+    /// the dial REFUSES to print a number — it prints INSUFFICIENT. Classes
+    /// flagged irreversible in the charter map always print ASK. Otherwise
+    /// it prints a score in `[0, 1]`. See `src/dial.rs` for the math.
+    #[command(display_order = 14)]
+    Dial {
+        agent: String,
+        action_class: String,
+        /// Minimum matching end-state outcomes required to print a number.
+        /// Tuned to observed BOI dispatch volume (2-6 specs/day).
+        #[arg(long, default_value_t = 3)]
+        min_n: usize,
+        /// Treat this class as irreversible — always print ASK.
+        #[arg(long)]
+        irreversible: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -829,18 +847,7 @@ fn main() {
                             std::process::exit(1);
                         }
                     };
-                    match ledger.last_ts_per_agent() {
-                        Ok(rows) => {
-                            for (agent, ts) in rows {
-                                println!("{}\t{}", agent, ts);
-                            }
-                            std::process::exit(0)
-                        }
-                        Err(e) => {
-                            eprintln!("hex ledger freshness: {e}");
-                            std::process::exit(1)
-                        }
-                    }
+                    std::process::exit(run_freshness(&ledger));
                 }
             }
         }
@@ -893,6 +900,152 @@ fn main() {
             println!("{}", hex::lint_gates::shadow_summary(&gates));
             std::process::exit(0);
         }
+        Commands::Dial { agent, action_class, min_n, irreversible } => {
+            // Load all outcome rows from the ledger and feed the pure dial.
+            let hex_dir = get_hex_dir();
+            let path = hex::ledger::default_path(&hex_dir);
+            let rows = match load_outcome_rows(&path) {
+                Ok(rs) => rs,
+                Err(e) => {
+                    eprintln!("hex dial: load outcomes failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let out = hex::dial::compute(&rows, &agent, &action_class, min_n, irreversible);
+            match out {
+                hex::dial::DialOutcome::Insufficient { n, min_n } => {
+                    println!("INSUFFICIENT (n={n}, min_n={min_n})");
+                    std::process::exit(0)
+                }
+                hex::dial::DialOutcome::Ask => {
+                    println!("ASK");
+                    std::process::exit(0)
+                }
+                hex::dial::DialOutcome::Score(s) => {
+                    println!("{:.4}", s);
+                    std::process::exit(0)
+                }
+            }
+        }
+    }
+}
+
+/// Load every `outcome`-kind row from the ledger into [`hex::dial::OutcomeRow`]s.
+/// Errors loudly per S6 — no silent skip on a malformed row.
+fn load_outcome_rows(
+    path: &std::path::Path,
+) -> Result<Vec<hex::dial::OutcomeRow>, String> {
+    use rusqlite::Connection;
+    let conn = Connection::open(path).map_err(|e| format!("open: {e}"))?;
+    let mut stmt = conn
+        .prepare("SELECT ts, agent, action_class, payload FROM ledger WHERE kind='outcome'")
+        .map_err(|e| format!("prepare: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| format!("query: {e}"))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (ts, agent, action_class, payload) =
+            row.map_err(|e| format!("row read: {e}"))?;
+        let v: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|e| format!("payload parse (ts={ts}): {e}"))?;
+        let success = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
+        out.push(hex::dial::OutcomeRow {
+            agent,
+            action_class,
+            success,
+            ts,
+        });
+    }
+    Ok(out)
+}
+
+/// Per-agent freshness window (seconds). Charter-derived defaults; spec
+/// contract calls for a "config map" — wired here as defaults so the worker
+/// has something to alert against on day one. The reconciler runs hourly, so
+/// a 2h window is the natural watcher.
+fn default_freshness_window_secs(agent: &str) -> i64 {
+    match agent {
+        "reconciler" => 2 * 3600,   // 2h: reconciler charter
+        "linter"     => 24 * 3600,  // 24h: linter is per-dispatch
+        "proposer"   => 26 * 3600,  // 26h: proposer nightly + overlap
+        "auditor"    => 26 * 3600,
+        _            => 24 * 3600,
+    }
+}
+
+/// Execute the freshness check loudly per S6:
+///   - print one summary line per agent;
+///   - on a stale agent, append an `alert` row, fire an `osascript`
+///     notification, and exit non-zero.
+fn run_freshness(ledger: &hex::ledger::Ledger) -> i32 {
+    use std::time::{SystemTime, UNIX_EPOCH};
+    let now = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map(|d| d.as_secs() as i64)
+        .unwrap_or(0);
+
+    let rows = match ledger.last_ts_per_agent() {
+        Ok(r) => r,
+        Err(e) => {
+            eprintln!("hex ledger freshness: {e}");
+            return 1;
+        }
+    };
+
+    let mut stale = 0usize;
+    for (agent, ts) in &rows {
+        let age = now - *ts;
+        let window = default_freshness_window_secs(agent);
+        let state = if age > window { "STALE" } else { "fresh" };
+        println!("{agent}\tlast_ts={ts}\tage={age}s\twindow={window}s\t{state}");
+        if age > window {
+            stale += 1;
+            let alert = serde_json::json!({
+                "stale_agent": agent,
+                "last_ts": ts,
+                "age_seconds": age,
+                "window_seconds": window,
+            });
+            if let Err(e) =
+                ledger.append("freshness", "freshness.alert", "alert", &alert)
+            {
+                eprintln!("hex ledger freshness: alert append failed: {e}");
+            }
+            // macOS notification (osascript). Best-effort — log a stderr
+            // miss so it's never silent.
+            #[cfg(target_os = "macos")]
+            {
+                let msg = format!(
+                    "display notification \"hex agent '{}' is stale ({}s > {}s)\" with title \"hex freshness\"",
+                    agent, age, window
+                );
+                if let Err(e) = std::process::Command::new("osascript")
+                    .arg("-e")
+                    .arg(&msg)
+                    .status()
+                {
+                    eprintln!("hex ledger freshness: osascript failed: {e}");
+                }
+            }
+            eprintln!(
+                "hex ledger freshness: ALERT — '{}' stale (age={}s, window={}s)",
+                agent, age, window
+            );
+        }
+    }
+    if stale > 0 {
+        eprintln!("hex ledger freshness: {} stale agent(s)", stale);
+        1
+    } else {
+        0
     }
 }
 
