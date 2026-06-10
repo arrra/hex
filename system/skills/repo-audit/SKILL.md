@@ -16,9 +16,7 @@ trigger: >
 
 # Repo Audit — Deep Audit with Adversarial Verification
 
-Validated in a 4-way blind bake-off (2026-06-10) on a real ~48k-line Rust repo, against the viral meta_alchemist 4-phase audit prompt, nud3l's 6-agent /code-audit, and claude-caliper's team-mode review — judged blind on groundedness, signal quality, actionability, and coverage. The measured differentiators: maturity-calibrated severity, the attack-your-own-findings phase, and process-level coverage (git/CI/deploy state, not just code).
-
-Run the prompt below against the target repository. If a repo isn't specified, ask which one. Analysis is read-only.
+Run the audit below against the target repository. If a repo isn't specified, ask which one. Analysis is read-only.
 
 ---
 
