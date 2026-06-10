@@ -7,6 +7,7 @@ pub mod act_evidence;
 pub mod claude_runs;
 pub mod doctor;
 pub mod harness;
+pub mod ledger;
 pub mod capability_exec;
 pub mod audit;
 pub mod capability_guard;

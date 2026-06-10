@@ -129,6 +129,32 @@ enum Commands {
         #[command(subcommand)]
         command: ModuleCommands,
     },
+    /// Hash-chained ledger ops (append-only, tamper-evident).
+    #[command(display_order = 14)]
+    Ledger {
+        #[command(subcommand)]
+        command: LedgerCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum LedgerCommands {
+    /// Append a validated row (kind ∈ intent|action|outcome|heartbeat|alert).
+    Append {
+        #[arg(long)]
+        agent: String,
+        #[arg(long = "action-class")]
+        action_class: String,
+        #[arg(long)]
+        kind: String,
+        /// JSON payload (defaults to {}).
+        #[arg(long, default_value = "{}")]
+        payload: String,
+    },
+    /// Walk the chain end-to-end; nonzero exit on any break.
+    Verify,
+    /// Print last-seen-at per agent (used by freshness alerting).
+    Freshness,
 }
 
 #[derive(Subcommand)]
@@ -741,6 +767,69 @@ fn main() {
                 }
             }
         },
+        Commands::Ledger { command } => {
+            let hex_dir = get_hex_dir();
+            let path = hex::ledger::default_path(&hex_dir);
+            match command {
+                LedgerCommands::Append { agent, action_class, kind, payload } => {
+                    let payload_json: serde_json::Value = match serde_json::from_str(&payload) {
+                        Ok(v) => v,
+                        Err(e) => {
+                            eprintln!("hex ledger append: --payload is not valid JSON: {e}");
+                            std::process::exit(2);
+                        }
+                    };
+                    let ledger = match hex::ledger::Ledger::open(&path) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            eprintln!("hex ledger append: open failed: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    match ledger.append(&agent, &action_class, &kind, &payload_json) {
+                        Ok(id) => {
+                            println!("{}", id);
+                            std::process::exit(0)
+                        }
+                        Err(e) => {
+                            eprintln!("hex ledger append: {e}");
+                            std::process::exit(1)
+                        }
+                    }
+                }
+                LedgerCommands::Verify => match hex::ledger::verify(&path) {
+                    Ok(n) => {
+                        println!("ledger verify OK ({} rows)", n);
+                        std::process::exit(0)
+                    }
+                    Err(e) => {
+                        eprintln!("hex ledger verify: TAMPER DETECTED — {e}");
+                        std::process::exit(1)
+                    }
+                },
+                LedgerCommands::Freshness => {
+                    let ledger = match hex::ledger::Ledger::open(&path) {
+                        Ok(l) => l,
+                        Err(e) => {
+                            eprintln!("hex ledger freshness: open failed: {e}");
+                            std::process::exit(1);
+                        }
+                    };
+                    match ledger.last_ts_per_agent() {
+                        Ok(rows) => {
+                            for (agent, ts) in rows {
+                                println!("{}\t{}", agent, ts);
+                            }
+                            std::process::exit(0)
+                        }
+                        Err(e) => {
+                            eprintln!("hex ledger freshness: {e}");
+                            std::process::exit(1)
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
