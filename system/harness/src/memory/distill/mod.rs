@@ -1,3 +1,4 @@
+pub mod cap;
 pub mod dedup;
 pub mod extract;
 pub mod judge;
