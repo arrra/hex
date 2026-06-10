@@ -561,7 +561,16 @@ RESPONSE=$(
         unset "$var"
     done
     cd "$HEX_DIR"
-    timeout 90 claude -p "$(cat "$PROMPT_TMP")" 2>/dev/null
+    # Lean-by-default profile (spec Sf5bj7y1d). `meeting_prep` re-enables only
+    # the calendar MCP server. Falls back to a no-op if the hex binary is not
+    # on PATH (e.g. legacy installs) — claude then runs with whatever defaults
+    # the workspace provides.
+    LEAN_FLAGS=""
+    if command -v hex >/dev/null 2>&1; then
+        LEAN_FLAGS="$(hex claude-flags meeting_prep 2>/dev/null || true)"
+    fi
+    # shellcheck disable=SC2086
+    timeout 90 claude $LEAN_FLAGS -p "$(cat "$PROMPT_TMP")" 2>/dev/null
 ) || {
     EXIT_CODE=$?
     log "$LLM_CLI failed (exit: $EXIT_CODE)"

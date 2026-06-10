@@ -1,0 +1,64 @@
+# claude-runs.toml — lean-by-default profile config for headless `claude -p`.
+#
+# Drop this file at $HEX_DIR/.hex/config/claude-runs.toml to override the
+# built-in profiles. Without this file, the built-in lean defaults apply
+# (every headless run goes out as `--bare --strict-mcp-config --mcp-config '{}'
+# --disable-slash-commands` — no plugins, no skills, no MCP servers, no
+# CLAUDE.md). That IS the intended behavior.
+#
+# Use this file ONLY to re-enable specific functionality for specific runs.
+#
+# See: docs/hex-ops.md → "Lean Claude runs (claude-runs.toml)" and
+#      spec Sf5bj7y1d.
+
+# -----------------------------------------------------------------------------
+# [defaults]
+# Applied to every profile before the per-run section overrides. All keys
+# optional. The built-in lean default already sets bare=true and
+# disable_slash_commands=true.
+# -----------------------------------------------------------------------------
+[defaults]
+bare = true
+disable_slash_commands = true
+# mcp_servers     = []     # names looked up in workspace .mcp.json
+# plugin_dirs     = []
+# setting_sources = []     # any subset of ["user", "project", "local"]
+# allowed_tools   = []
+# extra_flags     = []     # appended verbatim
+
+# -----------------------------------------------------------------------------
+# Harness question worker (system/harness/src/worker/run.rs).
+# Lean. No MCP, no plugins, no CLAUDE.md. Don't change this unless you
+# know exactly why the worker needs something more.
+# -----------------------------------------------------------------------------
+[runs.harness_worker]
+
+# -----------------------------------------------------------------------------
+# Meeting prep cron (system/scripts/meeting-prep.sh).
+# Needs the Google Calendar MCP server. Nothing else.
+# The server name must match an entry in the workspace .mcp.json.
+# -----------------------------------------------------------------------------
+[runs.meeting_prep]
+mcp_servers = ["google-calendar"]
+
+# -----------------------------------------------------------------------------
+# Eval harness (tests/eval/run_eval.py).
+# Lean — evals run against pristine behavior, not your workspace stack.
+# -----------------------------------------------------------------------------
+[runs.eval]
+
+# -----------------------------------------------------------------------------
+# Default fallback profile — used by `hex claude-flags default`.
+# -----------------------------------------------------------------------------
+[runs.default]
+
+# -----------------------------------------------------------------------------
+# Example custom profile. Uncomment to define your own.
+# -----------------------------------------------------------------------------
+# [runs.my_custom_run]
+# bare = false
+# mcp_servers   = ["server-name-from-mcp-json"]
+# plugin_dirs   = ["/abs/path/to/plugins"]
+# setting_sources = ["user"]
+# allowed_tools = ["Read", "Bash"]
+# extra_flags   = ["--max-turns", "5"]

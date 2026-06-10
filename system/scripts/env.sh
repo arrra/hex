@@ -40,6 +40,27 @@ claude() {
 }
 export -f claude
 
+# Lean-by-default headless invocation (spec Sf5bj7y1d). Prepends resolved
+# flags from `hex claude-flags <profile>` plus --dangerously-skip-permissions
+# so daemon/cron scripts get a clean, plugin/MCP/CLAUDE.md-free claude run.
+# Usage: claude_lean <profile> -p "..."
+claude_lean() {
+  local profile="${1:?claude_lean: profile name required (e.g. harness_worker, meeting_prep, eval)}"
+  shift
+  local claude_bin
+  claude_bin="$(type -P claude 2>/dev/null)" || {
+    echo "ERROR: claude not found on PATH" >&2
+    return 127
+  }
+  local lean_flags=""
+  if command -v hex >/dev/null 2>&1; then
+    lean_flags="$(hex claude-flags "$profile" 2>/dev/null || true)"
+  fi
+  # shellcheck disable=SC2086
+  "$claude_bin" --dangerously-skip-permissions $lean_flags "$@"
+}
+export -f claude_lean
+
 # Circuit breaker must stay shell (process substitution, shell builtins)
 agent_check_circuit_breaker() {
   local agent_id="$1" log_file="$2" threshold="${3:-3}"

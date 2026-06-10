@@ -14,6 +14,7 @@ import fnmatch
 import json
 import os
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -237,8 +238,25 @@ def run_claude(prompt: str, hex_dir: Path, model: str, timeout: int) -> tuple[st
     Run `claude -p <prompt> --cwd <hex_dir>` and return (stdout, stderr).
     Raises subprocess.TimeoutExpired or RuntimeError on failure.
     """
+    # Lean-by-default: prepend `hex claude-flags eval` when the hex binary is on
+    # PATH so headless eval runs don't inherit the workspace plugin/MCP/CLAUDE.md
+    # stack (spec Sf5bj7y1d). No-op when hex is absent.
+    lean_flags: list[str] = []
+    hex_bin = shutil.which("hex")
+    if hex_bin:
+        try:
+            out = subprocess.run(
+                [hex_bin, "claude-flags", "eval"],
+                capture_output=True, text=True, timeout=10, cwd=str(hex_dir),
+            )
+            if out.returncode == 0 and out.stdout.strip():
+                lean_flags = shlex.split(out.stdout.strip())
+        except (subprocess.TimeoutExpired, OSError):
+            pass
+
     cmd = [
         "claude",
+        *lean_flags,
         "-p", prompt,
         "--model", model,
         "--dangerously-skip-permissions",
