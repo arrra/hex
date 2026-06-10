@@ -48,7 +48,11 @@ pub fn load_api_key(api_key_env: &str) -> Option<String> {
             if let Ok(content) = std::fs::read_to_string(env_file) {
                 for line in content.lines() {
                     if let Some((k, v)) = line.split_once('=') {
-                        if k.trim() == "OPENROUTER_API_KEY" {
+                        // Tolerate shell-sourceable files (`export KEY=...`) —
+                        // a live box silently deferred for days on this prefix.
+                        let key = k.trim();
+                        let key = key.strip_prefix("export ").unwrap_or(key).trim();
+                        if key == "OPENROUTER_API_KEY" {
                             let val = v.trim().trim_matches('"').to_string();
                             if !val.is_empty() {
                                 return Some(val);
@@ -176,6 +180,25 @@ mod tests {
             Err(ProviderError::Deferred(_)) => {}
             _ => panic!("expected Deferred"),
         }
+    }
+
+    #[test]
+    fn load_api_key_tolerates_export_prefix_in_secrets_file() {
+        let _guard = crate::telemetry::test_support::lock_env();
+        std::env::remove_var("OPENROUTER_API_KEY");
+        let dir = std::env::temp_dir().join("hex-provider-test-export-prefix");
+        let secrets = dir.join(".hex/secrets");
+        std::fs::create_dir_all(&secrets).unwrap();
+        std::fs::write(
+            secrets.join("openrouter.env"),
+            "# comment line\nexport OPENROUTER_API_KEY=test-key-123\n",
+        )
+        .unwrap();
+        std::env::set_var("HEX_DIR", &dir);
+        let key = load_api_key("OPENROUTER_API_KEY");
+        std::env::remove_var("HEX_DIR");
+        std::fs::remove_dir_all(&dir).ok();
+        assert_eq!(key.as_deref(), Some("test-key-123"));
     }
 
     #[test]
