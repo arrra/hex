@@ -112,7 +112,7 @@ enum Commands {
     /// exit non-zero with a stderr explanation.
     #[command(display_order = 14, name = "claude-flags")]
     ClaudeFlags {
-        /// Profile name (built-ins: default, harness_worker, meeting_prep, eval)
+        /// Profile name (built-ins: default, harness_worker, eval)
         profile: String,
     },
     /// Print version

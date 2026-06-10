@@ -45,7 +45,7 @@ export -f claude
 # so daemon/cron scripts get a clean, plugin/MCP/CLAUDE.md-free claude run.
 # Usage: claude_lean <profile> -p "..."
 claude_lean() {
-  local profile="${1:?claude_lean: profile name required (e.g. harness_worker, meeting_prep, eval)}"
+  local profile="${1:?claude_lean: profile name required (e.g. harness_worker, eval)}"
   shift
   local claude_bin
   claude_bin="$(type -P claude 2>/dev/null)" || {

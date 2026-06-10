@@ -6,9 +6,8 @@
 //!     (so plugins/MCP/skills/CLAUDE.md don't auto-load on headless runs)
 //!   - hard-error on an unknown profile name (loud failure per SO #6)
 //!
-//! These tests pin the CLI surface that worker/run.rs, meeting-prep.sh and
-//! run_eval.py will consume. They fail before claude_runs is wired and pass
-//! after.
+//! These tests pin the CLI surface that worker/run.rs and run_eval.py will
+//! consume. They fail before claude_runs is wired and pass after.
 
 use std::process::Command;
 

@@ -232,8 +232,6 @@
   _via hex-skill · [~/.claude/skills/gws-people/SKILL.md]_
 - 🟢 **Gws Sheets Read** — Google Sheets: Read values from a spreadsheet.
   _via hex-skill · [~/.claude/skills/gws-sheets-read/SKILL.md]_
-- 🟢 **Gws Workflow Meeting Prep** — Google Workflow: Prepare for your next meeting: agenda, attendees, and linked docs.
-  _via hex-skill · [~/.claude/skills/gws-workflow-meeting-prep/SKILL.md]_
 - 🔵 **Google Workspace** — Gmail, Calendar, Drive, Contacts, Sheets, and Docs integration via Python. Uses OAuth2 with automatic token refresh. No external binaries needed — runs entirely with Google's Python client libraries i
   _via skill · [~/.hex/legacy-skills/skills/productivity/google-workspace/SKILL.md]_
 - 🔵 **Linear** — Manage Linear issues, projects, and teams via the GraphQL API. Create, update, search, and organize issues. Uses API key auth (no OAuth needed). All operations via curl — no dependencies.

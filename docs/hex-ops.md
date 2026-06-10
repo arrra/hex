@@ -218,7 +218,6 @@ Built-in profiles (apply with or without a config file):
 |-------------------|--------------------------------------------------------|-----------|
 | `default`         | fallback                                               | —         |
 | `harness_worker`  | `system/harness/src/worker/run.rs`                     | —         |
-| `meeting_prep`    | `system/scripts/meeting-prep.sh`                       | `google-calendar` MCP |
 | `eval`            | `tests/eval/run_eval.py`                               | —         |
 
 Lean default = `--bare --strict-mcp-config --mcp-config '{}'
@@ -246,9 +245,6 @@ bare = true
 [runs.harness_worker]
 # Lean — no overrides needed.
 
-[runs.meeting_prep]
-mcp_servers = ["google-calendar"]   # must resolve in workspace .mcp.json
-
 [runs.eval]
 ```
 
@@ -275,7 +271,7 @@ when one is — including resolving every named MCP server.
 Shell call sites use `hex claude-flags` with eval-style substitution:
 
 ```bash
-claude $(hex claude-flags meeting_prep) -p "$(cat prompt.txt)"
+claude $(hex claude-flags harness_worker) -p "$(cat prompt.txt)"
 ```
 
 The Rust harness call sites build the arg vector via

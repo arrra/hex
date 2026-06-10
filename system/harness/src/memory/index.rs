@@ -36,7 +36,6 @@ const TIERED_RAW_DIRS: &[(&str, &str)] = &[
     ("raw/handoffs", "exclude"),
     ("raw/reflections", "exclude"),
     ("raw/docs", "full"),
-    ("raw/meeting-prep", "full"),
     ("raw/messages", "full"),
     ("raw/calendar", "full"),
 ];

@@ -1,7 +1,7 @@
 //! Lean-by-default `claude -p` profile resolver.
 //!
-//! Headless invocations of Claude Code (harness question worker, meeting-prep
-//! cron, eval harness, etc.) should NOT inherit the full workspace plugin /
+//! Headless invocations of Claude Code (harness question worker, eval
+//! harness, etc.) should NOT inherit the full workspace plugin /
 //! skill / MCP / CLAUDE.md stack. This module owns the policy: a small
 //! built-in registry of profiles, optionally overridden by
 //! `$HEX_DIR/.hex/config/claude-runs.toml`, that resolves to a vector of CLI
@@ -231,13 +231,6 @@ impl std::error::Error for ClaudeRunsError {}
 fn builtin(name: &str) -> Option<ResolvedRun> {
     match name {
         "default" | "harness_worker" | "eval" => Some(ResolvedRun::lean(name)),
-        "meeting_prep" => {
-            let mut r = ResolvedRun::lean(name);
-            // Meeting prep needs access to Google Calendar via MCP.
-            // Server name matches the workspace .mcp.json entry.
-            r.mcp_servers = vec!["google-calendar".to_string()];
-            Some(r)
-        }
         _ => None,
     }
 }
@@ -246,7 +239,6 @@ fn known_profile_names() -> Vec<String> {
     vec![
         "default".to_string(),
         "harness_worker".to_string(),
-        "meeting_prep".to_string(),
         "eval".to_string(),
     ]
 }
@@ -534,12 +526,6 @@ mod tests {
     }
 
     #[test]
-    fn meeting_prep_requests_google_calendar_mcp() {
-        let r = resolve("meeting_prep", None).expect("builtin");
-        assert_eq!(r.mcp_servers, vec!["google-calendar".to_string()]);
-    }
-
-    #[test]
     fn mcp_server_lookup_succeeds_for_named_server() {
         let mut servers = BTreeMap::new();
         servers.insert(
@@ -547,7 +533,19 @@ mod tests {
             serde_json::json!({"command": "calendar-mcp", "args": []}),
         );
         let cfg = McpConfig { servers };
-        let r = resolve("meeting_prep", None).unwrap();
+        // Use a config-defined profile that requests the server.
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_dir = tmp.path().join(".hex").join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("claude-runs.toml"),
+            r#"
+[runs.with_calendar]
+mcp_servers = ["google-calendar"]
+"#,
+        )
+        .unwrap();
+        let r = resolve("with_calendar", Some(tmp.path())).unwrap();
         let flags = r.to_cli_flags(&cfg).expect("flags");
         let idx = flags.iter().position(|f| f == "--mcp-config").unwrap();
         let json = &flags[idx + 1];
@@ -557,7 +555,18 @@ mod tests {
 
     #[test]
     fn mcp_server_lookup_loud_error_when_missing() {
-        let r = resolve("meeting_prep", None).unwrap();
+        let tmp = tempfile::tempdir().unwrap();
+        let cfg_dir = tmp.path().join(".hex").join("config");
+        std::fs::create_dir_all(&cfg_dir).unwrap();
+        std::fs::write(
+            cfg_dir.join("claude-runs.toml"),
+            r#"
+[runs.with_calendar]
+mcp_servers = ["google-calendar"]
+"#,
+        )
+        .unwrap();
+        let r = resolve("with_calendar", Some(tmp.path())).unwrap();
         let err = r
             .to_cli_flags(&McpConfig::empty())
             .expect_err("must error — google-calendar not in empty config");

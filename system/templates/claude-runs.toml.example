@@ -34,14 +34,6 @@ disable_slash_commands = true
 [runs.harness_worker]
 
 # -----------------------------------------------------------------------------
-# Meeting prep cron (system/scripts/meeting-prep.sh).
-# Needs the Google Calendar MCP server. Nothing else.
-# The server name must match an entry in the workspace .mcp.json.
-# -----------------------------------------------------------------------------
-[runs.meeting_prep]
-mcp_servers = ["google-calendar"]
-
-# -----------------------------------------------------------------------------
 # Eval harness (tests/eval/run_eval.py).
 # Lean — evals run against pristine behavior, not your workspace stack.
 # -----------------------------------------------------------------------------
