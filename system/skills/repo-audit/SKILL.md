@@ -16,7 +16,7 @@ trigger: >
 
 # Repo Audit — Deep Audit with Adversarial Verification
 
-Won a 4-way blind bakeoff on 2026-06-10 (vs. the viral meta_alchemist 4-phase prompt, nud3l's 6-agent /code-audit, and claude-caliper team-mode; judged blind on groundedness / signal / actionability / coverage — see mrap-hex `projects/system-improvement/bakeoffs/repo-audit-prompt/2026-06-10/verdict.md`). The differentiators, in order of measured impact: maturity-calibrated severity, the attack-your-own-findings phase, and process-level coverage (git/CI/deploy state, not just code).
+Validated in a 4-way blind bake-off (2026-06-10) on a real ~48k-line Rust repo, against the viral meta_alchemist 4-phase audit prompt, nud3l's 6-agent /code-audit, and claude-caliper's team-mode review — judged blind on groundedness, signal quality, actionability, and coverage. The measured differentiators: maturity-calibrated severity, the attack-your-own-findings phase, and process-level coverage (git/CI/deploy state, not just code).
 
 Run the prompt below against the target repository. If a repo isn't specified, ask which one. Analysis is read-only.
 
@@ -92,7 +92,7 @@ Convert strategy into tasks an engineer (or coding agent) could pick up cold:
 - Read-only: do NOT modify code. Running builds/tests/linters/audit tools is allowed and encouraged.
 - No padding: a healthy dimension gets one sentence.
 
-## hex integration
+## After the audit
 
-- Save the deliverable to `projects/<project>/audits/YYYY-MM-DD-repo-audit.md` (or the workspace path the user prefers); don't leave it only in chat.
-- If the user wants the plan executed, convert M0/M1 tasks into a BOI spec (`boi-delegation` skill) — the task format above maps 1:1 onto `[[tasks]]` with `behavior` + `verifications`.
+- Save the deliverable to a file (e.g. `docs/audits/YYYY-MM-DD-repo-audit.md`, or wherever the user keeps such documents) — don't leave it only in chat.
+- If the user wants the plan executed, the task format above (behavior + acceptance criteria + dependencies) maps directly onto tickets or agent-delegation specs; offer to convert M0/M1.
