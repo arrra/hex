@@ -18,6 +18,7 @@ pub mod capability_guard;
 pub mod llm_config;
 pub mod memory;
 pub mod messages;
+pub mod module_state;
 pub mod ops;
 pub mod registry;
 pub mod telemetry;
