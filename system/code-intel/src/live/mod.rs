@@ -12,6 +12,7 @@
 //! Std threads + blocking IO throughout; deliberately NO `lsp-types`,
 //! `tower-lsp`, or tokio (SPEC-A2 §7).
 
+pub mod client;
 pub mod instance;
 pub mod lsp;
 pub mod pool;

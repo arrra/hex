@@ -1,19 +1,23 @@
-//! cq — stateless code-intelligence CLI (SPEC-A1 §5).
+//! cq — stateless code-intelligence CLI (SPEC-A1 §5, SPEC-A2 §5).
 //!
-//! Every query verb goes through `scipd_core::respond::run`: response
-//! envelope as a single JSON object on stdout, structured errors as JSON on
-//! stderr, exit codes exactly per the spec §5 table (0 ok / 2 stale /
-//! 3 NO_INDEX / 4 UNREGISTERED|UNSUPPORTED / 5 NOT_FOUND / 6 EMIT_FAILED).
+//! Every query verb goes through `scipd_core::respond::run_routed`: A1
+//! index fast path first, live escalation per SPEC-A2 §5 (`--live` forces,
+//! `--no-live` disables). Response envelope as a single JSON object on
+//! stdout, structured errors as JSON on stderr, exit codes per the spec
+//! tables (0 ok / 2 stale / 3 NO_INDEX / 4 UNREGISTERED|UNSUPPORTED /
+//! 5 NOT_FOUND / 6 EMIT_FAILED / 7 LIVE_UNAVAILABLE|RENAME_ABORTED /
+//! 8 CHECK_FAILED).
 
 use std::path::{Path, PathBuf};
 
 use clap::{Parser, Subcommand};
-use scipd_core::doctor;
 use scipd_core::error::CqError;
 use scipd_core::indexer::{self, IndexOutcome};
+use scipd_core::live::client::LiveClient;
 use scipd_core::query::Selector;
-use scipd_core::respond::{self, Verb};
+use scipd_core::respond::{self, LiveMode, Verb};
 use scipd_core::workspace::{codeintel_home, register_workspace, Registry, Workspace};
+use scipd_core::{check, doctor, rename_apply};
 
 /// Positional-target heuristic, documented in `--help` (plan Task 9): an
 /// argument whose two trailing `:`-separated segments are both positive
@@ -38,6 +42,10 @@ struct Cli {
     command: Command,
 }
 
+const LIVE_HELP: &str =
+    "Force the live path via the scipd daemon (exit 7 LIVE_UNAVAILABLE if impossible)";
+const NO_LIVE_HELP: &str = "Pure index answer; never touch the live daemon";
+
 #[derive(Subcommand)]
 enum Command {
     /// Definition site(s) for a position or symbol name
@@ -47,6 +55,10 @@ enum Command {
         /// Refuse (exit 2) instead of annotating when results touch stale files
         #[arg(long)]
         strict: bool,
+        #[arg(long, help = LIVE_HELP, conflicts_with = "no_live")]
+        live: bool,
+        #[arg(long, help = NO_LIVE_HELP)]
+        no_live: bool,
         #[arg(long, help = WORKSPACE_HELP)]
         workspace: Option<PathBuf>,
     },
@@ -56,6 +68,10 @@ enum Command {
         target: String,
         #[arg(long)]
         strict: bool,
+        #[arg(long, help = LIVE_HELP, conflicts_with = "no_live")]
+        live: bool,
+        #[arg(long, help = NO_LIVE_HELP)]
+        no_live: bool,
         #[arg(long, help = WORKSPACE_HELP)]
         workspace: Option<PathBuf>,
     },
@@ -65,6 +81,10 @@ enum Command {
         target: String,
         #[arg(long)]
         strict: bool,
+        #[arg(long, help = LIVE_HELP, conflicts_with = "no_live")]
+        live: bool,
+        #[arg(long, help = NO_LIVE_HELP)]
+        no_live: bool,
         #[arg(long, help = WORKSPACE_HELP)]
         workspace: Option<PathBuf>,
     },
@@ -87,6 +107,26 @@ enum Command {
     },
     /// Emit + ingest + atomically publish a new index generation
     Index {
+        #[arg(long, help = WORKSPACE_HELP)]
+        workspace: Option<PathBuf>,
+    },
+    /// Rename a symbol via the live daemon (always live, never indexed)
+    Rename {
+        /// Symbol position, FILE:LINE:COL (1-based)
+        target: String,
+        /// The new symbol name
+        new_name: String,
+        /// Apply the edits to the worktree (all-or-nothing,
+        /// content-asserted; default prints the edit plan only)
+        #[arg(long)]
+        apply: bool,
+        #[arg(long, help = WORKSPACE_HELP)]
+        workspace: Option<PathBuf>,
+    },
+    /// cargo check diagnostics for the worktree (per-worktree target dir)
+    Check {
+        /// Restrict reported diagnostics to one file (workspace-relative)
+        file: Option<String>,
         #[arg(long, help = WORKSPACE_HELP)]
         workspace: Option<PathBuf>,
     },
@@ -132,36 +172,116 @@ fn resolve_registered(home: &Path, workspace: Option<PathBuf>) -> Result<Workspa
     Ok(ws)
 }
 
+/// `--live`/`--no-live` → routing mode (default Auto, SPEC-A2 §5).
+fn live_mode(live: bool, no_live: bool) -> LiveMode {
+    match (live, no_live) {
+        (true, _) => LiveMode::Forced,
+        (_, true) => LiveMode::Disabled,
+        _ => LiveMode::Auto,
+    }
+}
+
 /// Run one query verb end-to-end: envelope JSON to stdout, exit code per the
-/// spec table (0 fresh, 2 stale-annotated; errors propagate as `CqError`).
+/// spec tables (0 fresh/live, 2 stale-annotated; errors propagate as
+/// `CqError`).
 fn run_query(
     workspace: Option<PathBuf>,
     verb: Verb,
     strict: bool,
+    mode: LiveMode,
 ) -> Result<i32, anyhow::Error> {
     let home = codeintel_home()?;
     let ws = resolve_registered(&home, workspace)?;
-    let (envelope, exit_code) = respond::run(&home, &ws, &verb, strict)?;
+    let (envelope, exit_code) = respond::run_routed(&home, &ws, &verb, strict, mode)?;
     println!("{}", serde_json::to_string(&envelope)?);
     Ok(exit_code)
 }
 
+/// `cq rename` (SPEC-A2 §5): live-only. Daemon down or instance warming →
+/// `LIVE_UNAVAILABLE` (exit 7). Without `--apply` the normalized edit plan
+/// is printed; with it, the plan is applied all-or-nothing with per-edit
+/// content assertions (`RENAME_ABORTED`, exit 7, nothing written, on any
+/// mismatch).
+fn run_rename(
+    workspace: Option<PathBuf>,
+    target: &str,
+    new_name: &str,
+    apply: bool,
+) -> Result<i32, anyhow::Error> {
+    let home = codeintel_home()?;
+    let ws = resolve_registered(&home, workspace)?;
+    let Selector::Pos { path, line, col } = parse_target(target) else {
+        anyhow::bail!(
+            "rename target must be a FILE:LINE:COL position (1-based), got {target:?}"
+        );
+    };
+
+    let unavailable = |reason: String| CqError::LiveUnavailable { reason };
+    let mut client = LiveClient::connect(&home).map_err(|e| unavailable(e.to_string()))?;
+    let reply = client
+        .rename(&ws.query_root, &path, line, col, new_name)
+        .map_err(|e| unavailable(e.to_string()))?;
+    if let Some(warming) = reply.warming {
+        return Err(unavailable(format!(
+            "live instance still warming ({}s elapsed) — rename is live-only; retry shortly",
+            warming.elapsed_secs
+        ))
+        .into());
+    }
+    if let Some(error) = reply.error {
+        return Err(unavailable(format!("{}: {}", error.code, error.message)).into());
+    }
+    let edits = reply.edits.ok_or_else(|| {
+        unavailable("daemon reply carried neither edits nor an error".into())
+    })?;
+
+    if apply {
+        let files_modified = rename_apply::apply(&ws.query_root, &edits)?;
+        println!(
+            "{}",
+            serde_json::json!({
+                "edits": edits,
+                "applied": true,
+                "files_modified": files_modified,
+            })
+        );
+    } else {
+        println!("{}", serde_json::json!({ "edits": edits, "applied": false }));
+    }
+    Ok(0)
+}
+
 fn run(cli: Cli) -> Result<i32, anyhow::Error> {
     match cli.command {
-        Command::Def { target, strict, workspace } => {
-            run_query(workspace, Verb::Def(parse_target(&target)), strict)
+        Command::Def { target, strict, live, no_live, workspace } => {
+            run_query(workspace, Verb::Def(parse_target(&target)), strict, live_mode(live, no_live))
         }
-        Command::Refs { target, strict, workspace } => {
-            run_query(workspace, Verb::Refs(parse_target(&target)), strict)
+        Command::Refs { target, strict, live, no_live, workspace } => {
+            run_query(workspace, Verb::Refs(parse_target(&target)), strict, live_mode(live, no_live))
         }
-        Command::Callers { target, strict, workspace } => {
-            run_query(workspace, Verb::Callers(parse_target(&target)), strict)
+        Command::Callers { target, strict, live, no_live, workspace } => {
+            run_query(
+                workspace,
+                Verb::Callers(parse_target(&target)),
+                strict,
+                live_mode(live, no_live),
+            )
         }
         Command::Symbols { file, strict, workspace } => {
-            run_query(workspace, Verb::Symbols(file), strict)
+            run_query(workspace, Verb::Symbols(file), strict, LiveMode::Disabled)
         }
         Command::Search { query, strict, workspace } => {
-            run_query(workspace, Verb::Search(query), strict)
+            run_query(workspace, Verb::Search(query), strict, LiveMode::Disabled)
+        }
+        Command::Rename { target, new_name, apply, workspace } => {
+            run_rename(workspace, &target, &new_name, apply)
+        }
+        Command::Check { file, workspace } => {
+            let home = codeintel_home()?;
+            let ws = resolve_registered(&home, workspace)?;
+            let (report, exit_code) = check::run(&ws.query_root, file.as_deref())?;
+            println!("{}", serde_json::to_string(&report)?);
+            Ok(exit_code)
         }
         Command::Index { workspace } => {
             let home = codeintel_home()?;
