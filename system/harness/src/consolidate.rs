@@ -24,9 +24,19 @@ pub enum Mode {
     Full,
 }
 
+/// Exit code policy: workspace FINDINGS (L1 doctor lint) are reported, not
+/// fatal. Only OPERATIONAL errors (L2 op failure, DB unopenable, L3 LLM
+/// failure, backstop failure) fail the run. 472 consecutive cron "errors"
+/// that were really lint findings taught us this (2026-06-11 assessment).
+fn exit_code_for(l1_findings: i32, any_error: bool) -> i32 {
+    let _ = l1_findings; // reported in summary + artifacts, never exit-fatal
+    if any_error { 1 } else { 0 }
+}
+
 /// Run the unified consolidation pass. Returns a process exit code.
-///   0 — all requested layers succeeded with no issues
-///   1 — at least one layer reported issues or hard-failed
+///   0 — no operational errors (L1 workspace findings are reported, not fatal)
+///   1 — at least one operational error (L2 op failure, DB unopenable,
+///       L3 LLM failure, backstop failure)
 pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
     // Self-throttle the whole process (every thread + IO) unless --max.
     crate::throttle::apply("consolidate", max);
@@ -66,7 +76,8 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
     }
     let _consolidate_lock = lock_file; // released when run returns
 
-    let mut any_fail = false;
+    let mut any_error = false;
+    let mut l1_findings: i32 = 0;
 
     println!("=== hex memory consolidate ({:?}) ===", mode);
 
@@ -74,8 +85,8 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
     println!("\n-- Layer 1: structural (doctor::consolidate) --");
     let l1 = crate::doctor::consolidate::run(hex_dir);
     if l1 != 0 {
-        eprintln!("Layer 1 reported issues (exit={l1})");
-        any_fail = true;
+        l1_findings = l1;
+        println!("Layer 1: {l1} findings (reported, non-fatal)");
     }
 
     // Layer 2 — MEMORY DB (deterministic)
@@ -89,7 +100,7 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
             // BEFORE the standard ops so `catchup-distill` sees the new rows.
             if let Err(e) = crate::memory::consolidate::op_transcript_backstop(&mut conn, hex_dir) {
                 eprintln!("Layer 2 transcript-backstop FAILED: {e}");
-                any_fail = true;
+                any_error = true;
             }
             match crate::memory::consolidate::run(&mut conn) {
             Ok(report) => {
@@ -102,18 +113,18 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
                     eprintln!("Layer 2 op '{name}' FAILED: {err}");
                 }
                 if !report.failed.is_empty() {
-                    any_fail = true;
+                    any_error = true;
                 }
             }
             Err(e) => {
                 eprintln!("Layer 2 hard-failed: {e}");
-                any_fail = true;
+                any_error = true;
             }
             }
         }
         Err(e) => {
             eprintln!("Layer 2 hard-failed: cannot open memory.db at {}: {e}", db_path.display());
-            any_fail = true;
+            any_error = true;
         }
     }
 
@@ -132,13 +143,17 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
             Ok(()) => println!("Layer 3 ok"),
             Err(e) => {
                 eprintln!("Layer 3 FAILED (Layers 1+2 already ran): {e}");
-                any_fail = true;
+                any_error = true;
             }
         }
     }
 
-    println!("\n=== consolidate done (exit={}) ===", if any_fail { 1 } else { 0 });
-    if any_fail { 1 } else { 0 }
+    let code = exit_code_for(l1_findings, any_error);
+    println!(
+        "\n=== consolidate done (exit={code}, findings={l1_findings}, errors={}) ===",
+        any_error
+    );
+    code
 }
 
 /// Layer 3 — operating-model audit (FULL mode only).
@@ -325,6 +340,15 @@ mod tests {
             "second backstop run must not duplicate the transcript_files row \
              (exactly-once contract)"
         );
+    }
+
+    #[test]
+    fn l1_findings_do_not_fail_the_run() {
+        // exit_code_for is the new pure aggregation fn introduced in Step 2
+        assert_eq!(exit_code_for(/*l1_findings=*/ 20, /*any_error=*/ false), 0);
+        assert_eq!(exit_code_for(0, true), 1);
+        assert_eq!(exit_code_for(5, true), 1);
+        assert_eq!(exit_code_for(0, false), 0);
     }
 
     #[test]
