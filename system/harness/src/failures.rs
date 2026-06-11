@@ -177,6 +177,107 @@ pub fn evaluate(
     Ok(report)
 }
 
+#[derive(Debug, Clone)]
+pub struct FailureSignature {
+    pub fid: String,
+    pub head: String, // normalized detail head
+    pub status: String,
+    pub count: i64,
+    pub first_seen: String,
+    pub last_seen: String,
+    pub is_new: bool, // first_seen inside the digest window
+}
+
+/// Normalize a detail string into a stable signature head: first line,
+/// digit runs collapsed to '#', truncated to 80 chars.
+pub fn signature_head(detail: &str) -> String {
+    let first = detail.lines().next().unwrap_or("");
+    let mut out = String::with_capacity(80);
+    let mut in_digits = false;
+    for c in first.chars().take(160) {
+        if c.is_ascii_digit() {
+            if !in_digits { out.push('#'); in_digits = true; }
+        } else {
+            in_digits = false;
+            out.push(c);
+        }
+        if out.len() >= 80 { break; }
+    }
+    out
+}
+
+/// Failures grouped by (fid, signature head), with is_new flagged when
+/// first_seen falls inside the last `window_hours`. Only signatures ACTIVE in
+/// the window are returned. status semantics: error/panic/failed = failures;
+/// skipped/warn are excluded here (CLI lists their counts separately).
+pub fn failure_signatures(
+    now: DateTime<Utc>,
+    window_hours: i64,
+) -> rusqlite::Result<Vec<FailureSignature>> {
+    let conn = crate::telemetry::open_ro()?;
+    let mut stmt = conn.prepare(
+        "SELECT event, status, COALESCE(detail,''), ts FROM events
+         WHERE status IN ('error','panic','failed') ORDER BY ts",
+    )?;
+    let mut map: std::collections::BTreeMap<(String, String), FailureSignature> =
+        Default::default();
+    let rows = stmt.query_map([], |r| {
+        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+    })?;
+    for r in rows {
+        let (fid, status, detail, ts) = r?;
+        let head = signature_head(&detail);
+        let e = map.entry((fid.clone(), head.clone())).or_insert(FailureSignature {
+            fid, head, status, count: 0, first_seen: ts.clone(),
+            last_seen: ts.clone(), is_new: false,
+        });
+        e.count += 1;
+        e.last_seen = ts;
+    }
+    let window_start = (now - chrono::Duration::hours(window_hours)).to_rfc3339();
+    let mut out: Vec<_> = map
+        .into_values()
+        .filter(|s| s.last_seen >= window_start)
+        .map(|mut s| { s.is_new = s.first_seen >= window_start; s })
+        .collect();
+    out.sort_by(|a, b| (b.is_new, b.count).cmp(&(a.is_new, a.count)));
+    Ok(out)
+}
+
+#[derive(Debug, Clone)]
+pub struct DuplicateFire {
+    pub fid: String,
+    pub window_start: DateTime<Utc>,
+    pub rows_in_window: i64,
+}
+
+/// >1 row per expected-fire window = engine anomaly (observed: double-fires
+/// ~150ms apart). Checks the most recent expected fire per cron fid.
+pub fn duplicate_fires(
+    exp: &[CronExpectation],
+    now: DateTime<Utc>,
+) -> rusqlite::Result<Vec<DuplicateFire>> {
+    let conn = crate::telemetry::open_ro()?;
+    let mut out = Vec::new();
+    for e in exp {
+        let Some(expected) = prev_fire(&e.expr, now) else { continue };
+        let cadence = cadence_secs(&e.expr, now).unwrap_or(86_400);
+        let lo = (expected - chrono::Duration::seconds(60)).to_rfc3339();
+        let hi = (expected + chrono::Duration::seconds(cadence / 2)).to_rfc3339();
+        let n: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE event = ?1 AND ts >= ?2 AND ts < ?3",
+            rusqlite::params![&e.fid, lo, hi],
+            |r| r.get(0),
+        )?;
+        if n > 1 {
+            out.push(DuplicateFire { fid: e.fid.clone(), window_start: expected,
+                rows_in_window: n });
+        }
+    }
+    Ok(out)
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use chrono::{DateTime, Utc};
@@ -279,6 +380,59 @@ mod missed_tests {
             "downtime must excuse a::daily: {:?}", report.missed);
         assert_eq!(report.downtime.len(), 1);
         assert!(report.downtime[0].excused_fids.contains(&"a::daily".to_string()));
+    }
+}
+
+#[cfg(test)]
+mod signature_tests {
+    use super::testutil::*;
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    #[test]
+    fn signatures_group_and_flag_new() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        seed_schema();
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        // chronic: 5 days of the same error; new: one today
+        for d in 1..=5 {
+            row_d("old::daily", now - Duration::days(d), "error",
+                "`hex` exited 2: error: unrecognized subcommand backup");
+        }
+        row_d("new::daily", now - Duration::hours(2), "error",
+            "`hex` exited 1: gate battery BLOCKED");
+        let sigs = failure_signatures(now, 24).unwrap();
+        let newsig = sigs.iter().find(|s| s.fid == "new::daily").unwrap();
+        assert!(newsig.is_new);
+        let oldsig = sigs.iter().find(|s| s.fid == "old::daily").unwrap();
+        assert!(!oldsig.is_new);
+        assert_eq!(oldsig.count, 5);
+    }
+
+    #[test]
+    fn double_fire_detected_per_expected_window() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        seed_schema();
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        // two rows 150ms apart around the 04:00 fire (live phenomenon: engine
+        // double-fires — 4 of hex-backup's 6 nights)
+        let fire = Utc.with_ymd_and_hms(2026, 6, 11, 3, 59, 59).unwrap();
+        row("a::daily", fire, "error", 100);
+        row("a::daily", fire + Duration::milliseconds(150), "error", 100);
+        let exp = vec![CronExpectation { worker: "a".into(), fid: "a::daily".into(),
+            expr: "0 0 4 * * * *".into() }];
+        let dups = duplicate_fires(&exp, now).unwrap();
+        assert_eq!(dups.len(), 1);
+        assert_eq!(dups[0].fid, "a::daily");
+        assert_eq!(dups[0].rows_in_window, 2);
+    }
+
+    #[test]
+    fn signature_head_normalizes_digits() {
+        assert_eq!(
+            signature_head("`hex` exited 2: slice 12345 failed\nsecond line"),
+            "`hex` exited #: slice # failed"
+        );
     }
 }
 
