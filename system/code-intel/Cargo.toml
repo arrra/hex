@@ -1,0 +1,29 @@
+[package]
+name = "scipd"
+version = "0.1.0"
+edition = "2021"
+
+[lib]
+name = "scipd_core"
+path = "src/lib.rs"
+
+[[bin]]
+name = "cq"
+path = "src/bin/cq.rs"
+
+[dependencies]
+anyhow = "1"
+clap = { version = "4", features = ["derive"] }
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+rusqlite = { version = "0.31", features = ["bundled-full"] }
+sha2 = "0.10"
+fs2 = "0.4"
+chrono = { version = "0.4", features = ["serde"] }
+# SCIP protobuf bindings (spec §9). Plan guessed 0.5; crates.io latest stable is
+# 0.8.1 (checked 2026-06-11). Pinned exact per spec. Task 5 consumes it.
+scip = "=0.8.1"
+toml = "0.8"
+
+[dev-dependencies]
+tempfile = "3"
