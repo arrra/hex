@@ -135,6 +135,10 @@ not queryable) and the previous `.hex/telemetry/events.db` that was removed
 when `hex-events` was deleted on 2026-06-02. The store is now rebuilt
 natively in the Rust harness.
 
+### Resources
+
+`hex resources sample|status` — hourly disk sampler (tier 0) + deterministic floor/trend pressure rules (tier 1) over the same telemetry store; on breach it alerts (6h dedupe) and emits `resource.pressure` level-triggered. Detection only — never cleans anything up.
+
 ---
 
 ## LLM configuration (`llm.toml`)
