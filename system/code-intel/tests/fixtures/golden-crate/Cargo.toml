@@ -1,0 +1,8 @@
+[package]
+name = "golden"
+version = "0.1.0"
+edition = "2021"
+
+# Standalone fixture package: never part of the parent cargo workspace.
+# (Also listed in the root Cargo.toml `workspace.exclude`.)
+[workspace]

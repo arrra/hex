@@ -1,0 +1,174 @@
+{
+  "_meta": {
+    "description": "Golden expectations for the committed fixture crate at tests/fixtures/golden-crate/. Consumed by tests/golden.rs (spec SPEC-A1 §8 S2).",
+    "convention": "All line/col values are 1-based (CLI envelope convention, spec §5). Raw SCIP is 0-based; the query layer converts.",
+    "generated_with": "rust-analyzer 0.0.0 (c5d30e2331 2026-05-31), `rust-analyzer scip .` run on a git-initialized copy of golden-crate; occurrences dumped via the scip 0.5 protobuf bindings",
+    "generated_at": "2026-06-11",
+    "refs_count_includes_definition": true,
+    "callers_gate_note": "Per spec §8 callers gate: call sites expanded from macro_rules! bodies do NOT produce an occurrence of the callee in the rust-analyzer SCIP emit (verified: macro_caller's body references only ops/call_double! — there is no ops/double() occurrence inside macro_caller). Entries marked macro_case=expected_but_gated are ground-truth callers that the index cannot see; assert them only per tests/fixtures/callers-gate.json."
+  },
+  "symbols": [
+    {
+      "name": "double",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 ops/double().",
+      "kind": "function",
+      "def": { "path": "src/ops.rs", "line": 1, "col": 8 },
+      "refs_count": 3,
+      "refs": [
+        { "path": "src/ops.rs", "line": 1, "col": 8, "role": "definition" },
+        { "path": "src/lib.rs", "line": 4, "col": 43, "role": "reference", "enclosing": "top_level_fn" },
+        { "path": "src/ops.rs", "line": 5, "col": 60, "role": "reference", "enclosing": "fmt_user" }
+      ],
+      "callers": {
+        "from_index": ["fmt_user", "top_level_fn"],
+        "gated": [
+          { "name": "macro_caller", "macro_case": "expected_but_gated" }
+        ]
+      }
+    },
+    {
+      "name": "generic_max",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 ops/generic_max().",
+      "kind": "function",
+      "def": { "path": "src/ops.rs", "line": 2, "col": 8 },
+      "refs_count": 1,
+      "refs": [
+        { "path": "src/ops.rs", "line": 2, "col": 8, "role": "definition" }
+      ],
+      "callers": { "from_index": [], "gated": [] }
+    },
+    {
+      "name": "Area",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 shapes/Area#",
+      "kind": "trait",
+      "def": { "path": "src/shapes.rs", "line": 1, "col": 11 },
+      "refs_count": 4,
+      "refs": [
+        { "path": "src/shapes.rs", "line": 1, "col": 11, "role": "definition" },
+        { "path": "src/shapes.rs", "line": 3, "col": 6, "role": "reference", "enclosing": null, "note": "impl Area for Circle header" },
+        { "path": "src/shapes.rs", "line": 5, "col": 6, "role": "reference", "enclosing": null, "note": "impl Area for Sq header" },
+        { "path": "src/shapes.rs", "line": 6, "col": 33, "role": "reference", "enclosing": "total_area", "note": "&dyn Area in total_area signature" }
+      ]
+    },
+    {
+      "name": "Area::area (trait method)",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 shapes/Area#area().",
+      "kind": "trait_method",
+      "def": { "path": "src/shapes.rs", "line": 1, "col": 21 },
+      "refs_count": 2,
+      "refs": [
+        { "path": "src/shapes.rs", "line": 1, "col": 21, "role": "definition" },
+        { "path": "src/shapes.rs", "line": 6, "col": 72, "role": "reference", "enclosing": "total_area", "note": "i.area() dynamic call resolves to the trait method symbol, not the impls" }
+      ],
+      "callers": { "from_index": ["total_area"], "gated": [] },
+      "impls": [
+        { "scip_symbol": "rust-analyzer cargo golden 0.1.0 shapes/impl#[Circle][Area]area().", "path": "src/shapes.rs", "line": 3, "col": 27 },
+        { "scip_symbol": "rust-analyzer cargo golden 0.1.0 shapes/impl#[Sq][Area]area().", "path": "src/shapes.rs", "line": 5, "col": 23 }
+      ]
+    },
+    {
+      "name": "<Circle as Area>::area",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 shapes/impl#[Circle][Area]area().",
+      "kind": "method",
+      "def": { "path": "src/shapes.rs", "line": 3, "col": 27 },
+      "refs_count": 1,
+      "refs": [
+        { "path": "src/shapes.rs", "line": 3, "col": 27, "role": "definition" }
+      ]
+    },
+    {
+      "name": "<Sq as Area>::area",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 shapes/impl#[Sq][Area]area().",
+      "kind": "method",
+      "def": { "path": "src/shapes.rs", "line": 5, "col": 23 },
+      "refs_count": 1,
+      "refs": [
+        { "path": "src/shapes.rs", "line": 5, "col": 23, "role": "definition" }
+      ]
+    },
+    {
+      "name": "total_area",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 shapes/total_area().",
+      "kind": "function",
+      "def": { "path": "src/shapes.rs", "line": 6, "col": 8 },
+      "refs_count": 1,
+      "refs": [
+        { "path": "src/shapes.rs", "line": 6, "col": 8, "role": "definition" }
+      ],
+      "callers": { "from_index": [], "gated": [] }
+    },
+    {
+      "name": "macro_caller",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 ops/macro_caller().",
+      "kind": "function",
+      "def": { "path": "src/ops.rs", "line": 4, "col": 8 },
+      "refs_count": 1,
+      "refs": [
+        { "path": "src/ops.rs", "line": 4, "col": 8, "role": "definition" }
+      ]
+    },
+    {
+      "name": "top_level_fn",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 top_level_fn().",
+      "kind": "function",
+      "def": { "path": "src/lib.rs", "line": 4, "col": 8 },
+      "refs_count": 1,
+      "refs": [
+        { "path": "src/lib.rs", "line": 4, "col": 8, "role": "definition" }
+      ]
+    },
+    {
+      "name": "Circle",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 shapes/Circle#",
+      "kind": "struct",
+      "def": { "path": "src/shapes.rs", "line": 2, "col": 12 },
+      "refs_count": 2,
+      "refs": [
+        { "path": "src/shapes.rs", "line": 2, "col": 12, "role": "definition" },
+        { "path": "src/shapes.rs", "line": 3, "col": 15, "role": "reference", "note": "impl Area for Circle header" }
+      ]
+    },
+    {
+      "name": "fmt_user",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 ops/fmt_user().",
+      "kind": "function",
+      "def": { "path": "src/ops.rs", "line": 5, "col": 8 },
+      "refs_count": 1,
+      "refs": [
+        { "path": "src/ops.rs", "line": 5, "col": 8, "role": "definition" }
+      ]
+    },
+    {
+      "name": "call_double!",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 ops/call_double!",
+      "kind": "macro",
+      "def": { "path": "src/ops.rs", "line": 3, "col": 14 },
+      "refs_count": 2,
+      "refs": [
+        { "path": "src/ops.rs", "line": 3, "col": 14, "role": "definition" },
+        { "path": "src/ops.rs", "line": 4, "col": 32, "role": "reference", "enclosing": "macro_caller" }
+      ],
+      "callers": { "from_index": ["macro_caller"], "gated": [] }
+    },
+    {
+      "name": "Sq",
+      "scip_symbol": "rust-analyzer cargo golden 0.1.0 shapes/Sq#",
+      "kind": "struct",
+      "def": { "path": "src/shapes.rs", "line": 4, "col": 12 },
+      "refs_count": 2,
+      "refs": [
+        { "path": "src/shapes.rs", "line": 4, "col": 12, "role": "definition" },
+        { "path": "src/shapes.rs", "line": 5, "col": 15, "role": "reference", "note": "impl Area for Sq header" }
+      ]
+    }
+  ],
+  "file_outlines": {
+    "src/shapes.rs": ["Area", "area", "Circle", "r", "area", "Sq", "s", "area", "total_area"],
+    "src/ops.rs": ["double", "generic_max", "call_double", "macro_caller", "fmt_user"],
+    "src/lib.rs": ["top_level_fn"]
+  },
+  "search": [
+    { "query": "gener", "must_include": ["generic_max"] },
+    { "query": "area", "must_include": ["Area", "total_area"] }
+  ]
+}
