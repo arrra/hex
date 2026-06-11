@@ -1,0 +1,5 @@
+# .boi-policy.toml — declares this repo's branch model to the BOI engine.
+# GitFlow: BOI specs targeting this repo MUST set base_branch = "develop";
+# the engine never delivers to a protected branch.
+model     = "gitflow"
+protected = ["main"]   # the gitflow default, stated explicitly

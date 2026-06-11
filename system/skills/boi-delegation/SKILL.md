@@ -130,7 +130,11 @@ schema reference.
   - `scope` — string, the sprint-contract anchor
   - `workspace` XOR `workspace_rationale` — exactly one (`workspace = "/path"`
     OR `workspace_rationale = "reason"`)
-  - `base_branch` — string, e.g. `"main"`
+  - `base_branch` — string, **workspace-conditional**: `"develop"` for GitFlow
+    workspaces — repos with a committed `.boi-policy.toml` (`model = "gitflow"`)
+    at the root, e.g. boi and hex-foundation; `"main"` for unmanaged workspaces
+    (no marker). The workspace's `.boi-policy.toml` marker decides; the engine
+    rejects dispatches targeting a protected branch (e.g. a GitFlow `main`)
 - At least one `[[tasks]]` entry, each with:
   - `behavior` — string
   - `verifications = [ { intent = "..." } | { command = "..." } ]` — at least one
@@ -163,12 +167,14 @@ Any unrecognized field (typo, drifted-field) is rejected at parse time by
 ### Worked Example (the §13 typo-fix fixture)
 
 ```toml
-# ~/github.com/mrap/boi/tests/fixtures/specs/01-typo-fix.toml
+# adapted from ~/github.com/mrap/boi/tests/fixtures/specs/01-typo-fix.toml
 title = "Fix a typo in the README"
 
 [contract]
 scope = "Correct the spelling of 'recieve' to 'receive' in README.md"
-base_branch = "main"
+# Workspace-conditional: example-repo commits .boi-policy.toml (model = "gitflow"),
+# so work lands on develop. Unmanaged workspaces (no marker) use "main".
+base_branch = "develop"
 workspace = "~/github.com/mrap/example-repo"
 
 [[tasks]]
@@ -186,6 +192,8 @@ title = "Add token-bucket rate limiting to the API"
 
 [contract]
 scope = "Add token-bucket rate limiting middleware to all /api routes"
+# Workspace-conditional: example-api is unmanaged (no .boi-policy.toml), so "main"
+# is correct here. GitFlow workspaces (e.g. boi, hex-foundation) use "develop".
 base_branch = "main"
 workspace = "~/github.com/mrap/example-api"
 exclusions = ["frontend changes", "auth changes"]
