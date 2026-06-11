@@ -5,7 +5,7 @@
 # below), so nothing user-facing or on-disk changes — you still run `hex`, and
 # `hex::` imports still resolve.
 name = "hex-harness"
-# Source of truth for hex version. Bumped by release.sh; build.rs
+# Source of truth for hex version. Bumped by `hex release cut`; build.rs
 # injects this via env!("CARGO_PKG_VERSION") at compile time.
 version = "0.37.0"
 edition = "2021"

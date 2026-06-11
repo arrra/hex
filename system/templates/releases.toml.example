@@ -1,0 +1,40 @@
+# releases.toml — additional repo profiles for the hex release engine.
+#
+# Drop this file at $HEX_DIR/.hex/config/releases.toml to teach
+# `hex release cut` (and the oss-releaser worker) about repos beyond the
+# built-in hex-foundation profile. Without this file, only hex-foundation
+# is releasable; any other repo is refused with an error listing the known
+# profiles.
+#
+# A repo matches a profile if EITHER rule hits:
+#   match_remote — substring of `git remote get-url origin`
+#                  (use the "owner/repo" form: it matches both the https
+#                  and ssh remote URL shapes)
+#   match_dir    — exact toplevel directory name
+#
+# See: system/harness/src/release.rs module docs for the full schema.
+
+# -----------------------------------------------------------------------------
+# Example: a Rust repo released with `just` gates and no GitHub release.
+# Gates run in order via `sh -c` from the repo root; all must pass before
+# the release ceremony proceeds.
+# -----------------------------------------------------------------------------
+[[profiles]]
+name = "boi"
+match_remote = "YOUR-GITHUB-USERNAME/boi"
+# match_dir = "boi"            # alternative: match by directory name
+gates = [
+  { name = "just-check", command = "just check" },
+  { name = "lint-scripts", command = "just lint-scripts" },
+]
+# Version files the ceremony bumps. kind: "plain" (whole file is the version
+# string, default) | "cargo-toml" (rewrites the `version = "…"` line only).
+version_files = [
+  { path = "Cargo.toml", kind = "cargo-toml" },
+]
+# Run after the bump so lockfiles update; a failing build reverts the bump.
+build_command = "cargo build --release"
+tag_prefix = "v"               # default "v"
+gh_release = false             # default false — no `gh release create`
+main_branch = "main"           # default
+develop_branch = "develop"     # default

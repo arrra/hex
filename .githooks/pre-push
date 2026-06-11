@@ -1,23 +1,9 @@
-#!/bin/bash
-# pre-push hook for hex-foundation
-#
-# Blocks direct `git push` — all pushes must go through release.sh
-# which runs the full pipeline (Docker E2E, sentinel, fleet notify).
-#
-# release.sh sets HEX_RELEASE_PIPELINE=1 to bypass this gate.
-# The global pre-push hook (gitleaks + PII scan) still runs after this.
-
-if [ "${HEX_RELEASE_PIPELINE:-0}" != "1" ]; then
-  echo "" >&2
-  echo "══════════════════════════════════════════════════════════════" >&2
-  echo "  BLOCKED: Direct git push is not allowed on hex-foundation." >&2
-  echo "" >&2
-  echo "  Use the release pipeline instead:" >&2
-  echo "    bash system/scripts/release.sh" >&2
-  echo "" >&2
-  echo "  This runs Docker E2E, notifies sentinel, pushes, and" >&2
-  echo "  notifies the fleet. Every commit. No exceptions." >&2
-  echo "══════════════════════════════════════════════════════════════" >&2
-  echo "" >&2
-  exit 1
+#!/bin/sh
+# pre-push shim — all branch logic lives in `hex git-guard pre-push`.
+hex_bin="$(git rev-parse --show-toplevel)/target/release/hex"
+if [ ! -x "$hex_bin" ]; then hex_bin="$(command -v hex || true)"; fi
+if [ -z "$hex_bin" ]; then
+  echo "WARN: hex binary not found — skipping git-guard pre-push" >&2
+  exit 0
 fi
+exec "$hex_bin" git-guard pre-push "$@"

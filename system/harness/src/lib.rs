@@ -20,6 +20,8 @@ pub mod memory;
 pub mod messages;
 pub mod ops;
 pub mod registry;
+pub mod release;
+pub mod sanitize;
 pub mod telemetry;
 pub mod types;
 pub mod wild;

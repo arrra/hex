@@ -179,6 +179,62 @@ enum Commands {
         #[command(subcommand)]
         command: GatekeeperCommands,
     },
+    /// GitFlow release ceremony (oss-releaser). One verb: `cut`.
+    #[command(display_order = 14)]
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommands,
+    },
+    /// Scan the repo for personalization violations (exit 0 clean, 1 found)
+    #[command(display_order = 14)]
+    Sanitize {
+        /// Print each matching line instead of per-category counts
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Git hook backends (invoked by the .githooks exec shims).
+    #[command(name = "git-guard", hide = true)]
+    GitGuard {
+        #[command(subcommand)]
+        command: GitGuardCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCommands {
+    /// Cut a GitFlow release: gate battery, bump, merge, tag, push (--dry-run stops after the battery)
+    Cut {
+        /// Bump tier off the latest semver tag: patch | minor | major (default patch)
+        #[arg(long)]
+        level: Option<String>,
+        /// Explicit next version X.Y.Z (wins over --level)
+        #[arg(long)]
+        version: Option<String>,
+        /// Cut hotfix/X.Y.Z from main instead of release/X.Y.Z from develop
+        #[arg(long)]
+        hotfix: bool,
+        /// Run the gate battery against the pinned SHA and stop (exit 0 all green / 1 blocked)
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the docker e2e gate (implies --skip-parity) — loud Skipped, never silent
+        #[arg(long)]
+        skip_e2e: bool,
+        /// Skip the codex-parity gate — loud Skipped, never silent
+        #[arg(long)]
+        skip_parity: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GitGuardCommands {
+    /// Backend for the pre-push hook: reads the standard ref-update lines on
+    /// stdin and blocks a refs/heads/main push unless HEX_RELEASE_PIPELINE=1.
+    #[command(name = "pre-push")]
+    PrePush {
+        /// Hook args the shim forwards (remote name, remote URL) — unused.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1060,6 +1116,76 @@ fn main() {
             GatekeeperCommands::Probe { store } => {
                 let hex_dir = get_hex_dir();
                 std::process::exit(hex::gatekeeper::cli_probe(&store, &hex_dir));
+            }
+        },
+        Commands::Release { command } => match command {
+            ReleaseCommands::Cut { level, version, hotfix, dry_run, skip_e2e, skip_parity } => {
+                // `version` wins over `level`; `level` defaults to patch —
+                // CutOptions owns that precedence, clap passes both raw.
+                let level = match level.as_deref().map(str::parse::<hex::release::BumpLevel>) {
+                    Some(Ok(l)) => Some(l),
+                    Some(Err(e)) => {
+                        eprintln!("hex release cut: {e}");
+                        std::process::exit(1);
+                    }
+                    None => None,
+                };
+                let opts = hex::release::CutOptions {
+                    level,
+                    version,
+                    hotfix,
+                    dry_run,
+                    skip: hex::release::SkipFlags { skip_e2e, skip_parity },
+                };
+                match hex::release::cut(&opts) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("hex release cut: {e:#}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
+        Commands::Sanitize { verbose } => {
+            // Scan the repo containing the current directory — the analog of
+            // the bash script scanning its own repo root.
+            let repo_root = match std::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
+                }
+                _ => {
+                    eprintln!("hex sanitize: not inside a git repository — run from the repo to scan");
+                    std::process::exit(2);
+                }
+            };
+            match hex::sanitize::scan(&repo_root, verbose) {
+                Ok(violations) if violations.is_empty() => std::process::exit(0),
+                Ok(_) => std::process::exit(1),
+                Err(e) => {
+                    eprintln!("hex sanitize: {e:#}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Commands::GitGuard { command } => match command {
+            GitGuardCommands::PrePush { args: _ } => {
+                // The pre-push hook protocol: one "<local ref> <local sha>
+                // <remote ref> <remote sha>" line per ref on stdin.
+                let mut input = String::new();
+                if let Err(e) = io::Read::read_to_string(&mut io::stdin(), &mut input) {
+                    eprintln!("hex git-guard pre-push: reading stdin: {e}");
+                    std::process::exit(1);
+                }
+                match hex::release::git_guard_pre_push(&input) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
             }
         },
     }

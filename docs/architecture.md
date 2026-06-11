@@ -123,7 +123,7 @@ If you find a reference, it is stale — flag it for the next audit pass.
 - Charter-driven autonomy tiers (A0–A4), `charter.yaml`
 - L1–L4 feedback loops, self-improvement cycle, `hex-initiative-loop-v2.py`
 - SSE event bus, policy engine, comments-service
-- `hex release` subcommand and the old `release.sh` flow (a new release pipeline is being built)
+- The legacy shell release pipeline script (deleted; releases are `hex release cut` — see [versioning.md](versioning.md))
 - `boi status`, `boi version` (use `boi dashboard`, `boi --version`)
 
 ---

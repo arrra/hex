@@ -560,9 +560,10 @@ Every status change gets a timestamped changelog entry at the bottom.
 2. **Standing Orders changes**: edit the relevant table row above; append new rules at the bottom with today's date in a note.
 3. **Add a new skill**: create `system/skills/<name>/SKILL.md` following the template in `system/templates/`.
 4. **Distribute to instances**: after editing AGENTS.md, copy the system block to any downstream hex instance's `AGENTS.md` via `hex upgrade` (or manually copy the system section between the markers).
-5. **Cut a version**: update `system/version.txt`, add an entry to `CHANGELOG.md`, commit locally.
-6. **Test before deploying**: run `bash tests/run.sh` if tests exist; then run `hex upgrade` in a test instance and verify it picks up the changes.
-7. **Per SO #5 (Communication gates)**: commit locally; never push without explicit approval.
+5. **Branch flow is GitFlow**: feature branches merge to `develop`, never to `main` directly. BOI specs targeting this repo MUST set `base_branch = "develop"` once the `develop` branch exists (bootstrap if missing: `git branch develop main && git push origin develop`).
+6. **Cut a release**: `hex release cut --level <patch|minor|major>` (or emit the `release.requested` event for the `oss-releaser` worker). Hotfix from `main`: `hex release cut --hotfix`. The ceremony runs the gate battery, bumps versions, merges to `main`, tags, back-merges, and pushes. Other repos are profile-driven via `$HEX_DIR/.hex/config/releases.toml` (example: `system/templates/releases.toml.example`). See `docs/versioning.md`.
+7. **Test before deploying**: run `bash tests/run.sh` if tests exist; then run `hex upgrade` in a test instance and verify it picks up the changes.
+8. **Per SO #5 (Communication gates)**: feature work pushes only with explicit approval; release pushes happen inside `hex release cut`.
 
 <!-- hex:system-end -->
 
