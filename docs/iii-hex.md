@@ -119,6 +119,28 @@ hex triggers emit  ──writes──►   iii STATE    ──►   TRIGGER (typ
 
 ---
 
+## Instance engine workers (`engine-workers.yaml`)
+
+The harness's in-process engine builds from `EngineConfig::default_config()` — it reads no
+config file. Instances extend it declaratively: the harness merges the `workers:` list from
+`$HEX_DIR/.hex/iii/engine-workers.yaml` (instance-owned; `.hex/iii/` is an additive upgrade
+dir, so the file survives `/hex-upgrade`) into the engine config at boot. Merge semantics:
+a name matching a default module/worker **replaces it in place** (how an instance
+reconfigures a default — e.g. `iii-observability` → memory exporter so the console trace
+explorer has data); other names append. Restart the harness to apply. Malformed file →
+loud skip (stderr + alert), never a harness crash-loop.
+
+**This is the no-LaunchAgents path for persistent local processes.** Declare an `iii-exec`
+entry whose final command is the daemon (e.g. the iii console UI); the engine supervises it —
+own session, stdout/stderr into the harness log, process-group SIGTERM→SIGKILL on shutdown.
+Template: `system/iii/engine-workers.example.yaml` (foundation ships ONLY the example —
+a real `engine-workers.yaml` in foundation would clobber every instance's copy on upgrade).
+
+Known limit: `iii-exec` does not respawn a daemon that dies on its own (only watch-glob
+restarts + engine lifecycle). Pair critical daemons with a doctor check.
+
+---
+
 ## Guardrails (carry from the iii decisions)
 
 - iii is the **additive default** for new mechanisms — not a migration of BOI/launchd/
