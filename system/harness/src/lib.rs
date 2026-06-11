@@ -9,6 +9,7 @@ pub mod backup;
 pub mod claude_runs;
 pub mod dial;
 pub mod doctor;
+pub mod failures;
 pub mod gatekeeper;
 pub mod harness;
 pub mod ledger;
