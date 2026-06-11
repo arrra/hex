@@ -480,6 +480,7 @@ mod tests {
             mem_limit_mb: 1000,
             pool_alarm_mb: 1500,
             spawn_grace_secs: 180,
+            warm_fallback_secs: 240,
         }
     }
 

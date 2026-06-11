@@ -29,6 +29,11 @@ pub struct ScipdConfig {
     /// No memory kill within this many seconds of spawn — priming spikes
     /// (SPEC-A2 §4).
     pub spawn_grace_secs: u64,
+    /// Quiescent-signal fallback (SPEC-A2 §4 caveat): if no quiescent
+    /// serverStatus after this long, probe with a cheap request — a
+    /// successful response promotes the instance to Ready ("fallback-probe").
+    /// Never Ready on time alone; never wait forever.
+    pub warm_fallback_secs: u64,
 }
 
 impl Default for ScipdConfig {
@@ -39,6 +44,7 @@ impl Default for ScipdConfig {
             mem_limit_mb: 3500,
             pool_alarm_mb: 7000,
             spawn_grace_secs: 180,
+            warm_fallback_secs: 240,
         }
     }
 }
@@ -71,6 +77,7 @@ mod tests {
         assert_eq!(c.mem_limit_mb, 3500);
         assert_eq!(c.pool_alarm_mb, 7000);
         assert_eq!(c.spawn_grace_secs, 180);
+        assert_eq!(c.warm_fallback_secs, 240);
     }
 
     #[test]
@@ -85,7 +92,7 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(
             home.path().join("scipd.toml"),
-            "pool_cap = 4\nidle_ttl_secs = 60\nmem_limit_mb = 1024\npool_alarm_mb = 2048\nspawn_grace_secs = 30\n",
+            "pool_cap = 4\nidle_ttl_secs = 60\nmem_limit_mb = 1024\npool_alarm_mb = 2048\nspawn_grace_secs = 30\nwarm_fallback_secs = 120\n",
         )
         .unwrap();
         let c = ScipdConfig::load(home.path()).unwrap();
@@ -97,6 +104,7 @@ mod tests {
                 mem_limit_mb: 1024,
                 pool_alarm_mb: 2048,
                 spawn_grace_secs: 30,
+                warm_fallback_secs: 120,
             }
         );
     }
@@ -111,6 +119,7 @@ mod tests {
         assert_eq!(c.mem_limit_mb, 3500);
         assert_eq!(c.pool_alarm_mb, 7000);
         assert_eq!(c.spawn_grace_secs, 180);
+        assert_eq!(c.warm_fallback_secs, 240);
     }
 
     #[test]

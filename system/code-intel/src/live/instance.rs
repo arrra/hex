@@ -9,6 +9,13 @@
 //!
 //! A background reader thread routes responses by request id and applies
 //! serverStatus transitions; everything is std threads + blocking IO.
+//!
+//! **Quiescent-fallback readiness (SPEC-A2 §4 caveat):** build-script-heavy
+//! workspaces may NEVER emit a quiescent serverStatus on a cold prime. A
+//! prober thread therefore probes a still-Warming instance with a cheap
+//! `textDocument/definition` request once `warm_fallback_secs` have elapsed;
+//! a successful response promotes it to Ready (logged as "fallback-probe").
+//! Never Ready on time alone; never wait forever.
 
 use crate::live::lsp;
 use anyhow::{Context, Result};
@@ -31,6 +38,18 @@ const INITIALIZE_TIMEOUT: Duration = Duration::from_secs(60);
 /// Grace given to `shutdown` acknowledgement AND to process exit after
 /// `exit`, each, before escalating to SIGKILL (plan T2: 2s wait → SIGKILL).
 const SHUTDOWN_GRACE: Duration = Duration::from_secs(2);
+/// Default quiescent-signal fallback window (SPEC-A2 §4 caveat); the daemon
+/// overrides this from `warm_fallback_secs` in scipd.toml.
+pub const DEFAULT_WARM_FALLBACK: Duration = Duration::from_secs(240);
+/// How long one fallback probe may wait for its answer. Deliberately
+/// generous: rust-analyzer parks requests while indexing, and an answered
+/// probe IS the readiness signal.
+const PROBE_TIMEOUT: Duration = Duration::from_secs(30);
+/// Pause between prober state checks.
+const PROBE_POLL: Duration = Duration::from_millis(250);
+/// Pause after a failed probe before trying again ("never wait forever" —
+/// the prober keeps trying while the instance stays Warming).
+const PROBE_RETRY: Duration = Duration::from_secs(5);
 
 pub type LiveResult<T> = std::result::Result<T, LiveError>;
 
@@ -130,7 +149,7 @@ pub struct LiveInstance {
     worktree_root: PathBuf,
     stdin: Arc<Mutex<ChildStdin>>,
     shared: Arc<Mutex<Inner>>,
-    next_id: AtomicI64,
+    next_id: Arc<AtomicI64>,
     last_used: Mutex<Instant>,
     shut_down: bool,
 }
@@ -144,6 +163,16 @@ impl LiveInstance {
 
     /// Test seam: spawn an arbitrary LSP-speaking binary as the server.
     pub fn spawn_with_binary(binary: &str, worktree_root: &Path) -> Result<Self> {
+        Self::spawn_with_options(binary, worktree_root, DEFAULT_WARM_FALLBACK)
+    }
+
+    /// Spawn with an explicit quiescent-fallback window (SPEC-A2 §4 caveat).
+    /// The daemon passes `warm_fallback_secs` from scipd.toml here.
+    pub fn spawn_with_options(
+        binary: &str,
+        worktree_root: &Path,
+        warm_fallback: Duration,
+    ) -> Result<Self> {
         let root = worktree_root.canonicalize().with_context(|| {
             format!("canonicalizing worktree root {}", worktree_root.display())
         })?;
@@ -189,7 +218,7 @@ impl LiveInstance {
             worktree_root: root.clone(),
             stdin,
             shared,
-            next_id: AtomicI64::new(1),
+            next_id: Arc::new(AtomicI64::new(1)),
             last_used: Mutex::new(Instant::now()),
             shut_down: false,
         };
@@ -209,6 +238,20 @@ impl LiveInstance {
         instance
             .notify(lsp::methods::INITIALIZED, serde_json::json!({}))
             .map_err(|e| anyhow::anyhow!("sending initialized to pid {pid}: {e}"))?;
+        // Quiescent-fallback prober (SPEC-A2 §4 caveat): shares the request
+        // transport with the instance; exits when the instance dies.
+        {
+            let stdin = Arc::clone(&instance.stdin);
+            let shared = Arc::clone(&instance.shared);
+            let next_id = Arc::clone(&instance.next_id);
+            let probe_root = instance.worktree_root.clone();
+            std::thread::Builder::new()
+                .name(format!("ra-prober-{pid}"))
+                .spawn(move || {
+                    prober_loop(stdin, shared, next_id, probe_root, warm_fallback, pid)
+                })
+                .context("spawning quiescent-fallback prober thread")?;
+        }
         Ok(instance)
     }
 
@@ -223,34 +266,15 @@ impl LiveInstance {
     /// Send a request and block for its response — no state gate (used by the
     /// handshake and shutdown, which must run while Warming/Dead).
     fn raw_request(&self, method: &str, params: Value, timeout: Duration) -> LiveResult<Value> {
-        let id = self.next_id.fetch_add(1, Ordering::SeqCst);
-        let (tx, rx) = mpsc::channel();
-        self.shared.lock().unwrap().pending.insert(id, tx);
-        let msg = lsp::request(id, method, params);
-        let write_result = {
-            let mut writer = self.stdin.lock().unwrap();
-            lsp::write_message(&mut *writer, &msg)
-        };
-        if let Err(e) = write_result {
-            self.shared.lock().unwrap().pending.remove(&id);
-            return Err(LiveError::Transport(format!(
-                "writing {method} to pid {}: {e}",
-                self.pid
-            )));
-        }
-        match rx.recv_timeout(timeout) {
-            Ok(outcome) => outcome,
-            Err(mpsc::RecvTimeoutError::Timeout) => {
-                self.shared.lock().unwrap().pending.remove(&id);
-                Err(LiveError::Timeout {
-                    method: method.to_string(),
-                    after: timeout,
-                })
-            }
-            Err(mpsc::RecvTimeoutError::Disconnected) => Err(LiveError::Dead {
-                reason: self.dead_reason(),
-            }),
-        }
+        send_request(
+            &self.stdin,
+            &self.shared,
+            &self.next_id,
+            self.pid,
+            method,
+            params,
+            timeout,
+        )
     }
 
     fn notify(&self, method: &str, params: Value) -> std::io::Result<()> {
@@ -259,14 +283,6 @@ impl LiveInstance {
         lsp::write_message(&mut *writer, &msg)
     }
 
-    fn dead_reason(&self) -> String {
-        self.shared
-            .lock()
-            .unwrap()
-            .dead_reason
-            .clone()
-            .unwrap_or_else(|| "unknown".into())
-    }
 }
 
 impl LiveBackend for LiveInstance {
@@ -448,6 +464,176 @@ fn rss_mb_of(pid: u32) -> Option<u64> {
     }
     let kb: u64 = String::from_utf8_lossy(&out.stdout).trim().parse().ok()?;
     Some(kb / 1024)
+}
+
+/// Send one request over the shared transport and block for its response —
+/// no state gate. Shared by [`LiveInstance::raw_request`] and the
+/// quiescent-fallback prober thread.
+fn send_request(
+    stdin: &Mutex<ChildStdin>,
+    shared: &Mutex<Inner>,
+    next_id: &AtomicI64,
+    pid: u32,
+    method: &str,
+    params: Value,
+    timeout: Duration,
+) -> LiveResult<Value> {
+    let id = next_id.fetch_add(1, Ordering::SeqCst);
+    let (tx, rx) = mpsc::channel();
+    shared.lock().unwrap().pending.insert(id, tx);
+    let msg = lsp::request(id, method, params);
+    let write_result = {
+        let mut writer = stdin.lock().unwrap();
+        lsp::write_message(&mut *writer, &msg)
+    };
+    if let Err(e) = write_result {
+        shared.lock().unwrap().pending.remove(&id);
+        return Err(LiveError::Transport(format!(
+            "writing {method} to pid {pid}: {e}"
+        )));
+    }
+    match rx.recv_timeout(timeout) {
+        Ok(outcome) => outcome,
+        Err(mpsc::RecvTimeoutError::Timeout) => {
+            shared.lock().unwrap().pending.remove(&id);
+            Err(LiveError::Timeout {
+                method: method.to_string(),
+                after: timeout,
+            })
+        }
+        Err(mpsc::RecvTimeoutError::Disconnected) => Err(LiveError::Dead {
+            reason: shared
+                .lock()
+                .unwrap()
+                .dead_reason
+                .clone()
+                .unwrap_or_else(|| "unknown".into()),
+        }),
+    }
+}
+
+/// Quiescent-fallback prober (SPEC-A2 §4 caveat): while the instance stays
+/// Warming past `warm_fallback`, probe with a cheap `textDocument/definition`
+/// at 1:1 of a known file; a successful response promotes the instance to
+/// Ready ("fallback-probe"). Never Ready on time alone — a probe must be
+/// ANSWERED. Never waits forever — retries every [`PROBE_RETRY`] until the
+/// instance is Ready or Dead. Exits when the instance dies.
+fn prober_loop(
+    stdin: Arc<Mutex<ChildStdin>>,
+    shared: Arc<Mutex<Inner>>,
+    next_id: Arc<AtomicI64>,
+    worktree_root: PathBuf,
+    warm_fallback: Duration,
+    pid: u32,
+) {
+    let mut warned_no_file = false;
+    loop {
+        let (state, warming_for) = {
+            let inner = shared.lock().unwrap();
+            (inner.state, inner.warming_since.elapsed())
+        };
+        match state {
+            InstanceState::Dead => return,
+            InstanceState::Ready => {
+                std::thread::sleep(PROBE_POLL);
+                continue;
+            }
+            InstanceState::Warming if warming_for < warm_fallback => {
+                std::thread::sleep(PROBE_POLL);
+                continue;
+            }
+            InstanceState::Warming => {}
+        }
+        let Some(probe_file) = find_probe_file(&worktree_root) else {
+            if !warned_no_file {
+                eprintln!(
+                    "live: pid {pid} fallback-probe found no .rs file under {} — cannot \
+                     probe; instance stays Warming until quiescent or a file appears",
+                    worktree_root.display()
+                );
+                warned_no_file = true;
+            }
+            std::thread::sleep(PROBE_RETRY);
+            continue;
+        };
+        let params = lsp::TextDocumentPositionParams {
+            text_document: lsp::TextDocumentIdentifier {
+                uri: lsp::path_to_uri(&probe_file),
+            },
+            // 1:1 in CLI terms == LSP 0:0.
+            position: lsp::Position { line: 0, character: 0 },
+        };
+        let params = match serde_json::to_value(&params) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!("live: pid {pid} fallback-probe params unserializable: {e}");
+                return;
+            }
+        };
+        eprintln!(
+            "live: pid {pid} no quiescent serverStatus after {}s — fallback-probe \
+             (definition at {}:1:1)",
+            warming_for.as_secs(),
+            probe_file.display()
+        );
+        match send_request(
+            &stdin,
+            &shared,
+            &next_id,
+            pid,
+            lsp::methods::DEFINITION,
+            params,
+            PROBE_TIMEOUT,
+        ) {
+            Ok(_) => {
+                let mut inner = shared.lock().unwrap();
+                if inner.state == InstanceState::Warming {
+                    eprintln!(
+                        "live: pid {pid} warming → ready (fallback-probe answered after \
+                         {}s without quiescent serverStatus)",
+                        inner.warming_since.elapsed().as_secs()
+                    );
+                    inner.state = InstanceState::Ready;
+                }
+            }
+            Err(LiveError::Dead { .. }) => return,
+            Err(e) => {
+                eprintln!("live: pid {pid} fallback-probe not answered ({e}); retrying");
+                std::thread::sleep(PROBE_RETRY);
+            }
+        }
+    }
+}
+
+/// A cheap, definitely-owned-by-rust-analyzer file to probe: prefers
+/// `src/lib.rs` / `src/main.rs`, otherwise the first `.rs` found walking the
+/// worktree (skipping `.git` and `target`).
+fn find_probe_file(root: &Path) -> Option<PathBuf> {
+    for known in ["src/lib.rs", "src/main.rs"] {
+        let p = root.join(known);
+        if p.is_file() {
+            return Some(p);
+        }
+    }
+    let mut queue = std::collections::VecDeque::from([root.to_path_buf()]);
+    while let Some(dir) = queue.pop_front() {
+        let entries = match std::fs::read_dir(&dir) {
+            Ok(entries) => entries,
+            Err(_) => continue, // racing a vanishing worktree — next probe retries
+        };
+        for entry in entries.flatten() {
+            let path = entry.path();
+            let name = entry.file_name();
+            if path.is_dir() {
+                if name != ".git" && name != "target" {
+                    queue.push_back(path);
+                }
+            } else if path.extension().is_some_and(|e| e == "rs") {
+                return Some(path);
+            }
+        }
+    }
+    None
 }
 
 /// Background thread: reads every server message, routes responses by id,
@@ -796,6 +982,124 @@ sleep 30
             Err(LiveError::Dead { .. }) => {}
             other => panic!("post-shutdown request must be Dead, got {other:?}"),
         }
+    }
+
+    /// Fake LSP server that NEVER sends a quiescent serverStatus but answers
+    /// requests: initialize (id 1) immediately, then the fallback probe
+    /// (id 2) after 3s — the SPEC-A2 §4 quiescent-signal caveat shape.
+    fn no_quiescent_answering_server(dir: &Path) -> PathBuf {
+        let path = dir.join("fake-ra-no-quiescent.sh");
+        let script = r#"#!/bin/bash
+body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+printf 'Content-Length: %d\r\n\r\n%s' "${#body}" "$body"
+sleep 3
+probe='{"jsonrpc":"2.0","id":2,"result":null}'
+printf 'Content-Length: %d\r\n\r\n%s' "${#probe}" "$probe"
+sleep 30
+"#;
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    /// Fake LSP server that never sends quiescent AND never answers anything
+    /// past initialize — readiness must NOT happen on time alone.
+    fn no_quiescent_mute_server(dir: &Path) -> PathBuf {
+        let path = dir.join("fake-ra-mute.sh");
+        let script = r#"#!/bin/bash
+body='{"jsonrpc":"2.0","id":1,"result":{"capabilities":{}}}'
+printf 'Content-Length: %d\r\n\r\n%s' "${#body}" "$body"
+sleep 60
+"#;
+        std::fs::write(&path, script).unwrap();
+        let mut perms = std::fs::metadata(&path).unwrap().permissions();
+        use std::os::unix::fs::PermissionsExt;
+        perms.set_mode(0o755);
+        std::fs::set_permissions(&path, perms).unwrap();
+        path
+    }
+
+    /// SPEC-A2 §4 quiescent-signal caveat: no quiescent serverStatus ever,
+    /// but the server answers the fallback probe → Ready via fallback-probe.
+    #[test]
+    fn fallback_probe_promotes_ready_without_quiescent() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn probe_me() {}\n").unwrap();
+        let script = no_quiescent_answering_server(dir.path());
+        let mut inst = LiveInstance::spawn_with_options(
+            script.to_str().unwrap(),
+            dir.path(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        assert_eq!(inst.state(), InstanceState::Warming, "no quiescent yet → warming");
+        // Probe fires at ~1s; the canned answer arrives at ~3s.
+        let t0 = Instant::now();
+        while inst.state() != InstanceState::Ready {
+            assert!(
+                t0.elapsed() < Duration::from_secs(15),
+                "fallback probe never promoted the instance to Ready"
+            );
+            std::thread::sleep(Duration::from_millis(50));
+        }
+        inst.shutdown();
+    }
+
+    /// Never Ready on time alone: with no quiescent signal AND no probe
+    /// answer, the instance must stay Warming well past the fallback window.
+    #[test]
+    fn no_ready_on_time_alone_when_probe_unanswered() {
+        let dir = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "pub fn probe_me() {}\n").unwrap();
+        let script = no_quiescent_mute_server(dir.path());
+        let mut inst = LiveInstance::spawn_with_options(
+            script.to_str().unwrap(),
+            dir.path(),
+            Duration::from_secs(1),
+        )
+        .unwrap();
+
+        // Fallback window (1s) passes, probes go unanswered — still Warming
+        // at 4s, and warming requests still refuse.
+        std::thread::sleep(Duration::from_secs(4));
+        assert_eq!(
+            inst.state(),
+            InstanceState::Warming,
+            "elapsed time without an answered probe must NEVER mean Ready"
+        );
+        match inst.request(lsp::methods::DEFINITION, Value::Null) {
+            Err(LiveError::Warming { elapsed_secs }) => assert!(elapsed_secs >= 3),
+            other => panic!("warming instance must refuse, got {other:?}"),
+        }
+        inst.shutdown();
+    }
+
+    #[test]
+    fn find_probe_file_prefers_src_then_walks() {
+        let dir = tempfile::tempdir().unwrap();
+        assert_eq!(find_probe_file(dir.path()), None, "empty dir has nothing to probe");
+        std::fs::create_dir_all(dir.path().join("nested/deeper")).unwrap();
+        std::fs::write(dir.path().join("nested/deeper/x.rs"), "").unwrap();
+        assert_eq!(
+            find_probe_file(dir.path()),
+            Some(dir.path().join("nested/deeper/x.rs"))
+        );
+        std::fs::create_dir_all(dir.path().join("src")).unwrap();
+        std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
+        assert_eq!(find_probe_file(dir.path()), Some(dir.path().join("src/lib.rs")));
+        // target/ and .git/ are never probed.
+        let lone = tempfile::tempdir().unwrap();
+        std::fs::create_dir_all(lone.path().join("target")).unwrap();
+        std::fs::create_dir_all(lone.path().join(".git")).unwrap();
+        std::fs::write(lone.path().join("target/gen.rs"), "").unwrap();
+        std::fs::write(lone.path().join(".git/hook.rs"), "").unwrap();
+        assert_eq!(find_probe_file(lone.path()), None);
     }
 
     /// Real rust-analyzer against the golden fixture (SPEC-A2 §2 semantics):

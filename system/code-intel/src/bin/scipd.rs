@@ -2,14 +2,21 @@
 //!
 //! Launchd-supervised (com.hex.scipd, KeepAlive). Owns the capped pool of
 //! live rust-analyzer instances and serves cq over `<home>/scipd.sock`.
-//! Task 1 ships the UDS skeleton: ping, stub status, stale-socket handling,
-//! second-daemon refusal, SIGTERM clean shutdown.
+//! Wires together (SPEC-A2 §2/§4):
+//! - the UDS accept loop ([`Daemon`]) dispatching into the live pool,
+//! - a reaper thread sweeping the pool every 30s (idle TTL, vanish reap,
+//!   memory watchdog),
+//! - clean SIGTERM/SIGINT shutdown: drain the accept loop, then
+//!   `pool.shutdown_all()` — no orphaned rust-analyzer children, ever.
 
 use std::process::ExitCode;
 use std::sync::atomic::Ordering;
+use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use scipd_core::config::ScipdConfig;
-use scipd_core::daemon::{BindError, Daemon};
+use scipd_core::daemon::{BindError, Daemon, SWEEP_INTERVAL};
+use scipd_core::live::{LiveInstance, Pool};
 use scipd_core::workspace::codeintel_home;
 
 fn fail(code: &str, message: String, hint: &str) -> ExitCode {
@@ -53,7 +60,18 @@ fn main() -> ExitCode {
         }
     };
 
-    let daemon = match Daemon::bind(&home, config) {
+    // The live pool: one rust-analyzer per worktree, quiescent-fallback
+    // window from config (SPEC-A2 §4 caveat).
+    let warm_fallback = Duration::from_secs(config.warm_fallback_secs);
+    let pool: Arc<Pool<LiveInstance>> = Arc::new(Pool::new(config, move |root| {
+        LiveInstance::spawn_with_options(
+            scipd_core::live::instance::RUST_ANALYZER_BIN,
+            root,
+            warm_fallback,
+        )
+    }));
+
+    let daemon = match Daemon::bind(&home, Arc::clone(&pool)) {
         Ok(daemon) => daemon,
         Err(e @ BindError::AlreadyRunning { .. }) => {
             return fail(
@@ -83,10 +101,47 @@ fn main() -> ExitCode {
         }
     }
 
-    match daemon.run() {
+    // Reaper/watchdog thread: one pool policy pass every SWEEP_INTERVAL
+    // (SPEC-A2 §4), polling the shutdown flag so SIGTERM stays responsive.
+    let reaper = {
+        let pool = Arc::clone(&pool);
+        let flag = flag.clone();
+        std::thread::Builder::new()
+            .name("scipd-reaper".into())
+            .spawn(move || {
+                let mut next_sweep = Instant::now() + SWEEP_INTERVAL;
+                while !flag.load(Ordering::SeqCst) {
+                    if Instant::now() >= next_sweep {
+                        pool.sweep();
+                        next_sweep = Instant::now() + SWEEP_INTERVAL;
+                    }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+            })
+    };
+    let reaper = match reaper {
+        Ok(handle) => handle,
+        Err(e) => {
+            return fail(
+                "DAEMON_START_FAILED",
+                format!("spawning reaper thread: {e}"),
+                "this should never fail; report it",
+            );
+        }
+    };
+
+    let run_result = daemon.run();
+
+    // Accept loop drained (SIGTERM/SIGINT or crash): stop the reaper, then
+    // shut every live instance down — no orphan rust-analyzer children.
+    flag.store(true, Ordering::SeqCst);
+    if reaper.join().is_err() {
+        eprintln!("scipd: reaper thread panicked during shutdown");
+    }
+    pool.shutdown_all();
+
+    match run_result {
         Ok(()) => {
-            // Reached only via the shutdown flag — confirm it for the log.
-            debug_assert!(flag.load(Ordering::SeqCst));
             eprintln!("scipd: clean shutdown");
             ExitCode::SUCCESS
         }
