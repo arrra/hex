@@ -23,9 +23,13 @@ struct LlmTomlFile {
     use_cases: HashMap<String, SectionFields>,
 }
 
+// KEEP IN SYNC with hex::llm_config::SectionFields — this is a duplicate
+// schema used only for validation. A field added there but not here makes
+// this check reject configs the runtime accepts (bit us 2026-06-10 when
+// `transport` landed in the runtime schema only).
 #[derive(Debug, Deserialize, Default, Clone)]
 #[serde(deny_unknown_fields)]
-#[allow(dead_code)] // max_tokens/base_url/api_key_env are parsed for validation only
+#[allow(dead_code)] // most fields are parsed for validation only
 struct SectionFields {
     #[serde(default)]
     model: Option<String>,
@@ -35,6 +39,12 @@ struct SectionFields {
     base_url: Option<String>,
     #[serde(default)]
     api_key_env: Option<String>,
+    #[serde(default)]
+    max_input_tokens: Option<u32>,
+    #[serde(default)]
+    transport: Option<String>,
+    #[serde(default)]
+    claude_settings_file: Option<String>,
 }
 
 fn builtin_model(use_case: &str) -> &'static str {
@@ -212,6 +222,26 @@ mod tests {
             blob.contains("memory_extract") || blob.contains("health_check"),
             "expected resolved-model report to mention known use cases, got: {}",
             blob
+        );
+        let _ = fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn passes_with_transport_and_claude_settings_fields() {
+        let (ctx, dir) = tmp_ctx("transport");
+        let cfg = dir.join(".hex/config");
+        fs::create_dir_all(&cfg).unwrap();
+        fs::write(
+            cfg.join("llm.toml"),
+            "[use_cases.memory_extract]\ntransport = \"claude-cli\"\n\n[use_cases.consolidate_audit]\ntransport = \"claude-cli\"\nclaude_settings_file = \"/tmp/x.json\"\nmax_input_tokens = 100000\n",
+        )
+        .unwrap();
+        let r = LlmConfigCheck.run(&ctx);
+        assert_eq!(
+            r.status,
+            Status::Pass,
+            "llm.toml with transport/claude_settings_file/max_input_tokens must pass: {:?}",
+            r
         );
         let _ = fs::remove_dir_all(&dir);
     }
