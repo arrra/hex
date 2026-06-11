@@ -34,11 +34,26 @@
 //! gh_release     = false                    # default false
 //! main_branch    = "main"                   # default "main"
 //! develop_branch = "develop"                # default "develop"
+//! # Watcher fields — consumed by the oss-releaser branch watcher. repo_dir
+//! # is the absolute path to the local clone the watcher polls and the
+//! # ceremony runs in; it is instance config (set it only in the deployed
+//! # $HEX_DIR/.hex/config/releases.toml, never in foundation source) and is
+//! # REQUIRED when watch = true. watch opts the profile in to the branch
+//! # watch (default false — strictly opt-in; the manual `release.requested`
+//! # event path ignores it).
+//! repo_dir = "/absolute/path/to/local/clone"
+//! watch    = true
 //! ```
 //!
+//! The built-in `hex-foundation` profile is configurable the same way: a
+//! `[[profiles]]` entry named `hex-foundation` sets ONLY the watcher fields
+//! (`repo_dir`, `watch`) on the builtin — every other field is pinned in
+//! code, and an entry that sets one is refused loudly.
+//!
 //! Missing file ⇒ built-in profile only. Malformed file or an invalid
-//! profile (no match rule, unknown version-file kind) ⇒ LOUD error (S6 —
-//! no quiet failures).
+//! profile (no match rule, unknown version-file kind, `watch = true`
+//! without an absolute `repo_dir`, a pinned-field override of the builtin)
+//! ⇒ LOUD error (S6 — no quiet failures).
 //!
 //! ## Gate battery
 //!
@@ -271,6 +286,19 @@ pub struct ReleaseProfile {
     pub main_branch: String,
     /// The GitFlow integration branch.
     pub develop_branch: String,
+    /// Absolute path to the local clone the oss-releaser branch watcher
+    /// polls and runs the ceremony from. `None` ⇒ no local checkout is
+    /// configured: the profile cannot be watched (the loader refuses
+    /// `watch = true` without it), and the manual `release.requested`
+    /// path — which carries its own repo_dir — is unaffected. The real
+    /// path lives only in the deployed instance config
+    /// (`$HEX_DIR/.hex/config/releases.toml`), never in foundation source.
+    pub repo_dir: Option<PathBuf>,
+    /// Opt this profile in to the oss-releaser cron branch watch. Default
+    /// `false` — watching is strictly opt-in; a profile with a configured
+    /// `repo_dir` opts back out with `watch = false`. The manual
+    /// `release.requested` event handler ignores this flag.
+    pub watch: bool,
 }
 
 impl ReleaseProfile {
@@ -285,11 +313,16 @@ impl ReleaseProfile {
     }
 }
 
+/// Name of the built-in profile. A releases.toml `[[profiles]]` entry with
+/// this name configures the builtin's watcher fields (`repo_dir`, `watch`)
+/// instead of adding a separate profile — see [`ProfileToml::into_foundation_override`].
+const FOUNDATION_PROFILE_NAME: &str = "hex-foundation";
+
 /// The built-in hex-foundation profile. Matches both the canonical checkout
 /// dir and any worktree of it (worktree dirs differ, the remote does not).
 pub fn builtin_foundation() -> ReleaseProfile {
     ReleaseProfile {
-        name: "hex-foundation".to_string(),
+        name: FOUNDATION_PROFILE_NAME.to_string(),
         match_remote: Some("hex-foundation".to_string()),
         match_dir: Some("hex-foundation".to_string()),
         gates: vec![
@@ -314,6 +347,11 @@ pub fn builtin_foundation() -> ReleaseProfile {
         gh_release: true,
         main_branch: "main".to_string(),
         develop_branch: "develop".to_string(),
+        // Watcher fields are instance config, never code: a deployed
+        // releases.toml opts in via a `[[profiles]] name = "hex-foundation"`
+        // entry (see `into_foundation_override`).
+        repo_dir: None,
+        watch: false,
     }
 }
 
@@ -347,6 +385,10 @@ struct ProfileToml {
     main_branch: Option<String>,
     #[serde(default)]
     develop_branch: Option<String>,
+    #[serde(default)]
+    repo_dir: Option<String>,
+    #[serde(default)]
+    watch: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,6 +404,59 @@ struct VersionFileToml {
     path: String,
     #[serde(default)]
     kind: Option<String>,
+}
+
+/// Everything one releases.toml provides: extra repo profiles, plus the
+/// optional watcher-field configuration for the built-in hex-foundation
+/// profile (from a restricted `[[profiles]] name = "hex-foundation"` entry).
+#[derive(Debug, Default)]
+struct ReleasesConfig {
+    /// Watcher fields for the builtin. Everything else about that profile
+    /// is pinned in code ([`builtin_foundation`]).
+    foundation: Option<FoundationOverride>,
+    /// Non-builtin profiles, in file order.
+    profiles: Vec<ReleaseProfile>,
+}
+
+/// The instance-configurable watcher fields of the built-in profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FoundationOverride {
+    repo_dir: Option<PathBuf>,
+    watch: bool,
+}
+
+/// Validate + convert the watcher fields of one releases.toml entry.
+/// `watch = true` requires an absolute `repo_dir` — the branch watcher polls
+/// and runs the ceremony from that local clone, so a missing or relative
+/// path is a config error refused at load time (S6 — no silent skips).
+fn watcher_fields(
+    profile_name: &str,
+    repo_dir: Option<String>,
+    watch: Option<bool>,
+) -> Result<(Option<PathBuf>, bool)> {
+    let repo_dir = match repo_dir {
+        Some(raw) => {
+            let path = PathBuf::from(&raw);
+            if !path.is_absolute() {
+                bail!(
+                    "profile `{profile_name}`: repo_dir `{raw}` must be an \
+                     absolute path — a relative path would resolve against \
+                     the harness's working directory"
+                );
+            }
+            Some(path)
+        }
+        None => None,
+    };
+    let watch = watch.unwrap_or(false);
+    if watch && repo_dir.is_none() {
+        bail!(
+            "profile `{profile_name}` sets watch = true without a repo_dir — \
+             the branch watcher needs a local clone to poll and run the \
+             ceremony from"
+        );
+    }
+    Ok((repo_dir, watch))
 }
 
 impl ProfileToml {
@@ -390,6 +485,7 @@ impl ProfileToml {
                 Ok(VersionFile { path: vf.path, kind })
             })
             .collect::<Result<Vec<_>>>()?;
+        let (repo_dir, watch) = watcher_fields(&self.name, self.repo_dir, self.watch)?;
         Ok(ReleaseProfile {
             name: self.name,
             match_remote: self.match_remote,
@@ -405,7 +501,69 @@ impl ProfileToml {
             gh_release: self.gh_release.unwrap_or(false),
             main_branch: self.main_branch.unwrap_or_else(|| "main".to_string()),
             develop_branch: self.develop_branch.unwrap_or_else(|| "develop".to_string()),
+            repo_dir,
+            watch,
         })
+    }
+
+    /// Convert a `[[profiles]] name = "hex-foundation"` entry into the
+    /// builtin override. Only the watcher fields (`repo_dir`, `watch`) are
+    /// instance-configurable — everything else is pinned in code
+    /// ([`builtin_foundation`]), and an entry that sets a pinned field is
+    /// refused loudly rather than half-applied (S6).
+    fn into_foundation_override(self) -> Result<FoundationOverride> {
+        let ProfileToml {
+            name,
+            match_remote,
+            match_dir,
+            gates,
+            version_files,
+            build_command,
+            tag_prefix,
+            gh_release,
+            main_branch,
+            develop_branch,
+            repo_dir,
+            watch,
+        } = self;
+        let mut illegal: Vec<&str> = Vec::new();
+        if match_remote.is_some() {
+            illegal.push("match_remote");
+        }
+        if match_dir.is_some() {
+            illegal.push("match_dir");
+        }
+        if !gates.is_empty() {
+            illegal.push("gates");
+        }
+        if !version_files.is_empty() {
+            illegal.push("version_files");
+        }
+        if build_command.is_some() {
+            illegal.push("build_command");
+        }
+        if tag_prefix.is_some() {
+            illegal.push("tag_prefix");
+        }
+        if gh_release.is_some() {
+            illegal.push("gh_release");
+        }
+        if main_branch.is_some() {
+            illegal.push("main_branch");
+        }
+        if develop_branch.is_some() {
+            illegal.push("develop_branch");
+        }
+        if !illegal.is_empty() {
+            bail!(
+                "profile `{name}` is built-in — only the watcher fields \
+                 (`repo_dir`, `watch`) are configurable from releases.toml; \
+                 refusing to override pinned field(s): {}",
+                illegal.join(", ")
+            );
+        }
+        let (repo_dir, watch) = watcher_fields(&name, repo_dir, watch)?;
+        Ok(FoundationOverride { repo_dir, watch })
     }
 }
 
@@ -421,30 +579,55 @@ fn config_path() -> PathBuf {
     hex_dir.join(".hex/config/releases.toml")
 }
 
-/// Load profiles from an explicit releases.toml path. Missing file ⇒ empty
-/// (built-ins only); malformed file or invalid profile ⇒ loud error.
-fn load_profiles_file(path: &Path) -> Result<Vec<ReleaseProfile>> {
+/// Load the config from an explicit releases.toml path. Missing file ⇒
+/// empty config (built-ins only); malformed file or invalid profile ⇒ loud
+/// error. A `[[profiles]]` entry named `hex-foundation` configures the
+/// builtin's watcher fields instead of adding a profile.
+fn load_profiles_file(path: &Path) -> Result<ReleasesConfig> {
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(ReleasesConfig::default());
     }
     let body = std::fs::read_to_string(path)
         .with_context(|| format!("reading releases.toml at {}", path.display()))?;
     let parsed: ReleasesTomlFile = toml::from_str(&body)
         .with_context(|| format!("parsing releases.toml at {}", path.display()))?;
-    parsed
-        .profiles
-        .into_iter()
-        .map(|p| p.into_profile())
-        .collect::<Result<Vec<_>>>()
-        .with_context(|| format!("loading releases.toml at {}", path.display()))
+    let loading = || format!("loading releases.toml at {}", path.display());
+    let mut cfg = ReleasesConfig::default();
+    for p in parsed.profiles {
+        if p.name == FOUNDATION_PROFILE_NAME {
+            if cfg.foundation.is_some() {
+                return Err(anyhow::anyhow!(
+                    "duplicate `{FOUNDATION_PROFILE_NAME}` entries — at most \
+                     one override of the built-in profile"
+                ))
+                .with_context(loading);
+            }
+            cfg.foundation = Some(p.into_foundation_override().with_context(loading)?);
+        } else {
+            cfg.profiles.push(p.into_profile().with_context(loading)?);
+        }
+    }
+    Ok(cfg)
+}
+
+/// Assemble the known-profiles list from a loaded config: the built-in
+/// hex-foundation profile first (with any instance-configured watcher
+/// fields applied), then the file's profiles in order.
+fn assemble_known_profiles(cfg: ReleasesConfig) -> Vec<ReleaseProfile> {
+    let mut foundation = builtin_foundation();
+    if let Some(o) = cfg.foundation {
+        foundation.repo_dir = o.repo_dir;
+        foundation.watch = o.watch;
+    }
+    let mut profiles = vec![foundation];
+    profiles.extend(cfg.profiles);
+    profiles
 }
 
 /// All known profiles: built-in hex-foundation first, then releases.toml in
 /// file order. First match wins in [`resolve_profile`].
 pub fn known_profiles() -> Result<Vec<ReleaseProfile>> {
-    let mut profiles = vec![builtin_foundation()];
-    profiles.extend(load_profiles_file(&config_path())?);
-    Ok(profiles)
+    Ok(assemble_known_profiles(load_profiles_file(&config_path())?))
 }
 
 fn match_profile<'a>(
@@ -2289,6 +2472,8 @@ mod tests {
             gh_release: false,
             main_branch: "main".to_string(),
             develop_branch: "develop".to_string(),
+            repo_dir: None,
+            watch: false,
         }
     }
 
@@ -2354,6 +2539,10 @@ mod tests {
         assert_eq!(p.tag_prefix, "v");
         assert_eq!(p.main_branch, "main");
         assert_eq!(p.develop_branch, "develop");
+        // Watcher fields: no local clone in code — the deployed instance
+        // opts in via a `[[profiles]] name = "hex-foundation"` entry.
+        assert!(p.repo_dir.is_none());
+        assert!(!p.watch);
     }
 
     #[test]
@@ -2375,9 +2564,10 @@ build_command = "cargo build --release"
 "#,
         )
         .unwrap();
-        let profiles = load_profiles_file(&path).unwrap();
-        assert_eq!(profiles.len(), 1);
-        let p = &profiles[0];
+        let cfg = load_profiles_file(&path).unwrap();
+        assert!(cfg.foundation.is_none());
+        assert_eq!(cfg.profiles.len(), 1);
+        let p = &cfg.profiles[0];
         assert_eq!(p.name, "boi");
         assert_eq!(p.gates.len(), 2);
         assert_eq!(
@@ -2390,11 +2580,154 @@ build_command = "cargo build --release"
         assert!(!p.gh_release);
         assert_eq!(p.main_branch, "main");
         assert_eq!(p.develop_branch, "develop");
+        // Watcher fields default to "not watchable": no clone, no watch.
+        assert!(p.repo_dir.is_none());
+        assert!(!p.watch);
 
         // Missing file ⇒ no extra profiles, no error.
-        assert!(load_profiles_file(&td.path().join("absent.toml"))
-            .unwrap()
-            .is_empty());
+        let absent = load_profiles_file(&td.path().join("absent.toml")).unwrap();
+        assert!(absent.profiles.is_empty());
+        assert!(absent.foundation.is_none());
+    }
+
+    #[test]
+    fn releases_toml_loads_watcher_fields() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("releases.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[profiles]]
+name = "boi"
+match_dir = "boi"
+repo_dir = "/srv/clones/boi"
+watch = true
+"#,
+        )
+        .unwrap();
+        let cfg = load_profiles_file(&path).unwrap();
+        let p = &cfg.profiles[0];
+        assert_eq!(p.repo_dir.as_deref(), Some(Path::new("/srv/clones/boi")));
+        assert!(p.watch);
+
+        // repo_dir with watch = false: a profile with a configured local
+        // clone explicitly opted OUT of the branch watch.
+        std::fs::write(
+            &path,
+            "[[profiles]]\nname = \"boi\"\nmatch_dir = \"boi\"\nrepo_dir = \"/srv/clones/boi\"\nwatch = false\n",
+        )
+        .unwrap();
+        let cfg = load_profiles_file(&path).unwrap();
+        assert!(!cfg.profiles[0].watch);
+        assert!(cfg.profiles[0].repo_dir.is_some());
+    }
+
+    #[test]
+    fn releases_toml_rejects_bad_watcher_fields_loudly() {
+        let td = tempfile::tempdir().unwrap();
+
+        // watch = true without a repo_dir: the watcher would have nowhere
+        // to poll from — refused at load, never silently skipped (S6).
+        let no_dir = td.path().join("no-dir.toml");
+        std::fs::write(
+            &no_dir,
+            "[[profiles]]\nname = \"x\"\nmatch_dir = \"x\"\nwatch = true\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load_profiles_file(&no_dir).unwrap_err());
+        assert!(err.contains("watch"), "got: {err}");
+        assert!(err.contains("repo_dir"), "got: {err}");
+
+        // A relative repo_dir would resolve against the harness's cwd.
+        let rel = td.path().join("rel.toml");
+        std::fs::write(
+            &rel,
+            "[[profiles]]\nname = \"x\"\nmatch_dir = \"x\"\nrepo_dir = \"clones/x\"\nwatch = true\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load_profiles_file(&rel).unwrap_err());
+        assert!(err.contains("absolute"), "got: {err}");
+    }
+
+    #[test]
+    fn releases_toml_foundation_entry_configures_builtin_watcher_fields() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("releases.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[profiles]]
+name = "hex-foundation"
+repo_dir = "/srv/clones/hex-foundation"
+watch = true
+
+[[profiles]]
+name = "boi"
+match_dir = "boi"
+"#,
+        )
+        .unwrap();
+        let cfg = load_profiles_file(&path).unwrap();
+        // The hex-foundation entry configures the builtin — it is NOT an
+        // extra profile.
+        assert_eq!(cfg.profiles.len(), 1);
+        assert_eq!(cfg.profiles[0].name, "boi");
+        let profiles = assemble_known_profiles(cfg);
+        assert_eq!(profiles.len(), 2);
+        let f = &profiles[0];
+        assert_eq!(f.name, "hex-foundation");
+        // Pinned fields intact…
+        assert_eq!(f.gates.len(), 5);
+        assert!(f.gh_release);
+        // …watcher fields applied.
+        assert_eq!(
+            f.repo_dir.as_deref(),
+            Some(Path::new("/srv/clones/hex-foundation"))
+        );
+        assert!(f.watch);
+
+        // No override entry ⇒ builtin watcher fields stay off.
+        let plain = assemble_known_profiles(ReleasesConfig::default());
+        assert_eq!(plain.len(), 1);
+        assert!(plain[0].repo_dir.is_none());
+        assert!(!plain[0].watch);
+    }
+
+    #[test]
+    fn releases_toml_rejects_foundation_override_of_pinned_fields() {
+        let td = tempfile::tempdir().unwrap();
+
+        // Pinned fields (gates, version_files, …) live in code; an entry
+        // that tries to override one is refused loudly, never half-applied.
+        let pinned = td.path().join("pinned.toml");
+        std::fs::write(
+            &pinned,
+            "[[profiles]]\nname = \"hex-foundation\"\nrepo_dir = \"/srv/x\"\nwatch = true\ngates = [{ name = \"g\", command = \"true\" }]\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load_profiles_file(&pinned).unwrap_err());
+        assert!(err.contains("built-in"), "got: {err}");
+        assert!(err.contains("gates"), "got: {err}");
+
+        // The watcher-field validation applies to the override too.
+        let no_dir = td.path().join("no-dir.toml");
+        std::fs::write(
+            &no_dir,
+            "[[profiles]]\nname = \"hex-foundation\"\nwatch = true\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load_profiles_file(&no_dir).unwrap_err());
+        assert!(err.contains("repo_dir"), "got: {err}");
+
+        // At most one override entry.
+        let dup = td.path().join("dup.toml");
+        std::fs::write(
+            &dup,
+            "[[profiles]]\nname = \"hex-foundation\"\nrepo_dir = \"/srv/x\"\nwatch = true\n\n[[profiles]]\nname = \"hex-foundation\"\nrepo_dir = \"/srv/y\"\nwatch = false\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load_profiles_file(&dup).unwrap_err());
+        assert!(err.contains("duplicate"), "got: {err}");
     }
 
     #[test]
