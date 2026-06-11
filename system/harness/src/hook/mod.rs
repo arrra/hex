@@ -16,9 +16,9 @@ pub enum HookCommands {
     /// Claude Code UserPromptSubmit hook — inject relevant workspace memory
     #[command(name = "user-prompt-submit")]
     UserPromptSubmit,
-    /// Claude Code PreToolUse hook — block edits to a flagged repo's shared
-    /// checkout (Standing Order 7: all work in worktrees). Deny-only; abstains
-    /// otherwise.
+    /// Claude Code PreToolUse hook — block edits to any git repo's shared
+    /// checkout; only the $HEX_DIR workspace repo is exempt (Standing Order 7:
+    /// all work in worktrees). Deny-only; abstains otherwise.
     #[command(name = "worktree-guard")]
     WorktreeGuard,
     /// Claude Code PreToolUse hook — shadow-lint `boi dispatch <spec>` Bash
