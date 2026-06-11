@@ -22,6 +22,14 @@ pub enum CqError {
     NotFound { query: String },
     /// Emit subprocess failed during `cq index` (exit 6).
     EmitFailed { stderr_tail: String },
+    /// Live path required (rename / `--live`) but unavailable (exit 7,
+    /// SPEC-A2 §5).
+    LiveUnavailable { reason: String },
+    /// `cargo check` itself failed to run (exit 8, SPEC-A2 §5).
+    CheckFailed { detail: String },
+    /// Rename edit application aborted on content mismatch — nothing written
+    /// (exit 7, SPEC-A2 §5).
+    RenameAborted { path: String, detail: String },
 }
 
 impl CqError {
@@ -34,6 +42,9 @@ impl CqError {
             CqError::UnsupportedWorkspace { .. } => "UNSUPPORTED_WORKSPACE",
             CqError::NotFound { .. } => "NOT_FOUND",
             CqError::EmitFailed { .. } => "EMIT_FAILED",
+            CqError::LiveUnavailable { .. } => "LIVE_UNAVAILABLE",
+            CqError::CheckFailed { .. } => "CHECK_FAILED",
+            CqError::RenameAborted { .. } => "RENAME_ABORTED",
         }
     }
 
@@ -46,6 +57,9 @@ impl CqError {
             CqError::UnsupportedWorkspace { .. } => 4,
             CqError::NotFound { .. } => 5,
             CqError::EmitFailed { .. } => 6,
+            CqError::LiveUnavailable { .. } => 7,
+            CqError::CheckFailed { .. } => 8,
+            CqError::RenameAborted { .. } => 7,
         }
     }
 
@@ -69,6 +83,15 @@ impl CqError {
             CqError::EmitFailed { stderr_tail } => {
                 format!("rust-analyzer scip emit failed; stderr tail: {stderr_tail}")
             }
+            CqError::LiveUnavailable { reason } => {
+                format!("live escalation path required but unavailable: {reason}")
+            }
+            CqError::CheckFailed { detail } => {
+                format!("cargo check failed to run: {detail}")
+            }
+            CqError::RenameAborted { path, detail } => {
+                format!("rename aborted, nothing written; {path} changed under the plan: {detail}")
+            }
         }
     }
 
@@ -89,6 +112,15 @@ impl CqError {
             }
             CqError::EmitFailed { .. } => {
                 "run `cq doctor` to verify rust-analyzer is on PATH and the workspace compiles"
+            }
+            CqError::LiveUnavailable { .. } => {
+                "check scipd: `cq doctor` shows the daemon section; start it via launchd (com.hex.scipd) or wait for the instance to finish warming"
+            }
+            CqError::CheckFailed { .. } => {
+                "verify cargo is on PATH and the worktree is a valid cargo workspace; rerun with the same args to see cargo's stderr"
+            }
+            CqError::RenameAborted { .. } => {
+                "the worktree changed between planning and applying the rename; rerun `cq rename` to compute a fresh plan"
             }
         }
     }
@@ -129,6 +161,13 @@ mod tests {
         );
         assert_eq!(CqError::NotFound { query: "nope".into() }.exit_code(), 5);
         assert_eq!(CqError::EmitFailed { stderr_tail: "boom".into() }.exit_code(), 6);
+        // SPEC-A2 §5 additions
+        assert_eq!(CqError::LiveUnavailable { reason: "daemon down".into() }.exit_code(), 7);
+        assert_eq!(CqError::CheckFailed { detail: "no cargo".into() }.exit_code(), 8);
+        assert_eq!(
+            CqError::RenameAborted { path: "a.rs".into(), detail: "mismatch".into() }.exit_code(),
+            7
+        );
     }
 
     #[test]
@@ -154,6 +193,15 @@ mod tests {
         );
         assert_eq!(CqError::NotFound { query: "q".into() }.code_str(), "NOT_FOUND");
         assert_eq!(CqError::EmitFailed { stderr_tail: "t".into() }.code_str(), "EMIT_FAILED");
+        assert_eq!(
+            CqError::LiveUnavailable { reason: "r".into() }.code_str(),
+            "LIVE_UNAVAILABLE"
+        );
+        assert_eq!(CqError::CheckFailed { detail: "d".into() }.code_str(), "CHECK_FAILED");
+        assert_eq!(
+            CqError::RenameAborted { path: "p".into(), detail: "d".into() }.code_str(),
+            "RENAME_ABORTED"
+        );
     }
 
     #[test]
@@ -165,6 +213,9 @@ mod tests {
             CqError::UnsupportedWorkspace { reason: "r".into() },
             CqError::NotFound { query: "q".into() },
             CqError::EmitFailed { stderr_tail: "t".into() },
+            CqError::LiveUnavailable { reason: "r".into() },
+            CqError::CheckFailed { detail: "d".into() },
+            CqError::RenameAborted { path: "p".into(), detail: "d".into() },
         ];
         for e in all {
             let j: serde_json::Value = serde_json::from_str(&e.to_json()).unwrap();
