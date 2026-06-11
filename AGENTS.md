@@ -172,15 +172,19 @@ cq refs <name | FILE:LINE:COL>     # all reference sites, definitions flagged
 cq callers <name>                  # enclosing functions of call sites
 cq symbols <FILE>                  # outline of one file
 cq search <query>                  # fuzzy/prefix search over symbol names
+cq rename <FILE:LINE:COL> <NEW>    # live rename plan; --apply writes it (all-or-nothing)
+cq check [FILE]                    # cargo check diagnostics, per-worktree target-cq dir
 cq index --workspace <path>        # rebuild the index (one-time setup: cq register <path>)
-cq doctor                          # health; exit !=0 with red_reasons when broken
+cq doctor                          # health (incl. scipd daemon); exit !=0 with red_reasons
 ```
 
 Every query prints one JSON envelope on stdout: `source`, `workspace_id`, `indexed_commit`, `index_age_secs`, `stale_files`, `latency_ms`, `results[]` (`path`, `line`, `col`, `display_name`, `kind`, `role`, `snippet`). `stale_files` = result files whose worktree content drifted from the indexed commit — positions for those may be off; snippets are withheld. Reindex to clear, or pass `--strict` to refuse stale answers outright.
 
-Exit codes: `0` fresh OK · `2` stale results (or `--strict` refusal) · `3` no index (`cq index`) · `4` unregistered/unsupported workspace (`cq register`) · `5` not found · `6` emit failed. All errors are structured JSON on stderr (`error.code/message/hint`) — never silent.
+**Reading `source` and `escalated`:** `source:"live"` means the answer came from a live rust-analyzer rooted at your worktree — **live answers reflect current disk state**, including your uncommitted edits, so trust their positions as-is. `source:"index"` plus an `escalated` object means escalation was attempted but deferred: `reason:"warming"` (instance still priming — re-run in a bit, a real repo warms in ~1-2 min) or `reason:"daemon-unavailable"` (scipd down — index answer still correct for the indexed commit, stale files still flagged). No `escalated` field = nothing was stale, pure index fast path. `--live` forces the live path (exit 7 `LIVE_UNAVAILABLE` if impossible); `--no-live` never touches the daemon.
 
-Works from any git worktree of a registered repo (resolves to the parent workspace automatically). Known limitation: call sites inside `macro_rules!` *bodies* are invisible to `callers` (macro *arguments* are captured) — grep for that edge.
+Exit codes: `0` fresh OK · `1` `cq check` found diagnostics · `2` stale results (or `--strict` refusal) · `3` no index (`cq index`) · `4` unregistered/unsupported workspace (`cq register`) · `5` not found · `6` emit failed · `7` live path required but unavailable, or rename aborted on content mismatch · `8` cargo check failed to run. All errors are structured JSON on stderr (`error.code/message/hint`) — never silent.
+
+Works from any git worktree of a registered repo (resolves to the parent workspace automatically). Known limitation: call sites inside `macro_rules!` *bodies* are invisible to `callers` AND untouched by `cq rename --apply` (renaming a function called inside a macro body breaks compilation); macro *arguments* are captured/renamed fine — grep for the macro-body edge before renaming.
 
 ---
 
