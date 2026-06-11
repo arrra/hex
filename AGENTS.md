@@ -162,6 +162,28 @@ If your runtime exposes structured file/search tools, use them. If it only gives
 
 ---
 
+## Code intelligence (cq)
+
+**Prefer `cq` over grep for def/refs/callers questions in Rust repos** — it answers from a semantic SCIP index, not text matching. Binary: `cargo build --release -p scipd` → `target/release/cq`. Full guide: [docs/code-intel.md](docs/code-intel.md).
+
+```bash
+cq def <name | FILE:LINE:COL>      # definition site(s)        (positions are 1-based)
+cq refs <name | FILE:LINE:COL>     # all reference sites, definitions flagged
+cq callers <name>                  # enclosing functions of call sites
+cq symbols <FILE>                  # outline of one file
+cq search <query>                  # fuzzy/prefix search over symbol names
+cq index --workspace <path>        # rebuild the index (one-time setup: cq register <path>)
+cq doctor                          # health; exit !=0 with red_reasons when broken
+```
+
+Every query prints one JSON envelope on stdout: `source`, `workspace_id`, `indexed_commit`, `index_age_secs`, `stale_files`, `latency_ms`, `results[]` (`path`, `line`, `col`, `display_name`, `kind`, `role`, `snippet`). `stale_files` = result files whose worktree content drifted from the indexed commit — positions for those may be off; snippets are withheld. Reindex to clear, or pass `--strict` to refuse stale answers outright.
+
+Exit codes: `0` fresh OK · `2` stale results (or `--strict` refusal) · `3` no index (`cq index`) · `4` unregistered/unsupported workspace (`cq register`) · `5` not found · `6` emit failed. All errors are structured JSON on stderr (`error.code/message/hint`) — never silent.
+
+Works from any git worktree of a registered repo (resolves to the parent workspace automatically). Known limitation: call sites inside `macro_rules!` *bodies* are invisible to `callers` (macro *arguments* are captured) — grep for that edge.
+
+---
+
 ## Skill Discovery
 
 If your runtime lacks first-class skill commands, read skills directly from disk.
