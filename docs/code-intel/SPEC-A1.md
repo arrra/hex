@@ -226,3 +226,26 @@ which `cq doctor` verifies).
   cases so regressions are caught at test time, not in production.
 - This is hex-foundation core tooling (Standing Order S1): all work on this branch, merged to
   foundation `main` only when complete end-to-end; mrap-hex consumes via `/hex-upgrade`.
+
+## 11. Acceptance record (Task 12 audit)
+
+Audited 2026-06-11 on `feature/code-intel-a1` (Task 12 worktree). Gates run: `cargo build
+--release` (workspace) green; `cargo test -p scipd` — 85 passed, 0 failed; `cargo clippy -p
+scipd --all-targets -- -D warnings` clean; `cargo test -p hex-harness` green (no harness
+regression); `bash tests/e2e/code-intel-e2e.sh` — all 6 sections PASS. Silent-failure audit
+(S6 grep for `unwrap_or_default` / `.ok()` / `let _ =` / `unwrap_or(` / bare `if let Ok(`):
+18 hits, every one justified (test helpers, commented clock-skew floors, display-only
+fallbacks, conservative parse fallbacks); zero empty-success-on-error paths.
+
+| # | Criterion | Evidence | Status |
+|---|---|---|---|
+| S1 | Workspace builds clean; tests + clippy green | `cargo build --release` finished clean; `cargo test -p scipd`: 85 passed (71 lib + 14 integration), 0 failed; `cargo clippy -p scipd --all-targets -- -D warnings`: clean | PASS |
+| S2 | Golden queries on fixture crate, ≥10 symbols incl. trait method, generic fn, macro case | `tests/golden.rs`: `golden_defs_refs_and_callers`, `golden_file_outlines`, `golden_search_hits`, `callers_gate_file_is_well_formed_and_resolved`; `tests/fixtures/golden-expectations.json` covers 13 symbols incl. `Area::area` (trait method + both impls), `generic_max`, `macro_caller` (macro-body limitation pinned as ABSENT per callers gate; `tests/fixtures/callers-gate.json`) | PASS |
+| S3 | Real-workspace E2E: index hex-foundation, 5 known symbols return correct file:line | `tests/e2e/code-intel-e2e.sh` sections 1–2: register + index (emit 69.9s), 5 grep-verified def/refs queries (`should_throttle`, `lower_to_background`, et al.) all PASS | PASS |
+| S4 | Ephemeral worktree: first query <2s, no new generation, no residue | E2E section 3: cold start 64ms, same `workspace_id` as parent, generation count unchanged, `CODEINTEL_HOME` clean after teardown | PASS |
+| S5 | Freshness: edited file → `stale_files` + `--strict` exit 2; overhead <150ms p95 | E2E section 4: non-strict exit 2 + file in `stale_files`, `--strict` exit 2 with `STALE_RESULTS`, freshness p95 25.8ms; unit: `src/freshness.rs` `unstaged_edit_is_stale`, `staged_edit_is_stale`, `commit_after_indexing_is_stale`, `file_removed_from_git_is_stale` | PASS |
+| S6 | Loud failures: exit 4/3/5 per taxonomy; no empty-success on error | `src/error.rs` `exit_codes_match_spec`, `code_strings_match_spec_table`, `every_variant_has_nonempty_hint`; `tests/cli.rs` `unregistered_cwd_exit_4`, `registered_no_index_exit_3`, `nonsense_symbol_exit_5`, `stale_strict_exit_2`; `src/indexer.rs` `emit_failure_is_emit_failed_with_stderr_tail`, `missing_analyzer_binary_is_loud_hinted_emit_failure`; Task 12 silent-failure code audit (18 hits, all justified) | PASS |
+| S7 | Latency p95 <500ms warm on hex-foundation index | E2E section 5: p95 172.0ms over 20 mixed queries | PASS |
+| S8 | 8 parallel readers during in-flight publish see consistent generations | E2E section 6: 1648 responses across 8 readers during reindex, all exit 0/2, every `indexed_commit` ∈ {old, new}, post-publish queries see new HEAD | PASS |
+| S9 | `cq doctor` red (nonzero + reason) on: no registry, no index, last emit failed, index >7 days | `tests/cli.rs` `doctor_red_when_no_index_and_green_after` (no-index, >7-days via meta UPDATE, `emit_exit_code=7`, commit-lag fields), `doctor_verifies_rust_analyzer_on_path`; `src/doctor.rs` `empty_registry_is_red`, `unreadable_db_is_an_error_not_a_skip` | PASS |
+| S10 | Docs: operator guide + AGENTS.md `cq` section | `docs/code-intel.md` (register/index/doctor walkthrough, launchd install for `system/templates/launchd/com.hex.codeintel-indexer.plist`, error-code table); `AGENTS.md` "## Code intelligence (cq)" section | PASS |
