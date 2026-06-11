@@ -1,75 +1,97 @@
 #!/usr/bin/env bash
-# Red/green proof for worktree-guard.sh (S7 enforcement / OBS-030).
+# Red/green proof for `hex hook worktree-guard` (S7 enforcement / OBS-030).
 #
-# Replays the OBS-030 incident against a real flagged repo + a real linked
-# worktree, asserting the guard DENIES the shared-checkout edit and ALLOWS the
-# worktree edit. No mocks of git — actual `git worktree` topology.
+# Replays the OBS-030 incident against real git topology: ANY repo's shared
+# checkout must DENY a mutating edit; a linked worktree must pass; the one
+# exemption is the $HEX_DIR workspace repo. No mocks of git.
+#
+# Contract under test (deny-only guard):
+#   deny  = JSON permissionDecision:"deny" on stdout + exit 2
+#   allow = ABSTAIN: no output + exit 0
+#
+# Binary: $HEX_BIN if set, else the worktree's release build, else `hex` on PATH.
 
 set -u
 SCRIPT_DIR=$(cd "$(dirname "$0")" && pwd -P)
-GUARD="$SCRIPT_DIR/../system/hooks/scripts/worktree-guard.sh"
+HEX_BIN="${HEX_BIN:-}"
+if [ -z "$HEX_BIN" ]; then
+    for cand in "$SCRIPT_DIR/../system/harness/target/release/hex" "$(command -v hex || true)"; do
+        [ -n "$cand" ] && [ -x "$cand" ] && HEX_BIN="$cand" && break
+    done
+fi
+if [ -z "$HEX_BIN" ]; then
+    echo "SKIP: no hex binary found (set HEX_BIN or build system/harness)"; exit 0
+fi
 
 pass=0; fail=0
 ok()   { printf '  \033[32mPASS\033[0m %s\n' "$1"; pass=$((pass+1)); }
 no()   { printf '  \033[31mFAIL\033[0m %s\n' "$1"; fail=$((fail+1)); }
 
-# decision <tool> <file> [env] -> prints "allow" | "deny"
+# decision <tool> <file> -> prints "allow" | "deny"
+# Abstain (empty stdout, exit 0) is the allow path of the deny-only guard.
 decision() {
-  local tool="$1" file="$2"
-  printf '{"tool_name":"%s","tool_input":{"file_path":"%s"}}' "$tool" "$file" \
-    | bash "$GUARD" 2>/dev/null \
-    | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["permissionDecision"])' 2>/dev/null
+  local tool="$1" file="$2" out
+  out=$(printf '{"tool_name":"%s","tool_input":{"file_path":"%s"}}' "$tool" "$file" \
+        | "$HEX_BIN" hook worktree-guard 2>/dev/null)
+  if [ -z "$out" ]; then echo "allow"; else
+    echo "$out" | python3 -c 'import json,sys; print(json.load(sys.stdin)["hookSpecificOutput"]["permissionDecision"])' 2>/dev/null
+  fi
 }
 
 TMP=$(mktemp -d)
 trap 'rm -rf "$TMP"' EXIT
 
-# --- build a flagged repo (named hex-foundation) with a shared checkout + worktree ---
-FLAGGED="$TMP/hex-foundation"
-git init -q "$FLAGGED"
-git -C "$FLAGGED" config user.email t@t.t; git -C "$FLAGGED" config user.name t
-printf 'readme\n' > "$FLAGGED/README.md"
-printf '*.lock\nstate.json\n' > "$FLAGGED/.gitignore"
-git -C "$FLAGGED" add -A; git -C "$FLAGGED" commit -qm init
-git -C "$FLAGGED" worktree add -q "$TMP/hex-foundation-wt" -b feat 2>/dev/null
+mkrepo() { # mkrepo <dir>
+  git init -q "$1"
+  git -C "$1" config user.email t@t.t; git -C "$1" config user.name t
+  printf 'readme\n' > "$1/README.md"
+  printf '*.lock\nstate.json\n' > "$1/.gitignore"
+  git -C "$1" add -A; git -C "$1" commit -qm init
+}
 
-# --- build a NON-flagged repo (different name) with a shared checkout ---
-OTHER="$TMP/some-app"
-git init -q "$OTHER"
-git -C "$OTHER" config user.email t@t.t; git -C "$OTHER" config user.name t
-printf 'x\n' > "$OTHER/README.md"
-git -C "$OTHER" add -A; git -C "$OTHER" commit -qm init
+# --- any old repo (no allowlist anymore) with a shared checkout + worktree ---
+REPO="$TMP/some-app"
+mkrepo "$REPO"
+git -C "$REPO" worktree add -q "$TMP/some-app-wt" -b feat 2>/dev/null
 
-echo "worktree-guard red/green proof (replays OBS-030):"
+# --- a repo standing in for the $HEX_DIR workspace ---
+HEXWS="$TMP/hexws"
+mkrepo "$HEXWS"
 
-# 1. THE INCIDENT (red case now caught): edit README in the flagged SHARED checkout.
-d=$(decision Edit "$FLAGGED/README.md")
-[ "$d" = "deny" ] && ok "OBS-030 incident: Edit README in shared hex-foundation checkout -> DENY" \
-                  || no "OBS-030 incident should DENY, got '$d'"
+# HEX_DIR points at the workspace stand-in, NOT at $REPO — so $REPO is guarded
+# and $HEXWS is exempt.
+export HEX_DIR="$HEXWS"
 
-# 2. Write a NEW file in the flagged shared checkout (the module-docs case) -> deny.
-d=$(decision Write "$FLAGGED/docs/new-guide.md")
-[ "$d" = "deny" ] && ok "Write new file in shared flagged checkout -> DENY" \
-                  || no "new file in shared flagged checkout should DENY, got '$d'"
+echo "worktree-guard red/green proof (replays OBS-030, any-repo scope):"
+
+# 1. THE INCIDENT (red case now caught): edit README in ANY repo's shared checkout.
+d=$(decision Edit "$REPO/README.md")
+[ "$d" = "deny" ] && ok "OBS-030 incident: Edit README in a shared checkout -> DENY" \
+                  || no "shared-checkout edit should DENY, got '$d'"
+
+# 2. Write a NEW file in the shared checkout (the module-docs case) -> deny.
+d=$(decision Write "$REPO/docs/new-guide.md")
+[ "$d" = "deny" ] && ok "Write new file in a shared checkout -> DENY" \
+                  || no "new file in shared checkout should DENY, got '$d'"
 
 # 3. THE CORRECT PATH (green): same edit, but in a linked worktree -> allow.
-d=$(decision Edit "$TMP/hex-foundation-wt/README.md")
-[ "$d" = "allow" ] && ok "Edit README in a hex-foundation WORKTREE -> ALLOW" \
+d=$(decision Edit "$TMP/some-app-wt/README.md")
+[ "$d" = "allow" ] && ok "Edit README in a linked WORKTREE -> ALLOW" \
                    || no "worktree edit should ALLOW, got '$d'"
 
-# 4. Non-flagged repo's shared checkout -> allow (guard is not over-broad).
-d=$(decision Edit "$OTHER/README.md")
-[ "$d" = "allow" ] && ok "Edit in non-flagged repo's shared checkout -> ALLOW" \
-                   || no "non-flagged repo should ALLOW, got '$d'"
+# 4. The $HEX_DIR workspace repo -> allow (the one exemption).
+d=$(decision Edit "$HEXWS/README.md")
+[ "$d" = "allow" ] && ok "Edit in the \$HEX_DIR workspace repo -> ALLOW (exempt)" \
+                   || no "\$HEX_DIR workspace should ALLOW, got '$d'"
 
-# 5. Ignored runtime file in flagged shared checkout -> allow (tracked-dirty vs runtime).
-d=$(decision Write "$FLAGGED/state.json")
-[ "$d" = "allow" ] && ok "Ignored runtime file in flagged checkout -> ALLOW" \
+# 5. Ignored runtime file in a shared checkout -> allow (tracked-dirty vs runtime).
+d=$(decision Write "$REPO/state.json")
+[ "$d" = "allow" ] && ok "Ignored runtime file in shared checkout -> ALLOW" \
                    || no "ignored runtime file should ALLOW, got '$d'"
 
-# 6. Non-mutating tool (Read) on the flagged shared checkout -> allow.
-d=$(decision Read "$FLAGGED/README.md")
-[ "$d" = "allow" ] && ok "Read (non-mutating) in flagged checkout -> ALLOW" \
+# 6. Non-mutating tool (Read) on the shared checkout -> allow.
+d=$(decision Read "$REPO/README.md")
+[ "$d" = "allow" ] && ok "Read (non-mutating) in shared checkout -> ALLOW" \
                    || no "Read should ALLOW, got '$d'"
 
 # 7. Path outside any git repo -> allow (fail-open).

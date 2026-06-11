@@ -1,7 +1,7 @@
 //! Claude Code `PreToolUse` hook — enforces Standing Order 7
 //! ("all work in worktrees, never the shared checkout").
 //!
-//! Refuses Write/Edit/MultiEdit/NotebookEdit on a FLAGGED repo when the target
+//! Refuses Write/Edit/MultiEdit/NotebookEdit on **any git repo** when the target
 //! lives in the repo's SHARED checkout (the main working tree) rather than a
 //! linked worktree. This is the mechanical backstop for the dirty-tree hazard in
 //! `evolution/observations.md` OBS-030 (a concurrent agent's reset silently wiped
@@ -22,10 +22,12 @@
 //! the right path (worktree) the easy path; it does not make the wrong path
 //! impossible.
 //!
-//! Flagged repos: env `HEX_WORKTREE_GUARD_REPOS` (space/comma list of repo dir
-//! basenames) overrides the default. Default: `hex-foundation`. Personal-data
-//! workspaces (the HEX_DIR checkout) are intentionally NOT flagged — the hazard
-//! is multi-agent CODE repos.
+//! Scope (Mike, 2026-06-11: "this worktree practice is for any git repo" — the
+//! per-repo allowlist `HEX_WORKTREE_GUARD_REPOS` is GONE): every git repo is
+//! guarded. The single exemption is the hex workspace itself — the repo whose
+//! toplevel is `$HEX_DIR` — because persist-immediately writes to workspace
+//! state (todo.md, me/decisions, evolution/) ARE the hex operating model, not
+//! multi-agent code work; its concurrent-write hazard is handled by S3 locks.
 //!
 //! Fail-OPEN: any internal error or unparseable input → Abstain. A broken guard
 //! must never wedge the session.
@@ -34,8 +36,6 @@ use serde_json::Value;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::Command;
-
-const DEFAULT_FLAGGED: &str = "hex-foundation";
 
 /// The guard's verdict for a single tool call. `Deny` carries a human-readable,
 /// actionable reason; `Abstain` means "no opinion — defer to normal permission
@@ -51,7 +51,7 @@ pub fn run() {
     if std::io::stdin().read_to_string(&mut raw).is_err() {
         std::process::exit(0); // fail-open
     }
-    match decide(&raw, &flagged_repos()) {
+    match decide(&raw, hex_dir().as_deref()) {
         Decision::Deny(reason) => {
             // Block via BOTH channels so the guard holds across Claude Code
             // versions: structured JSON on stdout (modern contract) AND exit 2
@@ -72,21 +72,23 @@ pub fn run() {
     }
 }
 
-/// Flagged-repo basenames from env, default `hex-foundation`. Comma OR whitespace
-/// separated.
-fn flagged_repos() -> Vec<String> {
-    let raw = std::env::var("HEX_WORKTREE_GUARD_REPOS").unwrap_or_else(|_| DEFAULT_FLAGGED.into());
-    raw.split([',', ' ', '\t', '\n'])
-        .map(str::trim)
-        .filter(|s| !s.is_empty())
-        .map(|s| s.to_owned())
-        .collect()
+/// The hex workspace root from `$HEX_DIR`, canonicalized. `None` when unset —
+/// the guard then has no exemption and every repo is guarded.
+fn hex_dir() -> Option<PathBuf> {
+    let raw = std::env::var("HEX_DIR").ok()?;
+    let trimmed = raw.trim();
+    if trimmed.is_empty() {
+        return None;
+    }
+    let p = PathBuf::from(trimmed);
+    Some(p.canonicalize().unwrap_or(p))
 }
 
 /// Pure decision over the raw hook stdin. Factored out of `run` so it is testable
 /// without capturing stdout/exit codes. Every error path returns `Abstain`
-/// (fail-open).
-pub fn decide(raw: &str, flagged: &[String]) -> Decision {
+/// (fail-open). `exempt_root` is the canonicalized workspace root (`$HEX_DIR`)
+/// whose own repo is not guarded.
+pub fn decide(raw: &str, exempt_root: Option<&Path>) -> Decision {
     let input: Value = match serde_json::from_str(raw) {
         Ok(v) => v,
         Err(_) => return Decision::Abstain,
@@ -108,12 +110,12 @@ pub fn decide(raw: &str, flagged: &[String]) -> Decision {
         _ => return Decision::Abstain,
     };
 
-    decide_for_path(Path::new(file), flagged)
+    decide_for_path(Path::new(file), exempt_root)
 }
 
 /// Decision for a concrete target path. Shells out to `git` (the established
 /// convention in this crate — see `upgrade.rs`); no git2/gix dependency.
-fn decide_for_path(file: &Path, flagged: &[String]) -> Decision {
+fn decide_for_path(file: &Path, exempt_root: Option<&Path>) -> Decision {
     // The file may not exist yet (a new Write): resolve the deepest EXISTING
     // ancestor directory and run git there.
     let dir = match deepest_existing_dir(file) {
@@ -157,15 +159,12 @@ fn decide_for_path(file: &Path, flagged: &[String]) -> Decision {
     }
     // From here: git-dir == git-common-dir → the SHARED checkout (main worktree).
 
-    // Is this repo flagged? Canonical name = basename of the dir containing the
-    // common .git.
-    let repo_name = common_abs
-        .parent()
-        .and_then(Path::file_name)
-        .and_then(|s| s.to_str())
-        .unwrap_or("");
-    if !flagged.iter().any(|r| r == repo_name) {
-        return Decision::Abstain;
+    // The hex workspace itself is the one exempt repo (see module docs).
+    if let (Some(root), Some(exempt)) = (common_abs.parent(), exempt_root) {
+        let root_canon = root.canonicalize().unwrap_or_else(|_| root.to_path_buf());
+        if root_canon == exempt {
+            return Decision::Abstain;
+        }
     }
 
     // Ignored runtime files are sweepable state, not work worth protecting —
@@ -174,11 +173,17 @@ fn decide_for_path(file: &Path, flagged: &[String]) -> Decision {
         return Decision::Abstain;
     }
 
+    let repo_name = common_abs
+        .parent()
+        .and_then(Path::file_name)
+        .and_then(|s| s.to_str())
+        .unwrap_or("");
     let repo_root = common_abs.parent().unwrap_or(&common_abs).display();
     Decision::Deny(format!(
-        "S7 violation: editing '{}' in the SHARED checkout of flagged repo '{repo_name}'. \
-         All work must happen in a git worktree (concurrent agents in one working tree silently \
-         clobber each other's uncommitted edits — see OBS-030). \
+        "S7 violation: editing '{}' in the SHARED checkout of git repo '{repo_name}'. \
+         All work — any worker, any git repo — happens in a dedicated worktree (concurrent \
+         agents in one working tree silently clobber each other's uncommitted edits — see \
+         OBS-030/OBS-033). \
          Fix: git -C {repo_root} worktree add ../{repo_name}-<task> -b feature/<name>  \
          (or use the using-git-worktrees skill), then edit there.",
         file.display(),
@@ -230,36 +235,31 @@ mod tests {
     use super::*;
     use std::fs;
 
-    fn flagged() -> Vec<String> {
-        vec!["hex-foundation".to_owned()]
-    }
-
     #[test]
     fn non_mutating_tool_abstains() {
         let raw = r#"{"tool_name":"Bash","tool_input":{"command":"ls"}}"#;
-        assert_eq!(decide(raw, &flagged()), Decision::Abstain);
+        assert_eq!(decide(raw, None), Decision::Abstain);
     }
 
     #[test]
     fn garbage_stdin_abstains() {
-        assert_eq!(decide("not json", &flagged()), Decision::Abstain);
-        assert_eq!(decide("", &flagged()), Decision::Abstain);
+        assert_eq!(decide("not json", None), Decision::Abstain);
+        assert_eq!(decide("", None), Decision::Abstain);
     }
 
     #[test]
     fn missing_file_path_abstains() {
         let raw = r#"{"tool_name":"Write","tool_input":{}}"#;
-        assert_eq!(decide(raw, &flagged()), Decision::Abstain);
+        assert_eq!(decide(raw, None), Decision::Abstain);
     }
 
-    /// Build a real shared checkout named like a flagged repo and assert a Write
-    /// into it is denied; then add a linked worktree and assert an edit there
-    /// abstains.
+    /// Build a real shared checkout (any name — there is no allowlist) and
+    /// assert a Write into it is denied; then add a linked worktree and assert
+    /// an edit there abstains.
     #[test]
     fn shared_checkout_denied_worktree_abstains() {
         let tmp = tempfile::tempdir().unwrap();
-        // Repo dir basename must match the flagged name.
-        let repo = tmp.path().join("hex-foundation");
+        let repo = tmp.path().join("any-old-repo");
         fs::create_dir(&repo).unwrap();
         run_git(&repo, &["init", "-q"]);
         run_git(&repo, &["config", "user.email", "t@t"]);
@@ -270,35 +270,54 @@ mod tests {
 
         // Edit in the SHARED checkout → Deny.
         let target = repo.join("src.rs");
-        match decide_for_path(&target, &flagged()) {
+        match decide_for_path(&target, None) {
             Decision::Deny(r) => assert!(r.contains("S7 violation"), "reason: {r}"),
             d => panic!("expected Deny, got {d:?}"),
         }
 
         // Add a linked worktree and edit there → Abstain.
-        let wt = tmp.path().join("hex-foundation-task");
+        let wt = tmp.path().join("any-old-repo-task");
         run_git(
             &repo,
             &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "feat"],
         );
         let wt_target = wt.join("src.rs");
-        assert_eq!(decide_for_path(&wt_target, &flagged()), Decision::Abstain);
+        assert_eq!(decide_for_path(&wt_target, None), Decision::Abstain);
     }
 
+    /// The hex workspace repo (toplevel == exempt_root) is the one exemption —
+    /// and the same repo WITHOUT the exemption is denied, proving the exemption
+    /// is what does the work.
     #[test]
-    fn unflagged_repo_abstains() {
+    fn hex_workspace_repo_exempt() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("some-other-repo");
+        let repo = tmp.path().join("hex");
         fs::create_dir(&repo).unwrap();
         run_git(&repo, &["init", "-q"]);
-        let target = repo.join("src.rs");
-        assert_eq!(decide_for_path(&target, &flagged()), Decision::Abstain);
+        run_git(&repo, &["config", "user.email", "t@t"]);
+        run_git(&repo, &["config", "user.name", "t"]);
+        fs::write(repo.join("todo.md"), "now").unwrap();
+        run_git(&repo, &["add", "."]);
+        run_git(&repo, &["commit", "-qm", "seed"]);
+
+        let exempt = repo.canonicalize().unwrap();
+        let target = repo.join("todo.md");
+        assert_eq!(
+            decide_for_path(&target, Some(&exempt)),
+            Decision::Abstain,
+            "the $HEX_DIR workspace repo must not be guarded"
+        );
+
+        match decide_for_path(&target, None) {
+            Decision::Deny(_) => {}
+            d => panic!("expected Deny without exemption, got {d:?}"),
+        }
     }
 
     #[test]
-    fn ignored_file_in_flagged_checkout_abstains() {
+    fn ignored_file_in_shared_checkout_abstains() {
         let tmp = tempfile::tempdir().unwrap();
-        let repo = tmp.path().join("hex-foundation");
+        let repo = tmp.path().join("some-repo");
         fs::create_dir(&repo).unwrap();
         run_git(&repo, &["init", "-q"]);
         run_git(&repo, &["config", "user.email", "t@t"]);
@@ -308,14 +327,14 @@ mod tests {
         run_git(&repo, &["commit", "-qm", "seed"]);
         fs::create_dir(repo.join("target")).unwrap();
         let ignored = repo.join("target").join("out.bin");
-        assert_eq!(decide_for_path(&ignored, &flagged()), Decision::Abstain);
+        assert_eq!(decide_for_path(&ignored, None), Decision::Abstain);
     }
 
     #[test]
     fn not_a_git_repo_abstains() {
         let tmp = tempfile::tempdir().unwrap();
         let target = tmp.path().join("loose.txt");
-        assert_eq!(decide_for_path(&target, &flagged()), Decision::Abstain);
+        assert_eq!(decide_for_path(&target, None), Decision::Abstain);
     }
 
     fn run_git(dir: &Path, args: &[&str]) {
