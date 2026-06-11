@@ -55,11 +55,13 @@ pub fn apply(worktree_root: &Path, edits: &[RenameEdit]) -> Result<Vec<String>> 
         let tmp = full.with_extension("cq-rename-tmp");
         std::fs::write(&tmp, &new_content)
             .with_context(|| format!("writing {}", tmp.display()))?;
-        // Preserve the original file's permissions across the rename.
-        if let Ok(meta) = std::fs::metadata(&full) {
-            std::fs::set_permissions(&tmp, meta.permissions())
-                .with_context(|| format!("setting permissions on {}", tmp.display()))?;
-        }
+        // Preserve the original file's permissions across the rename. The
+        // file is known to exist (phase 1 read it), so a metadata failure
+        // here is a real error — never silently skip preservation (S6).
+        let meta = std::fs::metadata(&full)
+            .with_context(|| format!("reading permissions of {}", full.display()))?;
+        std::fs::set_permissions(&tmp, meta.permissions())
+            .with_context(|| format!("setting permissions on {}", tmp.display()))?;
         std::fs::rename(&tmp, &full)
             .with_context(|| format!("renaming {} into place", tmp.display()))?;
         modified.push(path.to_string());

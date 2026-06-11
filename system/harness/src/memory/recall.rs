@@ -9,7 +9,6 @@ use std::path::Path;
 
 const MIN_QUERY_CHARS: usize = 12;
 const MAX_CONTEXT_CHARS: usize = 10_000; // spec §8 hard cap
-const TOP_K: usize = 6;
 
 pub type Hit = super::search::SearchResult;
 
