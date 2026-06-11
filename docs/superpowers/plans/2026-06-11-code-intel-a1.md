@@ -411,7 +411,10 @@ fn emit_failure_is_emit_failed_with_stderr_tail() { /* point rust-analyzer at a 
 **Files:**
 - Create: `system/code-intel/tests/golden.rs`
 
-- [ ] **Step 1: Write `tests/golden.rs`** — loads `golden-expectations.json`, runs the full pipeline (register→index→each verb) against the fixture, asserts every expectation. **Callers gate RESOLVED (smoke test #2, 2026-06-11): SHIP from index, 0% false negatives.** Create `tests/fixtures/callers-gate.json` with `{"macro_callers_from_index": true}` and assert the `macro_caller` case fully. No `quality: "best-effort"` flag in the default path; the envelope `quality` field stays reserved for future degraded modes.
+- [ ] **Step 1: Write `tests/golden.rs`** — loads `golden-expectations.json`, runs the full pipeline (register→index→each verb) against the fixture, asserts every expectation. **Callers gate RESOLVED with nuance (smoke test #2 + Task 4 fixture emit, 2026-06-11):**
+  - Calls passed **as macro arguments** (`assert!`, `format!`, `anyhow!`, `tokio::spawn(async {...})`) keep their spans → captured; real-codebase FN rate 0%. `cq callers` ships from the index with NO `quality` flag.
+  - Calls hidden **inside a `macro_rules!` body** (fixture's `call_double!`) emit zero call-site occurrences → structurally invisible. The golden test must assert `macro_caller` is **ABSENT** from `callers(double)` — pinning the known limitation so any rust-analyzer behavior change is noticed. Document the limitation in `docs/code-intel.md` (Task 11).
+  - `tests/fixtures/callers-gate.json` = `{"macro_body_callers_from_index": false, "macro_arg_callers_from_index": true}`.
 - [ ] **Step 2: Verify + commit** `test(code-intel): golden acceptance suite (spec S2)`.
 
 ---
