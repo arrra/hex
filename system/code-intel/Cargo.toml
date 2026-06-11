@@ -23,6 +23,9 @@ chrono = { version = "0.4", features = ["serde"] }
 # SCIP protobuf bindings (spec §9). Plan guessed 0.5; crates.io latest stable is
 # 0.8.1 (checked 2026-06-11). Pinned exact per spec. Task 5 consumes it.
 scip = "=0.8.1"
+# scip's generated types implement protobuf::Message; we need the trait in
+# scope to parse. Pinned to the exact version scip 0.8.1 depends on.
+protobuf = "=3.7.2"
 toml = "0.8"
 
 [dev-dependencies]

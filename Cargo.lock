@@ -4290,6 +4290,7 @@ dependencies = [
  "chrono",
  "clap",
  "fs2",
+ "protobuf",
  "rusqlite",
  "scip",
  "serde",
