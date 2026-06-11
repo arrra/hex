@@ -13,8 +13,13 @@
 //!   * command not matching `boi dispatch <spec>` → ALLOW silently.
 //!   * dispatch detected → run `hex::lint_gates` IN-PROCESS over the spec:
 //!     one `intent` ledger row per command gate (shadow mode), summary to
-//!     stderr, exit 0. Unreadable spec or TOML/contract parse error →
+//!     stderr, exit 0. TOML/contract parse error on a READABLE spec →
 //!     reason on stderr, exit 2 (BLOCK — the dispatch would fail anyway).
+//!   * UNREADABLE spec path → loud warning, exit 0 (ALLOW). The extraction
+//!     regex matches the dispatch phrase inside quoted prose too (commit
+//!     messages, heredocs — first wild FPs 2026-06-11 blocked two commits),
+//!     and a real dispatch of a missing file is rejected loudly by the boi
+//!     dispatcher itself, so blocking here protected nothing.
 //!   * ledger trouble → loud on stderr, exit 1 (NON-blocking: never block a
 //!     dispatch because our own bookkeeping is broken; exit 1 ≠ 2 so Claude
 //!     Code surfaces the error without denying the tool call).
@@ -54,8 +59,16 @@ pub fn run() {
     let src = match std::fs::read_to_string(&spec_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("lint-predispatch: cannot read spec {}: {e} — blocking dispatch", spec_path.display());
-            std::process::exit(2);
+            // ALLOW, loudly. The regex also matches the dispatch phrase inside
+            // quoted prose (commit -m text, heredocs) where the "spec" token is
+            // not a file; and for a genuine dispatch of a missing path, the boi
+            // dispatcher itself rejects loudly. Blocking here only ever hit the
+            // prose case (2 wild FPs on 2026-06-11).
+            eprintln!(
+                "lint-predispatch: cannot read spec {} ({e}) — allowing (not linted; a real dispatch of a missing spec is rejected by boi itself)",
+                spec_path.display()
+            );
+            std::process::exit(0);
         }
     };
     let gates = match hex::lint_gates::extract_gates_from_spec(&src) {
@@ -191,6 +204,22 @@ mod tests {
     #[test]
     fn flag_token_after_dispatch_skips() {
         assert_eq!(extract_spec_path("boi dispatch --help"), None);
+    }
+
+    #[test]
+    fn prose_mentions_still_extract_but_point_nowhere() {
+        // The 2026-06-11 wild FPs: the phrase inside quoted prose. Extraction
+        // still fires (the regex cannot see quoting), so the run() contract is
+        // what protects prose: an unreadable token must ALLOW, not block.
+        // These pin extraction; the allow behavior is pinned by code review of
+        // run()'s unreadable arm (exit 0) since run() owns process exit.
+        let commit = r#"git commit -m "worker execs boi dispatch <template> when armed""#;
+        assert_eq!(extract_spec_path(commit), Some(r#"<template>"#.to_string()));
+        let heredoc = "cat << 'EOF'\nthe worker runs boi dispatch /path/that/is/prose.toml nightly\nEOF";
+        assert_eq!(
+            extract_spec_path(heredoc),
+            Some("/path/that/is/prose.toml".to_string())
+        );
     }
 
     #[test]
