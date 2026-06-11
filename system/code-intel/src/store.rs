@@ -167,7 +167,18 @@ impl Store {
     /// Returns the names that were removed.
     pub fn prune(&self) -> Result<Vec<String>> {
         let current = self.current()?;
-        let generations = self.generations()?; // newest first
+        let mut generations = self.generations()?; // newest first
+        // Same-second publishes share a timestamp prefix and tie-break by
+        // random suffix, which can rank CURRENT below older generations and
+        // make prune keep 3. Within a timestamp tie, CURRENT is by
+        // definition the newest; distinct timestamps keep pure name order.
+        let is_current = |n: &str| Some(n) == current.as_deref();
+        let ts = |n: &str| n.split('-').next().unwrap_or(n).to_string();
+        generations.sort_by(|a, b| {
+            ts(b).cmp(&ts(a))
+                .then_with(|| is_current(b).cmp(&is_current(a)))
+                .then_with(|| b.cmp(a))
+        });
         let mut removed = Vec::new();
         for name in generations.iter().skip(KEEP_GENERATIONS) {
             if Some(name.as_str()) == current.as_deref() {
