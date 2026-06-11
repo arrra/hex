@@ -11,8 +11,21 @@
 //!   (`hex release cut --finish <branch>`) for any head it has not seen
 //!   before. A brand-new branch counts as new commits.
 //!
-//! Both paths spawn the ceremony as a DETACHED child of the current
-//! executable.
+//! The same cron tick also runs **develop-sync** — the releaser OWNS pushing
+//! base branches on watched repos. Per watched profile it compares the local
+//! develop branch against origin: strictly ahead → fast-forward push through
+//! the ceremony's audited push path (`HEX_RELEASE_PIPELINE=1` git-guard env
+//! plus the independent post-push SHA verify;
+//! [`hex::release::sync_develop_to_origin`]); diverged or origin branch
+//! missing → loud operator alert (stderr + telemetry, deduped notification
+//! for divergence) and NEVER an automatic pull/rebase/reset/force-push; in
+//! sync or behind-only → nothing. Sync failures are per-repo isolated and
+//! never block the release/* watch; a held ceremony lock defers the repo's
+//! sync to the next tick (the ceremony's own develop/main pushes during a
+//! cut are unchanged and unraced). Telemetry: `release::develop-sync`.
+//!
+//! Both ceremony paths spawn the ceremony as a DETACHED child of the
+//! current executable.
 //!
 //! ## Why detached — the real drain semantics
 //!
@@ -515,9 +528,108 @@ fn watch_repo(
     }
 }
 
-/// One watch tick over every watched profile. Per-repo fault isolation: a
-/// failing repo is reported loudly (stderr + telemetry) and the loop moves
-/// on; the tick itself errors at the end if anything failed, so the
+// ---------------------------------------------------------------------------
+// Develop sync — the releaser owns pushing base branches on watched repos.
+// ---------------------------------------------------------------------------
+
+/// Compare one watched repo's local develop branch against origin and
+/// fast-forward origin when local is strictly ahead, through the ceremony's
+/// audited push path ([`hex::release::sync_develop_to_origin`]). Diverged
+/// or origin-missing develop is an operator problem: loud alert (stderr +
+/// telemetry + deduped notification for divergence) and `Err` — NEVER an
+/// automatic pull/rebase/reset/force-push. In-sync and behind-only do
+/// nothing. `Ok(None)` = quiet pass, `Ok(Some(summary))` = something
+/// happened; every `Err` is one repo's loud failure that the caller
+/// isolates from the other repos and from the release/* watch.
+fn develop_sync_repo(profile: &hex::release::ReleaseProfile) -> Result<Option<String>> {
+    let name = profile.name.as_str();
+    let develop = profile.develop_branch.as_str();
+    let repo = profile.repo_dir.as_deref().with_context(|| {
+        format!(
+            "profile `{name}`: watch = true but repo_dir is unset — the loader \
+             should have refused this config"
+        )
+    })?;
+    if !repo.is_dir() {
+        anyhow::bail!(
+            "profile `{name}`: repo_dir {} does not exist or is not a directory",
+            repo.display()
+        );
+    }
+
+    // An in-flight ceremony pushes develop itself at the end of the cut —
+    // never race it; this repo's sync is reconsidered next tick.
+    let lock = hex::release::lock_file_path(repo)
+        .with_context(|| format!("profile `{name}`: resolving the ceremony lock path"))?;
+    if lock.exists() {
+        record_watch(
+            "release::develop-sync",
+            "skipped",
+            format!("profile={name} deferred — ceremony in flight (lock {})", lock.display()),
+        );
+        return Ok(Some(format!(
+            "develop-sync deferred — ceremony in flight (lock {})",
+            lock.display()
+        )));
+    }
+
+    use hex::release::DevelopSyncOutcome as Sync;
+    let outcome = hex::release::sync_develop_to_origin(repo, develop)
+        .with_context(|| format!("profile `{name}`: develop-sync of {} in {}", develop, repo.display()))?;
+    match outcome {
+        // In sync or behind-only: nothing (catching local up is a human's
+        // pull, never this worker's).
+        Sync::InSync | Sync::Behind { .. } => Ok(None),
+        Sync::Pushed { from, to } => {
+            record_watch(
+                "release::develop-sync",
+                "ok",
+                format!(
+                    "profile={name} pushed {develop} {from}..{to} repo={}",
+                    repo.display()
+                ),
+            );
+            Ok(Some(format!(
+                "pushed {develop} {}..{}",
+                &from[..from.len().min(12)],
+                &to[..to.len().min(12)]
+            )))
+        }
+        Sync::Diverged { local, origin } => {
+            // Divergence is an operator problem — alert (deduped macOS
+            // notification + stderr + telemetry via alert::notify), then
+            // fail the repo loudly. NEVER auto-resolved.
+            hex::alert::notify(
+                &format!("release-develop-sync-diverged-{name}"),
+                "oss-releaser: develop diverged",
+                &format!(
+                    "{name}: local {develop} ({}) and origin/{develop} ({}) have \
+                     diverged — reconcile by hand in {}",
+                    &local[..local.len().min(12)],
+                    &origin[..origin.len().min(12)],
+                    repo.display()
+                ),
+            );
+            anyhow::bail!(
+                "profile `{name}`: local {develop} ({local}) and origin/{develop} \
+                 ({origin}) have DIVERGED — each side has commits the other lacks; \
+                 refusing to push, pull, rebase, or reset. Reconcile by hand in {}",
+                repo.display()
+            )
+        }
+        Sync::RemoteMissing { local } => anyhow::bail!(
+            "profile `{name}`: origin has no {develop} branch (local is {local}) — \
+             the sync never creates base branches; push it by hand from {}",
+            repo.display()
+        ),
+    }
+}
+
+/// One watch tick over every watched profile: develop-sync first, then the
+/// release/* branch watch. Per-repo AND per-concern fault isolation: a
+/// failure in either is reported loudly (stderr + telemetry) and the loop
+/// moves on — a sync failure never blocks this repo's branch watch nor any
+/// other repo; the tick itself errors at the end if anything failed, so the
 /// runtime's auto-telemetry shows the failure too.
 fn watch_all(
     hex_dir: &Path,
@@ -528,22 +640,40 @@ fn watch_all(
     if watched.is_empty() {
         return Ok(());
     }
+    let mut failed_repos: std::collections::BTreeSet<String> = Default::default();
     let mut failures: Vec<String> = Vec::new();
     for p in &watched {
+        // Develop-sync runs first — a push that completes before any
+        // ceremony spawn below can never race it — and fully isolated.
+        match develop_sync_repo(p) {
+            Ok(None) => {}
+            Ok(Some(summary)) => eprintln!("oss-releaser develop-sync: {}: {summary}", p.name),
+            Err(err) => {
+                eprintln!("oss-releaser develop-sync: profile `{}` FAILED: {err:#}", p.name);
+                record_watch(
+                    "release::develop-sync",
+                    "error",
+                    format!("profile={} {err:#}", p.name),
+                );
+                failed_repos.insert(p.name.clone());
+                failures.push(format!("{} (develop-sync)", p.name));
+            }
+        }
         match watch_repo(hex_dir, p, spawn) {
             Ok(None) => {}
             Ok(Some(summary)) => eprintln!("oss-releaser watch: {}: {summary}", p.name),
             Err(err) => {
                 eprintln!("oss-releaser watch: profile `{}` FAILED: {err:#}", p.name);
                 record_watch("release::watch", "error", format!("profile={} {err:#}", p.name));
-                failures.push(p.name.clone());
+                failed_repos.insert(p.name.clone());
+                failures.push(format!("{} (watch)", p.name));
             }
         }
     }
     if !failures.is_empty() {
         anyhow::bail!(
-            "branch watch failed for {}/{} watched repos: {}",
-            failures.len(),
+            "branch watch tick failed for {}/{} watched repos: {}",
+            failed_repos.len(),
             watched.len(),
             failures.join(", ")
         );
@@ -801,7 +931,9 @@ mod tests {
         git(repo, &["commit", "-q", "-m", msg]);
     }
 
-    /// A local bare origin plus a clone with one commit on `main`, pushed.
+    /// A local bare origin plus a clone with one commit on `main` and a
+    /// `develop` branch at the same commit, both pushed (in-sync GitFlow
+    /// baseline — the develop-sync's quiet state).
     fn watch_fixture(td: &Path) -> PathBuf {
         let origin = td.join("origin.git");
         std::fs::create_dir_all(&origin).unwrap();
@@ -813,8 +945,9 @@ mod tests {
         git(&clone, &["config", "user.email", "watch-test@example.invalid"]);
         git(&clone, &["checkout", "-q", "-b", "main"]);
         commit_file(&clone, "seed.txt", "chore: seed");
+        git(&clone, &["branch", "develop"]);
         git(&clone, &["remote", "add", "origin", origin.to_str().unwrap()]);
-        git(&clone, &["push", "-q", "origin", "main"]);
+        git(&clone, &["push", "-q", "origin", "main", "develop"]);
         clone
     }
 
@@ -1022,5 +1155,191 @@ mod tests {
         assert!(err.contains("bad"), "got: {err}");
         // …and the good repo still got its trigger (fault isolation).
         assert_eq!(*spawned.lock().unwrap(), vec!["release/0.1.0".to_string()]);
+    }
+
+    // -- develop sync (cron tick base-branch ownership) ----------------------
+
+    fn origin_develop_sha(td: &Path) -> String {
+        git_out(&td.join("origin.git"), &["rev-parse", "refs/heads/develop"])
+    }
+
+    fn local_develop_sha(clone: &Path) -> String {
+        git_out(clone, &["rev-parse", "refs/heads/develop"])
+    }
+
+    /// Make local develop and origin/develop diverge: origin keeps a commit
+    /// the clone resets away; the clone takes a different one.
+    fn diverge_develop(clone: &Path) {
+        git(clone, &["checkout", "-q", "develop"]);
+        commit_file(clone, "origin-side.txt", "feat: origin side");
+        git(clone, &["push", "-q", "origin", "develop"]);
+        git(clone, &["reset", "-q", "--hard", "HEAD~1"]);
+        commit_file(clone, "local-side.txt", "feat: local side");
+        git(clone, &["checkout", "-q", "main"]);
+    }
+
+    #[test]
+    fn develop_sync_quiet_when_in_sync() {
+        let (_tmp, _guard) = hex::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let clone = watch_fixture(td.path());
+        let profile = watch_profile("fix", &clone);
+        assert_eq!(develop_sync_repo(&profile).unwrap(), None);
+    }
+
+    #[test]
+    fn develop_sync_pushes_strictly_ahead_local_develop() {
+        let (_tmp, _guard) = hex::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let clone = watch_fixture(td.path());
+        git(&clone, &["checkout", "-q", "develop"]);
+        commit_file(&clone, "ahead.txt", "feat: local ahead");
+        git(&clone, &["checkout", "-q", "main"]);
+        let local = local_develop_sha(&clone);
+        assert_ne!(origin_develop_sha(td.path()), local, "fixture: local is ahead");
+
+        let profile = watch_profile("fix", &clone);
+        let summary = develop_sync_repo(&profile).unwrap().expect("a push reports a summary");
+        assert!(summary.contains("pushed"), "got: {summary}");
+        // Origin fast-forwarded to the local head…
+        assert_eq!(origin_develop_sha(td.path()), local);
+        // …and the next tick is quiet (idempotent).
+        assert_eq!(develop_sync_repo(&profile).unwrap(), None);
+    }
+
+    #[test]
+    fn develop_sync_behind_only_is_quiet_and_touches_nothing() {
+        let (_tmp, _guard) = hex::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let clone = watch_fixture(td.path());
+        // Origin ahead of local: push a commit, then drop it locally.
+        git(&clone, &["checkout", "-q", "develop"]);
+        commit_file(&clone, "theirs.txt", "feat: theirs");
+        git(&clone, &["push", "-q", "origin", "develop"]);
+        git(&clone, &["reset", "-q", "--hard", "HEAD~1"]);
+        git(&clone, &["checkout", "-q", "main"]);
+        let origin_sha = origin_develop_sha(td.path());
+        let local = local_develop_sha(&clone);
+
+        let profile = watch_profile("fix", &clone);
+        assert_eq!(develop_sync_repo(&profile).unwrap(), None, "behind-only does nothing");
+        // No pull/rebase/reset/push happened on either side.
+        assert_eq!(origin_develop_sha(td.path()), origin_sha);
+        assert_eq!(local_develop_sha(&clone), local);
+    }
+
+    #[test]
+    fn develop_sync_diverged_alerts_loudly_and_errs() {
+        let (tmp, _guard) = hex::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let clone = watch_fixture(td.path());
+        diverge_develop(&clone);
+        let origin_sha = origin_develop_sha(td.path());
+        let local = local_develop_sha(&clone);
+
+        let profile = watch_profile("fix", &clone);
+        let err = format!("{:#}", develop_sync_repo(&profile).unwrap_err());
+        assert!(err.to_lowercase().contains("diverged"), "got: {err}");
+        // Divergence is NEVER auto-resolved: both sides untouched.
+        assert_eq!(origin_develop_sha(td.path()), origin_sha);
+        assert_eq!(local_develop_sha(&clone), local);
+        // S6: the deduped operator alert fired (stamp under HEX_DIR).
+        assert!(
+            tmp.path()
+                .join(".hex/run/alerts/release-develop-sync-diverged-fix.last")
+                .exists(),
+            "divergence must raise the operator alert"
+        );
+    }
+
+    #[test]
+    fn develop_sync_remote_missing_is_loud_err_never_creates() {
+        let (_tmp, _guard) = hex::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let clone = watch_fixture(td.path());
+        git(&clone, &["push", "-q", "origin", ":refs/heads/develop"]);
+
+        let profile = watch_profile("fix", &clone);
+        let err = format!("{:#}", develop_sync_repo(&profile).unwrap_err());
+        assert!(err.contains("develop"), "got: {err}");
+        // The sync never creates base branches on origin.
+        let gone = Command::new("git")
+            .args(["rev-parse", "--verify", "--quiet", "refs/heads/develop"])
+            .current_dir(td.path().join("origin.git"))
+            .output()
+            .unwrap();
+        assert!(!gone.status.success(), "origin develop must stay absent");
+    }
+
+    #[test]
+    fn develop_sync_defers_under_ceremony_lock() {
+        let (_tmp, _guard) = hex::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let clone = watch_fixture(td.path());
+        git(&clone, &["checkout", "-q", "develop"]);
+        commit_file(&clone, "ahead.txt", "feat: local ahead");
+        git(&clone, &["checkout", "-q", "main"]);
+        let origin_sha = origin_develop_sha(td.path());
+
+        let lock = hex::release::lock_file_path(&clone).unwrap();
+        std::fs::write(&lock, "pid=watch-test").unwrap();
+        let profile = watch_profile("fix", &clone);
+        let summary = develop_sync_repo(&profile).unwrap().expect("defer reports a summary");
+        assert!(summary.contains("deferred"), "got: {summary}");
+        assert_eq!(origin_develop_sha(td.path()), origin_sha, "no push under lock");
+
+        // Lock released → the next tick pushes.
+        std::fs::remove_file(&lock).unwrap();
+        develop_sync_repo(&profile).unwrap();
+        assert_eq!(origin_develop_sha(td.path()), local_develop_sha(&clone));
+    }
+
+    #[test]
+    fn develop_sync_missing_local_develop_is_loud_err() {
+        let (_tmp, _guard) = hex::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let clone = watch_fixture(td.path());
+        git(&clone, &["branch", "-D", "develop"]);
+        let profile = watch_profile("fix", &clone);
+        let err = format!("{:#}", develop_sync_repo(&profile).unwrap_err());
+        assert!(err.contains("develop"), "got: {err}");
+    }
+
+    #[test]
+    fn watch_all_sync_failure_never_blocks_branch_watch() {
+        let (tmp, _guard) = hex::telemetry::test_support::isolate();
+        let hex_dir = tmp.path().to_path_buf();
+        let td = tempfile::tempdir().unwrap();
+        let clone = watch_fixture(td.path());
+        diverge_develop(&clone);
+        push_branch(&clone, "release/0.1.0", "feature.txt");
+        let origin_sha = origin_develop_sha(td.path());
+
+        let profile = watch_profile("fix", &clone);
+        let (spawned, spawn) = recorder();
+        let err = format!("{:#}", watch_all(&hex_dir, &[profile], &spawn).unwrap_err());
+        // The diverged develop failed the tick loudly…
+        assert!(err.contains("develop-sync"), "got: {err}");
+        // …but the release/* watch still ran and triggered (fault isolation)…
+        assert_eq!(*spawned.lock().unwrap(), vec!["release/0.1.0".to_string()]);
+        // …and the divergence was not auto-resolved.
+        assert_eq!(origin_develop_sha(td.path()), origin_sha);
+    }
+
+    #[test]
+    fn watch_all_pushes_ahead_develop_on_watched_repos() {
+        let (tmp, _guard) = hex::telemetry::test_support::isolate();
+        let hex_dir = tmp.path().to_path_buf();
+        let td = tempfile::tempdir().unwrap();
+        let clone = watch_fixture(td.path());
+        git(&clone, &["checkout", "-q", "develop"]);
+        commit_file(&clone, "ahead.txt", "feat: local ahead");
+        git(&clone, &["checkout", "-q", "main"]);
+
+        let profile = watch_profile("fix", &clone);
+        let (spawned, spawn) = recorder();
+        watch_all(&hex_dir, &[profile], &spawn).unwrap();
+        assert_eq!(origin_develop_sha(td.path()), local_develop_sha(&clone));
+        assert!(spawned.lock().unwrap().is_empty(), "no release branches, no trigger");
     }
 }

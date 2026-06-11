@@ -40,7 +40,10 @@
 //! # $HEX_DIR/.hex/config/releases.toml, never in foundation source) and is
 //! # REQUIRED when watch = true. watch opts the profile in to the branch
 //! # watch (default false — strictly opt-in; the manual `release.requested`
-//! # event path ignores it).
+//! # event path ignores it). A watched profile's develop branch is also
+//! # kept pushed: each tick fast-forwards origin when the local clone is
+//! # strictly ahead ([`sync_develop_to_origin`], same audited push path as
+//! # the ceremony) and alerts loudly on divergence — never auto-resolved.
 //! repo_dir = "/absolute/path/to/local/clone"
 //! watch    = true
 //! ```
@@ -1456,6 +1459,120 @@ fn verify_pushed(repo_root: &Path, branch: &str, expected_sha: &str) -> Result<(
              {expected_sha} — release ABORTED",
             other.unwrap_or("<absent>")
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Base-branch sync (oss-releaser develop-sync) — the only push path outside
+// the cut ceremony. Strictly-ahead fast-forwards ONLY; divergence is an
+// operator problem and is reported as data, never auto-resolved.
+// ---------------------------------------------------------------------------
+
+/// Pure ahead/behind/diverged classification of one local base branch
+/// against its origin counterpart, from the two SHAs and the two ancestry
+/// answers. Pure so the matrix is unit-testable without a repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevelopSyncClass {
+    InSync,
+    Ahead,
+    Behind,
+    Diverged,
+    RemoteMissing,
+}
+
+fn classify_develop_sync(
+    local_sha: &str,
+    origin_sha: Option<&str>,
+    origin_is_ancestor_of_local: bool,
+    local_is_ancestor_of_origin: bool,
+) -> DevelopSyncClass {
+    match origin_sha {
+        None => DevelopSyncClass::RemoteMissing,
+        Some(o) if o == local_sha => DevelopSyncClass::InSync,
+        Some(_) => match (origin_is_ancestor_of_local, local_is_ancestor_of_origin) {
+            (true, false) => DevelopSyncClass::Ahead,
+            (false, true) => DevelopSyncClass::Behind,
+            (false, false) => DevelopSyncClass::Diverged,
+            // Two DISTINCT commits cannot each be the other's ancestor.
+            // Inconsistent evidence means the repo lied — never conclude
+            // "safe to push" from it; treat as diverged (operator problem).
+            (true, true) => DevelopSyncClass::Diverged,
+        },
+    }
+}
+
+/// What one develop-sync pass did (or refused to do).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DevelopSyncOutcome {
+    /// origin already equals the local head — nothing to do.
+    InSync,
+    /// Local was strictly ahead: origin was fast-forwarded `from → to`
+    /// through the ceremony's audited push path and the result verified.
+    Pushed { from: String, to: String },
+    /// Origin is strictly ahead of local — nothing to push; catching the
+    /// local clone up is not the sync's job (it never touches local refs).
+    Behind { local: String, origin: String },
+    /// Each side has commits the other lacks. The sync NEVER resolves this
+    /// (no push, no pull/rebase/reset) — the caller alerts the operator.
+    Diverged { local: String, origin: String },
+    /// Origin has no such branch. The sync never CREATES base branches on
+    /// origin — an absent base branch on a watched repo is an operator
+    /// problem, not a fast-forward.
+    RemoteMissing { local: String },
+}
+
+/// Compare the local `develop` branch against `origin/<develop>` and
+/// fast-forward origin when — and only when — local is strictly ahead.
+/// The push goes through the SAME audited path as the cut ceremony:
+/// [`push_ref`] (carries `HEX_RELEASE_PIPELINE=1` for the git-guard) plus
+/// the independent [`verify_pushed`] SHA check. Every other state is
+/// returned as data for the caller to act on; local refs are NEVER
+/// modified (the ancestry fetch downloads objects only).
+pub fn sync_develop_to_origin(repo_root: &Path, develop: &str) -> Result<DevelopSyncOutcome> {
+    let branch_ref = format!("refs/heads/{develop}");
+    let local = rev_parse(repo_root, &branch_ref)
+        .with_context(|| format!("resolving local {develop} — does the branch exist?"))?;
+    let origin = ls_remote_sha(repo_root, &branch_ref)
+        .with_context(|| format!("checking origin for {develop}"))?;
+
+    // The two classifications that need no ancestry (and no objects).
+    if origin.as_deref() == Some(local.as_str()) {
+        return Ok(DevelopSyncOutcome::InSync);
+    }
+    let Some(origin) = origin else {
+        return Ok(DevelopSyncOutcome::RemoteMissing { local });
+    };
+
+    // Ancestry needs origin's head in the local object db. When origin is
+    // ahead or diverged that commit may be unknown locally — fetch the
+    // branch (objects + remote-tracking ref only; never a local branch).
+    if !ref_exists(repo_root, &format!("{origin}^{{commit}}")) {
+        git_stdout(repo_root, &["fetch", "--quiet", "origin", develop])
+            .with_context(|| format!("fetching origin/{develop} for the ancestry check"))?;
+        if !ref_exists(repo_root, &format!("{origin}^{{commit}}")) {
+            bail!(
+                "origin/{develop} head {} is still unknown locally after \
+                 `git fetch origin {develop}` — origin moved mid-sync; retrying \
+                 next tick",
+                short_sha(&origin)
+            );
+        }
+    }
+
+    let origin_anc = is_ancestor(repo_root, &origin, &local)?;
+    let local_anc = is_ancestor(repo_root, &local, &origin)?;
+    match classify_develop_sync(&local, Some(&origin), origin_anc, local_anc) {
+        DevelopSyncClass::Ahead => {
+            push_ref(repo_root, develop)?;
+            verify_pushed(repo_root, develop, &local)?;
+            Ok(DevelopSyncOutcome::Pushed { from: origin, to: local })
+        }
+        DevelopSyncClass::Behind => Ok(DevelopSyncOutcome::Behind { local, origin }),
+        DevelopSyncClass::Diverged => Ok(DevelopSyncOutcome::Diverged { local, origin }),
+        // Unreachable here (equal/absent SHAs returned above), but answer
+        // consistently rather than panic if the impossible happens.
+        DevelopSyncClass::InSync => Ok(DevelopSyncOutcome::InSync),
+        DevelopSyncClass::RemoteMissing => Ok(DevelopSyncOutcome::RemoteMissing { local }),
     }
 }
 
@@ -3762,6 +3879,162 @@ match_dir = "boi"
             git_stdout(&repo, &["symbolic-ref", "--short", "HEAD"]).unwrap().trim(),
             "develop"
         );
+    }
+
+    // -- develop sync --------------------------------------------------------------
+
+    /// A second working clone of the fixture origin — the "someone else
+    /// pushed" actor whose commits the first clone does NOT have in its
+    /// local object db (exercises the sync's fetch path).
+    fn second_clone(td: &Path, name: &str) -> PathBuf {
+        let origin = td.join("origin.git");
+        let dest = td.join(name);
+        git(td, &["clone", "-q", origin.to_str().unwrap(), dest.to_str().unwrap()]);
+        git(&dest, &["config", "commit.gpgsign", "false"]);
+        let nohooks = td.join("nohooks");
+        git(&dest, &["config", "core.hooksPath", nohooks.to_str().unwrap()]);
+        dest
+    }
+
+    fn add_commit(repo: &Path, file: &str, subject: &str) {
+        std::fs::write(repo.join(file), format!("{subject}\n")).unwrap();
+        git(repo, &["add", "-A"]);
+        commit(repo, subject);
+    }
+
+    #[test]
+    fn classify_develop_sync_covers_the_full_matrix() {
+        use DevelopSyncClass as C;
+        // No origin branch at all.
+        assert_eq!(classify_develop_sync("aaa", None, false, false), C::RemoteMissing);
+        // Identical SHAs are in sync regardless of the ancestry answers.
+        assert_eq!(classify_develop_sync("aaa", Some("aaa"), false, false), C::InSync);
+        assert_eq!(classify_develop_sync("aaa", Some("aaa"), true, true), C::InSync);
+        // origin is an ancestor of local (and not vice versa): strictly ahead.
+        assert_eq!(classify_develop_sync("bbb", Some("aaa"), true, false), C::Ahead);
+        // local is an ancestor of origin: strictly behind.
+        assert_eq!(classify_develop_sync("aaa", Some("bbb"), false, true), C::Behind);
+        // Neither is an ancestor of the other: diverged.
+        assert_eq!(classify_develop_sync("aaa", Some("bbb"), false, false), C::Diverged);
+        // Two DISTINCT commits cannot each be the other's ancestor; on
+        // inconsistent evidence the classifier must never say "push".
+        assert_eq!(classify_develop_sync("aaa", Some("bbb"), true, true), C::Diverged);
+    }
+
+    #[test]
+    fn develop_sync_in_sync_is_a_noop() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        assert_eq!(
+            sync_develop_to_origin(&repo, "develop").unwrap(),
+            DevelopSyncOutcome::InSync
+        );
+    }
+
+    #[test]
+    fn develop_sync_pushes_when_local_is_strictly_ahead() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        let origin = td.path().join("origin.git");
+        let before = rev_parse(&origin, "refs/heads/develop").unwrap();
+        git(&repo, &["checkout", "-q", "develop"]);
+        add_commit(&repo, "ahead.txt", "feat: local ahead");
+        let local = rev_parse(&repo, "refs/heads/develop").unwrap();
+
+        let out = sync_develop_to_origin(&repo, "develop").unwrap();
+        assert_eq!(out, DevelopSyncOutcome::Pushed { from: before, to: local.clone() });
+        // Origin was fast-forwarded to the local head — and verified.
+        assert_eq!(rev_parse(&origin, "refs/heads/develop").unwrap(), local);
+        // Idempotent: the next pass is quiet.
+        assert_eq!(
+            sync_develop_to_origin(&repo, "develop").unwrap(),
+            DevelopSyncOutcome::InSync
+        );
+    }
+
+    #[test]
+    fn develop_sync_behind_only_touches_nothing_even_with_unknown_objects() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        let origin = td.path().join("origin.git");
+        let other = second_clone(td.path(), "other");
+        git(&other, &["checkout", "-q", "develop"]);
+        add_commit(&other, "theirs.txt", "feat: theirs");
+        git(&other, &["push", "-q", "origin", "develop"]);
+
+        let origin_sha = rev_parse(&origin, "refs/heads/develop").unwrap();
+        let local = rev_parse(&repo, "refs/heads/develop").unwrap();
+        // The first clone does NOT have origin's new commit — the sync must
+        // fetch objects (never local refs) to answer the ancestry question.
+        assert!(!ref_exists(&repo, &format!("{origin_sha}^{{commit}}")));
+
+        let out = sync_develop_to_origin(&repo, "develop").unwrap();
+        assert_eq!(
+            out,
+            DevelopSyncOutcome::Behind { local: local.clone(), origin: origin_sha.clone() }
+        );
+        // Nothing moved on either side.
+        assert_eq!(rev_parse(&repo, "refs/heads/develop").unwrap(), local);
+        assert_eq!(rev_parse(&origin, "refs/heads/develop").unwrap(), origin_sha);
+    }
+
+    #[test]
+    fn develop_sync_diverged_refuses_and_touches_nothing() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        let origin = td.path().join("origin.git");
+        let other = second_clone(td.path(), "other");
+        git(&other, &["checkout", "-q", "develop"]);
+        add_commit(&other, "theirs.txt", "feat: theirs");
+        git(&other, &["push", "-q", "origin", "develop"]);
+        git(&repo, &["checkout", "-q", "develop"]);
+        add_commit(&repo, "ours.txt", "feat: ours");
+
+        let origin_sha = rev_parse(&origin, "refs/heads/develop").unwrap();
+        let local = rev_parse(&repo, "refs/heads/develop").unwrap();
+        let out = sync_develop_to_origin(&repo, "develop").unwrap();
+        assert_eq!(
+            out,
+            DevelopSyncOutcome::Diverged { local: local.clone(), origin: origin_sha.clone() }
+        );
+        // NEVER auto-resolved: no push, no pull/rebase/reset on either side.
+        assert_eq!(rev_parse(&repo, "refs/heads/develop").unwrap(), local);
+        assert_eq!(rev_parse(&origin, "refs/heads/develop").unwrap(), origin_sha);
+    }
+
+    #[test]
+    fn develop_sync_remote_missing_is_reported_never_created() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        let origin = td.path().join("origin.git");
+        git(&repo, &["push", "-q", "origin", ":refs/heads/develop"]);
+        let local = rev_parse(&repo, "refs/heads/develop").unwrap();
+        assert_eq!(
+            sync_develop_to_origin(&repo, "develop").unwrap(),
+            DevelopSyncOutcome::RemoteMissing { local }
+        );
+        // The sync never creates base branches on origin.
+        assert!(!ref_exists(&origin, "refs/heads/develop"));
+    }
+
+    #[test]
+    fn develop_sync_missing_local_branch_is_loud_err() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        git(&repo, &["branch", "-D", "develop"]);
+        let err = format!("{:#}", sync_develop_to_origin(&repo, "develop").unwrap_err());
+        assert!(err.contains("develop"), "got: {err}");
+    }
+
+    #[test]
+    fn develop_sync_ls_remote_failure_is_loud_err() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        let gone = td.path().join("gone.git");
+        git(&repo, &["remote", "set-url", "origin", gone.to_str().unwrap()]);
+        // "Cannot check origin" must be a hard error, never read as absent.
+        let err = format!("{:#}", sync_develop_to_origin(&repo, "develop").unwrap_err());
+        assert!(err.contains("origin"), "got: {err}");
     }
 
     // -- test helpers ------------------------------------------------------------

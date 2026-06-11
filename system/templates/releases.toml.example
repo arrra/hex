@@ -53,6 +53,12 @@ develop_branch = "develop"     # default
 #            branch watch. Watching is strictly opt-in; a profile with a
 #            configured repo_dir opts back out with watch = false. The manual
 #            `release.requested` event path is unaffected by this flag.
+#            A watched repo also gets develop-sync on every tick: the
+#            releaser owns pushing base branches, so when the local develop
+#            is strictly ahead of origin it is pushed (same guarded push
+#            path as the ceremony); a diverged develop is alerted loudly and
+#            NEVER auto-resolved (no pull/rebase/reset/force-push); in-sync
+#            or behind-only does nothing.
 # -----------------------------------------------------------------------------
 repo_dir = "/absolute/path/to/local/clone"   # REQUIRED when watch = true
 watch = true                                 # default false — opt-in
