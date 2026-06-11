@@ -149,3 +149,5 @@ headers; docs ride the change; registry pinned by a harness test).
 | [testing.md](testing.md) | Test matrix and how to run it |
 | [versioning.md](versioning.md) | Version source of truth and bump flow |
 | [hex-ops.md](hex-ops.md) | Operational scripts reference |
+| [iii-hex.md](iii-hex.md) | iii engine mental model and trigger config — read when wiring iii workers or triggers |
+| [doc-maintenance.md](doc-maintenance.md) | Doc routing map + verified-claim checks — read before any documentation pass |
