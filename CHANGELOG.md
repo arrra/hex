@@ -2,12 +2,13 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
-## [2026-06-11] — remove Happy title-nudge hook (Happy sunset 2026-06-09)
+## [2026-06-11] — remove session title-nudge hook (third-party mobile session manager sunset 2026-06-09)
 
-Happy (mobile control plane) was sunset 2026-06-09; hex uses native Claude Code
-Remote Control. The harness still shipped the Happy session-title nudge, which
-told sessions to call the now-nonexistent `mcp__happy__change_title` MCP tool
-and `create_dir_all`'d `~/.happy/state` on every user prompt.
+The third-party mobile session manager (mobile control plane) was sunset
+2026-06-09; hex uses native Claude Code Remote Control. The harness still
+shipped the manager's session-title nudge, which told sessions to call a
+now-removed MCP titling tool and `create_dir_all`'d the manager's state dir on
+every user prompt.
 
 ### Removed
 - **`title_nudge` hook** (`system/harness/src/hook/title_nudge.rs`, added
