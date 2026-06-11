@@ -12,7 +12,7 @@ use hex::workers;
 fn cron_exprs(w: &hex::worker::Worker) -> Vec<String> {
     w.handlers
         .iter()
-        .filter_map(|(spec, _)| match spec {
+        .filter_map(|(_name, spec, _)| match spec {
             TriggerSpec::Cron { expression } => Some(expression.clone()),
             _ => None,
         })
@@ -139,7 +139,7 @@ fn workers_registry_oss_releaser_release_requested_event() {
         1,
         "oss-releaser must register exactly one handler"
     );
-    let (spec, _h) = &w.handlers[0];
+    let (_name, spec, _h) = &w.handlers[0];
     assert_eq!(
         *spec,
         TriggerSpec::State {

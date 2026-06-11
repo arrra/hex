@@ -43,7 +43,7 @@ mod tests {
     fn cron_exprs(w: &Worker) -> Vec<String> {
         w.handlers
             .iter()
-            .filter_map(|(spec, _)| match spec {
+            .filter_map(|(_name, spec, _)| match spec {
                 TriggerSpec::Cron { expression } => Some(expression.clone()),
                 _ => None,
             })

@@ -1909,7 +1909,7 @@ fn trigger_summary(w: &hex::worker::Worker) -> String {
     use hex::worker::TriggerSpec::*;
     w.handlers
         .iter()
-        .map(|(spec, _)| match spec {
+        .map(|(_name, spec, _)| match spec {
             Cron { expression } => format!("cron({expression})"),
             State { scope, key } => format!("state({scope}/{key})"),
             Queue { queue } => format!("queue({queue})"),

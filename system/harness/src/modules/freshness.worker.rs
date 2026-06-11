@@ -24,5 +24,5 @@ fn run_freshness(_e: Event, ctx: Ctx) -> Result<()> {
 
 /// Build the `hex-freshness` worker.
 pub fn worker() -> Worker {
-    Worker::new("hex-freshness").on_cron(CRON_DAILY_0900, run_freshness)
+    Worker::new("hex-freshness").on_cron_named("daily", CRON_DAILY_0900, run_freshness)
 }
