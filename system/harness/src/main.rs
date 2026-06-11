@@ -130,6 +130,13 @@ enum Commands {
         #[command(subcommand)]
         command: ModuleCommands,
     },
+    /// Ledger-anchored charter governance: register/amend/verify/log.
+    /// Out-of-band edits surface as DRIFT (nonzero exit).
+    #[command(display_order = 14)]
+    Charter {
+        #[command(subcommand)]
+        command: CharterCommands,
+    },
     /// Hash-chained ledger ops (append-only, tamper-evident).
     #[command(display_order = 14)]
     Ledger {
@@ -285,6 +292,53 @@ enum GatekeeperCommands {
         #[arg(long)]
         store: std::path::PathBuf,
     },
+}
+
+#[derive(Subcommand)]
+enum CharterCommands {
+    /// Anchor a charter file's CURRENT content as v1 (genesis row).
+    Register {
+        /// Charter name (e.g. proposer).
+        name: String,
+        /// Workspace-relative path (e.g. projects/agent-infra/charters/proposer.md).
+        path: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long, default_value = "hex-cli")]
+        by: String,
+    },
+    /// Replace a charter's content via the ONLY sanctioned write path.
+    /// Refuses if the on-disk file drifted from the recorded hash.
+    Amend {
+        name: String,
+        /// File holding the complete new charter content.
+        #[arg(long)]
+        file: PathBuf,
+        #[arg(long)]
+        why: String,
+        #[arg(long, default_value = "hex-cli")]
+        by: String,
+    },
+    /// Accept an out-of-band edit into the trail, explicitly (drift_accepted=true).
+    Rebaseline {
+        name: String,
+        #[arg(long)]
+        why: String,
+        #[arg(long, default_value = "hex-cli")]
+        by: String,
+    },
+    /// Recompute every registered charter's sha256 vs the ledger. Drift =
+    /// loud stderr + nonzero exit; --alert also appends a ledger ALERT row.
+    Verify {
+        #[arg(long)]
+        alert: bool,
+    },
+    /// Print the governance trail (oldest first), optionally for one name.
+    Log {
+        name: Option<String>,
+    },
+    /// Current registered charters: name, version, hash, path.
+    Show,
 }
 
 #[derive(Subcommand)]
@@ -984,6 +1038,62 @@ fn main() {
                 std::process::exit(module_set_enabled(&name, false));
             }
         },
+        Commands::Charter { command } => {
+            let hex_dir = get_hex_dir();
+            match command {
+                CharterCommands::Register { name, path, why, by } => {
+                    match hex::charter::register(&hex_dir, &name, &path, &by, &why) {
+                        Ok(st) => println!("charter '{}' registered at v{} ({})", st.name, st.version, st.sha256),
+                        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                    }
+                }
+                CharterCommands::Amend { name, file, why, by } => {
+                    match hex::charter::amend(&hex_dir, &name, &file, &by, &why) {
+                        Ok(st) => println!("charter '{}' amended to v{} ({})", st.name, st.version, st.sha256),
+                        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                    }
+                }
+                CharterCommands::Rebaseline { name, why, by } => {
+                    match hex::charter::rebaseline(&hex_dir, &name, &by, &why) {
+                        Ok(st) => println!("charter '{}' rebaselined to v{} ({}) — drift accepted into the trail", st.name, st.version, st.sha256),
+                        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                    }
+                }
+                CharterCommands::Verify { alert } => {
+                    match hex::charter::verify(&hex_dir, alert) {
+                        Ok(drifts) if drifts.is_empty() => {
+                            println!("charter verify OK ({} registered)", hex::charter::latest_states(&hex_dir).map(|m| m.len()).unwrap_or(0));
+                        }
+                        Ok(drifts) => {
+                            eprintln!("charter verify: {} DRIFTED", drifts.len());
+                            std::process::exit(1);
+                        }
+                        Err(e) => { eprintln!("{e}"); std::process::exit(2); }
+                    }
+                }
+                CharterCommands::Log { name } => {
+                    match hex::charter::log(&hex_dir, name.as_deref()) {
+                        Ok(rows) => {
+                            for (ts, v) in rows {
+                                println!("{} {}", chrono::DateTime::from_timestamp(ts, 0).map(|d| d.to_rfc3339()).unwrap_or_else(|| ts.to_string()), v);
+                            }
+                        }
+                        Err(e) => { eprintln!("{e}"); std::process::exit(2); }
+                    }
+                }
+                CharterCommands::Show => {
+                    match hex::charter::latest_states(&hex_dir) {
+                        Ok(states) if states.is_empty() => println!("no charters registered"),
+                        Ok(states) => {
+                            for (_, st) in states {
+                                println!("{:<12} v{:<3} {}  {}", st.name, st.version, st.sha256, st.path);
+                            }
+                        }
+                        Err(e) => { eprintln!("{e}"); std::process::exit(2); }
+                    }
+                }
+            }
+        }
         Commands::Ledger { command } => {
             let hex_dir = get_hex_dir();
             let path = hex::ledger::default_path(&hex_dir);
