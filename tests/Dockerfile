@@ -4,8 +4,14 @@ FROM rust:1-slim AS hex-builder
 RUN apt-get update && apt-get install -y --no-install-recommends \
     pkg-config libssl-dev g++ && rm -rf /var/lib/apt/lists/*
 WORKDIR /build
-COPY system/harness/ .
-RUN cargo build 2>&1
+# The harness depends on the sibling system/code-intel crate by path
+# (scipd = { path = "../code-intel" }) — copying only system/harness/
+# breaks the in-container build (deterministic gate RED, 2026-06-11).
+# Copy the workspace manifests + both members and build by -p.
+COPY Cargo.toml Cargo.lock ./
+COPY system/harness/ system/harness/
+COPY system/code-intel/ system/code-intel/
+RUN cargo build -p hex-harness 2>&1
 
 # Stage 2: Test runner
 FROM python:3.10-slim

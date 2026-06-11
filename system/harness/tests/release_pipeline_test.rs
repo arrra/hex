@@ -175,18 +175,13 @@ fn install_origin_tagger(origin: &Path, tag: &str, which: &str) {
     make_executable(&hook);
 }
 
-/// The pre-push exec shim, exactly the scope-item-8 shape: shebang, resolve
-/// the hex binary (repo-local release build first, then PATH), warn-and-allow
-/// when absent, exec `hex git-guard pre-push` forwarding args + stdin.
-const PRE_PUSH_SHIM: &str = "#!/bin/sh\n\
-# pre-push shim — all branch logic lives in `hex git-guard pre-push`.\n\
-hex_bin=\"$(git rev-parse --show-toplevel)/target/release/hex\"\n\
-if [ ! -x \"$hex_bin\" ]; then hex_bin=\"$(command -v hex || true)\"; fi\n\
-if [ -z \"$hex_bin\" ]; then\n\
-  echo \"WARN: hex binary not found — skipping git-guard pre-push\" >&2\n\
-  exit 0\n\
-fi\n\
-exec \"$hex_bin\" git-guard pre-push \"$@\"\n";
+/// The pre-push exec shim — the REAL shipped artifact, not a copy. This test
+/// previously embedded its own duplicate of the shim text, so the shipped
+/// `.githooks/pre-push` could drift freely while the test stayed green
+/// against its private copy (oss-releaser review nonblocker, 2026-06-11).
+/// `include_str!` makes the shipped file the single source of truth: every
+/// behavioral assertion below now exercises exactly what users run.
+const PRE_PUSH_SHIM: &str = include_str!("../../../.githooks/pre-push");
 
 /// Install the shim as the repo's pre-push hook via `core.hooksPath`.
 fn install_prepush_shim(fix: &Fixture) {
