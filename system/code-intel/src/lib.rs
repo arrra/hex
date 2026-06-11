@@ -9,8 +9,10 @@
 
 pub mod envelope;
 pub mod error;
+pub mod freshness;
 pub mod ingest;
 pub mod query;
+pub mod respond;
 pub mod schema;
 pub mod store;
 pub mod workspace;
