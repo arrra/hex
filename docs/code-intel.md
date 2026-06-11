@@ -40,7 +40,7 @@ the how-to.
 ```bash
 cargo build --release -p scipd        # binary at target/release/cq
 cq register ~/github.com/mrap/hex-foundation
-# {"registered":"ab12cd34ef56","root":"/Users/you/github.com/mrap/hex-foundation"}
+# {"registered":"ab12cd34ef56","root":"/path/to/hex-foundation"}
 
 cq index --workspace ~/github.com/mrap/hex-foundation
 # Runs rust-analyzer scip over the primary checkout (~40s, ~3GB RSS on this

@@ -4,7 +4,7 @@ All notable changes to hex-foundation will be documented in this file.
 
 ## [Unreleased] — memory pipeline holistic fix
 
-One consolidated pass over the memory pipeline (reference: mrap-hex assessment
+One consolidated pass over the memory pipeline (reference: personal-instance assessment
 2026-06-11 / FIX-007…FIX-011):
 
 - **Findings≠failure exit semantics:** consolidate findings are reported, not

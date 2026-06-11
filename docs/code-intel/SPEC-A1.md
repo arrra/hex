@@ -2,7 +2,7 @@
 
 **Date:** 2026-06-11
 **Branch:** `feature/code-intel-a1`
-**Design source:** mrap-hex `projects/system-improvement/research/2026-06-11-code-intel-optimal-design.md` (blind design competition, SCIPHQ winner + grafts)
+**Design source:** personal-instance `projects/system-improvement/research/2026-06-11-code-intel-optimal-design.md` (blind design competition, SCIPHQ winner + grafts)
 **Phase:** A1 = index-only. No live rust-analyzer pool (A2), no daemon process (deferred — see Deviations).
 
 ---
@@ -220,12 +220,12 @@ which `cq doctor` verifies).
 ## 10. Risks / open items carried into the plan
 
 - Smoke test #1 (emit time/RAM) and #2 (callers quality) are running; results land in
-  mrap-hex `projects/system-improvement/research/smoke-tests/`. Plan tasks consuming their
+  the personal instance's `projects/system-improvement/research/smoke-tests/`. Plan tasks consuming their
   outputs are marked. Neither blocks the build of indexer/query plumbing.
 - `rust-analyzer scip` output fidelity on our macro-heavy code: golden fixture includes macro
   cases so regressions are caught at test time, not in production.
 - This is hex-foundation core tooling (Standing Order S1): all work on this branch, merged to
-  foundation `main` only when complete end-to-end; mrap-hex consumes via `/hex-upgrade`.
+  foundation `main` only when complete end-to-end; personal instances consume via `/hex-upgrade`.
 
 ## 11. Acceptance record (Task 12 audit)
 

@@ -2,7 +2,7 @@
 
 > **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
 
-**Goal:** Make every memory-pipeline failure loud, fix the Stop-hook capture race, stop the nightly-consolidation silent skip, repair vector-store gaps, add DB maintenance + backups, and give facts semantic recall — closing all 22 confirmed findings from the 2026-06-11 memory-subsystem assessment (mrap-hex `projects/system-improvement/audits/2026-06-11-memory-subsystem-assessment.md`, FIX-007…FIX-011).
+**Goal:** Make every memory-pipeline failure loud, fix the Stop-hook capture race, stop the nightly-consolidation silent skip, repair vector-store gaps, add DB maintenance + backups, and give facts semantic recall — closing all 22 confirmed findings from the 2026-06-11 memory-subsystem assessment (personal-instance `projects/system-improvement/audits/2026-06-11-memory-subsystem-assessment.md`, FIX-007…FIX-011).
 
 **Architecture:** Targeted hardening of the existing pipeline (no rebuild — the assessment confirmed the structure is sound; the failures are all at observability boundaries and edge paths). Three systemic changes ripple through everything: (1) *findings ≠ failure* — workspace lint findings stop driving exit codes; only operational errors do; (2) *every silent path gets a telemetry event + (where it matters) an alert*; (3) *scheduled self-repair* — a weekly `hex memory maintain` job sweeps orphans, optimizes FTS, vacuums, and backfills missing embeddings, so one-off corruption stops being permanent.
 
@@ -169,7 +169,7 @@ git commit -m "telemetry: slice events carry start offset; child detail keeps he
 - Modify: `system/harness/src/consolidate.rs:69-142` (`run`)
 - Test: in-file tests `consolidate.rs` + `system/harness/tests/consolidate_orchestrator.rs`
 
-Root cause of "89/89 error completions": Layer 1 (doctor) reports workspace lint findings (broken links, orphan projects — 20 currently in mrap-hex) and `run()` escalates ANY nonzero L1 to exit 1. Every quick tick therefore "fails" forever, drowning real failures.
+Root cause of "89/89 error completions": Layer 1 (doctor) reports workspace lint findings (broken links, orphan projects — 20 currently in the personal instance) and `run()` escalates ANY nonzero L1 to exit 1. Every quick tick therefore "fails" forever, drowning real failures.
 
 - [ ] **Step 1: Write the failing test**
 
@@ -1451,7 +1451,7 @@ git commit -m "feat: facts semantic recall — facts_vec populated via maintain 
 **Files:**
 - Modify: `CHANGELOG.md` (top, follow the existing entry format)
 
-- [ ] **Step 1:** Add one consolidated entry under an Unreleased/next-version heading listing: findings≠failure exit semantics; full-consolidate lock wait + alerts; quick-tick budget + cron offset; nightly-full-liveness doctor check + 48h audit window; deduped alert pathway; stdin-first Stop-hook capture; distill-child reaper; drain-timeout telemetry; `hex backup`; vector backfill + stats gaps + KNN floor; `hex memory maintain` weekly; facts semantic recall. Reference: mrap-hex assessment 2026-06-11 / FIX-007…FIX-011.
+- [ ] **Step 1:** Add one consolidated entry under an Unreleased/next-version heading listing: findings≠failure exit semantics; full-consolidate lock wait + alerts; quick-tick budget + cron offset; nightly-full-liveness doctor check + 48h audit window; deduped alert pathway; stdin-first Stop-hook capture; distill-child reaper; drain-timeout telemetry; `hex backup`; vector backfill + stats gaps + KNN floor; `hex memory maintain` weekly; facts semantic recall. Reference: personal-instance assessment 2026-06-11 / FIX-007…FIX-011.
 
 - [ ] **Step 2:** `git add CHANGELOG.md && git commit -m "changelog: memory pipeline holistic fix"`
 
@@ -1459,13 +1459,13 @@ Do NOT bump `Cargo.toml` version or create tags — the release pipeline owns ve
 
 ---
 
-## Appendix: mrap-hex local operations (NOT part of the foundation work — run after `/hex-upgrade` deploys this)
+## Appendix: personal-instance local operations (NOT part of the foundation work — run after `/hex-upgrade` deploys this)
 
 These are data operations on the live instance; BOI workers must not touch `~/hex`.
 
 1. **Deploy:** `/hex-upgrade` (or `hex upgrade --local`) once the foundation work merges; verify `hex memory maintain --help` and `hex backup --help` exist post-deploy (decoy-binary check: the deployed binary builds from repo-root `target/release/hex`, never `system/harness/target/`).
 2. **Orphan:** the reaper kills PID 14882 on first harness restart — verify with `ps -p 14882` (expect gone). It has no pidfile (predates them) — if still alive, kill manually: `kill -9 14882`.
-3. **Stray DB:** `rm /Users/mrap/hex/.hex/memory/memory.db` after confirming `stat -f%z` reports 0 bytes.
+3. **Stray DB:** `rm $HEX_DIR/.hex/memory/memory.db` after confirming `stat -f%z` reports 0 bytes.
 4. **One-time reclaim:** `hex memory maintain --vacuum --backfill-facts` (expect ~305MB → ~100-150MB; ~649 facts embedded; orphan vectors swept).
 5. **Watermark rewind verification (data recovery for the ~480 poison-skipped slices):** old skip events lack `offset=` (Task 1 adds it going forward) — reconstruct per-file: for each path in `SELECT detail FROM events WHERE event='distill::slice' AND status='skipped'` (telemetry events.db), range-chain `bytes=` of prior ok/skipped events from offset 0 to compute where skipping began; if that offset < current `transcript_files.last_offset`, the span was never re-extracted → `UPDATE transcript_files SET last_offset = <first_skip_offset>, consecutive_failures = 0 WHERE path = '<path>'`. Dedup/judge absorbs re-extraction (verified in the 2026-06-10 fix; ≈ $0.15/96MB on deepseek). Cross-check against the Jun-10 rewind — only rewind files it missed.
 6. **Stop-hook smoke test:** end a session turn, then `ls -la raw/transcripts/<this-session-id>.jsonl` — mtime seconds old; `sqlite3 .hex/telemetry/events.db "SELECT * FROM events WHERE source='hook::capture' ORDER BY id DESC LIMIT 3"` shows ok rows.

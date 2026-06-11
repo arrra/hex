@@ -88,7 +88,7 @@
 ### Task 9: Final audit + acceptance record
 
 - [ ] Silent-failure audit of all A2 code (same method as A1's T12).
-- [ ] Set pool_cap/mem_limit_mb defaults from smoke test #3 results (`research/smoke-tests/2026-06-11-ra-live-rss.md` in mrap-hex; orchestrator will quote values in your prompt).
+- [ ] Set pool_cap/mem_limit_mb defaults from smoke test #3 results (`research/smoke-tests/2026-06-11-ra-live-rss.md` in the personal instance; orchestrator will quote values in your prompt).
 - [ ] Full gates incl. `cargo test -p hex-harness` + `cargo build --release`. Run BOTH E2E scripts (A1's and A2's).
 - [ ] Write "## 8. Acceptance record" into SPEC-A2.md: A2-S1..A2-S10 (S10 = deployment, recorded as "orchestrator step" with the verification commands).
 - [ ] Commit.
