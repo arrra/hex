@@ -13,6 +13,7 @@ pub mod error;
 pub mod freshness;
 pub mod indexer;
 pub mod ingest;
+pub mod live;
 pub mod query;
 pub mod respond;
 pub mod schema;
