@@ -13,6 +13,7 @@ pub mod gatekeeper;
 pub mod harness;
 pub mod ledger;
 pub mod lint_gates;
+pub mod llm_cost;
 pub mod reconciler;
 pub mod capability_exec;
 pub mod charter;
