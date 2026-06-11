@@ -162,7 +162,7 @@ If your runtime exposes structured file/search tools, use them. If it only gives
 | Delegate work | Subagent | `boi dispatch <spec>` | BOI handles all delegation |
 | Track todos | TodoWrite | Write to `todo.md` | Same format, manual file write |
 
-**If web search is unavailable in your runtime:** for research tasks requiring web access, write a BOI spec with mode=generate and note the limitation in the spec context.
+**If web search is unavailable in your runtime:** for research tasks requiring web access, write a BOI spec and note the limitation in `[contract].scope`.
 
 ---
 
