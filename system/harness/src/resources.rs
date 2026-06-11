@@ -164,6 +164,129 @@ pub fn evaluate_rules(
     Ok(out)
 }
 
+/// Per-condition alert keys, sanitized to [A-Za-z0-9._-] — alert::notify
+/// interpolates the key into a stamp-file path (alert.rs) and dedupes 6h per
+/// key, so keys must be path-safe and per-condition.
+///
+/// MERGE NOTE: identical to `failures::alert_key` on the sibling branch
+/// (feature/hex-failures, plan 2026-06-11-hex-failures-detection.md). That
+/// module is not on this branch — dedupe to `crate::failures::alert_key` at
+/// merge and delete this private copy.
+fn alert_key(kind: &str, ident: &str) -> String {
+    let safe: String = ident
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '-' })
+        .collect::<String>()
+        .split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-");
+    format!("failures-{kind}-{safe}")
+}
+
+/// One sampler tick. Policy:
+/// - df every tick (4ms).
+/// - du when none in the last DU_INTERVAL_HOURS OR free fell ≥ DU_DELTA_GB
+///   since the last du tick (attribution data for the trend rule).
+/// - On breach: alert (deduped) + emit resource.pressure (LEVEL-triggered:
+///   re-emitted every tick while in breach) + on-pressure-only discovery
+///   pass and docker probe (gated on OrbStack actually running — du
+///   under-reports docker ~300x and `docker system df` can wake the VM).
+pub fn sample_tick(now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Breach>, String> {
+    let df = sample_df().ok_or("df sample failed")?;
+    record_df(&df);
+
+    let conn = crate::telemetry::open_ro().map_err(|e| e.to_string())?;
+    let last_du: Option<(String, String)> = conn
+        .query_row(
+            "SELECT ts, COALESCE(detail,'') FROM events
+             WHERE source='hex-resources' AND event='sample::du'
+             ORDER BY ts DESC LIMIT 1",
+            [],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok();
+    let last_df_free: Option<i64> = last_du.as_ref().and_then(|(ts, _)| {
+        conn.query_row(
+            "SELECT detail FROM events
+             WHERE source='hex-resources' AND event='sample::df' AND ts <= ?1
+             ORDER BY ts DESC LIMIT 1",
+            [ts],
+            |r| r.get::<_, String>(0),
+        )
+        .ok()
+        .and_then(|d| serde_json::from_str::<serde_json::Value>(&d).ok())
+        .and_then(|v| v["free_gb"].as_i64())
+    });
+    let du_due = match &last_du {
+        None => true,
+        Some((ts, _)) => chrono::DateTime::parse_from_rfc3339(ts)
+            .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() >= DU_INTERVAL_HOURS)
+            .unwrap_or(true)
+            || last_df_free.map_or(false, |prev| prev - df.free_gb >= DU_DELTA_GB),
+    };
+    if du_due {
+        let dirs: Vec<String> = WATCH_LIST.iter().map(|d| expand_home(d)).collect();
+        record_du(&du_sizes(&dirs));
+    }
+
+    let breaches = evaluate_rules(&df, now).map_err(|e| e.to_string())?;
+    for b in &breaches {
+        let (key_ident, msg, data) = match b {
+            Breach::Floor { free_gb } => (
+                "floor".to_string(),
+                format!("root free space {free_gb}G < {FLOOR_FREE_GB}G floor"),
+                serde_json::json!({ "category": "floor", "free_gb": free_gb }),
+            ),
+            Breach::Trend { dir, growth_gb, window_hours } => (
+                format!("trend-{dir}"),
+                format!("{dir} grew {growth_gb}G in {window_hours}h"),
+                serde_json::json!({ "category": "trend", "path": dir,
+                    "growth_gb": growth_gb, "window_hours": window_hours }),
+            ),
+        };
+        crate::alert::notify(&alert_key("resource", &key_ident), "resource pressure", &msg);
+        // Level-triggered emission. ops::emit signature on this branch is
+        // emit(event, data, producer: Option<&str>) — adapted from the plan's
+        // sketch per its VERIFY note.
+        if let Err(e) = crate::ops::emit("resource.pressure", data.clone(), Some("hex-resources")) {
+            eprintln!("resources: pressure emit failed (engine down?): {e}");
+        }
+    }
+    if !breaches.is_empty() {
+        // On-pressure attribution: discovery pass over $HOME top-level (find
+        // NEW offenders — survey lesson: they shift) + docker logical sizes,
+        // only if OrbStack is already running (never wake the VM).
+        if let Ok(home) = std::env::var("HOME") {
+            let tops: Vec<String> = std::fs::read_dir(&home)
+                .map(|rd| {
+                    rd.flatten()
+                        .filter(|e| e.path().is_dir())
+                        .map(|e| e.path().to_string_lossy().into_owned())
+                        .collect()
+                })
+                .unwrap_or_default();
+            record_du(&du_sizes(&tops));
+        }
+        let orb_running = std::process::Command::new("pgrep")
+            .args(["-x", "OrbStack"])
+            .output()
+            .map(|o| o.status.success())
+            .unwrap_or(false);
+        if orb_running {
+            if let Ok(o) = std::process::Command::new("docker").args(["system", "df"]).output() {
+                crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+                    source: "hex-resources".into(),
+                    event: "sample::docker".into(),
+                    status: "ok".into(),
+                    duration_ms: None,
+                    exit_code: None,
+                    detail: Some(String::from_utf8_lossy(&o.stdout).lines()
+                        .collect::<Vec<_>>().join(" | ")),
+                });
+            }
+        }
+    }
+    Ok(breaches)
+}
+
 #[cfg(test)]
 mod rule_tests {
     use super::*;
