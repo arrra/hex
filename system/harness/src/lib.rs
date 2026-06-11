@@ -26,6 +26,7 @@ pub mod ops;
 pub mod reaper;
 pub mod registry;
 pub mod release;
+pub mod resources;
 pub mod sanitize;
 pub mod telemetry;
 pub mod types;
