@@ -333,63 +333,17 @@ HARNESS_VERSION=$(grep "^HARNESS_VERSION=" "$VERSIONS_FILE" | cut -d= -f2 || tru
 BOI_REPO="${HEX_BOI_REPO:-https://github.com/mrap/boi.git}"
 
 # BOI — parallel worker dispatch (boi-v2: the canonical TOML engine).
-# Fresh install: clone at pinned version, then build the Rust binary.
-# Existing install: fetch latest tag and upgrade in place.
-install_or_upgrade_boi() {
-    local boi_src="$HOME/github.com/mrap/boi"
-    mkdir -p "$HOME/.boi/bin" "$HOME/.boi/pids" "$HOME/.boi/logs" "$HOME/.boi/worktrees"
+# Builds in a MACHINE-OWNED clone under ~/.boi/src/boi and never touches a
+# developer checkout (e.g. ~/github.com/mrap/boi). The previous version ran
+# `checkout -f $TAG` + `checkout -B main` against the developer repo, which
+# force-reset its main to the pinned tag on every install/upgrade/test run —
+# silently eating merged work 4x (mrap-hex OBS-033, 2026-06-10). The build
+# checkout stays detached at the pinned tag: it is an artifact cache, not a
+# working repo, so there is no branch to leave behind.
 
-    # TRIPWIRE (2026-06-05): record who triggers the boi rebuild/symlink loop.
-    # Remove once the runaway `hex upgrade` invoker is identified + fixed.
-    {
-        echo "[$(date '+%F %T')] install_or_upgrade_boi BOI_VERSION=$BOI_VERSION pid=$$ ppid=$PPID"
-        ps -o pid,ppid,command -p "$PPID" 2>/dev/null || true
-        echo "  args: $0 $*"
-    } >> "$HOME/.boi/install-tripwire.log" 2>&1 || true
-
-    # Clone or update the BOI repo
-    if [ -d "$boi_src/.git" ]; then
-        echo "  BOI repo exists — fetching $BOI_VERSION..."
-        # checkout -f to discard any stray local changes (e.g. the generated
-        # boi.sh wrapper written below), then `checkout -B main` to RE-ATTACH a
-        # `main` branch at the pinned tag — never leave the repo in detached
-        # HEAD (SO #13). Surface failures loudly (S6) instead of `|| true`.
-        if ! ( cd "$boi_src" && git fetch --tags origin 2>/dev/null && \
-               git checkout -f "$BOI_VERSION" 2>/dev/null && \
-               git checkout -B main 2>/dev/null ); then
-            echo "  BOI: failed to fetch/checkout $BOI_VERSION — boi may be stale" >&2
-        fi
-    else
-        echo "  Cloning BOI repo..."
-        mkdir -p "$(dirname "$boi_src")"
-        git clone --branch "$BOI_VERSION" "$BOI_REPO" "$boi_src" 2>/dev/null || {
-            echo "  BOI: failed to clone $BOI_REPO @ $BOI_VERSION"
-            return
-        }
-        # `clone --branch <tag>` leaves a detached HEAD — re-attach to `main`
-        # at the pinned tag (SO #13: never leave the repo detached).
-        ( cd "$boi_src" && git checkout -B main 2>/dev/null ) || \
-            echo "  BOI: could not attach main branch after clone" >&2
-    fi
-
-    # Build the Rust binary
-    if command -v cargo &>/dev/null; then
-        echo "  Building BOI binary..."
-        ( cd "$boi_src" && cargo build --release 2>/dev/null ) || {
-            echo "  BOI: cargo build failed"
-            return
-        }
-        # Symlink binary
-        ln -sf "$boi_src/target/release/boi" "$HOME/.boi/bin/boi"
-        echo "  BOI $BOI_VERSION built and linked  ✓"
-    else
-        echo "  ⚠️  Rust/cargo not found — cannot build BOI binary"
-        echo "     Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-        return
-    fi
-
-    # Create boi.sh wrapper for shell alias
-    cat > "$boi_src/boi.sh" << 'BOISH'
+# boi.sh wrapper for shell aliases — lives next to the binary, not in any repo.
+write_boi_wrapper() {
+    cat > "$HOME/.boi/bin/boi.sh" << 'BOISH'
 #!/bin/bash
 if [ -x "$HOME/.boi/bin/boi" ]; then
     exec "$HOME/.boi/bin/boi" "$@"
@@ -397,7 +351,70 @@ fi
 echo "error: BOI binary not found at ~/.boi/bin/boi"
 exit 1
 BOISH
-    chmod +x "$boi_src/boi.sh"
+    chmod +x "$HOME/.boi/bin/boi.sh"
+}
+
+install_or_upgrade_boi() {
+    local boi_build="$HOME/.boi/src/boi"
+    local boi_bin="$HOME/.boi/bin/boi"
+    mkdir -p "$HOME/.boi/bin" "$HOME/.boi/pids" "$HOME/.boi/logs" \
+             "$HOME/.boi/worktrees" "$HOME/.boi/src"
+
+    # TRIPWIRE (2026-06-05): record who triggers the boi rebuild/symlink loop.
+    # Kept: it identified the OBS-033 resetter (codex-parity tests → install.sh).
+    {
+        echo "[$(date '+%F %T')] install_or_upgrade_boi BOI_VERSION=$BOI_VERSION pid=$$ ppid=$PPID"
+        ps -o pid,ppid,command -p "$PPID" 2>/dev/null || true
+        echo "  args: $0 $*"
+    } >> "$HOME/.boi/install-tripwire.log" 2>&1 || true
+
+    # Fast path: the machine-owned build already provides the pinned version.
+    # (Also makes repeated install.sh runs — e.g. from test suites — no-ops.)
+    if [ -x "$boi_bin" ] && \
+       [ "$(readlink "$boi_bin" 2>/dev/null)" = "$boi_build/target/release/boi" ]; then
+        local current
+        current="v$("$boi_bin" --version 2>/dev/null | awk '/^boi /{print $2}' | tail -1)"
+        if [ "$current" = "$BOI_VERSION" ]; then
+            echo "  BOI $BOI_VERSION already installed  ✓"
+            write_boi_wrapper
+            return
+        fi
+    fi
+
+    # Clone or update the machine-owned build checkout (detached at the tag).
+    if [ -d "$boi_build/.git" ]; then
+        echo "  BOI build repo exists — fetching $BOI_VERSION..."
+        if ! ( cd "$boi_build" && git fetch --tags origin 2>/dev/null && \
+               git checkout -f --detach "$BOI_VERSION" 2>/dev/null ); then
+            echo "  BOI: failed to fetch/checkout $BOI_VERSION — boi may be stale" >&2
+        fi
+    else
+        echo "  Cloning BOI build repo (machine-owned, ~/.boi/src/boi)..."
+        git clone "$BOI_REPO" "$boi_build" 2>/dev/null || {
+            echo "  BOI: failed to clone $BOI_REPO"
+            return
+        }
+        ( cd "$boi_build" && git checkout -f --detach "$BOI_VERSION" 2>/dev/null ) || \
+            echo "  BOI: tag $BOI_VERSION not found in $BOI_REPO" >&2
+    fi
+
+    # Build the Rust binary
+    if command -v cargo &>/dev/null; then
+        echo "  Building BOI binary..."
+        ( cd "$boi_build" && cargo build --release 2>/dev/null ) || {
+            echo "  BOI: cargo build failed"
+            return
+        }
+        # Symlink binary
+        ln -sf "$boi_build/target/release/boi" "$boi_bin"
+        echo "  BOI $BOI_VERSION built and linked  ✓"
+    else
+        echo "  ⚠️  Rust/cargo not found — cannot build BOI binary"
+        echo "     Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        return
+    fi
+
+    write_boi_wrapper
 }
 install_or_upgrade_boi
 

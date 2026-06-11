@@ -5,7 +5,7 @@
 #   1. Clones hex-foundation from a volume mount of the local repo
 #   2. Runs install.sh non-interactively
 #   3. Asserts: binary presence, --help subcommands, version (boi-v2 "boi 3.0.0"),
-#      wrapper chain (~/github.com/mrap/boi/boi.sh)
+#      wrapper chain (~/.boi/bin/boi.sh)
 #   4. Dispatches a smoke TOML spec if ANTHROPIC_API_KEY is set (optional)
 #   5. Clears all BOI state on exit so reruns are clean
 #
@@ -195,7 +195,7 @@ else
 fi
 
 # 3f. Wrapper chain: boi.sh delegates to ~/.boi/bin/boi
-BOI_WRAPPER="$HOME/github.com/mrap/boi/boi.sh"
+BOI_WRAPPER="$HOME/.boi/bin/boi.sh"
 if [ -x "$BOI_WRAPPER" ]; then
     if "$BOI_WRAPPER" --help > /dev/null 2>&1; then
         pass "wrapper-chain: $BOI_WRAPPER --help exits 0"
