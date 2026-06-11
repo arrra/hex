@@ -130,10 +130,76 @@ fn run_release(e: Event, _ctx: Ctx) -> Result<()> {
         child.id(),
         log_path.display()
     );
+
+    // Reap the child when it exits. Without this the Child handle drops
+    // un-waited and every finished ceremony leaves a ZOMBIE in the
+    // long-lived harness until restart (oss-releaser review nonblocker,
+    // 2026-06-11). The exit callback doubles as the loud "the ceremony
+    // ENDED, and how" record — previously only the child's own log knew.
+    {
+        let level = level.clone();
+        let repo_dir = repo_dir.to_string();
+        let log_display = log_path.display().to_string();
+        reap_in_background(child, move |status| {
+            hex::telemetry::record_loud(&hex::telemetry::TelemetryEvent {
+                source: "oss-releaser".into(),
+                event: "release::child-exit".into(),
+                status: if status.success() { "ok" } else { "error" }.into(),
+                duration_ms: None,
+                exit_code: status.code().map(i64::from),
+                detail: Some(format!(
+                    "level={level} repo={repo_dir} log={log_display}"
+                )),
+            });
+        });
+    }
     Ok(())
+}
+
+/// Wait on the detached ceremony child from a background thread so it never
+/// zombifies, invoking `on_exit` with its exit status. The thread dies with
+/// the harness (the child survives detached, re-parented to init, which
+/// reaps it — the zombie risk exists only while the harness outlives the
+/// child without waiting).
+fn reap_in_background(
+    mut child: std::process::Child,
+    on_exit: impl FnOnce(std::process::ExitStatus) + Send + 'static,
+) -> std::thread::JoinHandle<()> {
+    std::thread::spawn(move || {
+        let pid = child.id();
+        match child.wait() {
+            Ok(status) => on_exit(status),
+            Err(e) => eprintln!("oss-releaser: wait on ceremony child pid={pid} failed: {e}"),
+        }
+    })
 }
 
 /// Build the `oss-releaser` worker.
 pub fn worker() -> Worker {
     Worker::new("oss-releaser").on_event(EVENT_RELEASE_REQUESTED, run_release)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn reaper_waits_child_and_reports_exit_status() {
+        let child = Command::new("/bin/sh")
+            .args(["-c", "exit 7"])
+            .stdin(Stdio::null())
+            .stdout(Stdio::null())
+            .stderr(Stdio::null())
+            .spawn()
+            .expect("spawn test child");
+        let (tx, rx) = std::sync::mpsc::channel();
+        let handle = reap_in_background(child, move |status| {
+            tx.send(status.code()).expect("report exit");
+        });
+        let code = rx
+            .recv_timeout(std::time::Duration::from_secs(10))
+            .expect("reaper must report within 10s");
+        assert_eq!(code, Some(7));
+        handle.join().expect("reaper thread exits cleanly");
+    }
 }
