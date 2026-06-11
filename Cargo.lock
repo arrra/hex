@@ -1838,6 +1838,7 @@ dependencies = [
  "regex",
  "rusqlite",
  "rustls-pemfile",
+ "scipd",
  "serde",
  "serde_json",
  "serde_yaml",

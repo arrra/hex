@@ -224,27 +224,27 @@ socket dead", red: check `scipd.err.log` and
 | Instance keeps getting killed | Memory watchdog: footprint over `mem_limit_mb` (default 3500). Raise the limit in `scipd.toml` or accept respawn-per-burst. Kills within 180s of spawn never happen (grace). |
 | scipd restart loop in `scipd.err.log` | Malformed `scipd.toml` is a fatal startup error and KeepAlive keeps relaunching. Fix or delete the file. |
 
-## Scheduling with launchd (nightly reindex, 02:30)
+## Scheduling (nightly reindex, 02:30)
 
-Template: `system/templates/launchd/com.hex.codeintel-indexer.plist`. One copy
-per registered workspace; manual install in A1.
+Nightly indexing runs via the harness worker **`hex-codeintel-indexer`**
+(`system/harness/src/modules/code_intel.worker.rs`), cron `0 30 2 * * * *`
+(02:30 daily). It loads the registry from `$CODEINTEL_HOME` (default
+`~/.codeintel`) and indexes **every registered workspace sequentially** —
+emits are ~3GB transient RSS each, so they never run concurrently. A
+`SkippedInFlight` is a visible log line, not an error; a per-workspace
+failure is logged loudly and the run continues to the remaining workspaces,
+then errors with a summary (telemetry picks it up — no silent partial
+success).
 
-```bash
-mkdir -p ~/.codeintel/logs
-sed -e "s|__CQ_BIN__|$HOME/github.com/mrap/hex-foundation/target/release/cq|" \
-    -e "s|__WORKSPACE__|$HOME/github.com/mrap/hex-foundation|" \
-    -e "s|__HOME__|$HOME|" \
-    system/templates/launchd/com.hex.codeintel-indexer.plist \
-    > ~/Library/LaunchAgents/com.hex.codeintel-indexer.plist
-launchctl bootstrap "gui/$(id -u)" ~/Library/LaunchAgents/com.hex.codeintel-indexer.plist
-launchctl kickstart "gui/$(id -u)/com.hex.codeintel-indexer"   # optional: run now
-tail -f ~/.codeintel/logs/com.hex.codeintel-indexer.log
-```
+No per-workspace plist installs: register workspaces with `cq register
+<path>` and the worker picks them up. The module is deployed with
+`hex harness restart` after an upgrade (rebuild = install). Verify with
+`hex module status hex-codeintel-indexer`.
 
-For additional workspaces, copy the plist with a unique filename and Label
-suffix (`com.hex.codeintel-indexer.<name>`). To remove:
-`launchctl bootout "gui/$(id -u)/com.hex.codeintel-indexer"` and delete the
-plist.
+Categorical distinction: scheduled **jobs** live in the harness as worker
+modules, while long-running **daemons** like scipd stay on launchd
+(`system/templates/launchd/com.hex.scipd.plist` and its install steps above
+are unchanged).
 
 ## Known limitation: calls inside `macro_rules!` bodies
 
@@ -271,7 +271,7 @@ nonzero with explicit `red_reasons` when anything is wrong.
 | Exit 2 + `stale_files` | Your worktree drifted from the indexed commit (edits or different checkout). Results are still correct *positions for the indexed commit*; reindex to clear. |
 | `EMIT_FAILED` (exit 6) | `rust-analyzer scip` crashed; stderr tail is in the error JSON and the failed `<gen>.tmp/` dir is kept for post-mortem. Check rust-analyzer version (`cq doctor`). |
 | `{"skipped":"emit-in-flight"}` | Another `cq index` holds the flock. Wait for it; nothing was lost. |
-| Doctor red: index older than 7 days | The launchd job isn't running — check `launchctl print gui/$(id -u)/com.hex.codeintel-indexer` and the log under `~/.codeintel/logs/`. |
+| Doctor red: index older than 7 days | The nightly harness worker isn't running — check `hex harness status`, `hex module status hex-codeintel-indexer`, and `hex telemetry` for failed runs. |
 | Slow first query after reboot | Cold page cache on `index.sqlite`; subsequent queries are warm (<500ms p95 budget). |
 
 ## E2E acceptance
