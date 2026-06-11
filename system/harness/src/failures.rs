@@ -75,6 +75,213 @@ pub fn cron_expectations(
         .collect()
 }
 
+#[derive(Debug, Clone)]
+pub struct Missed {
+    pub fid: String,
+    pub expr: String,
+    pub expected_at: DateTime<Utc>,
+    pub last_seen: Option<String>,
+}
+
+#[derive(Debug, Clone)]
+pub struct Downtime {
+    pub from: DateTime<Utc>,
+    pub to: DateTime<Utc>,
+    pub excused_fids: Vec<String>,
+}
+
+#[derive(Debug, Default)]
+pub struct Report {
+    pub missed: Vec<Missed>,
+    pub never_ran: Vec<CronExpectation>,
+    pub downtime: Vec<Downtime>,
+}
+
+/// Evaluate expectations against events.db at `now`. `extra_excused` lets
+/// callers exempt fids (used by the probe self-check in main.rs).
+pub fn evaluate(
+    exp: &[CronExpectation],
+    now: DateTime<Utc>,
+    extra_excused: &[String],
+) -> rusqlite::Result<Report> {
+    let conn = crate::telemetry::open_ro()?;
+    let mut report = Report::default();
+
+    // 1. Downtime intervals: gaps > 2× shortest cadence across ALL rows.
+    let shortest = exp
+        .iter()
+        .filter_map(|e| cadence_secs(&e.expr, now))
+        .min()
+        .unwrap_or(900);
+    let lookback = (now - chrono::Duration::hours(36)).to_rfc3339();
+    let mut stmt = conn.prepare("SELECT ts FROM events WHERE ts >= ?1 ORDER BY ts")?;
+    let times: Vec<DateTime<Utc>> = stmt
+        .query_map([&lookback], |r| r.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .filter_map(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)))
+        .collect();
+    let mut downtimes: Vec<(DateTime<Utc>, DateTime<Utc>)> = Vec::new();
+    for pair in times.windows(2) {
+        if (pair[1] - pair[0]).num_seconds() > 2 * shortest {
+            downtimes.push((pair[0], pair[1]));
+        }
+    }
+
+    // 2. Per-fid evaluation.
+    for e in exp {
+        let (last_ts, max_dur): (Option<String>, Option<i64>) = conn.query_row(
+            "SELECT MAX(ts), MAX(duration_ms) FROM events WHERE event = ?1",
+            [&e.fid],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )?;
+        if last_ts.is_none() {
+            report.never_ran.push(e.clone());
+            continue;
+        }
+        let Some(expected) = prev_fire(&e.expr, now) else { continue };
+        let cadence = cadence_secs(&e.expr, now).unwrap_or(86_400);
+        let slack = std::cmp::max(cadence / 4, max_dur.unwrap_or(0) / 1000 + 60);
+        if now < expected + chrono::Duration::seconds(slack) {
+            continue; // fire may legitimately still be in flight
+        }
+        let row_since: i64 = conn.query_row(
+            "SELECT COUNT(*) FROM events WHERE event = ?1 AND ts >= ?2",
+            rusqlite::params![&e.fid, expected.to_rfc3339()],
+            |r| r.get(0),
+        )?;
+        if row_since > 0 || extra_excused.contains(&e.fid) {
+            continue;
+        }
+        // Excused by downtime?
+        if let Some((from, to)) = downtimes
+            .iter()
+            .find(|(from, to)| expected >= *from && expected <= *to)
+        {
+            match report.downtime.iter_mut().find(|d| d.from == *from) {
+                Some(d) => d.excused_fids.push(e.fid.clone()),
+                None => report.downtime.push(Downtime {
+                    from: *from,
+                    to: *to,
+                    excused_fids: vec![e.fid.clone()],
+                }),
+            }
+            continue;
+        }
+        report.missed.push(Missed {
+            fid: e.fid.clone(),
+            expr: e.expr.clone(),
+            expected_at: expected,
+            last_seen: last_ts,
+        });
+    }
+    Ok(report)
+}
+
+#[cfg(test)]
+pub(crate) mod testutil {
+    use chrono::{DateTime, Utc};
+    pub fn seed_schema() {
+        crate::telemetry::record(&crate::telemetry::TelemetryEvent {
+            source: "seed".into(), event: "seed".into(), status: "ok".into(),
+            duration_ms: None, exit_code: None, detail: None,
+        }).unwrap();
+    }
+    fn conn() -> rusqlite::Connection {
+        rusqlite::Connection::open(
+            std::path::PathBuf::from(std::env::var("HEX_DIR").unwrap())
+                .join(".hex/telemetry/events.db"),
+        ).unwrap()
+    }
+    pub fn row(fid: &str, ts: DateTime<Utc>, status: &str, duration_ms: i64) {
+        conn().execute(
+            "INSERT INTO events (ts, source, event, status, duration_ms) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![ts.to_rfc3339(), "w", fid, status, duration_ms],
+        ).unwrap();
+    }
+    pub fn row_d(fid: &str, ts: DateTime<Utc>, status: &str, detail: &str) {
+        conn().execute(
+            "INSERT INTO events (ts, source, event, status, detail) VALUES (?1,?2,?3,?4,?5)",
+            rusqlite::params![ts.to_rfc3339(), "w", fid, status, detail],
+        ).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod missed_tests {
+    use super::testutil::*;
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    #[test]
+    fn missed_fires_alert_when_expected_fire_has_no_row() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        seed_schema();
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        // daily 04:00 cron, last row 2 days ago → MISSED
+        row("a::daily", now - Duration::days(2), "ok", 1000);
+        let exp = vec![CronExpectation { worker: "a".into(), fid: "a::daily".into(),
+            expr: "0 0 4 * * * *".into() }];
+        let report = evaluate(&exp, now, &[]).unwrap();
+        assert_eq!(report.missed.len(), 1, "{:?}", report.missed);
+        assert_eq!(report.missed[0].fid, "a::daily");
+    }
+
+    #[test]
+    fn not_missed_within_duration_slack() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        seed_schema();
+        // 15-min cron whose recent runs take 30 min: at 12:07 the 12:00 fire is
+        // still legitimately in-flight → NOT missed.
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 7, 0).unwrap();
+        row("a::quarter", now - Duration::minutes(40), "ok", 1_800_000);
+        let exp = vec![CronExpectation { worker: "a".into(), fid: "a::quarter".into(),
+            expr: "0 */15 * * * * *".into() }];
+        let report = evaluate(&exp, now, &[]).unwrap();
+        assert!(report.missed.is_empty(), "{:?}", report.missed);
+    }
+
+    #[test]
+    fn never_ran_listed_not_missed() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        seed_schema();
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        let exp = vec![CronExpectation { worker: "a".into(), fid: "a::daily".into(),
+            expr: "0 0 4 * * * *".into() }];
+        let report = evaluate(&exp, now, &[]).unwrap();
+        assert!(report.missed.is_empty());
+        assert_eq!(report.never_ran.len(), 1);
+    }
+
+    #[test]
+    fn downtime_excuses_missed_and_reports_once() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        seed_schema();
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        // Heartbeat stream rows every 15 min EXCEPT a 5h hole covering 04:00.
+        let mut t = now - Duration::hours(10);
+        while t < now {
+            let in_hole = t > now - Duration::hours(9) && t < now - Duration::hours(4);
+            if !in_hole {
+                row("hb::quarter", t, "ok", 10);
+            }
+            t = t + Duration::minutes(15);
+        }
+        // Daily 04:00 fid (04:00 = now-8h, inside the hole), no row today.
+        row("a::daily", now - Duration::days(1) - Duration::hours(8), "ok", 1000);
+        let exp = vec![
+            CronExpectation { worker: "hb".into(), fid: "hb::quarter".into(),
+                expr: "0 */15 * * * * *".into() },
+            CronExpectation { worker: "a".into(), fid: "a::daily".into(),
+                expr: "0 0 4 * * * *".into() },
+        ];
+        let report = evaluate(&exp, now, &[]).unwrap();
+        assert!(report.missed.iter().all(|m| m.fid != "a::daily"),
+            "downtime must excuse a::daily: {:?}", report.missed);
+        assert_eq!(report.downtime.len(), 1);
+        assert!(report.downtime[0].excused_fids.contains(&"a::daily".to_string()));
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

@@ -85,6 +85,19 @@ fn open() -> rusqlite::Result<Connection> {
     Ok(conn)
 }
 
+/// Read-only connection for consumers (failures detector, probe). Plain
+/// read-only on a WAL db reads checkpointed + WAL frames correctly;
+/// `immutable=1` would silently miss the WAL — never use it here.
+pub fn open_ro() -> rusqlite::Result<Connection> {
+    let path = db_path().map_err(|e| {
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
+            std::io::ErrorKind::Other,
+            format!("telemetry: cannot resolve db path: {e}"),
+        )))
+    })?;
+    Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
+}
+
 /// Append one event. ts is stamped at call time (UTC RFC3339).
 pub fn record(ev: &TelemetryEvent) -> rusqlite::Result<()> {
     let conn = open()?;
