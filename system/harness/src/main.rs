@@ -206,6 +206,16 @@ enum GatekeeperCommands {
         /// verdict lands there via the chmod-up/write/chmod-down sequence.
         #[arg(long)]
         store: Option<std::path::PathBuf>,
+        /// Canary registry JSON (gates/canaries.json). When given, a
+        /// registered canary can never ACCEPT, and an auditor accept on one
+        /// voids approvals + appends a loud ledger alert (F4).
+        #[arg(long)]
+        canaries: Option<std::path::PathBuf>,
+        /// boi.db path for auditor identity ground truth (read-only). When
+        /// given, auditor verdicts whose spec_id is not a real BOI run are
+        /// voided; author-as-auditor is voided regardless.
+        #[arg(long = "boi-db")]
+        boi_db: Option<std::path::PathBuf>,
     },
     /// Containment write-probe: the store must reject a candidate-context
     /// subprocess write. Breach ⇒ ledger alert + exit 1.
@@ -233,6 +243,18 @@ enum LedgerCommands {
     Verify,
     /// Print last-seen-at per agent (used by freshness alerting).
     Freshness,
+    /// S1-wild join: linter intents × reconciler outcomes by gate_hash
+    /// (DISTINCT, latest event wins). JSON report: per-gate rows + the
+    /// linter's wild confusion matrix. The proposer's nightly feed.
+    Wild {
+        /// Only include gates whose wild event time (`first_started_at`)
+        /// is at or after this ISO8601/RFC3339 instant.
+        #[arg(long)]
+        since: Option<String>,
+        /// Ledger db path (defaults to $HEX_DIR/.hex/ledger/ledger.db).
+        #[arg(long)]
+        db: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -895,6 +917,37 @@ fn main() {
                     };
                     std::process::exit(run_freshness(&ledger));
                 }
+                LedgerCommands::Wild { since, db } => {
+                    let db_path = db.unwrap_or(path);
+                    let since_epoch = match since.as_deref() {
+                        None => None,
+                        Some(s) => match chrono::DateTime::parse_from_rfc3339(s) {
+                            Ok(dt) => Some(dt.timestamp()),
+                            Err(e) => {
+                                eprintln!(
+                                    "hex ledger wild: --since {s:?} is not RFC3339/ISO8601 (e.g. 2026-06-10T03:30:00Z): {e}"
+                                );
+                                std::process::exit(2);
+                            }
+                        },
+                    };
+                    match hex::wild::wild_report(&db_path, since_epoch, since) {
+                        Ok(report) => {
+                            match serde_json::to_string_pretty(&report) {
+                                Ok(j) => println!("{j}"),
+                                Err(e) => {
+                                    eprintln!("hex ledger wild: serialize failed: {e}");
+                                    std::process::exit(1);
+                                }
+                            }
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("hex ledger wild: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
             }
         }
         Commands::LintGates { spec, spec_id } => {
@@ -974,7 +1027,7 @@ fn main() {
             }
         }
         Commands::Gatekeeper { command } => match command {
-            GatekeeperCommands::Judge { proposal, corpus, floor, out, now, store } => {
+            GatekeeperCommands::Judge { proposal, corpus, floor, out, now, store, canaries, boi_db } => {
                 let hex_dir = get_hex_dir();
                 // Dial consult — recorded in the verdict, never upgrades it
                 // (P1: everything flags to Mike regardless).
@@ -998,6 +1051,8 @@ fn main() {
                     out.as_deref(),
                     now,
                     store.as_deref(),
+                    canaries.as_deref(),
+                    boi_db.as_deref(),
                     &hex_dir,
                     dial,
                 ));

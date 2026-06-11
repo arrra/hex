@@ -22,5 +22,6 @@ pub mod ops;
 pub mod registry;
 pub mod telemetry;
 pub mod types;
+pub mod wild;
 pub mod worker;
 pub mod workers;
