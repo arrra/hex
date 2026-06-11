@@ -389,7 +389,7 @@ fn emit_failure_is_emit_failed_with_stderr_tail() { /* point rust-analyzer at a 
 - [ ] **Step 1: Failing CLI tests** (each asserts BOTH stdout/stderr JSON shape AND exit code; spec §5 table):
 
 ```rust
-#[test] fn def_happy_path_exit_0() { /* full pipeline on golden repo via CARGO_BIN_EXE_cq, CODEINTEL_HOME=tempdir */ }
+#[test] fn def_success_path_exit_0() { /* full pipeline on golden repo via CARGO_BIN_EXE_cq, CODEINTEL_HOME=tempdir */ }
 #[test] fn unregistered_cwd_exit_4() { /* run in plain tempdir → stderr error.code == UNREGISTERED_WORKSPACE */ }
 #[test] fn registered_no_index_exit_3() { }
 #[test] fn nonsense_symbol_exit_5() { }

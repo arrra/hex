@@ -63,9 +63,12 @@ impl Violation {
 // ---------------------------------------------------------------------------
 
 /// Directories every common check skips (`--exclude-dir` set in the bash).
+/// `.fastembed_cache` is the gitignored local embedding-model cache the
+/// embed tests download (tokenizer vocab blobs contain arbitrary English
+/// words, so extension-less full-tree checks would false-positive on it).
 const COMMON_EXCLUDE_DIRS: &[&str] = &[
     ".git", "target", "node_modules", ".boi", "worktrees", "__pycache__",
-    "dist", ".hex", ".claude",
+    "dist", ".hex", ".claude", ".fastembed_cache",
 ];
 
 /// `--exclude-dir` set of the `/opt/homebrew` check (deliberately narrower).
@@ -121,9 +124,10 @@ fn compile(patterns: &[&str]) -> Vec<Regex> {
     patterns.iter().map(|p| re(p)).collect()
 }
 
-/// The full category registry, in the bash script's execution order.
-/// (The tenth category — unguarded `.claude/` paths — is file-level, not
-/// line-level, and lives in [`claude_path_check_file`].)
+/// The full category registry: the categories ported from the bash script
+/// first, in script order, then post-port additions (banned strings).
+/// (The tenth ported category — unguarded `.claude/` paths — is file-level,
+/// not line-level, and lives in [`claude_path_check_file`].)
 fn registry() -> Vec<LineCheck> {
     let mut checks = Vec::new();
 
@@ -288,6 +292,24 @@ fn registry() -> Vec<LineCheck> {
         ]),
         plain_suffix: " — use hex_invoke instead of direct claude/codex invocation",
         verbose_suffix: " — use hex_invoke instead of direct claude/codex invocation",
+    });
+
+    // Banned strings — post-port addition (not in the bash original). The
+    // sunset session-manager's name keeps creeping back into docs, comments,
+    // and test names (purged 4× as of 2026-06-11); this check makes the purge
+    // permanent. The pattern encodes the word's second letter as a `\x61` hex
+    // escape (resolved by the regex crate) so this source file never carries
+    // the literal it bans. Every file type is scanned (`grep -ri` semantics,
+    // Slack-ID precedent) and docs/ and tests/ are deliberately NOT excluded
+    // — that's where the recurring hits live.
+    checks.push(LineCheck {
+        label: "banned string: sunset session-manager name",
+        pattern: re(r"(?i)h\x61ppy"),
+        include_ext: None,
+        exclude_dirs: COMMON_EXCLUDE_DIRS,
+        filters: compile(COMMON_FILTERS),
+        plain_suffix: " — sunset tool name; reword (see purge 2026-06-11)",
+        verbose_suffix: "",
     });
 
     checks
@@ -681,6 +703,58 @@ mod tests {
         assert!(sweep("system/harness/src/example_clean.rs", content).is_empty());
         let script = "#!/usr/bin/env bash\nset -euo pipefail\necho ok\n";
         assert!(sweep("system/scripts/ok.sh", script).is_empty());
+    }
+
+    // -- Banned strings ---------------------------------------------------------
+    // Fixtures build the banned word by concatenation (`concat!`) so this
+    // source file never contains the literal — the same invariant the check
+    // itself guards.
+
+    const BANNED_LABEL: &str = "banned string: sunset session-manager name";
+
+    #[test]
+    fn banned_string_planted_in_temp_repo_is_flagged_once() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        // Mixed case — the check is case-insensitive.
+        fs::write(
+            root.join("notes.md"),
+            concat!("the H", "aPpY", " path needs rewording\n"),
+        )
+        .unwrap();
+        let found = scan(root, false).unwrap();
+        assert_eq!(found.len(), 1, "expected exactly one violation: {found:?}");
+        assert_eq!(found[0].category, BANNED_LABEL);
+        assert_eq!(found[0].path, "./notes.md");
+        assert_eq!(found[0].line, 1);
+    }
+
+    #[test]
+    fn banned_string_clean_repo_has_zero_violations() {
+        let dir = tempfile::tempdir().unwrap();
+        let root = dir.path();
+        fs::write(root.join("notes.md"), "the success path is documented\n").unwrap();
+        fs::write(root.join("ok.sh"), "#!/usr/bin/env bash\necho ok\n").unwrap();
+        let found = scan(root, false).unwrap();
+        assert!(
+            found.iter().all(|v| v.category != BANNED_LABEL),
+            "clean repo tripped the banned-string check: {found:?}"
+        );
+        assert!(found.is_empty(), "clean repo has violations: {found:?}");
+    }
+
+    #[test]
+    fn banned_string_matches_every_extension() {
+        // `include_ext: None` — grep -ri semantics, any file type.
+        let c = check(BANNED_LABEL);
+        let fixture = concat!("status = \"unh", "appy\"\n");
+        let v = check_content(&c, "config/state.ini", fixture);
+        assert_eq!(v.len(), 1);
+        assert_eq!(v[0].category, BANNED_LABEL);
+        assert_eq!(sweep("config/state.ini", fixture).len(), 1);
+        // The word inside identifiers is caught too.
+        let fn_line = concat!("fn def_h", "appy_path_exit_0() {}");
+        assert_eq!(check_content(&c, "tests/cli.rs", fn_line).len(), 1);
     }
 
     // -- End-to-end scan over a temp tree --------------------------------------
