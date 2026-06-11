@@ -2,6 +2,21 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [2026-06-11] — remove Happy title-nudge hook (Happy sunset 2026-06-09)
+
+Happy (mobile control plane) was sunset 2026-06-09; hex uses native Claude Code
+Remote Control. The harness still shipped the Happy session-title nudge, which
+told sessions to call the now-nonexistent `mcp__happy__change_title` MCP tool
+and `create_dir_all`'d `~/.happy/state` on every user prompt.
+
+### Removed
+- **`title_nudge` hook** (`system/harness/src/hook/title_nudge.rs`, added
+  v0.19.4): deleted, along with its module declaration and its call site in the
+  `UserPromptSubmit` hook. Memory-recall injection behavior is unchanged (same
+  JSON output shape, same fail-open semantics).
+- `filetime`/`tempfile` dev-deps retained — both still used by other tests
+  (`memory/embed.rs` and 30+ files respectively).
+
 ## [2026-06-05] — harness lifecycle adopts daemon-green (v0.31.0)
 
 The hex harness no longer hand-rolls launchctl/plist logic. `hex harness
