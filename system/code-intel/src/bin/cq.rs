@@ -6,6 +6,7 @@
 
 use clap::{Parser, Subcommand};
 use scipd_core::error::CqError;
+use scipd_core::workspace::{codeintel_home, register_workspace};
 
 #[derive(Parser)]
 #[command(
@@ -82,7 +83,15 @@ fn run(cli: Cli) -> Result<(), anyhow::Error> {
         Command::Symbols { .. } => anyhow::bail!("unimplemented: cq symbols (Task 9)"),
         Command::Search { .. } => anyhow::bail!("unimplemented: cq search (Task 9)"),
         Command::Index { .. } => anyhow::bail!("unimplemented: cq index (Task 8)"),
-        Command::Register { .. } => anyhow::bail!("unimplemented: cq register (Task 2)"),
+        Command::Register { path } => {
+            let home = codeintel_home()?;
+            let entry = register_workspace(&home, std::path::Path::new(&path))?;
+            println!(
+                "{}",
+                serde_json::json!({ "registered": entry.id, "root": entry.root })
+            );
+            Ok(())
+        }
         Command::Doctor { .. } => anyhow::bail!("unimplemented: cq doctor (Task 9)"),
     }
 }
