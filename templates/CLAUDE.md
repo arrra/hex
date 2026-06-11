@@ -390,7 +390,7 @@ boi dashboard [spec-id]              # observability TUI
 boi log <spec-id>                    # phase-run history
 boi cancel <id> --reason "..."       # cancel spec or task (--reason MANDATORY)
 boi fail <spec-id> --reason "..."    # mark spec failed (--reason MANDATORY)
-boi unblock <task-id>                # force a blocked task back to active
+boi unblock <task-id> [--reset-counter]  # force a blocked task back to active (flag zeroes its iteration counter)
 boi clean <spec-id>                  # delete spec + cascade (retention)
 boi spec show <spec-id>              # print stored spec snapshot
 ```

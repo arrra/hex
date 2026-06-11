@@ -60,7 +60,7 @@ If no target repo was specified, ask which one. Work the phases in order.
 
 ### Phase 1 — Hunt
 
-Verify claims and assess structure (per-claim recipes: §5; run commands only when cheap and side-effect-free). Every finding — drift or structural — records the exact reproducible check (command, path, threshold) that Phase 5 re-runs verbatim. Types:
+Verify claims and assess structure (per-claim recipes: §5; run commands only when cheap and side-effect-free). Every finding — drift or structural — gets a globally unique ID (namespace per hunter/dimension when hunting in parallel — colliding IDs cross-wire later verdicts) and records the exact reproducible check (command, path, threshold) that Phase 5 re-runs verbatim. Types:
 
 - **DRIFT** — doc says X; code at file:line says Y. Quote both sides. Unverifiable claims stay UNVERIFIED and unedited.
 - **DEAD** — subject no longer exists or its expiry condition arrived; cite the search proving it.
@@ -76,7 +76,7 @@ Before any finding drives an edit, try to refute it: a "drifted" command may wor
 
 ### Phase 3 — Plan
 
-Translate confirmed findings into typed ops. Write the full plan + ledger to a durable file OUTSIDE the repo before the first write (§10); don't pause for approval unless asked. Run the inbound-reference scan on every MOVE / SPLIT / RETIRE source: `git grep` its path, filename, and section anchors repo-wide (code, CI, doc-site configs, manifests); every hit blocks the op or becomes a ledgered link-rebase op. Never rename platform well-known files (§6).
+Translate confirmed findings into typed ops. Write the full plan + ledger to a durable file OUTSIDE the repo before the first write (§10); don't pause for approval unless asked. Run the inbound-reference scan on every MOVE / SPLIT / RETIRE source: `git grep` its path, filename, and section anchors repo-wide (code, CI, doc-site configs, manifests); consume the scan output IN FULL — a truncated scan (`head`, first-N) is a missed reference — and every hit blocks the op or becomes a ledgered link-rebase op. Never rename platform well-known files (§6).
 
 - **FIX** — replace a drifted claim with text derived from the cited code, in the file's voice. The ledger row quotes the removed line(s) verbatim.
 - **MOVE / SPLIT** — relocate verbatim to the layer the placement tree (§2) assigns; leave a one-line pointer with an applicability condition.
@@ -93,7 +93,7 @@ Close with a **do-NOT-touch list**: conforming-but-imperfect text left alone, pr
 
 ### Phase 5 — Converge and prove
 
-1. **Proof pass — read-only, no writes, no commits:** re-run the detection and planning of Phases 0–3 against the result using the recorded checks. Convergence = zero re-derived findings WITHIN the scope the plan addressed, plus an explicit "converged within scope; N deferred" statement. In-scope residue → re-enter Phases 3–4 for it and re-prove (max 3 rounds, then stop and report the instability; common causes: §9). Never measure convergence as a clean tree after more commits. Never ship "mostly idempotent".
+1. **Proof pass — read-only, no writes, no commits, fresh eyes:** run it in a context that did not produce the edits (a fresh subagent/session where available) — self-review reliably misses what fresh context catches, including errors the fixes themselves introduced. Re-run the detection and planning of Phases 0–3 against the result using the recorded checks. Convergence = zero re-derived findings WITHIN the scope the plan addressed, plus an explicit "converged within scope; N deferred" statement. In-scope residue → re-enter Phases 3–4 for it and re-prove (max 3 rounds, then stop and report the instability; common causes: §9). Never measure convergence as a clean tree after more commits. Never ship "mostly idempotent".
 2. **Churn gate:** every hunk in `git diff <base>..HEAD` traces to a CONFIRMED finding; untraceable hunks → revert. Any non-doc path in the diff → revert it.
 3. **Conservation:** cross-check every removed line against the ledger, exactly one row each (command, self-test, and structural-line carve-out: §9).
 4. **Reachability & links:** every topic doc one pointer hop from an entry file; every pointer carries an applicability condition; links resolve — run a link checker, or fail closed by grepping every old path and anchor.
