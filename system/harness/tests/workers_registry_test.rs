@@ -83,3 +83,29 @@ fn workers_registry_backup_is_cron_worker() {
         "hex-backup must have at least one cron-triggered handler"
     );
 }
+
+#[test]
+fn workers_registry_oss_releaser_release_requested_event() {
+    // oss-releaser (oss-releaser spec, scope item 6): exactly one trigger —
+    // the `release.requested` event, i.e. a State trigger scope="events",
+    // key="release.requested" (the `.on_event` convention).
+    let reg = workers::registry();
+    let w = reg
+        .iter()
+        .find(|w| w.name == "oss-releaser")
+        .expect("oss-releaser worker must be registered");
+    assert_eq!(
+        w.handlers.len(),
+        1,
+        "oss-releaser must register exactly one handler"
+    );
+    let (spec, _h) = &w.handlers[0];
+    assert_eq!(
+        *spec,
+        TriggerSpec::State {
+            scope: "events".to_string(),
+            key: "release.requested".to_string(),
+        },
+        "oss-releaser must trigger on events/release.requested"
+    );
+}

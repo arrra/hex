@@ -1,5 +1,16 @@
 # Contributing to hex-foundation
 
+## Branch & Release Flow (GitFlow)
+
+- **Feature branches target `develop`**, never `main` directly. (BOI specs against this
+  repo set `base_branch = "develop"` once the `develop` branch exists; bootstrap it with
+  `git branch develop main && git push origin develop`.)
+- **Releases** are cut with `hex release cut --level <patch|minor|major>` (or the
+  `release.requested` event); **hotfixes** with `hex release cut --hotfix`. The ceremony
+  gates, bumps, merges to `main`, tags, and back-merges — see `docs/versioning.md`.
+- Direct pushes to `main` are blocked by the `.githooks/pre-push` shim
+  (`hex git-guard pre-push`); only the release pipeline passes.
+
 ## BOI Integration Changes
 
 **Any change that affects how BOI is installed, upgraded, or invoked requires a corresponding

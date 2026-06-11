@@ -88,7 +88,7 @@ bash tests/codex-parity/run-all.sh
 | `test-boi-dispatch-codex.sh` | Minimal spec with `runtime=codex` completes and produces output | Yes |
 | `test-memory-search.sh` | Memory search index and CLI work identically under the Codex runtime | No |
 
-Gate 5 in `system/scripts/release.sh` runs this suite and blocks on failure; structural tests always run, live tests are skipped when no key is present. (Note: `release.sh` is **retiring — new pipeline** is being built; references here remain only until the replacement lands.)
+The `codex-parity` gate in the `hex release cut` battery runs this suite and blocks the release on failure; structural tests always run, live tests are skipped when no key is present. The gate is skipped loudly when the directory is absent or `--skip-parity` (or `--skip-e2e`, which implies it) is passed.
 
 ## Running locally
 

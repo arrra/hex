@@ -211,7 +211,7 @@ The binary is built or downloaded automatically by `install.sh`. If it cannot be
 
 ### Version
 
-`system/harness/Cargo.toml` is the single source of truth. `env!("CARGO_PKG_VERSION")` embeds the version at compile time. Git tags must match — enforced by `release.sh`. See [docs/versioning.md](./docs/versioning.md).
+`system/harness/Cargo.toml` is the single source of truth. `env!("CARGO_PKG_VERSION")` embeds the version at compile time. Git tags must match — enforced by `hex release cut`, the GitFlow release ceremony. See [docs/versioning.md](./docs/versioning.md).
 
 ### Module authoring
 
@@ -339,7 +339,7 @@ v0.17.3: **Act evidence verification.**
 
 v0.17.2: **Doctor ports + release.rs native module.**
 - **4 doctor commands native**: `hex doctor introspect`, `goal-alignment`, `cleanup-projects`, `tech-scout` ported to Rust. 4 `.legacy.sh` stubs removed.
-- **`release.rs` native module**: deterministic LLM-free release command replaces manual `release.sh` steps. The tool that ships hex is now Rust.
+- **`release.rs` native module**: deterministic LLM-free release command replaces the manual legacy script steps. The tool that ships hex is now Rust.
 - **Quality policies migrated**: `system/policies/` → `system/events/policies/`. Commands repointed to `hex doctor quality-check`.
 
 v0.17.1: **Doctor consolidate + startup cleanup.**
