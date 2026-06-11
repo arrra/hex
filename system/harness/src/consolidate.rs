@@ -148,6 +148,20 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
         }
     }
 
+    // Stamp full-run completion so doctor's nightly-full-liveness check can
+    // detect missed nights (lock-timeouts, harness-down, kills-in-flight).
+    if matches!(mode, Mode::Full) && !any_error {
+        if let Ok(conn) = crate::memory::open_db(&crate::memory::db_path(hex_dir)) {
+            if let Err(e) = conn.execute(
+                "INSERT INTO metadata(key, value) VALUES('last_full_consolidated', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![chrono::Local::now().to_rfc3339()],
+            ) {
+                eprintln!("consolidate: failed to stamp last_full_consolidated: {e}");
+            }
+        }
+    }
+
     let code = exit_code_for(l1_findings, any_error);
     println!(
         "\n=== consolidate done (exit={code}, findings={l1_findings}, errors={}) ===",
