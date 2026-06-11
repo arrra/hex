@@ -31,7 +31,7 @@ Positional fids (`{worker}::{idx}`) mis-attribute history when handlers are reor
 - Modify: `system/harness/src/worker/runtime.rs:121-124`
 - Test: in-module `#[cfg(test)]` in `worker/mod.rs`
 
-- [ ] **Step 1: Write the failing tests** (append to `worker/mod.rs` tests module)
+- [x] **Step 1: Write the failing tests** (append to `worker/mod.rs` tests module)
 
 ```rust
 /// Named cron triggers carry their name; fid derivation uses it.
@@ -51,12 +51,12 @@ fn fid_for_named_and_positional() {
 }
 ```
 
-- [ ] **Step 2: Run tests to verify they fail**
+- [x] **Step 2: Run tests to verify they fail**
 
 Run: `cd system/harness && cargo test worker::tests 2>&1 | tail -20`
 Expected: FAIL — `on_cron_named` not found / handlers tuple arity mismatch.
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 In `worker/mod.rs`: change `handlers` to carry the optional name and add named builders + the shared fid helper:
 
@@ -113,12 +113,12 @@ for (idx, (tname, spec, handler)) in worker.handlers.into_iter().enumerate() {
 
 Fix the two existing tests in `worker/mod.rs` that destructure 2-tuples (`on_event_maps_to_state_events_scope`, `on_cron_maps_to_cron_trigger`) to destructure `(_name, spec, _h)`. Fix any other compile errors the change surfaces (`grep -rn "\.handlers" system/harness/src/`).
 
-- [ ] **Step 4: Run the full suite**
+- [x] **Step 4: Run the full suite**
 
 Run: `cd system/harness && cargo test 2>&1 | tail -5`
 Expected: PASS (all existing tests + 2 new).
 
-- [ ] **Step 5: Name the core module triggers** (stable ids for multi-trigger workers; single-trigger modules too, for uniformity)
+- [x] **Step 5: Name the core module triggers** (stable ids for multi-trigger workers; single-trigger modules too, for uniformity)
 
 In `src/modules/`:
 - `memory_maintenance.worker.rs`: the 5 `.on_cron(...)` calls become `.on_cron_named("index", …)`, `.on_cron_named("quick", …)`, `.on_cron_named("parse-transcripts", …)`, `.on_cron_named("consolidate-full", …)`, `.on_cron_named("maintain-weekly", …)` — match names to each handler's doc comment.
@@ -130,12 +130,12 @@ In `src/modules/`:
 
 Do NOT touch instance overlay modules (`$HEX_DIR/.hex/modules/` is another repo; positional fallback keeps them working).
 
-- [ ] **Step 6: Run suite + grep for stale fid references in THIS repo**
+- [x] **Step 6: Run suite + grep for stale fid references in THIS repo**
 
 Run: `cd system/harness && cargo test 2>&1 | tail -5` → PASS.
 Run: `grep -rn "::0\b\|::1\b" system/harness/src/ docs/ --include="*.rs" --include="*.md" | grep -v target | head -20` — update any foundation doc/code that hardcodes old positional fids for the renamed core workers (note them in the commit message; events.db history keeps old fids — the detector's NEVER-RAN section will show the renamed fids as new, which is expected; Task 6's digest header says so).
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add -A && git commit -m "feat(worker): named triggers + shared fid_for — stable telemetry identity"
@@ -150,7 +150,7 @@ git add -A && git commit -m "feat(worker): named triggers + shared fid_for — s
 - Modify: the crate's module-declaration file (find it: `grep -rn "pub mod alert" system/harness/src/` — add `pub mod failures;` beside it)
 - Modify: `system/harness/Cargo.toml` (add `cron = "=0.15.0"  # MUST match engine fork's version — parity test below`)
 
-- [ ] **Step 1: Write the failing tests**
+- [x] **Step 1: Write the failing tests**
 
 ```rust
 #[cfg(test)]
@@ -215,12 +215,12 @@ mod tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure**
+- [x] **Step 2: Run to verify failure**
 
 Run: `cd system/harness && cargo test failures:: 2>&1 | tail -10`
 Expected: FAIL — module doesn't exist.
 
-- [ ] **Step 3: Implement the model**
+- [x] **Step 3: Implement the model**
 
 ```rust
 //! `hex failures` — unexpected-failure detection over the telemetry store.
@@ -303,11 +303,11 @@ pub fn cron_expectations(
 
 If `prev_fire`'s `next_back()` semantics differ from the contract test (at-or-before vs strictly-before), fix the implementation (e.g. `schedule.after(&(now + chrono::Duration::seconds(1))).next_back()`), never the test.
 
-- [ ] **Step 4: Run tests**
+- [x] **Step 4: Run tests**
 
 Run: `cd system/harness && cargo test failures:: 2>&1 | tail -10` → PASS (all 5).
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add -A && git commit -m "feat(failures): expectations model + cron prev-fire math (cron =0.15.0 pinned to engine)"
@@ -325,7 +325,7 @@ The rules (from the adversarial review of the proposal):
 - A fid is MISSED ⇔ zero rows since `last_expected_fire`, evaluated only when `now > last_expected + slack`, where `slack = max(cadence/4, recent MAX(duration_ms)/1000 + 60)` — fires serialize behind slow handlers (observed: 182-min gaps on a healthy 15-min cron).
 - DOWNTIME: any gap between consecutive rows (across ALL sources) `> 2 × shortest_cadence` is a downtime interval; expected fires inside downtime are excused from MISSED and reported once, collectively.
 
-- [ ] **Step 1: Add the shared test helpers** (`failures.rs`)
+- [x] **Step 1: Add the shared test helpers** (`failures.rs`)
 
 ```rust
 #[cfg(test)]
@@ -358,7 +358,7 @@ pub(crate) mod testutil {
 }
 ```
 
-- [ ] **Step 2: Write the failing tests**
+- [x] **Step 2: Write the failing tests**
 
 ```rust
 #[cfg(test)]
@@ -438,9 +438,9 @@ mod missed_tests {
 }
 ```
 
-- [ ] **Step 3: Run to verify failure** — `cargo test missed_tests 2>&1 | tail -10` → FAIL (`evaluate` undefined).
+- [x] **Step 3: Run to verify failure** — `cargo test missed_tests 2>&1 | tail -10` → FAIL (`evaluate` undefined).
 
-- [ ] **Step 4: Implement `evaluate` + `telemetry::open_ro`**
+- [x] **Step 4: Implement `evaluate` + `telemetry::open_ro`**
 
 In `telemetry/mod.rs` (NEVER `immutable=1` — WAL readers with immutable silently miss un-checkpointed rows, the freshest data):
 
@@ -565,9 +565,9 @@ pub fn evaluate(
 }
 ```
 
-- [ ] **Step 5: Run** — `cargo test missed_tests 2>&1 | tail -10` → PASS (4).
+- [x] **Step 5: Run** — `cargo test missed_tests 2>&1 | tail -10` → PASS (4).
 
-- [ ] **Step 6: Commit** — `git add -A && git commit -m "feat(failures): MISSED with duration-aware slack, NEVER-RAN, downtime subtraction"`
+- [x] **Step 6: Commit** — `git add -A && git commit -m "feat(failures): MISSED with duration-aware slack, NEVER-RAN, downtime subtraction"`
 
 ---
 
@@ -576,7 +576,7 @@ pub fn evaluate(
 **Files:**
 - Modify: `system/harness/src/failures.rs`
 
-- [ ] **Step 1: Failing tests**
+- [x] **Step 1: Failing tests**
 
 ```rust
 #[cfg(test)]
@@ -633,9 +633,9 @@ mod signature_tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure.**
+- [x] **Step 2: Run to verify failure.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 #[derive(Debug, Clone)]
@@ -740,8 +740,8 @@ pub fn duplicate_fires(
 }
 ```
 
-- [ ] **Step 4: Run** — `cargo test failures 2>&1 | tail -5` → PASS.
-- [ ] **Step 5: Commit** — `git add -A && git commit -m "feat(failures): failure signatures with new-flag + duplicate-fire anomaly"`
+- [x] **Step 4: Run** — `cargo test failures 2>&1 | tail -5` → PASS.
+- [x] **Step 5: Commit** — `git add -A && git commit -m "feat(failures): failure signatures with new-flag + duplicate-fire anomaly"`
 
 ---
 
@@ -752,7 +752,7 @@ The real orbstack-prune incident: a `.worker.rs` on disk for weeks, never compil
 **Files:**
 - Modify: `system/harness/src/failures.rs`
 
-- [ ] **Step 1: Failing test**
+- [x] **Step 1: Failing test**
 
 ```rust
 #[cfg(test)]
@@ -773,9 +773,9 @@ mod not_landed_tests {
 }
 ```
 
-- [ ] **Step 2: Run to verify failure.**
+- [x] **Step 2: Run to verify failure.**
 
-- [ ] **Step 3: Implement**
+- [x] **Step 3: Implement**
 
 ```rust
 /// Compare *.worker.rs files on disk under $HEX_DIR/.hex/modules/ against the
@@ -826,7 +826,7 @@ pub fn compiled_module_basenames() -> Vec<String> {
 }
 ```
 
-- [ ] **Step 4: Run** — PASS. **Step 5: Commit** — `git commit -am "feat(failures): module-not-landed disk-vs-binary diff"`
+- [x] **Step 4: Run** — PASS. **Step 5: Commit** — `git commit -am "feat(failures): module-not-landed disk-vs-binary diff"`
 
 ---
 
@@ -837,7 +837,7 @@ pub fn compiled_module_basenames() -> Vec<String> {
 - Modify: `system/harness/src/failures.rs` (alert key sanitization)
 - Modify: `system/harness/src/doctor/checks/telemetry_health.rs` (remediation string)
 
-- [ ] **Step 1: Failing test for alert-key sanitization** (in failures.rs)
+- [x] **Step 1: Failing test for alert-key sanitization** (in failures.rs)
 
 ```rust
 #[test]
@@ -847,7 +847,7 @@ fn alert_keys_are_path_safe() {
 }
 ```
 
-- [ ] **Step 2: Implement**
+- [x] **Step 2: Implement**
 
 ```rust
 /// Per-condition alert keys, sanitized to [A-Za-z0-9._-] — alert::notify
@@ -866,7 +866,7 @@ pub fn alert_key(kind: &str, ident: &str) -> String {
 
 Run the test → PASS.
 
-- [ ] **Step 3: CLI wiring in main.rs**
+- [x] **Step 3: CLI wiring in main.rs**
 
 Add to `enum Commands`:
 
@@ -1031,15 +1031,15 @@ fn run_failures_probe() -> i32 {
 }
 ```
 
-- [ ] **Step 4: Update the doctor remediation string** — in `telemetry_health.rs`, change the remediation text to: ``Run `hex failures` (digest) or `hex telemetry failures` (raw rows) to inspect``.
+- [x] **Step 4: Update the doctor remediation string** — in `telemetry_health.rs`, change the remediation text to: ``Run `hex failures` (digest) or `hex telemetry failures` (raw rows) to inspect``.
 
-- [ ] **Step 5: Build + run by hand (read-only against live data)**
+- [x] **Step 5: Build + run by hand (read-only against live data)**
 
 Run: `cd system/harness && cargo build 2>&1 | tail -3` → compiles.
 Run: `HEX_DIR=/Users/mrap/hex ./target/debug/hex failures | head -50` → digest prints; eyeball MISSED/NEVER-RAN against `HEX_DIR=/Users/mrap/hex /Users/mrap/hex/.hex/bin/hex module list` reality. Record the output in the task report. (If `CARGO_TARGET_DIR` is set in your environment, the binary is at `$CARGO_TARGET_DIR/debug/hex` instead.)
 
-- [ ] **Step 6: Run full suite** — `cargo test 2>&1 | tail -5` → PASS.
-- [ ] **Step 7: Commit** — `git commit -am "feat(failures): hex failures CLI digest + alerts + out-of-process probe"`
+- [x] **Step 6: Run full suite** — `cargo test 2>&1 | tail -5` → PASS.
+- [x] **Step 7: Commit** — `git commit -am "feat(failures): hex failures CLI digest + alerts + out-of-process probe"`
 
 ---
 
@@ -1050,7 +1050,7 @@ Run: `HEX_DIR=/Users/mrap/hex ./target/debug/hex failures | head -50` → digest
 - Modify: `system/harness/src/modules/freshness.worker.rs` (one-line cron fix)
 - Create: launchd plist — check where plist templates live first (`find . -name "*.plist" -not -path "*/target/*"`); if a template dir exists, put it there; otherwise create `system/templates/launchd/com.hex.failures-probe.plist` and say so in the report.
 
-- [ ] **Step 1: Worker stub**
+- [x] **Step 1: Worker stub**
 
 ```rust
 //! `hex-failures` — daily unexpected-failure digest over the telemetry store.
@@ -1079,9 +1079,9 @@ pub fn worker() -> Worker {
 
 (Check how other module stubs import the crate — `freshness.worker.rs` uses `use hex::worker::...`; mirror exactly. Verify `ctx.run`'s argv type by reading `ctx.rs` — adjust `&[...]` vs `&Vec<String>` to match.)
 
-- [ ] **Step 2: Freshness tz fix** — in `freshness.worker.rs`: cron value `"0 0 9 * * * *"` → `"0 0 16 * * * *"`, doc comment → `09:00 PT (16:00 UTC) — engine crons evaluate UTC; see telemetry-consumption-layer proposal`.
+- [x] **Step 2: Freshness tz fix** — in `freshness.worker.rs`: cron value `"0 0 9 * * * *"` → `"0 0 16 * * * *"`, doc comment → `09:00 PT (16:00 UTC) — engine crons evaluate UTC; see telemetry-consumption-layer proposal`.
 
-- [ ] **Step 3: Probe plist**
+- [x] **Step 3: Probe plist**
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -1105,7 +1105,7 @@ pub fn worker() -> Worker {
 
 Do NOT load the plist (deploy-time op, instance-side). Note in the report: install = copy to `~/Library/LaunchAgents/` + `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hex.failures-probe.plist`. If the repo's sanitize gate (`hex sanitize`) flags the absolute `/Users/mrap` paths, follow whatever convention existing templates use for instance paths (placeholder + install-time substitution) and document it.
 
-- [ ] **Step 4: Suite + commit**
+- [x] **Step 4: Suite + commit**
 
 Run: `cargo test 2>&1 | tail -5` → PASS. If any test asserts the registry handler count (grep `registered.*handler` in tests), update it for the new module.
 
@@ -1121,19 +1121,19 @@ git add -A && git commit -m "feat(failures): daily digest worker + out-of-proces
 - Modify: `docs/hex-ops.md` (add a Failures row near the Telemetry row; document the WAL/immutable footgun where events.db is documented)
 - Modify: `docs/workflows.md` "Health check" section (add `hex failures`)
 
-- [ ] **Step 1: Doc edits** — one row/line each, follow surrounding format exactly.
+- [x] **Step 1: Doc edits** — one row/line each, follow surrounding format exactly.
 
-- [ ] **Step 2: Full suite + release build**
+- [x] **Step 2: Full suite + release build**
 
 Run: `cd system/harness && cargo test 2>&1 | tail -3` → PASS.
 Run: `cargo build --release 2>&1 | tail -3` → compiles.
 
-- [ ] **Step 3: Exit-gate smoke against live data (read-only)**
+- [x] **Step 3: Exit-gate smoke against live data (read-only)**
 
 Run: `HEX_DIR=/Users/mrap/hex ./target/release/hex failures; echo "exit=$?"`
 Expected: digest prints; NEVER-RAN lists the renamed core fids (expected post-rename); MODULE NOT LANDED section empty.
 Run: `HEX_DIR=/Users/mrap/hex ./target/release/hex failures probe; echo "exit=$?"` → `probe ok`, exit 0 (harness is up).
 
-- [ ] **Step 4: Commit** — `git commit -am "docs: hex failures surfaces + WAL footgun"`
+- [x] **Step 4: Commit** — `git commit -am "docs: hex failures surfaces + WAL footgun"`
 
-- [ ] **Step 5: Report** — branch name, test counts, live-digest output sample, every deviation from this plan (documented deviations are judged on merit; undocumented ones are review failures).
+- [x] **Step 5: Report** — branch name, test counts, live-digest output sample, every deviation from this plan (documented deviations are judged on merit; undocumented ones are review failures).
