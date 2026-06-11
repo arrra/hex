@@ -5,6 +5,7 @@ extern crate self as hex;
 
 pub mod act_evidence;
 pub mod alert;
+pub mod backup;
 pub mod claude_runs;
 pub mod dial;
 pub mod doctor;

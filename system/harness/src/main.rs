@@ -180,6 +180,11 @@ enum Commands {
         #[command(subcommand)]
         command: GatekeeperCommands,
     },
+    /// Daily sqlite snapshots (memory/telemetry/ledger DBs) with 7-day
+    /// rotation under $HEX_DIR/.hex/backups/YYYY-MM-DD/. Target of the
+    /// hex-backup cron worker (04:00 daily).
+    #[command(display_order = 14)]
+    Backup,
 }
 
 #[derive(Subcommand)]
@@ -792,6 +797,10 @@ fn main() {
             }
         }
         Commands::Env { command } => env::run_env_command(command),
+        Commands::Backup => {
+            let hex_dir = get_hex_dir();
+            std::process::exit(hex::backup::run(&hex_dir));
+        }
         Commands::Upgrade { args } => {
             std::process::exit(upgrade::run(&args));
         }
