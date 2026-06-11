@@ -14,5 +14,6 @@
 
 pub mod instance;
 pub mod lsp;
+pub mod translate;
 
 pub use instance::{InstanceState, LiveBackend, LiveError, LiveInstance, LiveResult};
