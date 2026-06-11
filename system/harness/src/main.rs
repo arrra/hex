@@ -490,6 +490,14 @@ enum MemoryCommands {
     /// Print ~10 recency-ordered pointers into the live workspace (project dirs,
     /// recent decisions, todo "Now" items). No LLM, target <200ms.
     Recent,
+    /// Scheduled self-repair for memory.db: orphan-vector sweep, FTS5 optimize,
+    /// transcript_files hygiene, optional VACUUM + facts backfill
+    Maintain {
+        #[arg(long)]
+        vacuum: bool,
+        #[arg(long)]
+        backfill_facts: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -758,6 +766,9 @@ fn main() {
                 }
                 MemoryCommands::Recent => {
                     memory::recent::run(&hex_dir)
+                }
+                MemoryCommands::Maintain { vacuum, backfill_facts } => {
+                    memory::maintain::run(&hex_dir, *vacuum, *backfill_facts)
                 }
                 MemoryCommands::Consolidate { command } => {
                     let (mode, max) = match command {

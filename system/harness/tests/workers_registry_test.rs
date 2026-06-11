@@ -56,6 +56,46 @@ fn workers_registry_memory_maintenance_cron_matches_yaml() {
 }
 
 #[test]
+fn workers_registry_memory_maintenance_has_weekly_maintain() {
+    // `hex memory maintain --vacuum --backfill-facts` runs weekly — Sunday
+    // 04:30Z, after the 04:00Z backup — so one-off memory.db corruption
+    // (orphan vectors, FTS bloat, foreign transcript_files rows) self-heals.
+    let reg = workers::registry();
+    let mm = reg
+        .iter()
+        .find(|w| w.name == "hex-memory-maintenance")
+        .expect("hex-memory-maintenance worker must be registered");
+    let exprs = cron_exprs(mm);
+    assert!(
+        exprs.iter().any(|e| e == "0 30 4 * * SUN *"),
+        "expected weekly `hex memory maintain` cron '0 30 4 * * SUN *' in {:?}",
+        exprs
+    );
+    assert_eq!(
+        hex::workers::hex_modules::memory_maintenance::ARGV_MAINTAIN,
+        &["hex", "memory", "maintain", "--vacuum", "--backfill-facts"],
+    );
+}
+
+#[test]
+fn workers_registry_quick_consolidate_offset_from_full_run() {
+    // 2026-06-10: the 03:00:00Z full consolidation was lock-skipped behind a
+    // quick tick that fired the same second. The quick cron must stay offset
+    // from the :00 boundary (4x/hour at :05/:20/:35/:50).
+    let reg = workers::registry();
+    let mm = reg
+        .iter()
+        .find(|w| w.name == "hex-memory-maintenance")
+        .expect("hex-memory-maintenance worker must be registered");
+    let exprs = cron_exprs(mm);
+    assert!(
+        exprs.iter().any(|e| e == "0 5,20,35,50 * * * * *"),
+        "expected quick-consolidate cron '0 5,20,35,50 * * * * *' in {:?}",
+        exprs
+    );
+}
+
+#[test]
 fn workers_registry_freshness_daily_0900() {
     // hex-freshness: daily ledger freshness alerting (agent-infra P0, E0 step 4).
     let reg = workers::registry();
