@@ -1,5 +1,5 @@
 <!--
-verified-against: 3c8f6b14 (2026-06-11)
+verified-against: 2c3250d1 (2026-06-11)
 source-paths: system/harness/src/memory/, system/harness/src/consolidate.rs, system/harness/src/hook/capture.rs, system/harness/src/hook/user_prompt_submit.rs, system/harness/src/modules/memory_maintenance.worker.rs, system/harness/src/modules/backup.worker.rs
 -->
 # Memory Pipeline Architecture
