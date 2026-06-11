@@ -149,7 +149,7 @@ fn stale_ref_scan_targets(hex_dir: &Path) -> Vec<PathBuf> {
     let mut targets = vec![
         hex_dir.join("CLAUDE.md"),
         hex_dir.join("AGENTS.md"),
-        hex_dir.join("templates/CLAUDE.md"),
+        hex_dir.join("templates/AGENTS.md"),
     ];
     // docs/**/*.md
     let docs_dir = hex_dir.join("docs");

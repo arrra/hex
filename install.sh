@@ -116,8 +116,8 @@ mkdir -p "$TARGET_DIR/.hex/extensions"
 mkdir -p "$TARGET_DIR/.hex/memory"
 
 # Copy root templates
-cp "$SCRIPT_DIR/templates/CLAUDE.md"  "$TARGET_DIR/CLAUDE.md"
 cp "$SCRIPT_DIR/templates/AGENTS.md"  "$TARGET_DIR/AGENTS.md"
+ln -sfn AGENTS.md "$TARGET_DIR/CLAUDE.md"
 cp "$SCRIPT_DIR/templates/todo.md"    "$TARGET_DIR/todo.md"
 
 # Copy user data templates
