@@ -80,13 +80,19 @@ cq (CLI, per query) ──fresh──────────────► SQL
 
 ## 4. Pool policy (all configurable in `~/.codeintel/scipd.toml`, loud defaults)
 
-| Knob | Default | Behavior |
+| Knob | Default (smoke #3, 2026-06-11) | Behavior |
 |---|---|---|
-| `pool_cap` | from smoke #3 (2 if unresolved) | LRU evict (SIGTERM→SIGKILL) on overflow; eviction logged + visible in `status` |
+| `pool_cap` | **2** | LRU evict (SIGTERM→SIGKILL) on overflow; eviction logged + visible in `status` |
 | `idle_ttl_secs` | 1800 | reaper kills instances idle past TTL |
 | `vanish_reap` | always on | instance whose worktree path no longer exists is killed immediately |
-| `mem_limit_mb` | from smoke #3 (6144 if unresolved) | watchdog polls RSS every 30s; over limit → kill + log + `status` red note; NEXT query respawns |
+| `mem_limit_mb` | **3072** per instance | watchdog polls every 30s; over limit → kill + log + `status` red note; NEXT query respawns. **Grace: no kill within 180s of spawn** (priming spikes). Pool-wide alarm (log+status only) at **6144**. |
 | `max_warm_wait` | n/a | cq never blocks on warming; there is no wait knob by design |
+
+**Memory metric (smoke #3 finding):** `ps` RSS under-reports idle rust-analyzer by >50x on
+macOS (compressed/cold pages — 16MB reported vs >1GB held). The watchdog measures **physical
+footprint** (`footprint -p <pid>` when runnable unprivileged; fall back to
+`ps -o rss=` with the under-reporting caveat logged once at startup). Smoke #3 measured
+steady-state: hex-foundation 861MB, boi 1451MB quiescent; prime 94s/111s.
 
 ## 5. cq changes
 
