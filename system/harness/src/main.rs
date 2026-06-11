@@ -228,6 +228,10 @@ enum ReleaseCommands {
         /// Skip the codex-parity gate — loud Skipped, never silent
         #[arg(long)]
         skip_parity: bool,
+        /// Finish a pre-existing release/X.Y.Z or hotfix/X.Y.Z branch instead
+        /// of cutting one (the branch name owns the version and the mode)
+        #[arg(long, value_name = "BRANCH", conflicts_with_all = ["level", "version"])]
+        finish: Option<String>,
     },
 }
 
@@ -1180,7 +1184,15 @@ fn main() {
             }
         },
         Commands::Release { command } => match command {
-            ReleaseCommands::Cut { level, version, hotfix, dry_run, skip_e2e, skip_parity } => {
+            ReleaseCommands::Cut {
+                level,
+                version,
+                hotfix,
+                dry_run,
+                skip_e2e,
+                skip_parity,
+                finish,
+            } => {
                 // `version` wins over `level`; `level` defaults to patch —
                 // CutOptions owns that precedence, clap passes both raw.
                 let level = match level.as_deref().map(str::parse::<hex::release::BumpLevel>) {
@@ -1197,6 +1209,7 @@ fn main() {
                     hotfix,
                     dry_run,
                     skip: hex::release::SkipFlags { skip_e2e, skip_parity },
+                    finish,
                 };
                 match hex::release::cut(&opts) {
                     Ok(()) => std::process::exit(0),
