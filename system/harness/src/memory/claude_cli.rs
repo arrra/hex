@@ -67,10 +67,15 @@ pub fn map_model_to_cli(model: &str) -> String {
 /// Build the argv (excluding the binary name) for a `claude -p` invocation.
 /// The argument order is the exact verified recipe from the spec — do not
 /// reorder without re-verifying on a live box.
-pub fn build_args(prompt: &str, settings_arg: &str, cli_model: &str) -> Vec<String> {
+///
+/// The prompt is deliberately NOT an argv element: it goes to the child via
+/// stdin (`-p` with no positional prompt reads stdin). A single argv string is
+/// capped at 128 KB on Linux (`MAX_ARG_STRLEN`), so a default 48k-token
+/// distill slice (~168 KB) made `execve` fail with E2BIG — every large
+/// transcript burned a spawn + a strike per slice (mrap/hex#7).
+pub fn build_args(settings_arg: &str, cli_model: &str) -> Vec<String> {
     vec![
         "-p".into(),
-        prompt.into(),
         "--strict-mcp-config".into(),
         "--mcp-config".into(),
         r#"{"mcpServers":{}}"#.into(),
@@ -149,7 +154,7 @@ pub fn generate(
 ) -> Result<String, ProviderError> {
     let settings = settings_arg_value(claude_settings_file)?;
     let cli_model = map_model_to_cli(model);
-    let args = build_args(prompt, &settings, &cli_model);
+    let args = build_args(&settings, &cli_model);
 
     // CLAUDE.md auto-discovery is cwd-based; spawning from any workspace cwd
     // WILL slurp CLAUDE.md (verified). A fresh tempdir is clean. Hold the
@@ -157,14 +162,33 @@ pub fn generate(
     let cwd_guard = tempfile::tempdir()
         .map_err(|e| ProviderError::Upstream(format!("tempdir for claude cwd: {e}")))?;
 
-    let child = build_command(&args, cwd_guard.path())
+    let mut child = build_command(&args, cwd_guard.path())
         .spawn()
         .map_err(|e| ProviderError::Upstream(format!("spawn `claude` failed: {e}")))?;
 
     // Pidfile so reaper::sweep can find this child if WE die before it does.
     let _pidfile = PidfileGuard::new(child.id());
 
+    // Feed the prompt on stdin from a dedicated thread: prompts routinely
+    // exceed the 64 KB pipe buffer, so a same-thread write_all would block
+    // until the child drains — and deadlock-forever if the child dies without
+    // reading (auth failure). A write error here (EPIPE from an early-dead
+    // child) is reported but never masks the child's own exit/stderr story.
+    let stdin_pipe = child.stdin.take();
+    let prompt_owned = prompt.to_string();
+    let stdin_writer = std::thread::spawn(move || {
+        if let Some(mut pipe) = stdin_pipe {
+            use std::io::Write;
+            if let Err(e) = pipe.write_all(prompt_owned.as_bytes()) {
+                eprintln!(
+                    "claude_cli: stdin write incomplete ({e}) — child exit status carries the real story"
+                );
+            }
+        } // drop closes the pipe → EOF, claude starts generating
+    });
+
     let (status, stdout, stderr) = run_with_timeout(child, DEFAULT_TIMEOUT)?;
+    let _ = stdin_writer.join();
 
     // Hold cwd_guard alive until after the child finishes.
     drop(cwd_guard);
@@ -242,7 +266,9 @@ fn build_command(args: &[String], cwd: &Path) -> Command {
         .env_remove("ANTHROPIC_AUTH_TOKEN")
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
-        .stdin(Stdio::null());
+        // The prompt arrives on stdin (see build_args — argv has a 128 KB
+        // per-string ceiling on Linux).
+        .stdin(Stdio::piped());
     // Put the child in its own process group so that on timeout we can SIGKILL
     // the entire tree (claude -p may fork helpers; killing only the top-level
     // pid would leave them holding the pipes open, and our read threads would
@@ -393,11 +419,16 @@ mod tests {
 
     #[test]
     fn build_args_matches_verified_recipe() {
-        let args = build_args("hello", "{}", "claude-sonnet-4-5");
-        // The exact arg order is the verified recipe. Spot-check both
-        // structure (flags present, prompt second) and value pass-through.
+        let args = build_args("{}", "claude-sonnet-4-5");
+        // The exact arg order is the verified recipe. The prompt must NOT be
+        // an argv element (stdin contract — mrap/hex#7, E2BIG on Linux):
+        // `-p` is immediately followed by the next flag.
         assert_eq!(args[0], "-p");
-        assert_eq!(args[1], "hello");
+        assert_eq!(args[1], "--strict-mcp-config");
+        assert!(
+            args.iter().all(|a| a.starts_with("--") || a == "-p" || !a.contains(' ')),
+            "no argv element may carry free prompt text"
+        );
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
         // --mcp-config must be followed by the empty MCP servers JSON.
         let mcp_idx = args.iter().position(|a| a == "--mcp-config").unwrap();
@@ -538,7 +569,10 @@ mod tests {
         let dump = out_dir.join("dump.txt");
         format!(
             r#"#!/bin/sh
+# Read stdin FIRST (the real claude drains the prompt before generating).
+STDIN_CONTENT=$(cat)
 {{
+  echo "STDIN=${{STDIN_CONTENT}}"
   echo "ARGV_COUNT=$#"
   i=1
   for a in "$@"; do
@@ -576,9 +610,16 @@ JSON
 
         let dump = std::fs::read_to_string(dump_dir.path().join("dump.txt"))
             .expect("shim wrote dump");
-        // Args must include the verified flags.
+        // Args must include the verified flags — and the prompt must arrive
+        // on STDIN, never in argv (mrap/hex#7: argv is capped at 128 KB per
+        // string on Linux; default distill slices are ~168 KB).
         assert!(dump.contains("ARGV[1]=-p"));
-        assert!(dump.contains("ARGV[2]=hello-prompt"));
+        assert!(dump.contains("ARGV[2]=--strict-mcp-config"));
+        assert!(dump.contains("STDIN=hello-prompt"));
+        assert!(
+            !dump.lines().any(|l| l.starts_with("ARGV[") && l.contains("hello-prompt")),
+            "prompt must not appear in any argv element, dump: {dump}"
+        );
         assert!(dump.contains("=--strict-mcp-config"));
         assert!(dump.contains(r#"={"mcpServers":{}}"#));
         assert!(dump.contains("=--no-session-persistence"));
@@ -615,6 +656,62 @@ JSON
                 .unwrap_or_else(|_| shim_dir.path().into()),
             "cwd must NOT be the shim dir"
         );
+    }
+
+    #[test]
+    fn shim_e2e_oversized_prompt_streams_via_stdin() {
+        // Regression for mrap/hex#7: a 300 KB prompt exceeds both the Linux
+        // 128 KB per-argv-string cap (the original E2BIG) AND the 64 KB pipe
+        // buffer (would deadlock a same-thread stdin write). The shim reports
+        // the byte count it received so we prove the full prompt arrived.
+        let shim_dir = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+LEN=$(cat | wc -c | tr -d ' ')
+printf '{"type":"result","result":"len:%s"}' "$LEN"
+"#;
+        install_shim(shim_dir.path(), script);
+
+        let prompt = "x".repeat(300_000);
+        let out = generate_with_shim(
+            shim_dir.path(),
+            "memory_extract",
+            &prompt,
+            "anthropic/claude-sonnet-4.5",
+            None,
+        )
+        .expect("oversized prompt must round-trip via stdin");
+        assert_eq!(out, "len:300000");
+    }
+
+    #[test]
+    fn shim_e2e_child_dying_without_reading_stdin_reports_child_error() {
+        // If the child exits before draining stdin (e.g. auth failure), the
+        // writer thread takes EPIPE and the caller must still get the CHILD's
+        // failure — not a hang, not a write panic.
+        let shim_dir = tempfile::tempdir().unwrap();
+        let script = r#"#!/bin/sh
+echo "Not logged in" >&2
+exit 3
+"#;
+        install_shim(shim_dir.path(), script);
+
+        let prompt = "x".repeat(300_000);
+        let result = generate_with_shim(
+            shim_dir.path(),
+            "memory_extract",
+            &prompt,
+            "anthropic/claude-sonnet-4.5",
+            None,
+        );
+        match result {
+            Err(ProviderError::Deferred(msg)) => {
+                assert!(
+                    msg.contains("Not logged in"),
+                    "child stderr must surface, got: {msg}"
+                );
+            }
+            other => panic!("expected Deferred from auth-shaped child failure, got: {other:?}"),
+        }
     }
 
     #[test]
@@ -720,7 +817,7 @@ sleep 30
 
         let cwd_guard = tempfile::tempdir().unwrap();
         let child = build_command(
-            &build_args("x", "{}", "claude-sonnet-4-5"),
+            &build_args("{}", "claude-sonnet-4-5"),
             cwd_guard.path(),
         )
         .spawn()
