@@ -278,6 +278,19 @@ pub fn duplicate_fires(
     Ok(out)
 }
 
+/// Per-condition alert keys, sanitized to [A-Za-z0-9._-] — alert::notify
+/// interpolates the key into a stamp-file path (alert.rs:57) and dedupes 6h
+/// per key, so keys must be path-safe and per-condition (a shared key would
+/// suppress a different worker's distinct MISS).
+pub fn alert_key(kind: &str, ident: &str) -> String {
+    let safe: String = ident
+        .chars()
+        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '-' })
+        .collect::<String>()
+        .split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-");
+    format!("failures-{kind}-{safe}")
+}
+
 #[cfg(test)]
 pub(crate) mod testutil {
     use chrono::{DateTime, Utc};
@@ -543,6 +556,12 @@ mod tests {
         let exp = cron_expectations(&regs, &disabled);
         assert_eq!(exp.len(), 1);
         assert_eq!(exp[0].fid, "a::daily");
+    }
+
+    #[test]
+    fn alert_keys_are_path_safe() {
+        assert_eq!(alert_key("missed", "hex-backup::daily"), "failures-missed-hex-backup-daily");
+        assert_eq!(alert_key("missed", "a::b/c"), "failures-missed-a-b-c");
     }
 
     /// Parity: every cron expression in the live registry must parse with OUR
