@@ -1,5 +1,6 @@
 [workspace]
 members = ["system/harness", "system/code-intel"]
+exclude = ["system/code-intel/tests/fixtures/golden-crate"]
 resolver = "2"
 
 [profile.release]
