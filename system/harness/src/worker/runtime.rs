@@ -93,7 +93,7 @@ async fn run(workers: Vec<Worker>) -> i32 {
     use iii_engine::workers::config::EngineConfig;
     use iii_engine::EngineBuilder;
     let engine = match EngineBuilder::new()
-        .with_config(EngineConfig::default_config())
+        .with_config(loopback_engine_config(EngineConfig::default_config()))
         .build()
         .await
     {
@@ -298,6 +298,38 @@ async fn run(workers: Vec<Worker>) -> i32 {
     engine_task.abort();
     eprintln!("hex harness serve: stopped cleanly");
     0
+}
+
+/// The engine's listener workers and the bind-host override slot each exposes.
+/// Upstream defaults all three to `0.0.0.0`, which puts the agent control
+/// plane (WS :49134, HTTP :3111, stream :3112) on every interface — reachable
+/// off-host on a corp network. We pin them to loopback; cross-host access is
+/// an explicit opt-in via `III_BIND_HOST`.
+const LISTENER_WORKERS: &[&str] = &["iii-worker-manager", "iii-http", "iii-stream"];
+const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+
+/// Rewrite the engine config so every listener worker binds `III_BIND_HOST`
+/// (default loopback). Only sets `host`; ports and the rest of each worker's
+/// config keep their defaults (an existing per-worker config is preserved and
+/// only its `host` key overridden).
+fn loopback_engine_config(
+    mut config: iii_engine::workers::config::EngineConfig,
+) -> iii_engine::workers::config::EngineConfig {
+    let host =
+        std::env::var("III_BIND_HOST").unwrap_or_else(|_| DEFAULT_BIND_HOST.to_string());
+    for entry in config.modules.iter_mut().chain(config.workers.iter_mut()) {
+        if LISTENER_WORKERS.contains(&entry.name.as_str()) {
+            let mut cfg = entry
+                .config
+                .take()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(obj) = cfg.as_object_mut() {
+                obj.insert("host".to_string(), serde_json::json!(host));
+            }
+            entry.config = Some(cfg);
+        }
+    }
+    config
 }
 
 /// Deliver one emission to the engine through an EXISTING `iii` connection,
@@ -525,6 +557,44 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    /// Every listener worker in the default engine config gets its bind host
+    /// pinned to loopback (mrap/hex#8 — upstream defaults are 0.0.0.0).
+    #[test]
+    fn loopback_config_pins_every_listener_host() {
+        let config =
+            loopback_engine_config(iii_engine::workers::config::EngineConfig::default_config());
+        let all: Vec<_> = config.modules.iter().chain(config.workers.iter()).collect();
+        for name in LISTENER_WORKERS {
+            let entry = all
+                .iter()
+                .find(|e| e.name == *name)
+                .unwrap_or_else(|| panic!("default config must include listener '{name}'"));
+            let host = entry
+                .config
+                .as_ref()
+                .and_then(|c| c.get("host"))
+                .and_then(|h| h.as_str())
+                .unwrap_or_else(|| panic!("listener '{name}' must carry a host override"));
+            assert_eq!(host, DEFAULT_BIND_HOST, "listener '{name}' must bind loopback");
+        }
+    }
+
+    /// Non-listener workers are left untouched — no config injected.
+    #[test]
+    fn loopback_config_leaves_other_workers_alone() {
+        let config =
+            loopback_engine_config(iii_engine::workers::config::EngineConfig::default_config());
+        for entry in config.modules.iter().chain(config.workers.iter()) {
+            if !LISTENER_WORKERS.contains(&entry.name.as_str()) {
+                assert!(
+                    entry.config.is_none(),
+                    "non-listener '{}' must not gain a config override",
+                    entry.name
+                );
+            }
+        }
+    }
 
     /// INVARIANT 1a: in normal operation Ctx::emit hits the engine.
     #[test]
