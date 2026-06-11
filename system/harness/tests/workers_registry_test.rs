@@ -98,6 +98,8 @@ fn workers_registry_quick_consolidate_offset_from_full_run() {
 #[test]
 fn workers_registry_freshness_daily_0900() {
     // hex-freshness: daily ledger freshness alerting (agent-infra P0, E0 step 4).
+    // 09:00 PT = 16:00 UTC — engine crons evaluate UTC (telemetry-consumption
+    // proposal: the original "0 0 9" fired at 02:00 PT, while Mike slept).
     let reg = workers::registry();
     let fr = reg
         .iter()
@@ -105,8 +107,8 @@ fn workers_registry_freshness_daily_0900() {
         .expect("hex-freshness worker must be registered");
     let exprs = cron_exprs(fr);
     assert!(
-        exprs.iter().any(|e| e == "0 0 9 * * * *"),
-        "expected hex-freshness cron '0 0 9 * * * *' (09:00 daily) in {:?}",
+        exprs.iter().any(|e| e == "0 0 16 * * * *"),
+        "expected hex-freshness cron '0 0 16 * * * *' (09:00 PT / 16:00 UTC) in {:?}",
         exprs
     );
 }

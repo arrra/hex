@@ -7,12 +7,13 @@
 //! anything is stale — loud per SO S6. This file is only the cron stub the
 //! worker registry picks up (same shape as `backup.worker.rs`).
 //!
-//! 09:00 daily, so stale-agent alerts land while Mike is awake.
+//! 09:00 PT daily, so stale-agent alerts land while Mike is awake.
 
 use hex::worker::{ctx::Ctx, event::Event, Result, Worker};
 
-/// Cron expression — 09:00 daily.
-pub const CRON_DAILY_0900: &str = "0 0 9 * * * *";
+/// Cron expression — 09:00 PT (16:00 UTC) — engine crons evaluate UTC; see
+/// telemetry-consumption-layer proposal.
+pub const CRON_DAILY_0900: &str = "0 0 16 * * * *";
 
 /// Argv for the freshness check.
 pub const ARGV_FRESHNESS: &[&str] = &["hex", "ledger", "freshness"];
