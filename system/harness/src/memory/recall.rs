@@ -9,7 +9,6 @@ use std::path::Path;
 
 const MIN_QUERY_CHARS: usize = 12;
 const MAX_CONTEXT_CHARS: usize = 10_000; // spec §8 hard cap
-const TOP_K: usize = 6;
 
 pub type Hit = super::search::SearchResult;
 
@@ -32,7 +31,9 @@ pub fn recall_with_facts(
     query: &str,
 ) -> rusqlite::Result<RecallV2> {
     let chunks = chunks_recall(conn, query, 5).unwrap_or_default();
-    let facts = facts_recall(conn, query, 5)?;
+    // Hot-path budget: no embedding model is loaded here (module doc), so the
+    // facts vector arm is off (None ⇒ exactly the FTS-only behavior).
+    let facts = facts_recall(conn, query, 5, None)?;
     Ok(RecallV2 { chunks, facts })
 }
 
@@ -44,10 +45,15 @@ fn chunks_recall(
     super::search::search_fts_public(conn, query, k, None)
 }
 
-fn facts_recall(
+/// Facts retrieval: FTS keyword arm, plus a KNN arm over `facts_vec` when the
+/// caller already holds a query embedding (hoist it from the chunk path — do
+/// NOT cold-load the model here). `query_vec = None` ⇒ FTS-only, identical to
+/// the pre-fusion behavior.
+pub(crate) fn facts_recall(
     conn: &rusqlite::Connection,
     query: &str,
     k: usize,
+    query_vec: Option<&[f32]>,
 ) -> rusqlite::Result<Vec<FactHit>> {
     // FTS5 default-ANDs tokens — for natural-language queries we want any-match.
     // Drop stopwords and OR the remaining alphanumerics so "who is alice" hits
@@ -59,27 +65,71 @@ fn facts_recall(
         .collect::<Vec<_>>()
         .join(" OR ");
 
-    let mut hits: Vec<FactHit> = if fts_query.is_empty() {
+    // FTS arm — ranked facts rowids (bm25, then importance). The rowid is the
+    // fusion key shared with the KNN arm (facts.id is a TEXT ULID, not an
+    // integer — knn_facts joins it back to the rowid).
+    let fts_ids: Vec<i64> = if fts_query.is_empty() {
         Vec::new()
     } else {
         conn.prepare(
-            "SELECT f.subject, f.predicate, f.object, f.importance, f.private
+            "SELECT facts_fts.rowid
              FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
              WHERE facts_fts MATCH ?1 AND f.tombstone = 0
              ORDER BY bm25(facts_fts), f.importance DESC LIMIT ?2",
         )?
-        .query_map(rusqlite::params![fts_query, k as i64], |r| {
-            Ok(FactHit {
-                subject: r.get(0)?,
-                predicate: r.get(1)?,
-                object: r.get(2)?,
-                importance: r.get(3)?,
-                private: r.get::<_, i64>(4)? != 0,
-            })
-        })?
+        .query_map(rusqlite::params![fts_query, k as i64], |r| r.get(0))?
         .filter_map(Result::ok)
         .collect()
     };
+
+    // Vector arm — same shape as the chunk-side fusion (search.rs run()):
+    // best-effort, loud on failure, never degrades the FTS arm.
+    let knn_ids: Vec<i64> = match query_vec {
+        Some(qv) => super::vector::knn_facts(conn, qv, k.max(20))
+            .map(|hits| hits.into_iter().map(|(id, _)| id).collect())
+            .unwrap_or_else(|e| {
+                eprintln!("facts vector arm failed: {e}");
+                vec![]
+            }),
+        None => vec![],
+    };
+
+    let fused = super::rrf::rrf_fuse(&[fts_ids, knn_ids], super::rrf::RRF_K);
+
+    // Fetch facts in fused order. Importance breaks RRF-score ties (the
+    // fuse's HashMap ordering is arbitrary on equal scores); the sort is
+    // stable, so the single-arm (None) path keeps exactly the FTS order.
+    let mut scored: Vec<(FactHit, f64)> = Vec::new();
+    for (rowid, score) in &fused {
+        let row = conn.query_row(
+            "SELECT subject, predicate, object, importance, private
+             FROM facts WHERE rowid = ?1 AND tombstone = 0",
+            [rowid],
+            |r| {
+                Ok(FactHit {
+                    subject: r.get(0)?,
+                    predicate: r.get(1)?,
+                    object: r.get(2)?,
+                    importance: r.get(3)?,
+                    private: r.get::<_, i64>(4)? != 0,
+                })
+            },
+        );
+        if let Ok(h) = row {
+            scored.push((h, *score));
+        }
+    }
+    scored.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(
+                b.0.importance
+                    .partial_cmp(&a.0.importance)
+                    .unwrap_or(std::cmp::Ordering::Equal),
+            )
+    });
+    let mut hits: Vec<FactHit> = scored.into_iter().map(|(h, _)| h).collect();
+    hits.truncate(k);
 
     // Slug boost: for each token in the query, surface facts whose subject
     // contains `:<token>` after the type prefix (e.g. "alice" → subject
@@ -543,6 +593,84 @@ mod plan2_tests {
             ablation.get("total_chars").is_some()
                 || ablation.get("chars").is_some(),
             "`ablation_without_top1` must include a char total (`total_chars` or `chars`): {ablation}"
+        );
+    }
+
+    /// RED test for Plan Task 11 Step 3 — `facts_recall` must gain a vector
+    /// arm: when the caller passes a query embedding, facts that share NO
+    /// token with the query but sit near it in embedding space must surface,
+    /// fused (RRF) with the FTS arm. `None` keeps today's FTS-only behavior.
+    #[test]
+    fn facts_recall_fuses_knn_arm_with_fts() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+
+        // Fact A: FTS-matchable by the query tokens ("vector", "store").
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('fa','project:hex','uses','sqlite-vec for the vector store',0.9,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+        // Fact B: shares NO token with the query — only the KNN arm can find
+        // it. Synthetic embedding identical to the query vector (distance 0,
+        // safely under KNN_MAX_DISTANCE).
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('fb','person:bob','prefers','zzqx qqzz',0.9,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+        let qv = vec![0.1f32; crate::memory::vector::EMBED_DIM];
+        crate::memory::vector::insert_fact_vec(&c, "fb", &qv).unwrap();
+
+        // FTS-only: B is invisible.
+        let fts_only = facts_recall(&c, "what powers the vector store", 5, None).unwrap();
+        assert!(
+            fts_only.iter().any(|f| f.subject == "project:hex"),
+            "FTS arm must still surface the keyword match"
+        );
+        assert!(
+            !fts_only.iter().any(|f| f.subject == "person:bob"),
+            "without a query vector the KNN-only fact must NOT appear"
+        );
+
+        // Fused: both arms contribute.
+        let fused = facts_recall(&c, "what powers the vector store", 5, Some(&qv)).unwrap();
+        assert!(
+            fused.iter().any(|f| f.subject == "project:hex"),
+            "FTS hit must survive fusion"
+        );
+        assert!(
+            fused.iter().any(|f| f.subject == "person:bob" && f.object == "zzqx qqzz"),
+            "KNN arm must surface the semantically-near fact, got {:?}",
+            fused.iter().map(|f| &f.subject).collect::<Vec<_>>()
+        );
+    }
+
+    /// Tombstoned facts must not leak through the KNN arm even when their
+    /// vector is still present in facts_vec (sweep happens weekly, not live).
+    #[test]
+    fn facts_recall_knn_arm_skips_tombstoned() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,tombstone)
+             VALUES ('fd','person:dead','was','zzqx qqzz',0.9,'2026-06-11','2026-06-11',1)",
+            [],
+        )
+        .unwrap();
+        let qv = vec![0.1f32; crate::memory::vector::EMBED_DIM];
+        crate::memory::vector::insert_fact_vec(&c, "fd", &qv).unwrap();
+
+        let fused = facts_recall(&c, "anything relevant here at all", 5, Some(&qv)).unwrap();
+        assert!(
+            !fused.iter().any(|f| f.subject == "person:dead"),
+            "tombstoned fact must not surface via the KNN arm"
         );
     }
 

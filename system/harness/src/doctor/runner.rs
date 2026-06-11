@@ -53,6 +53,7 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::distill_strikes::DistillStrikes),
         Box::new(checks::vector_search::VectorSearchHealthy),
         Box::new(checks::reflection_liveness::ReflectionLogFresh),
+        Box::new(checks::nightly_full_liveness::NightlyFullLiveness),
         Box::new(checks::scripts_exec::ScriptsExecutable),
         Box::new(checks::boi_health::BoiHealth),
         Box::new(checks::iii_engine_health::IiiEngineHealth),

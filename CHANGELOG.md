@@ -2,6 +2,47 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [Unreleased] — memory pipeline holistic fix
+
+One consolidated pass over the memory pipeline (reference: personal-instance assessment
+2026-06-11 / FIX-007…FIX-011):
+
+- **Findings≠failure exit semantics:** consolidate findings are reported, not
+  fatal — exit codes reflect operational errors only.
+- **Full-consolidate lock wait + alerts:** nightly full waits for the lock (45m)
+  and alerts on timeout; quick lock-skips record `skipped-lock`, not ok.
+- **Quick-tick budget + cron offset:** 10-min wall-clock budget on the quick
+  transcript backstop; quick cron offset from :00 — ticks can no longer starve
+  the nightly lock.
+- **Doctor nightly-full-liveness check** (26h) + 48h audit window.
+- **Deduped alert pathway:** one alert helper (stderr + telemetry + osascript),
+  deduplicated.
+- **Stdin-first Stop-hook capture:** stdin `transcript_path` is authoritative;
+  inline copy; every failure path loud (stderr + telemetry).
+- **Distill-child reaper:** pidfile-tracked distill children; serve startup
+  kills orphans. Before any kill the reaper verifies process identity
+  (`ps -o command=` must mention `claude`) so a recycled PID in a stale
+  pidfile never takes out an innocent process group; kill delivery is
+  verified (killpg rc checked, plain-kill fallback) — a failed kill is a
+  telemetry error, never recorded as success.
+- **Drain-timeout telemetry:** harness drain timeouts hit telemetry instead of
+  passing silently.
+- **`hex backup`:** online sqlite snapshots (memory/events/ledger) with 7-day
+  rotation — the 04:00Z cron finally has a target.
+- **Vector backfill + stats gaps + KNN floor:** index backfills missing vectors;
+  `hex memory stats` reports embedding/orphan gaps; KNN distance floor.
+- **`hex memory maintain` weekly:** orphan sweep, FTS optimize,
+  transcript_files hygiene, VACUUM — on weekly cron. Hygiene canonicalizes
+  transcript_files to the ABSOLUTE path the live backstop writes
+  (`<hex_dir>/raw/transcripts/*.md`); relative rows and stale absolute
+  prefixes fold into it keeping the furthest watermark — live watermarks are
+  never purged (purging them forced a weekly full-corpus re-distillation).
+- **Facts semantic recall:** facts_vec populated via maintain backfill;
+  `hex memory search` embeds the query once and fuses FTS + KNN arms (RRF)
+  for chunks AND facts, and now surfaces a Facts section. The per-prompt
+  hook recall path stays FTS-only by design (no embedder cold-load inside
+  the UserPromptSubmit latency budget).
+
 ## [2026-06-11] — remove session title-nudge hook (third-party mobile session manager sunset 2026-06-09)
 
 The third-party mobile session manager (mobile control plane) was sunset

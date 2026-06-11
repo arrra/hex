@@ -351,7 +351,10 @@ title = "{Spec title}"
 
 [contract]
 scope = "{Why this work is needed, what the end state looks like}"
-base_branch = "main"
+# Workspace-conditional: "develop" if the workspace commits a .boi-policy.toml
+# marker (model = "gitflow") at its root — e.g. boi, hex-foundation; "main" for
+# unmanaged workspaces (no marker).
+base_branch = "{main|develop}"
 workspace = "~/github.com/mrap/{repo}"
 
 [[tasks]]

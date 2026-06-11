@@ -52,8 +52,6 @@ exit 0
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
     #[test]
     fn template_output_is_valid_bash_shebang() {
         // Capture stdout via a simple string check of the constant content.

@@ -69,6 +69,20 @@ fn outbox_path() -> std::path::PathBuf {
 
 /// The async lifecycle body. Returns the process exit code.
 async fn run(workers: Vec<Worker>) -> i32 {
+    // Reap orphaned distill children from a previous harness life BEFORE the
+    // engine comes up: `claude -p` children run in their own process group, so
+    // a launchd kill of our group leaves them alive under PID 1 with no
+    // timeout enforcement (observed burning tokens for 2h+, 2026-06-11).
+    if let Ok(hex_dir) = std::env::var("HEX_DIR") {
+        let report = crate::reaper::sweep(std::path::Path::new(&hex_dir));
+        if report.killed > 0 || report.removed_stale > 0 {
+            eprintln!(
+                "hex harness serve: reaper killed {} orphan(s), cleared {} stale pidfile(s)",
+                report.killed, report.removed_stale
+            );
+        }
+    }
+
     let outbox = Arc::new(Outbox::new(outbox_path()));
     let stopping = Arc::new(AtomicBool::new(false));
     let inflight = Arc::new(AtomicUsize::new(0));
@@ -263,10 +277,20 @@ async fn run(workers: Vec<Worker>) -> i32 {
         DrainOutcome::AllCompleted => {
             eprintln!("hex harness serve: drain complete — all handlers finished")
         }
-        DrainOutcome::TimedOut(n) => eprintln!(
-            "hex harness serve: drain timed out after {}s — {n} handler(s) still in-flight",
-            DRAIN_TIMEOUT.as_secs()
-        ),
+        DrainOutcome::TimedOut(n) => {
+            eprintln!(
+                "hex harness serve: drain timed out after {}s — {n} handler(s) still in-flight",
+                DRAIN_TIMEOUT.as_secs()
+            );
+            crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+                source: "harness".into(),
+                event: "drain::timeout".into(),
+                status: "error".into(),
+                duration_ms: Some(DRAIN_TIMEOUT.as_millis() as i64),
+                exit_code: None,
+                detail: Some(format!("{n} handler(s) killed in-flight")),
+            });
+        }
     }
 
     // 5. Tear down: drop the worker connection, stop the engine task.

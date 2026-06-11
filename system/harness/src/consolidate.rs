@@ -24,9 +24,45 @@ pub enum Mode {
     Full,
 }
 
+/// Exit code policy: workspace FINDINGS (L1 doctor lint) are reported, not
+/// fatal. Only OPERATIONAL errors (L2 op failure, DB unopenable, L3 LLM
+/// failure, backstop failure) fail the run. 472 consecutive cron "errors"
+/// that were really lint findings taught us this (2026-06-11 assessment).
+fn exit_code_for(l1_findings: i32, any_error: bool) -> i32 {
+    let _ = l1_findings; // reported in summary + artifacts, never exit-fatal
+    if any_error { 1 } else { 0 }
+}
+
+const LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Full consolidation is the sole producer of the nightly audit; it WAITS for
+/// the lock (a quick tick budget is ≤ ~12 min — see op_transcript_backstop —
+/// so 45 min covers two stuck ticks). Quick overlaps are normal; skip fast.
+fn lock_wait_budget(mode: Mode) -> std::time::Duration {
+    match mode {
+        Mode::Full => std::time::Duration::from_secs(45 * 60),
+        _ => std::time::Duration::ZERO,
+    }
+}
+
+fn acquire_lock(lock_file: &std::fs::File, budget: std::time::Duration) -> bool {
+    use fs2::FileExt;
+    let start = std::time::Instant::now();
+    loop {
+        if lock_file.try_lock_exclusive().is_ok() {
+            return true;
+        }
+        if start.elapsed() >= budget {
+            return false;
+        }
+        std::thread::sleep(LOCK_POLL_INTERVAL.min(budget.saturating_sub(start.elapsed())));
+    }
+}
+
 /// Run the unified consolidation pass. Returns a process exit code.
-///   0 — all requested layers succeeded with no issues
-///   1 — at least one layer reported issues or hard-failed
+///   0 — no operational errors (L1 workspace findings are reported, not fatal)
+///   1 — at least one operational error (L2 op failure, DB unopenable,
+///       L3 LLM failure, backstop failure)
 pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
     // Self-throttle the whole process (every thread + IO) unless --max.
     crate::throttle::apply("consolidate", max);
@@ -35,8 +71,9 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
     // following tick — or 03:00 full and 03:15 quick — must not race the
     // watermark or double-pay extract calls. Reuses the same file-lock
     // pattern as `memory::index::run_index` (`memory-index.lock` at
-    // index.rs:722). Skip cleanly if held — overlap is normal.
-    use fs2::FileExt;
+    // index.rs:722). Quick skips cleanly if held (overlap is normal) but
+    // records `skipped-lock`; Full WAITS up to its budget and alerts on
+    // timeout — a lock-skipped nightly is a MISSED nightly (2026-06-10).
     let db_path = crate::memory::db_path(hex_dir);
     let lock_path = db_path.with_file_name("memory-consolidate.lock");
     if let Some(parent) = lock_path.parent() {
@@ -57,16 +94,36 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
             return 1;
         }
     };
-    if lock_file.try_lock_exclusive().is_err() {
-        println!(
-            "hex memory consolidate: another run holds {} — skipping",
+    if !acquire_lock(&lock_file, lock_wait_budget(mode)) {
+        let (status, code) = match mode {
+            Mode::Full => ("lock-timeout", 1), // nightly MISSED — this must be loud
+            _ => ("skipped-lock", 0),          // overlap is normal for quick
+        };
+        eprintln!(
+            "hex memory consolidate ({mode:?}): lock {} held past budget — {status}",
             lock_path.display()
         );
-        return 0;
+        crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+            source: "memory::consolidate".into(),
+            event: format!("consolidate::{mode:?}").to_lowercase(),
+            status: status.into(),
+            duration_ms: None,
+            exit_code: Some(code as i64),
+            detail: Some(format!("lock={}", lock_path.display())),
+        });
+        if matches!(mode, Mode::Full) {
+            crate::alert::notify(
+                "consolidate-full-lock-timeout",
+                "hex nightly consolidation MISSED",
+                "full consolidate could not acquire memory-consolidate.lock within 45m",
+            );
+        }
+        return code;
     }
     let _consolidate_lock = lock_file; // released when run returns
 
-    let mut any_fail = false;
+    let mut any_error = false;
+    let mut l1_findings: i32 = 0;
 
     println!("=== hex memory consolidate ({:?}) ===", mode);
 
@@ -74,8 +131,8 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
     println!("\n-- Layer 1: structural (doctor::consolidate) --");
     let l1 = crate::doctor::consolidate::run(hex_dir);
     if l1 != 0 {
-        eprintln!("Layer 1 reported issues (exit={l1})");
-        any_fail = true;
+        l1_findings = l1;
+        println!("Layer 1: {l1} findings (reported, non-fatal)");
     }
 
     // Layer 2 — MEMORY DB (deterministic)
@@ -89,7 +146,7 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
             // BEFORE the standard ops so `catchup-distill` sees the new rows.
             if let Err(e) = crate::memory::consolidate::op_transcript_backstop(&mut conn, hex_dir) {
                 eprintln!("Layer 2 transcript-backstop FAILED: {e}");
-                any_fail = true;
+                any_error = true;
             }
             match crate::memory::consolidate::run(&mut conn) {
             Ok(report) => {
@@ -102,18 +159,18 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
                     eprintln!("Layer 2 op '{name}' FAILED: {err}");
                 }
                 if !report.failed.is_empty() {
-                    any_fail = true;
+                    any_error = true;
                 }
             }
             Err(e) => {
                 eprintln!("Layer 2 hard-failed: {e}");
-                any_fail = true;
+                any_error = true;
             }
             }
         }
         Err(e) => {
             eprintln!("Layer 2 hard-failed: cannot open memory.db at {}: {e}", db_path.display());
-            any_fail = true;
+            any_error = true;
         }
     }
 
@@ -132,13 +189,31 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
             Ok(()) => println!("Layer 3 ok"),
             Err(e) => {
                 eprintln!("Layer 3 FAILED (Layers 1+2 already ran): {e}");
-                any_fail = true;
+                any_error = true;
             }
         }
     }
 
-    println!("\n=== consolidate done (exit={}) ===", if any_fail { 1 } else { 0 });
-    if any_fail { 1 } else { 0 }
+    // Stamp full-run completion so doctor's nightly-full-liveness check can
+    // detect missed nights (lock-timeouts, harness-down, kills-in-flight).
+    if matches!(mode, Mode::Full) && !any_error {
+        if let Ok(conn) = crate::memory::open_db(&crate::memory::db_path(hex_dir)) {
+            if let Err(e) = conn.execute(
+                "INSERT INTO metadata(key, value) VALUES('last_full_consolidated', ?1)
+                 ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                rusqlite::params![chrono::Local::now().to_rfc3339()],
+            ) {
+                eprintln!("consolidate: failed to stamp last_full_consolidated: {e}");
+            }
+        }
+    }
+
+    let code = exit_code_for(l1_findings, any_error);
+    println!(
+        "\n=== consolidate done (exit={code}, findings={l1_findings}, errors={}) ===",
+        any_error
+    );
+    code
 }
 
 /// Layer 3 — operating-model audit (FULL mode only).
@@ -325,6 +400,24 @@ mod tests {
             "second backstop run must not duplicate the transcript_files row \
              (exactly-once contract)"
         );
+    }
+
+    #[test]
+    fn lock_policy_full_waits_quick_skips() {
+        assert_eq!(
+            lock_wait_budget(Mode::Full),
+            std::time::Duration::from_secs(45 * 60)
+        );
+        assert_eq!(lock_wait_budget(Mode::Quick), std::time::Duration::ZERO);
+    }
+
+    #[test]
+    fn l1_findings_do_not_fail_the_run() {
+        // exit_code_for is the new pure aggregation fn introduced in Step 2
+        assert_eq!(exit_code_for(/*l1_findings=*/ 20, /*any_error=*/ false), 0);
+        assert_eq!(exit_code_for(0, true), 1);
+        assert_eq!(exit_code_for(5, true), 1);
+        assert_eq!(exit_code_for(0, false), 0);
     }
 
     #[test]

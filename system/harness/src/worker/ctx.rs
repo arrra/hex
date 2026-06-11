@@ -94,9 +94,7 @@ impl Ctx {
             let tail = |bytes: &[u8]| {
                 let s = String::from_utf8_lossy(bytes);
                 let t = s.trim();
-                // last ~500 chars, single-lined for the telemetry detail column
-                let start = t.len().saturating_sub(500);
-                t[start..].replace('\n', " ")
+                head_tail(t, 600, 400)
             };
             let stderr_tail = tail(&out.stderr);
             let detail = if stderr_tail.is_empty() {
@@ -116,6 +114,28 @@ impl Default for Ctx {
     fn default() -> Self {
         Self::new()
     }
+}
+
+/// First `head` + last `tail` chars with an ellipsis marker — error heads
+/// carry file paths, tails carry exit reasons; keep both.
+fn head_tail(s: &str, head: usize, tail: usize) -> String {
+    let flat = s.replace('\n', " ");
+    if flat.len() <= head + tail {
+        return flat;
+    }
+    // char-boundary-safe slicing
+    let head_end = flat
+        .char_indices()
+        .map(|(i, _)| i)
+        .take_while(|&i| i <= head)
+        .last()
+        .unwrap_or(0);
+    let tail_start = flat
+        .char_indices()
+        .map(|(i, _)| i)
+        .find(|&i| i >= flat.len().saturating_sub(tail))
+        .unwrap_or(flat.len());
+    format!("{} …[truncated]… {}", &flat[..head_end], &flat[tail_start..])
 }
 
 /// Handle for direct iii state access from a worker handler. Stateless — each
@@ -219,5 +239,19 @@ mod tests {
             .run(&["sh".into(), "-c".into(), "exit 0".into()])
             .expect("exit 0 must be Ok");
         assert!(out.status.success());
+    }
+
+    #[test]
+    fn head_tail_keeps_both_ends() {
+        let s = format!("/path/to/the/error/file.txt: {}END", "x".repeat(2000));
+        let out = head_tail(&s, 600, 400);
+        assert!(out.starts_with("/path/to/the/error/file.txt:"));
+        assert!(out.ends_with("END"));
+        assert!(out.contains("…[truncated]…"));
+    }
+
+    #[test]
+    fn head_tail_short_passthrough() {
+        assert_eq!(head_tail("short", 600, 400), "short");
     }
 }

@@ -104,6 +104,15 @@ fn op_topic_rollup(_conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+/// One quick tick may not hold the consolidate lock indefinitely — the
+/// nightly full run needs it (lock_wait_budget = 45m). 10 minutes processes
+/// ~10-20 slices; the 15-min cron picks the remainder up next tick.
+pub(crate) const BACKSTOP_BUDGET: std::time::Duration = std::time::Duration::from_secs(10 * 60);
+
+pub(crate) fn backstop_over_budget(start: std::time::Instant) -> bool {
+    start.elapsed() >= BACKSTOP_BUDGET
+}
+
 /// Phase A transcript-delta backstop.
 ///
 /// Scans `raw/transcripts/*.md`, registers any not-yet-known file in
@@ -126,7 +135,25 @@ pub fn op_transcript_backstop(conn: &mut Connection, hex_dir: &Path) -> anyhow::
         .collect();
     entries.sort();
 
-    for p in entries {
+    let loop_start = std::time::Instant::now();
+    for (i, p) in entries.iter().enumerate() {
+        if backstop_over_budget(loop_start) {
+            let remaining = entries.len() - i;
+            let msg = format!(
+                "backstop budget ({:?}) reached — {remaining} file(s) deferred to next tick",
+                BACKSTOP_BUDGET
+            );
+            println!("{msg}");
+            crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+                source: "memory::consolidate".into(),
+                event: "backstop::budget-stop".into(),
+                status: "ok".into(),
+                duration_ms: Some(loop_start.elapsed().as_millis() as i64),
+                exit_code: None,
+                detail: Some(msg),
+            });
+            break;
+        }
         let path_str = match p.to_str() {
             Some(s) => s.to_string(),
             None => continue,
@@ -161,6 +188,13 @@ pub fn op_transcript_backstop(conn: &mut Connection, hex_dir: &Path) -> anyhow::
 mod tests {
     use super::*;
     use crate::memory;
+
+    #[test]
+    fn backstop_budget_constant_is_ten_minutes() {
+        assert_eq!(BACKSTOP_BUDGET, std::time::Duration::from_secs(10 * 60));
+        let fresh = std::time::Instant::now();
+        assert!(!backstop_over_budget(fresh));
+    }
 
     /// Regression: a consolidate run must stamp `metadata.last_consolidated`
     /// so `hex memory stats` stops reporting "never" after a real run.

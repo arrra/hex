@@ -10,6 +10,7 @@ mod integration_cmd;
 mod integration_check_all;
 // telemetry lives in the lib (used by the in-process worker runtime too); the
 // bin shares that one copy rather than compiling a second (mirrors hex::memory).
+use hex::alert;
 use hex::memory;
 use hex::telemetry;
 mod path_map;
@@ -179,6 +180,11 @@ enum Commands {
         #[command(subcommand)]
         command: GatekeeperCommands,
     },
+    /// Daily sqlite snapshots (memory/telemetry/ledger DBs) with 7-day
+    /// rotation under $HEX_DIR/.hex/backups/YYYY-MM-DD/. Target of the
+    /// hex-backup cron worker (04:00 daily).
+    #[command(display_order = 14)]
+    Backup,
     /// GitFlow release ceremony (oss-releaser). One verb: `cut`.
     #[command(display_order = 14)]
     Release {
@@ -546,6 +552,14 @@ enum MemoryCommands {
     /// Print ~10 recency-ordered pointers into the live workspace (project dirs,
     /// recent decisions, todo "Now" items). No LLM, target <200ms.
     Recent,
+    /// Scheduled self-repair for memory.db: orphan-vector sweep, FTS5 optimize,
+    /// transcript_files hygiene, optional VACUUM + facts backfill
+    Maintain {
+        #[arg(long)]
+        vacuum: bool,
+        #[arg(long)]
+        backfill_facts: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -815,6 +829,9 @@ fn main() {
                 MemoryCommands::Recent => {
                     memory::recent::run(&hex_dir)
                 }
+                MemoryCommands::Maintain { vacuum, backfill_facts } => {
+                    memory::maintain::run(&hex_dir, *vacuum, *backfill_facts)
+                }
                 MemoryCommands::Consolidate { command } => {
                     let (mode, max) = match command {
                         ConsolidateCommands::Quick { max } => (consolidate::Mode::Quick, *max),
@@ -853,6 +870,10 @@ fn main() {
             }
         }
         Commands::Env { command } => env::run_env_command(command),
+        Commands::Backup => {
+            let hex_dir = get_hex_dir();
+            std::process::exit(hex::backup::run(&hex_dir));
+        }
         Commands::Upgrade { args } => {
             std::process::exit(upgrade::run(&args));
         }
@@ -905,7 +926,7 @@ fn main() {
         Commands::Module { command } => match command {
             ModuleCommands::List => {
                 let hex_dir = get_hex_dir();
-                let disabled = match hex::module_state::load(&hex_dir) {
+                let disabled = match hex::module_state::disabled_set(&hex_dir) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("hex module list: disabled-store unreadable ({e}) — states shown as enabled");
@@ -932,7 +953,7 @@ fn main() {
                 match hex::workers::registry().into_iter().find(|w| w.name == name) {
                     Some(w) => {
                         let hex_dir = get_hex_dir();
-                        let state = match hex::module_state::load(&hex_dir) {
+                        let state = match hex::module_state::disabled_set(&hex_dir) {
                             Ok(s) if s.contains(&w.name) => "disabled",
                             Ok(_) => "enabled",
                             Err(e) => {
@@ -1816,35 +1837,23 @@ fn module_set_enabled(name: &str, enable: bool) -> i32 {
         return 1;
     }
     let hex_dir = get_hex_dir();
-    let mut disabled = match hex::module_state::load(&hex_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("hex module {verb}: {e} — refusing to overwrite an unreadable store; fix or delete it first");
-            return 1;
-        }
-    };
-    let changed = if enable {
-        disabled.remove(name)
-    } else {
-        disabled.insert(name.to_string())
-    };
-    if !changed {
-        println!(
-            "hex module {verb}: '{name}' already {}",
-            if enable { "enabled" } else { "disabled" }
-        );
-        return 0;
-    }
-    match hex::module_state::save(&hex_dir, &disabled) {
-        Ok(()) => {
+    match hex::module_state::set_disabled(&hex_dir, name, !enable) {
+        Ok(true) => {
             println!(
                 "hex module {verb}: '{name}' {} (effective at its next fire; no restart needed)",
                 if enable { "enabled" } else { "disabled" }
             );
             0
         }
+        Ok(false) => {
+            println!(
+                "hex module {verb}: '{name}' already {}",
+                if enable { "enabled" } else { "disabled" }
+            );
+            0
+        }
         Err(e) => {
-            eprintln!("hex module {verb}: {e}");
+            eprintln!("hex module {verb}: {e} — fix or delete the state db first");
             1
         }
     }
