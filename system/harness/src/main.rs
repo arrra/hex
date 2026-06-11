@@ -98,6 +98,12 @@ enum Commands {
         #[command(subcommand)]
         command: TelemetryCommands,
     },
+    /// Resource sampling (tier 0) + pressure rules (tier 1). Detection only.
+    #[command(display_order = 6)]
+    Resources {
+        #[command(subcommand)]
+        command: ResourcesCommands,
+    },
     /// Questions & replies: ask a structured question, reply to one by id.
     #[command(display_order = 4)]
     Messages {
@@ -488,6 +494,14 @@ enum TelemetryCommands {
         #[arg(long = "keep-days", default_value_t = 30)]
         keep_days: i64,
     },
+}
+
+#[derive(Subcommand)]
+enum ResourcesCommands {
+    /// One sampler tick: df (+du when due), evaluate rules, alert+emit on breach.
+    Sample,
+    /// Print the latest df/du samples and any current breaches.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -933,6 +947,9 @@ fn main() {
         }
         Commands::Telemetry { command } => {
             std::process::exit(run_telemetry(command));
+        }
+        Commands::Resources { command } => {
+            std::process::exit(run_resources(command));
         }
         Commands::Messages { command } => {
             std::process::exit(run_messages(command));
@@ -1774,6 +1791,111 @@ fn run_messages(command: MessagesCommands) -> i32 {
         Err(e) => {
             eprintln!("hex messages: {e}");
             1
+        }
+    }
+}
+
+fn format_breach(b: &hex::resources::Breach) -> String {
+    match b {
+        hex::resources::Breach::Floor { free_gb } => format!(
+            "BREACH floor: root free space {free_gb}G < {}G floor",
+            hex::resources::FLOOR_FREE_GB
+        ),
+        hex::resources::Breach::Trend { dir, growth_gb, window_hours } => {
+            format!("BREACH trend: {dir} grew {growth_gb}G in {window_hours}h")
+        }
+    }
+}
+
+fn run_resources(command: ResourcesCommands) -> i32 {
+    match command {
+        // Exit codes: 0 clean, 1 breach(es) — loud for cron/CI, 2 on error.
+        ResourcesCommands::Sample => match hex::resources::sample_tick(chrono::Utc::now()) {
+            Ok(breaches) => {
+                for b in &breaches {
+                    println!("{}", format_breach(b));
+                }
+                if breaches.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            Err(e) => {
+                eprintln!("hex resources sample: {e}");
+                2
+            }
+        },
+        ResourcesCommands::Status => run_resources_status(),
+    }
+}
+
+/// `hex resources status` — newest df/du samples + current breaches.
+/// Read-only view: exits 0 even when breaches print (sample is the loud one).
+fn run_resources_status() -> i32 {
+    if !telemetry::db_exists() {
+        println!("no samples yet (telemetry store absent)");
+        return 0;
+    }
+    let conn = match telemetry::open_ro() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("hex resources status: {e}");
+            return 2;
+        }
+    };
+    let latest = |event: &str| -> Option<(String, String)> {
+        conn.query_row(
+            "SELECT ts, COALESCE(detail,'') FROM events
+             WHERE source='hex-resources' AND event=?1
+             ORDER BY ts DESC LIMIT 1",
+            [event],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()
+    };
+    let pretty = |detail: &str| -> String {
+        serde_json::from_str::<serde_json::Value>(detail)
+            .and_then(|v| serde_json::to_string_pretty(&v))
+            .unwrap_or_else(|_| detail.to_string())
+    };
+    let df_row = latest("sample::df");
+    match &df_row {
+        Some((ts, detail)) => println!("df @ {ts}\n{}", pretty(detail)),
+        None => println!("df: no samples yet"),
+    }
+    match latest("sample::du") {
+        Some((ts, detail)) => println!("du @ {ts}\n{}", pretty(&detail)),
+        None => println!("du: no samples yet"),
+    }
+    let Some((_, detail)) = df_row else {
+        return 0;
+    };
+    let v: serde_json::Value = match serde_json::from_str(&detail) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("hex resources status: bad df detail: {e}");
+            return 2;
+        }
+    };
+    let df = hex::resources::DfSample {
+        free_gb: v["free_gb"].as_i64().unwrap_or(0),
+        used_gb: v["used_gb"].as_i64().unwrap_or(0),
+    };
+    match hex::resources::evaluate_rules(&df, chrono::Utc::now()) {
+        Ok(breaches) => {
+            if breaches.is_empty() {
+                println!("breaches: none");
+            } else {
+                for b in &breaches {
+                    println!("{}", format_breach(b));
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("hex resources status: {e}");
+            2
         }
     }
 }
