@@ -10,6 +10,7 @@ mod integration_cmd;
 mod integration_check_all;
 // telemetry lives in the lib (used by the in-process worker runtime too); the
 // bin shares that one copy rather than compiling a second (mirrors hex::memory).
+use hex::alert;
 use hex::memory;
 use hex::telemetry;
 mod path_map;

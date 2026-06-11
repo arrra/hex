@@ -33,6 +33,32 @@ fn exit_code_for(l1_findings: i32, any_error: bool) -> i32 {
     if any_error { 1 } else { 0 }
 }
 
+const LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
+
+/// Full consolidation is the sole producer of the nightly audit; it WAITS for
+/// the lock (a quick tick budget is ≤ ~12 min — see op_transcript_backstop —
+/// so 45 min covers two stuck ticks). Quick overlaps are normal; skip fast.
+fn lock_wait_budget(mode: Mode) -> std::time::Duration {
+    match mode {
+        Mode::Full => std::time::Duration::from_secs(45 * 60),
+        _ => std::time::Duration::ZERO,
+    }
+}
+
+fn acquire_lock(lock_file: &std::fs::File, budget: std::time::Duration) -> bool {
+    use fs2::FileExt;
+    let start = std::time::Instant::now();
+    loop {
+        if lock_file.try_lock_exclusive().is_ok() {
+            return true;
+        }
+        if start.elapsed() >= budget {
+            return false;
+        }
+        std::thread::sleep(LOCK_POLL_INTERVAL.min(budget.saturating_sub(start.elapsed())));
+    }
+}
+
 /// Run the unified consolidation pass. Returns a process exit code.
 ///   0 — no operational errors (L1 workspace findings are reported, not fatal)
 ///   1 — at least one operational error (L2 op failure, DB unopenable,
@@ -45,8 +71,9 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
     // following tick — or 03:00 full and 03:15 quick — must not race the
     // watermark or double-pay extract calls. Reuses the same file-lock
     // pattern as `memory::index::run_index` (`memory-index.lock` at
-    // index.rs:722). Skip cleanly if held — overlap is normal.
-    use fs2::FileExt;
+    // index.rs:722). Quick skips cleanly if held (overlap is normal) but
+    // records `skipped-lock`; Full WAITS up to its budget and alerts on
+    // timeout — a lock-skipped nightly is a MISSED nightly (2026-06-10).
     let db_path = crate::memory::db_path(hex_dir);
     let lock_path = db_path.with_file_name("memory-consolidate.lock");
     if let Some(parent) = lock_path.parent() {
@@ -67,12 +94,31 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
             return 1;
         }
     };
-    if lock_file.try_lock_exclusive().is_err() {
-        println!(
-            "hex memory consolidate: another run holds {} — skipping",
+    if !acquire_lock(&lock_file, lock_wait_budget(mode)) {
+        let (status, code) = match mode {
+            Mode::Full => ("lock-timeout", 1), // nightly MISSED — this must be loud
+            _ => ("skipped-lock", 0),          // overlap is normal for quick
+        };
+        eprintln!(
+            "hex memory consolidate ({mode:?}): lock {} held past budget — {status}",
             lock_path.display()
         );
-        return 0;
+        crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+            source: "memory::consolidate".into(),
+            event: format!("consolidate::{mode:?}").to_lowercase(),
+            status: status.into(),
+            duration_ms: None,
+            exit_code: Some(code as i64),
+            detail: Some(format!("lock={}", lock_path.display())),
+        });
+        if matches!(mode, Mode::Full) {
+            crate::alert::notify(
+                "consolidate-full-lock-timeout",
+                "hex nightly consolidation MISSED",
+                "full consolidate could not acquire memory-consolidate.lock within 45m",
+            );
+        }
+        return code;
     }
     let _consolidate_lock = lock_file; // released when run returns
 
@@ -354,6 +400,15 @@ mod tests {
             "second backstop run must not duplicate the transcript_files row \
              (exactly-once contract)"
         );
+    }
+
+    #[test]
+    fn lock_policy_full_waits_quick_skips() {
+        assert_eq!(
+            lock_wait_budget(Mode::Full),
+            std::time::Duration::from_secs(45 * 60)
+        );
+        assert_eq!(lock_wait_budget(Mode::Quick), std::time::Duration::ZERO);
     }
 
     #[test]
