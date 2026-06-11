@@ -1,0 +1,55 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  scipd — live code-intelligence daemon template (SPEC-A2 §2).
+
+  Per-user gui LaunchAgent (install to ~/Library/LaunchAgents), ONE copy per
+  user (the daemon serves every registered workspace through one socket at
+  ~/.codeintel/scipd.sock). KeepAlive restarts it on crash; a second manual
+  scipd refuses loudly if the agent already holds the socket.
+
+  Manual install in A2 (hex-upgrade wiring is a follow-up). Substitute the
+  placeholders before loading — see docs/code-intel.md "Phase A2 — live
+  escalation" for the exact steps:
+
+    __SCIPD_BIN__  -> absolute path to the scipd binary
+                      (e.g. /Users/you/github.com/mrap/hex-foundation/target/release/scipd)
+    __HOME__       -> your home directory (for the log paths; launchd does not
+                      expand ~)
+
+  Logs land under ~/.codeintel/logs/scipd.{out,err}.log. Pool policy knobs
+  live in ~/.codeintel/scipd.toml (missing file = defaults; malformed file =
+  loud startup failure, which KeepAlive will surface as a restart loop in
+  scipd.err.log — fix the file).
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hex.scipd</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>__SCIPD_BIN__</string>
+    </array>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <true/>
+    <!-- rust-analyzer must be reachable; cq doctor verifies the same PATH. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>PATH</key>
+        <string>/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin</string>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>__HOME__/.codeintel/logs/scipd.out.log</string>
+    <key>StandardErrorPath</key>
+    <string>__HOME__/.codeintel/logs/scipd.err.log</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+    <!-- Each live rust-analyzer instance primes CPU-heavy (~1-2 min on a
+         large repo); Nice keeps the pool out of the way of interactive
+         work. Steady-state the daemon itself is idle. -->
+    <key>Nice</key>
+    <integer>10</integer>
+</dict>
+</plist>

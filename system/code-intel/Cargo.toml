@@ -11,6 +11,10 @@ path = "src/lib.rs"
 name = "cq"
 path = "src/bin/cq.rs"
 
+[[bin]]
+name = "scipd"
+path = "src/bin/scipd.rs"
+
 [dependencies]
 anyhow = "1"
 clap = { version = "4", features = ["derive"] }
@@ -27,6 +31,8 @@ scip = "=0.8.1"
 # scope to parse. Pinned to the exact version scip 0.8.1 depends on.
 protobuf = "=3.7.2"
 toml = "0.8"
+# scipd daemon: SIGTERM clean-shutdown flag (SPEC-A2; std-thread design, no tokio)
+signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile = "3"

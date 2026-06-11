@@ -7,13 +7,19 @@
 //! - (later tasks) generation store, SCIP ingest, the query engine,
 //!   freshness, and the indexer.
 
+pub mod check;
+pub mod config;
+pub mod daemon;
 pub mod doctor;
 pub mod envelope;
 pub mod error;
 pub mod freshness;
 pub mod indexer;
 pub mod ingest;
+pub mod live;
+pub mod proto;
 pub mod query;
+pub mod rename_apply;
 pub mod respond;
 pub mod schema;
 pub mod store;

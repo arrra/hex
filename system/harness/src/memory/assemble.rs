@@ -457,7 +457,8 @@ pub fn assemble(
             if seen.insert(cand.dedup_key.clone()) {
                 if chars + cost > budget {
                     // Floor over-budget — still push so the facet coverage
-                    // contract is honored, then break.
+                    // contract is honored, then stop (no further candidates
+                    // are considered, so `chars` needs no update).
                     merged.push(cand);
                     return AssembledContext { candidates: merged, per_move_stats };
                 }

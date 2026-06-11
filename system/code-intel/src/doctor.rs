@@ -17,6 +17,9 @@ use anyhow::{Context, Result};
 use rusqlite::OpenFlags;
 use serde::Serialize;
 
+use crate::daemon::socket_path;
+use crate::live::client::LiveClient;
+use crate::proto::PoolStatus;
 use crate::store::Store;
 use crate::workspace::{Registry, RegistryEntry};
 
@@ -28,6 +31,106 @@ const MAX_INDEX_AGE_SECS: u64 = 7 * 24 * 60 * 60;
 pub struct DoctorReport {
     pub workspaces: Vec<WorkspaceHealth>,
     pub rust_analyzer: RustAnalyzerHealth,
+    /// Live daemon health (SPEC-A2 §5).
+    pub scipd: ScipdHealth,
+}
+
+/// `scipd` daemon health (SPEC-A2 §5): socket ping + pool status
+/// passthrough. An unreachable daemon is a WARNING — A1 still works — and
+/// only goes red when launchd claims the agent is loaded yet the socket is
+/// dead ("scipd loaded but socket dead").
+#[derive(Debug, Serialize)]
+pub struct ScipdHealth {
+    pub socket: PathBuf,
+    pub reachable: bool,
+    /// Pool occupancy passthrough when reachable.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<PoolStatus>,
+    /// `launchctl print` verdict for com.hex.scipd; `null` when launchctl
+    /// is unavailable (e.g. tests, non-macOS).
+    pub launchd_loaded: Option<bool>,
+    /// `"ok"` | `"warning"` | `"red"`.
+    pub level: String,
+    pub detail: String,
+}
+
+/// The launchd agent label scipd is deployed under (SPEC-A2 §2).
+pub const SCIPD_LAUNCHD_LABEL: &str = "com.hex.scipd";
+
+/// Pure classification of the scipd verdict (unit-tested per plan Task 6):
+/// reachable → ok; unreachable + launchd-loaded → red (supposed-running
+/// daemon is dead); unreachable otherwise → warning (A1 still works).
+pub fn classify_scipd(reachable: bool, launchd_loaded: Option<bool>) -> (&'static str, String) {
+    match (reachable, launchd_loaded) {
+        (true, _) => ("ok", "scipd answering on the socket".into()),
+        (false, Some(true)) => (
+            "red",
+            "scipd loaded but socket dead (launchd claims the agent is running)".into(),
+        ),
+        (false, _) => (
+            "warning",
+            "scipd unreachable — index queries (A1) still work; live escalation, \
+             rename and check-routing are unavailable"
+                .into(),
+        ),
+    }
+}
+
+/// Probe the daemon: connect + ping + status within the client's 500ms
+/// connect bound. Best-effort launchd check via `launchctl print`.
+fn scipd_health(home: &Path) -> ScipdHealth {
+    let socket = socket_path(home);
+    let (reachable, status) = match LiveClient::connect(home) {
+        Ok(mut client) => match client.ping().and_then(|()| client.status()) {
+            Ok(status) => (true, Some(status)),
+            Err(e) => {
+                eprintln!("doctor: scipd socket connected but ping/status failed: {e}");
+                (false, None)
+            }
+        },
+        Err(_) => (false, None),
+    };
+    // The launchd agent supervises the DEFAULT home's (~/.codeintel) daemon
+    // only; for any other home (hermetic tests, $CODEINTEL_HOME overrides)
+    // launchd state says nothing about this home's socket — report unknown.
+    let is_default_home = std::env::var_os("HOME")
+        .map(|h| PathBuf::from(h).join(".codeintel") == home)
+        .unwrap_or(false);
+    let launchd_loaded = if is_default_home {
+        launchd_agent_loaded(SCIPD_LAUNCHD_LABEL)
+    } else {
+        None
+    };
+    let (level, detail) = classify_scipd(reachable, launchd_loaded);
+    ScipdHealth {
+        socket,
+        reachable,
+        status,
+        launchd_loaded,
+        level: level.into(),
+        detail,
+    }
+}
+
+/// `launchctl print gui/$UID/<label>` — `Some(true)` when the agent is
+/// loaded, `Some(false)` when launchctl answers "not loaded", `None` when
+/// launchctl itself is unavailable (best-effort by design).
+fn launchd_agent_loaded(label: &str) -> Option<bool> {
+    let uid = run_id_u()?;
+    let out = Command::new("launchctl")
+        .args(["print", &format!("gui/{uid}/{label}")])
+        .output()
+        .ok()?;
+    Some(out.status.success())
+}
+
+/// Current uid via `id -u` (no libc dependency for one syscall).
+fn run_id_u() -> Option<String> {
+    let out = Command::new("id").arg("-u").output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).trim().to_string())
 }
 
 /// Health of one registered workspace. Index-derived fields are `null` when
@@ -60,6 +163,7 @@ pub fn run(home: &Path) -> Result<(DoctorReport, i32)> {
     // Unreadable/malformed registry is a hard, loud error (S6).
     let registry = Registry::load(home)?;
     let rust_analyzer = rust_analyzer_health();
+    let scipd = scipd_health(home);
 
     let workspaces: Vec<WorkspaceHealth> = registry
         .entries()
@@ -75,6 +179,20 @@ pub fn run(home: &Path) -> Result<(DoctorReport, i32)> {
     if !rust_analyzer.found {
         eprintln!("doctor: RED — rust-analyzer not found on PATH");
         red = true;
+    }
+    match scipd.level.as_str() {
+        "ok" => {
+            let instances = scipd
+                .status
+                .as_ref()
+                .map_or(0, |s| s.instances.len());
+            eprintln!("doctor: OK  scipd answering ({instances} live instance(s))");
+        }
+        "warning" => eprintln!("doctor: WARN scipd — {}", scipd.detail),
+        _ => {
+            eprintln!("doctor: RED scipd — {}", scipd.detail);
+            red = true;
+        }
     }
     for w in &workspaces {
         if w.red_reasons.is_empty() {
@@ -97,7 +215,7 @@ pub fn run(home: &Path) -> Result<(DoctorReport, i32)> {
     }
 
     let exit = i32::from(red);
-    Ok((DoctorReport { workspaces, rust_analyzer }, exit))
+    Ok((DoctorReport { workspaces, rust_analyzer, scipd }, exit))
 }
 
 /// Health of one workspace. Never errors out of the whole report: every
@@ -272,5 +390,44 @@ mod tests {
         let (report, exit) = run(home.path()).unwrap();
         assert!(report.workspaces.is_empty());
         assert_eq!(exit, 1, "no workspaces registered must be red (spec S9)");
+    }
+
+    // ---- scipd classification (SPEC-A2 §5, plan Task 6) ----
+
+    #[test]
+    fn scipd_reachable_is_ok_regardless_of_launchd() {
+        for loaded in [None, Some(true), Some(false)] {
+            let (level, _) = classify_scipd(true, loaded);
+            assert_eq!(level, "ok", "loaded={loaded:?}");
+        }
+    }
+
+    #[test]
+    fn scipd_unreachable_is_warning_not_red() {
+        for loaded in [None, Some(false)] {
+            let (level, detail) = classify_scipd(false, loaded);
+            assert_eq!(level, "warning", "loaded={loaded:?}");
+            assert!(detail.contains("A1"), "{detail}");
+        }
+    }
+
+    #[test]
+    fn scipd_loaded_but_socket_dead_is_red() {
+        let (level, detail) = classify_scipd(false, Some(true));
+        assert_eq!(level, "red");
+        assert!(detail.contains("loaded but socket dead"), "{detail}");
+    }
+
+    #[test]
+    fn scipd_section_present_in_report_and_unreachable_daemon_not_red() {
+        // Hermetic home: no daemon. The report must carry the section and
+        // the missing daemon alone must NOT add a red reason (the exit-1
+        // here comes from the empty registry).
+        let home = tempfile::tempdir().unwrap();
+        let (report, _) = run(home.path()).unwrap();
+        assert!(!report.scipd.reachable);
+        assert!(report.scipd.status.is_none());
+        assert_eq!(report.scipd.socket, home.path().join("scipd.sock"));
+        assert_ne!(report.scipd.level, "red", "{:?}", report.scipd);
     }
 }
