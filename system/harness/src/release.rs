@@ -2594,7 +2594,7 @@ build_command = "cargo build --release"
     // -- ceremony ------------------------------------------------------------------
 
     #[test]
-    fn cut_happy_path_full_ceremony() {
+    fn cut_success_path_full_ceremony() {
         let (_hex, _guard) = crate::telemetry::test_support::isolate();
         let td = tempfile::tempdir().unwrap();
         let repo = gitflow_fixture(td.path());

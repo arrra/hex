@@ -9,9 +9,9 @@
 //!   the next-patch suggestion.
 //! - `tests/test_release_tag_step.sh` (all scenarios): remote-aware tag
 //!   handling — push when absent on origin (the OBS-017 fix, exercised by
-//!   every happy-path cut), idempotent green when origin already has the tag
+//!   every success-path cut), idempotent green when origin already has the tag
 //!   at the same commit, loud refusal (never overwrite) when it diverges.
-//! - Ceremony scenarios: happy-path cut on an injected toy profile,
+//! - Ceremony scenarios: success-path cut on an injected toy profile,
 //!   clean-tree refusal, lock-held refusal, missing-develop bootstrap
 //!   instruction, back-merge conflict abort, develop-moved race abort, and
 //!   dry-run exit codes.
@@ -274,12 +274,12 @@ fn version_gate_blocks_regression() {
 }
 
 // ---------------------------------------------------------------------------
-// Happy-path cuts on the injected toy profile (legacy tests 5 + 7, plus the
+// Success-path cuts on the injected toy profile (legacy tests 5 + 7, plus the
 // tag-step "absent on origin → pushed" scenario).
 // ---------------------------------------------------------------------------
 
 #[test]
-fn cut_happy_path_patch_bump_lands_on_origin() {
+fn cut_success_path_patch_bump_lands_on_origin() {
     let f = fixture();
     git(&f.repo, &["tag", "v1.0.0"]);
     let out = run_cut(&f, &["--level", "patch"]);
@@ -305,7 +305,7 @@ fn cut_happy_path_patch_bump_lands_on_origin() {
 }
 
 #[test]
-fn cut_happy_path_major_bump_lands_on_origin() {
+fn cut_success_path_major_bump_lands_on_origin() {
     // Legacy test 7: 1.0.0 → 2.0.0 is accepted and released.
     let f = fixture();
     git(&f.repo, &["tag", "v1.0.0"]);
