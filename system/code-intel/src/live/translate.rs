@@ -756,6 +756,9 @@ mod tests {
         fn rss_mb(&self) -> Option<u64> {
             None
         }
+        fn footprint_mb(&self) -> Option<u64> {
+            None
+        }
         fn last_used(&self) -> Instant {
             Instant::now()
         }
