@@ -458,6 +458,24 @@ verifications = [
 
 Optional blocks: `[[decision]]` for authored decisions, `[[skill]]` to declare skill references the worker may invoke.
 
+### Spec conventions: drift check + STOP conditions
+
+- **Stamp the base.** Record the commit the spec was written against in `[contract].scope`
+  ("Spec written against `<short-sha>`"). The first task's first verification is a mechanical
+  drift check — `git diff --stat <sha>..HEAD -- <in-scope paths>` — and the scope instructs:
+  if in-scope files changed since the spec was written, compare the spec's assumptions
+  against the live code before touching anything; on a mismatch, STOP and report. (Specs go
+  stale while queued; executing a stale spec against drifted code produces confident wrong
+  changes.)
+- **STOP conditions.** `[contract].scope` carries an explicit block of "if X, STOP and
+  report — do not improvise" conditions tuned to the work's actual risks: the code at the
+  named locations doesn't match the spec's description; a verification fails twice after a
+  reasonable fix attempt; the fix appears to require an out-of-scope file; a named key
+  assumption turns out false.
+- **Review rule for deviations:** a worker that hits a real obstacle, adapts minimally, and
+  documents it has done the right thing — judge documented deviations on merit. Undocumented
+  deviations are review failures, full stop.
+
 ### Rejected v1 fields (typed errors)
 
 The v2 parser rejects these with typed errors (see `boi/src/config/spec.rs:180-191`). Do NOT include them:
