@@ -10,7 +10,7 @@
 //! ACCEPT_FLAGGED — a human (Mike) merges; the dial is consulted and
 //! RECORDED but never upgrades a verdict.
 //!
-//! Proposal file contract (the conventions doc in mrap-hex mirrors this):
+//! Proposal file contract (the personal-instance conventions doc mirrors this):
 //! a markdown file containing two fenced TOML blocks:
 //!
 //! ```toml proposal

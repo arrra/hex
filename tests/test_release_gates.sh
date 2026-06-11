@@ -3,8 +3,9 @@ set -euo pipefail
 
 # test_release_gates.sh — Tests for release pipeline enforcement gates
 #
-# Tests version bump gate, AGENT_DIR guard in session-start hook,
-# and doctor check 23. Uses isolated temp git repos.
+# Tests version bump gate enforcement and hardcoded-path hygiene.
+# Uses isolated temp git repos. (Tests of the retired bash architecture —
+# session-start.sh, doctor.sh, upgrade.sh — were removed 2026-06-11.)
 
 PASS=0
 FAIL=0
@@ -152,77 +153,10 @@ else
     fail "Expected 1.2.10, got $SUGGESTED"
 fi
 
-# ── Test 9: Session-start hook blocks without AGENT_DIR ────────────
-echo "[9] Session-start hook — blocks without AGENT_DIR"
-HOOK_SCRIPT="$REPO_DIR/system/hooks/scripts/session-start.sh"
-if [ -f "$HOOK_SCRIPT" ]; then
-    OUTPUT=$(unset AGENT_DIR; bash "$HOOK_SCRIPT" 2>&1 || true)
-    if echo "$OUTPUT" | grep -q "AGENT_DIR IS NOT SET"; then
-        pass "Session-start blocks without AGENT_DIR"
-    else
-        fail "Session-start should block without AGENT_DIR"
-        echo "    Output: $(echo "$OUTPUT" | head -3)"
-    fi
-else
-    fail "session-start.sh not found at $HOOK_SCRIPT"
-fi
-
-# ── Test 10: Session-start hook passes with AGENT_DIR ──────────────
-echo "[10] Session-start hook — passes with AGENT_DIR"
-if [ -f "$HOOK_SCRIPT" ]; then
-    OUTPUT=$(AGENT_DIR="$REPO_DIR" bash "$HOOK_SCRIPT" 2>&1 || true)
-    if echo "$OUTPUT" | grep -q "AGENT_DIR IS NOT SET"; then
-        fail "Session-start should pass when AGENT_DIR set"
-    else
-        pass "Session-start passes with AGENT_DIR set"
-    fi
-else
-    fail "session-start.sh not found at $HOOK_SCRIPT"
-fi
-
-# ── Test 11: Doctor check 23 exists ────────────────────────────────
-echo "[11] Doctor check 23 — AGENT_DIR check exists"
-if grep -q 'check_23' "$REPO_DIR/system/scripts/doctor.sh"; then
-    pass "check_23 defined in doctor.sh"
-else
-    fail "check_23 not found in doctor.sh"
-fi
-
-if grep -q 'hex-dir-set' "$REPO_DIR/system/scripts/doctor.sh"; then
-    pass "hex-dir-set record in doctor.sh"
-else
-    fail "hex-dir-set not found in doctor.sh"
-fi
-
-# ── Test 12: Install adds AGENT_DIR to shell rc ───────────────────
-echo "[12] Install script — AGENT_DIR setup"
-if grep -q 'export AGENT_DIR' "$REPO_DIR/install.sh"; then
-    pass "install.sh sets AGENT_DIR"
-else
-    fail "install.sh missing AGENT_DIR setup"
-fi
-
-if grep -q 'export HEX_DIR' "$REPO_DIR/install.sh"; then
-    pass "install.sh sets HEX_DIR"
-else
-    fail "install.sh missing HEX_DIR setup"
-fi
-
-# ── Test 13: Upgrade backfills AGENT_DIR ───────────────────────────
-echo "[13] Upgrade script — AGENT_DIR backfill"
-if grep -q 'export AGENT_DIR' "$REPO_DIR/system/scripts/upgrade.sh"; then
-    pass "upgrade.sh backfills AGENT_DIR"
-else
-    fail "upgrade.sh missing AGENT_DIR backfill"
-fi
-
-# ── Test 14: No hardcoded user paths ──────────────────────────────
-echo "[14] No hardcoded user paths in enforcement code"
+# ── Test 9: No hardcoded user paths ──────────────────────────────
+echo "[9] No hardcoded user paths in enforcement code"
 HARDCODE_FOUND=false
-for f in "$REPO_DIR/system/hooks/scripts/session-start.sh" \
-         "$REPO_DIR/system/scripts/doctor.sh" \
-         "$REPO_DIR/install.sh" \
-         "$REPO_DIR/system/scripts/upgrade.sh"; do
+for f in "$REPO_DIR/install.sh"; do
     # Exclude GitHub URLs (github.com/mrap/hex-*) — those are canonical upstream refs
     # Build pattern dynamically to avoid triggering sanitize-check on this test file
     _USER="mr""ap"

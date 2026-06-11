@@ -337,7 +337,7 @@ BOI_REPO="${HEX_BOI_REPO:-https://github.com/mrap/boi.git}"
 # developer checkout (e.g. ~/github.com/mrap/boi). The previous version ran
 # `checkout -f $TAG` + `checkout -B main` against the developer repo, which
 # force-reset its main to the pinned tag on every install/upgrade/test run —
-# silently eating merged work 4x (mrap-hex OBS-033, 2026-06-10). The build
+# silently eating merged work 4x (OBS-033, 2026-06-10). The build
 # checkout stays detached at the pinned tag: it is an artifact cache, not a
 # working repo, so there is no branch to leave behind.
 
