@@ -2,6 +2,36 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [Unreleased] — memory pipeline holistic fix
+
+One consolidated pass over the memory pipeline (reference: mrap-hex assessment
+2026-06-11 / FIX-007…FIX-011):
+
+- **Findings≠failure exit semantics:** consolidate findings are reported, not
+  fatal — exit codes reflect operational errors only.
+- **Full-consolidate lock wait + alerts:** nightly full waits for the lock (45m)
+  and alerts on timeout; quick lock-skips record `skipped-lock`, not ok.
+- **Quick-tick budget + cron offset:** 10-min wall-clock budget on the quick
+  transcript backstop; quick cron offset from :00 — ticks can no longer starve
+  the nightly lock.
+- **Doctor nightly-full-liveness check** (26h) + 48h audit window.
+- **Deduped alert pathway:** one alert helper (stderr + telemetry + osascript),
+  deduplicated.
+- **Stdin-first Stop-hook capture:** stdin `transcript_path` is authoritative;
+  inline copy; every failure path loud (stderr + telemetry).
+- **Distill-child reaper:** pidfile-tracked distill children; serve startup
+  kills orphans.
+- **Drain-timeout telemetry:** harness drain timeouts hit telemetry instead of
+  passing silently.
+- **`hex backup`:** online sqlite snapshots (memory/events/ledger) with 7-day
+  rotation — the 04:00Z cron finally has a target.
+- **Vector backfill + stats gaps + KNN floor:** index backfills missing vectors;
+  `hex memory stats` reports embedding/orphan gaps; KNN distance floor.
+- **`hex memory maintain` weekly:** orphan sweep, FTS optimize,
+  transcript_files hygiene, VACUUM — on weekly cron.
+- **Facts semantic recall:** facts_vec populated via maintain backfill; recall
+  fuses FTS + KNN arms (RRF).
+
 ## [2026-06-05] — harness lifecycle adopts daemon-green (v0.31.0)
 
 The hex harness no longer hand-rolls launchctl/plist logic. `hex harness
