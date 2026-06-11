@@ -29,8 +29,11 @@ pub fn rss_mb() -> Option<u64> {
     }
 }
 
-/// Emit an RSS checkpoint to stderr. Cheap; safe to leave wired in.
+/// Emit an RSS checkpoint to stderr. Opt-in via `HEX_RSS_LOG`.
 pub fn log_rss(label: &str) {
+    if std::env::var_os("HEX_RSS_LOG").is_none() {
+        return; // diagnostic noise on every search otherwise — opt-in only
+    }
     match rss_mb() {
         Some(mb) => eprintln!("[rss] {label}: {mb} MB"),
         None => eprintln!("[rss] {label}: (unavailable on this platform)"),

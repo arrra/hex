@@ -10,6 +10,7 @@ mod integration_cmd;
 mod integration_check_all;
 // telemetry lives in the lib (used by the in-process worker runtime too); the
 // bin shares that one copy rather than compiling a second (mirrors hex::memory).
+use hex::alert;
 use hex::memory;
 use hex::telemetry;
 mod path_map;
@@ -179,6 +180,11 @@ enum Commands {
         #[command(subcommand)]
         command: GatekeeperCommands,
     },
+    /// Daily sqlite snapshots (memory/telemetry/ledger DBs) with 7-day
+    /// rotation under $HEX_DIR/.hex/backups/YYYY-MM-DD/. Target of the
+    /// hex-backup cron worker (04:00 daily).
+    #[command(display_order = 14)]
+    Backup,
     /// GitFlow release ceremony (oss-releaser). One verb: `cut`.
     #[command(display_order = 14)]
     Release {
@@ -546,6 +552,14 @@ enum MemoryCommands {
     /// Print ~10 recency-ordered pointers into the live workspace (project dirs,
     /// recent decisions, todo "Now" items). No LLM, target <200ms.
     Recent,
+    /// Scheduled self-repair for memory.db: orphan-vector sweep, FTS5 optimize,
+    /// transcript_files hygiene, optional VACUUM + facts backfill
+    Maintain {
+        #[arg(long)]
+        vacuum: bool,
+        #[arg(long)]
+        backfill_facts: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -815,6 +829,9 @@ fn main() {
                 MemoryCommands::Recent => {
                     memory::recent::run(&hex_dir)
                 }
+                MemoryCommands::Maintain { vacuum, backfill_facts } => {
+                    memory::maintain::run(&hex_dir, *vacuum, *backfill_facts)
+                }
                 MemoryCommands::Consolidate { command } => {
                     let (mode, max) = match command {
                         ConsolidateCommands::Quick { max } => (consolidate::Mode::Quick, *max),
@@ -853,6 +870,10 @@ fn main() {
             }
         }
         Commands::Env { command } => env::run_env_command(command),
+        Commands::Backup => {
+            let hex_dir = get_hex_dir();
+            std::process::exit(hex::backup::run(&hex_dir));
+        }
         Commands::Upgrade { args } => {
             std::process::exit(upgrade::run(&args));
         }

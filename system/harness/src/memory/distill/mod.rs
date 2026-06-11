@@ -31,6 +31,7 @@ const STRIKE_LIMIT: u32 = 3;
 /// caller (see `telemetry::record_loud`).
 fn telemetry_slice(
     path: &str,
+    start_offset: i64,
     bytes: i64,
     est_tokens: u32,
     outcome: &str,
@@ -43,8 +44,8 @@ fn telemetry_slice(
         duration_ms: None,
         exit_code: None,
         detail: Some(format!(
-            "path={} bytes={} est_tokens={} strikes={}",
-            path, bytes, est_tokens, strikes
+            "path={} offset={} bytes={} est_tokens={} strikes={}",
+            path, start_offset, bytes, est_tokens, strikes
         )),
     });
 }
@@ -144,7 +145,7 @@ pub fn run_on_file(
                     "[distill] POISON SLICE SKIP: file={} bytes={}..{} strikes={} budget_tokens={} reason={}",
                     path, offset, slice_end_offset, new_strikes, budget, e
                 );
-                telemetry_slice(path, cap_len as i64, est_tokens, "skipped", new_strikes);
+                telemetry_slice(path, offset, cap_len as i64, est_tokens, "skipped", new_strikes);
                 let tx = conn.transaction()?;
                 watermark::advance_offset(&tx, path, slice_end_offset)?;
                 watermark::set_strikes(&tx, path, 0)?;
@@ -154,7 +155,7 @@ pub fn run_on_file(
                     "[distill] extract failed (strike {} of {}): file={} budget_tokens={} err={}",
                     new_strikes, STRIKE_LIMIT, path, budget, e
                 );
-                telemetry_slice(path, cap_len as i64, est_tokens, "failed", new_strikes);
+                telemetry_slice(path, offset, cap_len as i64, est_tokens, "failed", new_strikes);
                 watermark::set_strikes(conn, path, new_strikes)?;
             }
             return Ok(report);
@@ -292,7 +293,7 @@ pub fn run_on_file(
     watermark::advance_offset(&tx, path, new_offset)?;
     watermark::set_strikes(&tx, path, 0)?;
     tx.commit()?;
-    telemetry_slice(path, cap_len as i64, est_tokens, "ok", 0);
+    telemetry_slice(path, offset, cap_len as i64, est_tokens, "ok", 0);
     Ok(report)
 }
 

@@ -459,7 +459,6 @@ pub fn assemble(
                     // Floor over-budget — still push so the facet coverage
                     // contract is honored, then break.
                     merged.push(cand);
-                    chars += cost;
                     return AssembledContext { candidates: merged, per_move_stats };
                 }
                 merged.push(cand);

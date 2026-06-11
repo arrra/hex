@@ -15,6 +15,7 @@ pub mod llm_preference;
 pub mod llm_provider;
 pub mod me_md;
 pub mod memory_db;
+pub mod nightly_full_liveness;
 pub mod python;
 pub mod reflection_liveness;
 pub mod scripts_exec;

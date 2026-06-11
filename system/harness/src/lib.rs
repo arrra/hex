@@ -4,6 +4,8 @@
 extern crate self as hex;
 
 pub mod act_evidence;
+pub mod alert;
+pub mod backup;
 pub mod claude_runs;
 pub mod dial;
 pub mod doctor;
@@ -20,6 +22,7 @@ pub mod memory;
 pub mod messages;
 pub mod module_state;
 pub mod ops;
+pub mod reaper;
 pub mod registry;
 pub mod release;
 pub mod sanitize;

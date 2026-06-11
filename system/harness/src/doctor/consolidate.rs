@@ -299,7 +299,9 @@ fn check_audit_freshness(hex_dir: &Path) -> Result<String, String> {
     if !evo_dir.is_dir() {
         return Err("LLM consolidation stale — run hex memory consolidate full".to_string());
     }
-    let thirty_days_secs: u64 = 30 * 24 * 3600;
+    // A nightly artifact checked with a 30-day window masked the 2026-06-10
+    // miss for what would have been weeks — keep this tight (48h).
+    let fresh_window_secs: u64 = 48 * 3600;
     let now_secs = SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -328,7 +330,7 @@ fn check_audit_freshness(hex_dir: &Path) -> Result<String, String> {
 
     match newest_mtime {
         None => Err("LLM consolidation stale — run hex memory consolidate full".to_string()),
-        Some(mtime) if now_secs.saturating_sub(mtime) > thirty_days_secs => {
+        Some(mtime) if now_secs.saturating_sub(mtime) > fresh_window_secs => {
             Err("LLM consolidation stale — run hex memory consolidate full".to_string())
         }
         Some(_) => Ok("OK: LLM consolidation audit is fresh".to_string()),

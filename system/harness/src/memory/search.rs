@@ -330,6 +330,79 @@ fn format_results(results: &[SearchResult], args: &SearchArgs, query: &str) {
     }
 }
 
+/// How many facts the facts arm contributes to `hex memory search` output.
+const FACTS_TOP_K: usize = 5;
+
+/// Core retrieval for `hex memory search`: the FTS+KNN chunk fusion plus the
+/// facts arm (`facts_recall` — FTS, fused with KNN over `facts_vec` when a
+/// query embedding is supplied). Split from [`run`] so tests can drive it
+/// with a synthetic query vector.
+///
+/// Review-fix 2026-06-11 (findings 1/4/6): the facts KNN arm previously had
+/// NO production caller passing a vector — `facts_vec` was populated weekly
+/// and read by nothing. `run` embeds the query ONCE and the same vector
+/// feeds both the chunk KNN arm and the facts KNN arm (plan Task 11 Step 3).
+pub(crate) fn run_query(
+    conn: &Connection,
+    args: &SearchArgs,
+    query_vec: Option<&[f32]>,
+) -> (Vec<SearchResult>, Vec<super::recall::FactHit>) {
+    // FTS5 arm — keeps bm25 * source_weight as its pre-RRF rank input (spec §7).
+    let fts = search_fts(conn, &args.query, args.top.max(20), args.file.as_deref())
+        .unwrap_or_default();
+    let fts_rowids: Vec<i64> = fts.iter().map(|r| r.rowid).collect();
+
+    // Vector arm — best-effort. If KNN fails, log loud and fall back to
+    // FTS5-only (never silently degrade to nothing).
+    let vec_rowids: Vec<i64> = match query_vec {
+        Some(qv) => super::vector::knn(conn, qv, args.top.max(20))
+            .map(|hits| hits.into_iter().map(|(id, _)| id).collect())
+            .unwrap_or_else(|e| {
+                eprintln!("vector arm failed: {e}");
+                vec![]
+            }),
+        None => vec![],
+    };
+
+    let fused = super::rrf::rrf_fuse(&[fts_rowids, vec_rowids], super::rrf::RRF_K);
+    let fused_rowids: Vec<i64> = fused.iter().map(|(id, _)| *id).collect();
+    let mut results = fetch_chunks_by_rowid(conn, &fused_rowids).unwrap_or_default();
+
+    // Attach the RRF score to each result for display.
+    let scores: std::collections::HashMap<i64, f64> = fused.iter().copied().collect();
+    for r in &mut results {
+        r.score = scores.get(&r.rowid).copied().unwrap_or(0.0);
+    }
+
+    // Facts arm — reuses the already-computed query vector for its KNN side.
+    let mut facts = super::recall::facts_recall(conn, &args.query, FACTS_TOP_K, query_vec)
+        .unwrap_or_else(|e| {
+            eprintln!("facts arm failed: {e}");
+            vec![]
+        });
+
+    // Privacy filter — the index-time `private` column (spec §7), applied to
+    // chunks and facts alike.
+    if args.private {
+        results.retain(|r| !r.private);
+        facts.retain(|f| !f.private);
+    }
+    results.truncate(args.top);
+
+    (results, facts)
+}
+
+fn format_facts(facts: &[super::recall::FactHit]) {
+    if facts.is_empty() {
+        return;
+    }
+    println!();
+    println!("Facts:");
+    for f in facts {
+        println!("  - {} {} {}", f.subject, f.predicate, f.object);
+    }
+}
+
 pub fn run(hex_root: &Path, args: &SearchArgs) -> i32 {
     let db = db_path(hex_root);
     if !db.exists() {
@@ -344,45 +417,22 @@ pub fn run(hex_root: &Path, args: &SearchArgs) -> i32 {
         }
     };
 
-    // FTS5 arm — keeps bm25 * source_weight as its pre-RRF rank input (spec §7).
-    let fts = search_fts(&conn, &args.query, args.top.max(20), args.file.as_deref())
-        .unwrap_or_default();
-    let fts_rowids: Vec<i64> = fts.iter().map(|r| r.rowid).collect();
-
-    // Vector arm — best-effort. If the model or KNN fails, log loud and fall
-    // back to FTS5-only (never silently degrade to nothing).
-    let vec_rowids: Vec<i64> = match super::embed::Embedder::new(hex_root)
+    // Embed the query ONCE — the same vector feeds the chunk KNN arm and the
+    // facts KNN arm. If the model fails, log loud and fall back to FTS5-only.
+    let query_vec: Option<Vec<f32>> = match super::embed::Embedder::new(hex_root)
         .and_then(|e| e.embed_query(&args.query))
     {
-        Ok(qv) => super::vector::knn(&conn, &qv, args.top.max(20))
-            .map(|hits| hits.into_iter().map(|(id, _)| id).collect())
-            .unwrap_or_else(|e| {
-                eprintln!("vector arm failed: {e}");
-                vec![]
-            }),
+        Ok(qv) => Some(qv),
         Err(e) => {
             eprintln!("query embedding failed, FTS5-only: {e}");
-            vec![]
+            None
         }
     };
 
-    let fused = super::rrf::rrf_fuse(&[fts_rowids, vec_rowids], super::rrf::RRF_K);
-    let fused_rowids: Vec<i64> = fused.iter().map(|(id, _)| *id).collect();
-    let mut results = fetch_chunks_by_rowid(&conn, &fused_rowids).unwrap_or_default();
-
-    // Attach the RRF score to each result for display.
-    let scores: std::collections::HashMap<i64, f64> = fused.iter().copied().collect();
-    for r in &mut results {
-        r.score = scores.get(&r.rowid).copied().unwrap_or(0.0);
-    }
-
-    // Privacy filter — the index-time `private` column (spec §7).
-    if args.private {
-        results.retain(|r| !r.private);
-    }
-    results.truncate(args.top);
+    let (results, facts) = run_query(&conn, args, query_vec.as_deref());
 
     format_results(&results, args, &args.query);
+    format_facts(&facts);
     0
 }
 
@@ -426,6 +476,116 @@ mod tests {
             params![rowid, weight],
         )
         .unwrap();
+    }
+
+    /// Build the full production-shaped fixture: Plan 2 schema (facts,
+    /// facts_fts, facts_vec) + the chunks FTS5 vtable + vec_chunks.
+    fn setup_full_db() -> Connection {
+        crate::memory::vector::register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE chunks USING fts5(
+                file_id UNINDEXED,
+                source_path UNINDEXED,
+                heading,
+                chunk_index UNINDEXED,
+                content,
+                private UNINDEXED,
+                tokenize='unicode61'
+            );",
+        )
+        .unwrap();
+        crate::memory::vector::init_vec_table(&conn).unwrap();
+        conn
+    }
+
+    fn search_args(query: &str, private: bool) -> SearchArgs {
+        SearchArgs {
+            query: query.to_string(),
+            top: 5,
+            file: None,
+            compact: false,
+            context: None,
+            private,
+        }
+    }
+
+    /// Review-fix 2026-06-11 (findings 1/4/6): the facts KNN arm was dead
+    /// code — no production caller ever passed a query vector. `hex memory
+    /// search` already embeds the query for the chunk arm; `run_query` (the
+    /// core `run` delegates to) must hoist that SAME vector into
+    /// `facts_recall` so facts fuse FTS + KNN (plan Task 11 Step 3).
+    #[test]
+    fn run_query_passes_query_vector_to_facts_arm() {
+        let conn = setup_full_db();
+
+        // Fact A: FTS-matchable by the query tokens. Fact B: shares NO token
+        // with the query — only the KNN arm can surface it.
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('fa','project:hex','uses','sqlite-vec for the vector store',0.9,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('fb','person:bob','prefers','zzqx qqzz',0.9,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+        let qv = vec![0.1f32; crate::memory::vector::EMBED_DIM];
+        crate::memory::vector::insert_fact_vec(&conn, "fb", &qv).unwrap();
+
+        let args = search_args("what powers the vector store", false);
+
+        // No query vector ⇒ FTS-only facts: the KNN-only fact stays invisible.
+        let (_chunks, facts_fts_only) = run_query(&conn, &args, None);
+        assert!(
+            facts_fts_only.iter().any(|f| f.subject == "project:hex"),
+            "FTS facts arm must work without an embedder"
+        );
+        assert!(
+            !facts_fts_only.iter().any(|f| f.subject == "person:bob"),
+            "without a query vector the KNN-only fact must not surface"
+        );
+
+        // With the (hoisted) query vector, both arms contribute.
+        let (_chunks, facts) = run_query(&conn, &args, Some(&qv));
+        assert!(
+            facts.iter().any(|f| f.subject == "project:hex"),
+            "FTS fact must survive fusion"
+        );
+        assert!(
+            facts.iter().any(|f| f.subject == "person:bob"),
+            "search must pass the query vector through to the facts KNN arm, got {:?}",
+            facts.iter().map(|f| &f.subject).collect::<Vec<_>>()
+        );
+    }
+
+    /// `--private` must filter private facts exactly as it filters chunks.
+    #[test]
+    fn run_query_private_flag_filters_private_facts() {
+        let conn = setup_full_db();
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+             VALUES ('fp','me:secret','prefers','the vector store stays hidden',0.9,'2026-06-11','2026-06-11',1)",
+            [],
+        )
+        .unwrap();
+
+        let (_c, facts) = run_query(&conn, &search_args("vector store", false), None);
+        assert!(
+            facts.iter().any(|f| f.subject == "me:secret"),
+            "without --private the fact is visible"
+        );
+
+        let (_c, facts) = run_query(&conn, &search_args("vector store", true), None);
+        assert!(
+            !facts.iter().any(|f| f.subject == "me:secret"),
+            "--private must filter private facts"
+        );
     }
 
     #[test]

@@ -92,8 +92,9 @@ mod tests {
         );
         assert_eq!(
             hex_modules::memory_maintenance::CRON_CONSOLIDATE_QUICK,
-            "0 */15 * * * * *",
-            "quick-consolidate must run every 15 minutes"
+            "0 5,20,35,50 * * * * *",
+            "quick-consolidate must run 4x/hour OFFSET from :00 — a quick tick \
+             on the :00 boundary lock-skipped the 03:00:00Z full run (2026-06-10)"
         );
         assert_eq!(
             hex_modules::memory_maintenance::ARGV_CONSOLIDATE_QUICK,
