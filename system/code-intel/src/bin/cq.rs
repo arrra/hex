@@ -6,6 +6,7 @@
 
 use clap::{Parser, Subcommand};
 use scipd_core::error::CqError;
+use scipd_core::indexer::{self, IndexOutcome};
 use scipd_core::workspace::{codeintel_home, register_workspace};
 
 #[derive(Parser)]
@@ -82,7 +83,23 @@ fn run(cli: Cli) -> Result<(), anyhow::Error> {
         Command::Callers { .. } => anyhow::bail!("unimplemented: cq callers (Task 9)"),
         Command::Symbols { .. } => anyhow::bail!("unimplemented: cq symbols (Task 9)"),
         Command::Search { .. } => anyhow::bail!("unimplemented: cq search (Task 9)"),
-        Command::Index { .. } => anyhow::bail!("unimplemented: cq index (Task 8)"),
+        Command::Index { workspace } => {
+            let home = codeintel_home()?;
+            let dir = match workspace {
+                Some(path) => std::path::PathBuf::from(path),
+                None => std::env::current_dir()?,
+            };
+            match indexer::run(&home, &dir)? {
+                // Visible skip, exit 0 (spec §7): an emit is already in flight.
+                IndexOutcome::SkippedInFlight => {
+                    println!("{}", serde_json::json!({ "skipped": "emit-in-flight" }));
+                }
+                IndexOutcome::Completed(report) => {
+                    println!("{}", serde_json::to_string(&report)?);
+                }
+            }
+            Ok(())
+        }
         Command::Register { path } => {
             let home = codeintel_home()?;
             let entry = register_workspace(&home, std::path::Path::new(&path))?;

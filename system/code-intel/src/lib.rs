@@ -9,6 +9,7 @@
 
 pub mod envelope;
 pub mod error;
+pub mod indexer;
 pub mod ingest;
 pub mod query;
 pub mod schema;
