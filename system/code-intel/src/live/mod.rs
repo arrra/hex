@@ -14,6 +14,8 @@
 
 pub mod instance;
 pub mod lsp;
+pub mod pool;
 pub mod translate;
 
 pub use instance::{InstanceState, LiveBackend, LiveError, LiveInstance, LiveResult};
+pub use pool::Pool;
