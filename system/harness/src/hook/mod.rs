@@ -1,6 +1,5 @@
 pub mod capture;
 pub mod lint_predispatch;
-pub mod title_nudge;
 pub mod user_prompt_submit;
 pub mod worktree_guard;
 
