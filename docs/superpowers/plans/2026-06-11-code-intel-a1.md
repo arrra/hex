@@ -291,7 +291,7 @@ fn ingest_golden_crate_populates_schema() {
   - `ingest::ingest(scip_path, conn, repo_root) -> Stats`:
     1. Parse with the `scip` crate (`scip::types::Index::parse_from_bytes` via `protobuf::Message`).
     2. One pass: upsert symbols (from `SymbolInformation` and any occurrence symbols), insert files with `blob_oid` from one `git -C repo_root ls-files -s` call parsed into a map, insert occurrences with SCIP ranges verbatim (0-based).
-    3. Second pass per file: derive `enclosing_symbol_id` — prefer `enclosing_range` from SCIP when populated; else smallest definition-occurrence span in the same file strictly containing the reference range. Definitions get NULL.
+    3. Second pass per file: derive `enclosing_symbol_id` — **containment ONLY**: smallest definition-occurrence span in the same file strictly containing the reference range, excluding module-like definition kinds (Module/Namespace/Package). **Do NOT use reference-side SCIP `enclosing_range`** — smoke test #2 proved it holds the *referenced definition's* range, not the call site's scope (spec §4 has the full finding). Definitions get NULL.
     4. Wrap in one transaction; `PRAGMA journal_mode=OFF, synchronous=OFF` during build (write-once artifact).
   - If the `scip` crate's API differs from the above sketch, adapt — the test is the contract, not the sketch.
 - [ ] **Step 3: Verify + commit** `feat(code-intel): SCIP protobuf ingest into generation SQLite`.
@@ -411,7 +411,7 @@ fn emit_failure_is_emit_failed_with_stderr_tail() { /* point rust-analyzer at a 
 **Files:**
 - Create: `system/code-intel/tests/golden.rs`
 
-- [ ] **Step 1: Write `tests/golden.rs`** — loads `golden-expectations.json`, runs the full pipeline (register→index→each verb) against the fixture, asserts every expectation. The macro-case caller (`macro_caller`) is asserted per the gate file: read `tests/fixtures/callers-gate.json` (`{"macro_callers_from_index": true|false}`) — **created in this task** from the smoke-test #2 verdict (orchestrator supplies it; if the smoke-test result file `~/hex/projects/system-improvement/research/smoke-tests/2026-06-11-scip-callers-quality.md` is not yet available, set `false` (conservative) and the envelope `quality: "best-effort"` field MUST be emitted by `cq callers` — add that to `respond::run`).
+- [ ] **Step 1: Write `tests/golden.rs`** — loads `golden-expectations.json`, runs the full pipeline (register→index→each verb) against the fixture, asserts every expectation. **Callers gate RESOLVED (smoke test #2, 2026-06-11): SHIP from index, 0% false negatives.** Create `tests/fixtures/callers-gate.json` with `{"macro_callers_from_index": true}` and assert the `macro_caller` case fully. No `quality: "best-effort"` flag in the default path; the envelope `quality` field stays reserved for future degraded modes.
 - [ ] **Step 2: Verify + commit** `test(code-intel): golden acceptance suite (spec S2)`.
 
 ---

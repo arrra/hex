@@ -103,8 +103,14 @@ CREATE VIRTUAL TABLE symbols_fts USING fts5(display_name, content='symbols', con
 
 `enclosing_symbol_id` derivation at ingest: for each reference occurrence, the enclosing symbol
 is the definition occurrence in the same file whose range most tightly contains the reference
-(smallest containing `[start,end)` span among definition occurrences). SCIP
-`enclosing_range` is used when present; containment fallback otherwise.
+(smallest containing `[start,end)` span among definition occurrences), **excluding module-like
+definitions** (SCIP kinds Module/Namespace/Package) so `use`-import lines inside inline modules
+don't masquerade as callers. **NEVER use reference-side SCIP `enclosing_range`** — smoke test #2
+(2026-06-11, `research/smoke-tests/2026-06-11-scip-callers-quality.md`) proved it contains the
+*referenced definition's* range, not the call site's enclosing scope. Containment-only.
+Smoke test verdict: callers() ships from the index cleanly (0% false negatives on macro-heavy
+ground truth incl. `assert!`/`anyhow!`/`tokio::spawn` cases); no `quality: "best-effort"` flag
+needed in the default path.
 
 ## 5. CLI surface (all verbs emit the envelope; `--json` is the default and only output mode)
 
