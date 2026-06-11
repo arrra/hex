@@ -1285,7 +1285,11 @@ fn git_common_dir(repo_root: &Path) -> Result<PathBuf> {
     }
 }
 
-fn lock_file_path(repo_root: &Path) -> Result<PathBuf> {
+/// The ceremony's exclusive lock file. Public so the oss-releaser branch
+/// watcher can defer polling a repo while a ceremony is in flight — it only
+/// checks existence; TAKING the lock stays the ceremony's job
+/// ([`ReleaseLock::acquire`]).
+pub fn lock_file_path(repo_root: &Path) -> Result<PathBuf> {
     Ok(git_common_dir(repo_root)?.join("hex-release.lock"))
 }
 
@@ -1364,6 +1368,36 @@ fn parse_ls_remote(out: &str, refname: &str) -> Option<String> {
         }
     }
     unpeeled
+}
+
+/// All `release/*` and `hotfix/*` branch heads on origin as `(branch, sha)`
+/// pairs — the poll primitive of the oss-releaser branch watcher. A failing
+/// `ls-remote` is a hard error: "cannot list" must never read as "no
+/// branches" (S6).
+pub fn ls_remote_watch_heads(repo_root: &Path) -> Result<Vec<(String, String)>> {
+    let out = git_stdout(
+        repo_root,
+        &["ls-remote", "origin", "refs/heads/release/*", "refs/heads/hotfix/*"],
+    )
+    .context("listing origin release/* and hotfix/* heads")?;
+    Ok(parse_ls_remote_heads(&out))
+}
+
+/// Parse multi-ref `git ls-remote` output into `(branch, sha)` pairs sorted
+/// by branch name. Only `refs/heads/*` lines count (branch heads are never
+/// peeled, so no `^{}` handling); malformed lines are skipped.
+pub fn parse_ls_remote_heads(out: &str) -> Vec<(String, String)> {
+    let mut heads: Vec<(String, String)> = out
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace();
+            let (sha, refname) = (cols.next()?, cols.next()?);
+            let branch = refname.strip_prefix("refs/heads/")?;
+            Some((branch.to_string(), sha.to_string()))
+        })
+        .collect();
+    heads.sort();
+    heads
 }
 
 /// `git merge --no-ff` of `branch` into the current branch. `Err` carries
@@ -2581,6 +2615,25 @@ mod tests {
         // Prefix-sharing refs never match.
         let noise = "ddd444\trefs/tags/v1.0.0-rc1\neee555\trefs/heads/main\n";
         assert_eq!(parse_ls_remote(noise, "refs/tags/v1.0.0"), None);
+    }
+
+    #[test]
+    fn parse_ls_remote_heads_extracts_sorted_branch_heads() {
+        // Multi-head listing, deliberately out of order; only refs/heads/*
+        // lines count, malformed lines are skipped.
+        let out = "bbb222\trefs/heads/release/0.2.0\n\
+                   aaa111\trefs/heads/hotfix/0.1.1\n\
+                   garbage-line-without-ref\n\
+                   ccc333\trefs/tags/v0.1.0\n";
+        assert_eq!(
+            parse_ls_remote_heads(out),
+            vec![
+                ("hotfix/0.1.1".to_string(), "aaa111".to_string()),
+                ("release/0.2.0".to_string(), "bbb222".to_string()),
+            ]
+        );
+        // No heads at all.
+        assert!(parse_ls_remote_heads("").is_empty());
     }
 
     #[test]
