@@ -9,5 +9,6 @@
 pub mod envelope;
 pub mod error;
 pub mod ingest;
+pub mod query;
 pub mod schema;
 pub mod store;
