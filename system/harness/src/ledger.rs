@@ -364,6 +364,21 @@ pub fn default_path(hex_dir: &Path) -> PathBuf {
     hex_dir.join(".hex").join("ledger").join("ledger.db")
 }
 
+/// Per-agent freshness window (seconds). Charter-derived defaults; the spec
+/// contract calls for a "config map" — wired here as defaults so the freshness
+/// check has something to alert against on day one. The reconciler runs
+/// hourly, so a 2h window is the natural watcher. An agent is STALE strictly
+/// beyond its window: `age == window` is still fresh, `age > window` alerts.
+pub fn default_freshness_window_secs(agent: &str) -> i64 {
+    match agent {
+        "reconciler" => 2 * 3600,   // 2h: reconciler charter (hourly cron + slack)
+        "linter"     => 24 * 3600,  // 24h: linter is per-dispatch
+        "proposer"   => 26 * 3600,  // 26h: proposer nightly + overlap (charter)
+        "auditor"    => 26 * 3600,
+        _            => 24 * 3600,
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Unit tests (the integration test in tests/ledger_test.rs covers the
 // public contract; these pin the internals).
@@ -395,6 +410,15 @@ mod tests {
         let a = canonical_json(&json!({"b": 1, "a": 2})).unwrap();
         let b = canonical_json(&json!({"a": 2, "b": 1})).unwrap();
         assert_eq!(a, b);
+    }
+
+    #[test]
+    fn ledger_freshness_windows_match_charters() {
+        assert_eq!(default_freshness_window_secs("reconciler"), 2 * 3600);
+        assert_eq!(default_freshness_window_secs("linter"), 24 * 3600);
+        assert_eq!(default_freshness_window_secs("proposer"), 26 * 3600);
+        assert_eq!(default_freshness_window_secs("auditor"), 26 * 3600);
+        assert_eq!(default_freshness_window_secs("anything-else"), 24 * 3600);
     }
 
     #[test]

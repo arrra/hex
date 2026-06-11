@@ -228,18 +228,18 @@ pub fn shadow_summary(gates: &[String]) -> String {
 
 #[derive(Debug, serde::Deserialize)]
 struct VerifEntry {
-    // BOI v2 verifications are intent-XOR-command (enforced by BOI's own
-    // validator). Only command gates are lintable; an intent entry is an
-    // LLM-judged claim with no shell to inspect, so it must PARSE here but
-    // contributes no gate — a linter that errors on valid intent entries
-    // silently zeroes coverage for the whole spec (OBS-034).
+    /// Shell gate — the lintable kind. Exactly one of `command`/`intent` must
+    /// be present (BOI v2 schema, enforced by BOI's own validator too).
     #[serde(default)]
     command: Option<String>,
+    /// LLM-judged gate. Valid BOI v2, but carries no shell command — the
+    /// linter skips it rather than rejecting the spec. The old `command:
+    /// String` field made every intent-gated spec a parse error, which the
+    /// PreToolUse hook turned into a blocked dispatch and which silently
+    /// zeroed lint coverage for the whole spec (OBS-034).
     #[serde(default)]
-    #[allow(dead_code)]
     intent: Option<String>,
     #[serde(default)]
-    #[allow(dead_code)]
     name: Option<String>,
 }
 
@@ -285,22 +285,43 @@ impl From<std::io::Error> for LintError {
     fn from(e: std::io::Error) -> Self { LintError::Io(e) }
 }
 
-/// Extract every verification command (contract + per-task) from a BOI v2
-/// TOML spec, in document order.
+/// Extract every lintable verification command (contract + per-task) from a
+/// BOI v2 TOML spec, in document order. `{name, intent}` gates are valid spec
+/// content with nothing to lint — skipped, never an error. A verification with
+/// BOTH or NEITHER of command/intent is a spec error named after the gate.
 pub fn extract_gates_from_spec(toml_src: &str) -> Result<Vec<String>, LintError> {
     let spec: SpecToml = toml::from_str(toml_src).map_err(|e| LintError::Toml(e.to_string()))?;
     let mut gates = Vec::new();
     if let Some(c) = spec.contract {
-        for v in c.verifications {
-            gates.extend(v.command);
-        }
+        collect_command_gates(c.verifications, &mut gates)?;
     }
     for t in spec.tasks {
-        for v in t.verifications {
-            gates.extend(v.command);
-        }
+        collect_command_gates(t.verifications, &mut gates)?;
     }
     Ok(gates)
+}
+
+/// Push the command gates from one verification list, enforcing the
+/// command-XOR-intent contract per entry.
+fn collect_command_gates(entries: Vec<VerifEntry>, out: &mut Vec<String>) -> Result<(), LintError> {
+    for v in entries {
+        let label = v.name.as_deref().unwrap_or("<unnamed>").to_owned();
+        match (v.command, v.intent) {
+            (Some(cmd), None) => out.push(cmd),
+            (None, Some(_)) => {} // intent gate: LLM-judged, nothing to lint
+            (Some(_), Some(_)) => {
+                return Err(LintError::Toml(format!(
+                    "verification '{label}': has BOTH command and intent — exactly one is allowed"
+                )));
+            }
+            (None, None) => {
+                return Err(LintError::Toml(format!(
+                    "verification '{label}': has NEITHER command nor intent — exactly one is required"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 // ---------------------------------------------------------------------------
@@ -400,6 +421,79 @@ verifications = [{ command = "cargo test 2>/dev/null" }]
         let gates = extract_gates_from_spec(src).unwrap();
         assert_eq!(gates.len(), 3);
         assert_eq!(gates[2], "cargo test 2>/dev/null");
+    }
+
+    // -- command-XOR-intent contract (the 2026-06-10 E0-smoke bug) ----------
+
+    #[test]
+    fn lint_extract_skips_intent_gates_in_mixed_spec() {
+        // Mixed spec: intent gates are valid BOI v2 and must be skipped, not
+        // rejected — the old `command: String` model exit-2'd the whole spec.
+        let src = r#"
+title = "x"
+pipeline = "standard"
+
+[contract]
+verifications = [
+  { name = "shell", command = "test -f foo" },
+  { name = "judged", intent = "unit tests prove the watermark cannot regress" },
+]
+
+[[tasks]]
+ref = "a"
+behavior = "do a"
+verifications = [
+  { name = "judged-2", intent = "the docs match the implementation" },
+  { name = "shell-2", command = "test -d src" },
+]
+"#;
+        let gates = extract_gates_from_spec(src).unwrap();
+        assert_eq!(gates, vec!["test -f foo".to_string(), "test -d src".to_string()]);
+    }
+
+    #[test]
+    fn lint_extract_intent_only_spec_is_ok_with_zero_gates() {
+        let src = r#"
+title = "x"
+pipeline = "standard"
+
+[contract]
+verifications = [{ name = "judged", intent = "a free-form claim" }]
+"#;
+        let gates = extract_gates_from_spec(src).unwrap();
+        assert!(gates.is_empty());
+    }
+
+    #[test]
+    fn lint_extract_rejects_both_command_and_intent_naming_the_gate() {
+        let src = r#"
+title = "x"
+pipeline = "standard"
+
+[contract]
+verifications = [{ name = "greedy-gate", command = "true", intent = "also a claim" }]
+"#;
+        let err = extract_gates_from_spec(src).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("greedy-gate"), "error must name the gate: {msg}");
+        assert!(msg.contains("BOTH"), "error must say both were given: {msg}");
+    }
+
+    #[test]
+    fn lint_extract_rejects_neither_command_nor_intent_naming_the_gate() {
+        let src = r#"
+title = "x"
+pipeline = "standard"
+
+[[tasks]]
+ref = "a"
+behavior = "do a"
+verifications = [{ name = "empty-gate" }]
+"#;
+        let err = extract_gates_from_spec(src).unwrap_err();
+        let msg = err.to_string();
+        assert!(msg.contains("empty-gate"), "error must name the gate: {msg}");
+        assert!(msg.contains("NEITHER"), "error must say neither was given: {msg}");
     }
 
     #[test]

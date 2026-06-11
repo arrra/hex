@@ -1,4 +1,5 @@
 pub mod capture;
+pub mod lint_predispatch;
 pub mod title_nudge;
 pub mod user_prompt_submit;
 pub mod worktree_guard;
@@ -20,6 +21,11 @@ pub enum HookCommands {
     /// otherwise.
     #[command(name = "worktree-guard")]
     WorktreeGuard,
+    /// Claude Code PreToolUse hook — shadow-lint `boi dispatch <spec>` Bash
+    /// calls in-process (one intent ledger row per gate); blocks only specs
+    /// BOI itself would reject (unreadable / parse error).
+    #[command(name = "lint-predispatch")]
+    LintPredispatch,
 }
 
 pub fn run(command: HookCommands) {
@@ -27,5 +33,6 @@ pub fn run(command: HookCommands) {
         HookCommands::Capture => capture::run(),
         HookCommands::UserPromptSubmit => user_prompt_submit::run(),
         HookCommands::WorktreeGuard => worktree_guard::run(),
+        HookCommands::LintPredispatch => lint_predispatch::run(),
     }
 }

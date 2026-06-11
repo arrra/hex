@@ -56,6 +56,22 @@ fn workers_registry_memory_maintenance_cron_matches_yaml() {
 }
 
 #[test]
+fn workers_registry_freshness_daily_0900() {
+    // hex-freshness: daily ledger freshness alerting (agent-infra P0, E0 step 4).
+    let reg = workers::registry();
+    let fr = reg
+        .iter()
+        .find(|w| w.name == "hex-freshness")
+        .expect("hex-freshness worker must be registered");
+    let exprs = cron_exprs(fr);
+    assert!(
+        exprs.iter().any(|e| e == "0 0 9 * * * *"),
+        "expected hex-freshness cron '0 0 9 * * * *' (09:00 daily) in {:?}",
+        exprs
+    );
+}
+
+#[test]
 fn workers_registry_backup_is_cron_worker() {
     let reg = workers::registry();
     let bk = reg

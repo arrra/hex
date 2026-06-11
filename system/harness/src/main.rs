@@ -967,19 +967,9 @@ fn load_outcome_rows(
     Ok(out)
 }
 
-/// Per-agent freshness window (seconds). Charter-derived defaults; spec
-/// contract calls for a "config map" — wired here as defaults so the worker
-/// has something to alert against on day one. The reconciler runs hourly, so
-/// a 2h window is the natural watcher.
-fn default_freshness_window_secs(agent: &str) -> i64 {
-    match agent {
-        "reconciler" => 2 * 3600,   // 2h: reconciler charter
-        "linter"     => 24 * 3600,  // 24h: linter is per-dispatch
-        "proposer"   => 26 * 3600,  // 26h: proposer nightly + overlap
-        "auditor"    => 26 * 3600,
-        _            => 24 * 3600,
-    }
-}
+// Per-agent freshness windows live in `hex::ledger::default_freshness_window_secs`
+// (unit-tested there; the hex-freshness cron worker and this CLI share it).
+use hex::ledger::default_freshness_window_secs;
 
 /// Execute the freshness check loudly per S6:
 ///   - print one summary line per agent;

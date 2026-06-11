@@ -1,0 +1,23 @@
+# Fixture: BOI v2 spec mixing shell-command gates and LLM-judged intent gates.
+# Pins the command-XOR-intent parse contract (E0 smoke bug, 2026-06-10): the
+# linter must lint the command gates and SKIP the intent gates, exit 0.
+title    = "mixed gates fixture"
+pipeline = "standard"
+delivery = "merge"
+
+[contract]
+base_branch = "main"
+workspace   = "~/fixture"
+scope       = "fixture spec — never dispatched"
+verifications = [
+  { name = "shell-gate", command = "export PATH=\"/opt/homebrew/bin:$PATH\" && test -f Cargo.toml" },
+  { name = "judged-gate", intent = "unit tests prove the watermark cannot regress" },
+]
+
+[[tasks]]
+ref      = "only-task"
+behavior = "fixture task"
+verifications = [
+  { name = "task-judged", intent = "the docs match the implementation" },
+  { name = "task-shell", command = "test -d src" },
+]
