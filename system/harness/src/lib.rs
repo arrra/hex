@@ -7,6 +7,7 @@ pub mod act_evidence;
 pub mod claude_runs;
 pub mod dial;
 pub mod doctor;
+pub mod gatekeeper;
 pub mod harness;
 pub mod ledger;
 pub mod lint_gates;

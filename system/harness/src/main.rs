@@ -167,6 +167,52 @@ enum Commands {
         #[arg(long)]
         irreversible: bool,
     },
+    /// Deterministic judge of the agent-infra improvement plane (P1a).
+    ///
+    /// `judge` runs kill gates → embedded self-test → grounded eval on the
+    /// frozen held-out corpus and emits a replay-deterministic verdict
+    /// (ACCEPT_FLAGGED / REJECT / INSUFFICIENT_DATA — nothing auto-lands in
+    /// P1). `probe` is the verdict-store containment self-test (mode 0555;
+    /// a candidate subprocess write must fail, loudly alerting otherwise).
+    #[command(display_order = 14)]
+    Gatekeeper {
+        #[command(subcommand)]
+        command: GatekeeperCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum GatekeeperCommands {
+    /// Judge one proposal markdown file (two fenced TOML blocks) and append
+    /// its verdict block; exit 0 on any verdict, 2 on unjudgeable input.
+    Judge {
+        /// Proposal markdown file.
+        proposal: std::path::PathBuf,
+        /// Frozen corpus JSON ({train, held, ...}); judged on `held` only.
+        #[arg(long)]
+        corpus: std::path::PathBuf,
+        /// Precision floor below which a rule can never ACCEPT
+        /// (baseline-honest.md lower CI bound).
+        #[arg(long, default_value_t = hex::gatekeeper::DEFAULT_PRECISION_FLOOR)]
+        floor: f64,
+        /// Also write the verdict JSON here.
+        #[arg(long)]
+        out: Option<std::path::PathBuf>,
+        /// Timestamp recorded VERBATIM in the verdict (never a clock read —
+        /// determinism contract).
+        #[arg(long)]
+        now: Option<String>,
+        /// Verdict store dir (0555 containment); when given, a copy of the
+        /// verdict lands there via the chmod-up/write/chmod-down sequence.
+        #[arg(long)]
+        store: Option<std::path::PathBuf>,
+    },
+    /// Containment write-probe: the store must reject a candidate-context
+    /// subprocess write. Breach ⇒ ledger alert + exit 1.
+    Probe {
+        #[arg(long)]
+        store: std::path::PathBuf,
+    },
 }
 
 #[derive(Subcommand)]
@@ -927,6 +973,40 @@ fn main() {
                 }
             }
         }
+        Commands::Gatekeeper { command } => match command {
+            GatekeeperCommands::Judge { proposal, corpus, floor, out, now, store } => {
+                let hex_dir = get_hex_dir();
+                // Dial consult — recorded in the verdict, never upgrades it
+                // (P1: everything flags to Mike regardless).
+                let ledger_path = hex::ledger::default_path(&hex_dir);
+                let dial = match load_outcome_rows(&ledger_path) {
+                    Ok(rows) => {
+                        match hex::dial::compute(&rows, "proposer", "proposal.land", 3, false) {
+                            hex::dial::DialOutcome::Insufficient { n, min_n } => {
+                                format!("INSUFFICIENT (n={n}, min_n={min_n})")
+                            }
+                            hex::dial::DialOutcome::Ask => "ASK".to_string(),
+                            hex::dial::DialOutcome::Score(s) => format!("{s:.4}"),
+                        }
+                    }
+                    Err(_) => "UNAVAILABLE".to_string(),
+                };
+                std::process::exit(hex::gatekeeper::cli_judge(
+                    &proposal,
+                    &corpus,
+                    floor,
+                    out.as_deref(),
+                    now,
+                    store.as_deref(),
+                    &hex_dir,
+                    dial,
+                ));
+            }
+            GatekeeperCommands::Probe { store } => {
+                let hex_dir = get_hex_dir();
+                std::process::exit(hex::gatekeeper::cli_probe(&store, &hex_dir));
+            }
+        },
     }
 }
 
