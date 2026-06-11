@@ -228,7 +228,16 @@ pub fn shadow_summary(gates: &[String]) -> String {
 
 #[derive(Debug, serde::Deserialize)]
 struct VerifEntry {
-    command: String,
+    // BOI v2 verifications are intent-XOR-command (enforced by BOI's own
+    // validator). Only command gates are lintable; an intent entry is an
+    // LLM-judged claim with no shell to inspect, so it must PARSE here but
+    // contributes no gate — a linter that errors on valid intent entries
+    // silently zeroes coverage for the whole spec (OBS-034).
+    #[serde(default)]
+    command: Option<String>,
+    #[serde(default)]
+    #[allow(dead_code)]
+    intent: Option<String>,
     #[serde(default)]
     #[allow(dead_code)]
     name: Option<String>,
@@ -283,12 +292,12 @@ pub fn extract_gates_from_spec(toml_src: &str) -> Result<Vec<String>, LintError>
     let mut gates = Vec::new();
     if let Some(c) = spec.contract {
         for v in c.verifications {
-            gates.push(v.command);
+            gates.extend(v.command);
         }
     }
     for t in spec.tasks {
         for v in t.verifications {
-            gates.push(v.command);
+            gates.extend(v.command);
         }
     }
     Ok(gates)
@@ -391,6 +400,48 @@ verifications = [{ command = "cargo test 2>/dev/null" }]
         let gates = extract_gates_from_spec(src).unwrap();
         assert_eq!(gates.len(), 3);
         assert_eq!(gates[2], "cargo test 2>/dev/null");
+    }
+
+    #[test]
+    fn lint_extract_skips_intent_gates_but_keeps_commands() {
+        // intent entries are valid BOI v2 (intent-XOR-command); they must not
+        // fail parsing — that would zero lint coverage for the spec (OBS-034).
+        let src = r#"
+title = "x"
+pipeline = "standard"
+
+[contract]
+verifications = [
+  { name = "file", command = "test -f foo" },
+  { name = "claim", intent = "the worker never prunes volumes" },
+]
+
+[[tasks]]
+ref = "a"
+behavior = "do a"
+verifications = [
+  { intent = "tests are meaningful" },
+  { command = "cargo test 2>/dev/null" },
+]
+"#;
+        let gates = extract_gates_from_spec(src).unwrap();
+        assert_eq!(gates, vec!["test -f foo", "cargo test 2>/dev/null"]);
+    }
+
+    #[test]
+    fn lint_extract_intent_only_spec_yields_no_gates() {
+        let src = r#"
+title = "x"
+
+[contract]
+verifications = [{ intent = "it works" }]
+
+[[tasks]]
+behavior = "do a"
+verifications = [{ intent = "it really works" }]
+"#;
+        let gates = extract_gates_from_spec(src).unwrap();
+        assert!(gates.is_empty());
     }
 
     #[test]
