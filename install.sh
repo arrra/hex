@@ -370,10 +370,13 @@ install_or_upgrade_boi() {
 
     # Fast path: the machine-owned build already provides the pinned version.
     # (Also makes repeated install.sh runs — e.g. from test suites — no-ops.)
+    # `|| true` inside the substitution: a present-but-unrunnable binary (e.g.
+    # interrupted build) must fall through to the rebuild below, not errexit
+    # the whole installer.
     if [ -x "$boi_bin" ] && \
        [ "$(readlink "$boi_bin" 2>/dev/null)" = "$boi_build/target/release/boi" ]; then
         local current
-        current="v$("$boi_bin" --version 2>/dev/null | awk '/^boi /{print $2}' | tail -1)"
+        current="v$("$boi_bin" --version 2>/dev/null | awk '/^boi /{print $2}' | tail -1 || true)"
         if [ "$current" = "$BOI_VERSION" ]; then
             echo "  BOI $BOI_VERSION already installed  ✓"
             write_boi_wrapper
@@ -381,28 +384,38 @@ install_or_upgrade_boi() {
         fi
     fi
 
-    # Clone or update the machine-owned build checkout (detached at the tag).
+    # Update the machine-owned build checkout (detached at the tag). A repo
+    # that cannot reach the pin (corrupt clone, force-moved tag) self-heals by
+    # re-cloning fresh — never build a stale checkout and call it $BOI_VERSION.
+    # (fetch failure alone is tolerated: the pinned tag may already be local.)
     if [ -d "$boi_build/.git" ]; then
         echo "  BOI build repo exists — fetching $BOI_VERSION..."
-        if ! ( cd "$boi_build" && git fetch --tags origin 2>/dev/null && \
+        if ! ( cd "$boi_build" && { git fetch --tags origin 2>/dev/null || true; } && \
                git checkout -f --detach "$BOI_VERSION" 2>/dev/null ); then
-            echo "  BOI: failed to fetch/checkout $BOI_VERSION — boi may be stale" >&2
+            echo "  BOI: build repo cannot reach $BOI_VERSION — re-cloning fresh" >&2
+            rm -rf "$boi_build"
         fi
-    else
+    fi
+    if [ ! -d "$boi_build/.git" ]; then
         echo "  Cloning BOI build repo (machine-owned, ~/.boi/src/boi)..."
         git clone "$BOI_REPO" "$boi_build" 2>/dev/null || {
-            echo "  BOI: failed to clone $BOI_REPO"
+            echo "  BOI: failed to clone $BOI_REPO — keeping currently installed binary" >&2
             return
         }
-        ( cd "$boi_build" && git checkout -f --detach "$BOI_VERSION" 2>/dev/null ) || \
-            echo "  BOI: tag $BOI_VERSION not found in $BOI_REPO" >&2
+        ( cd "$boi_build" && git checkout -f --detach "$BOI_VERSION" 2>/dev/null ) || {
+            echo "  BOI: tag $BOI_VERSION not found in $BOI_REPO — keeping currently installed binary" >&2
+            return
+        }
     fi
 
-    # Build the Rust binary
+    # Build the Rust binary (full log kept — a swallowed compiler error makes
+    # failures undiagnosable, S6)
     if command -v cargo &>/dev/null; then
         echo "  Building BOI binary..."
-        ( cd "$boi_build" && cargo build --release 2>/dev/null ) || {
-            echo "  BOI: cargo build failed"
+        local build_log="$HOME/.boi/logs/boi-build.log"
+        ( cd "$boi_build" && cargo build --release ) > "$build_log" 2>&1 || {
+            echo "  BOI: cargo build failed — last 20 lines of $build_log:" >&2
+            tail -20 "$build_log" >&2 || true
             return
         }
         # Symlink binary

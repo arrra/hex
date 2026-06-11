@@ -141,10 +141,10 @@ NEW_BOI_VERSION=$(grep "^BOI_VERSION=" VERSIONS | cut -d= -f2)
 BASELINE_BOI_VERSION="v2.0.0"
 
 # install.sh is the fresh-install entrypoint and refuses to run over an existing
-# target dir. boi_src ($HOME/github.com/mrap/boi) and the binary ($HOME/.boi)
-# are HOME-based and shared across installs, so we point the two installs at
-# distinct target dirs: the second install proceeds and its
-# install_or_upgrade_boi sees the existing boi repo → fetch + checkout + rebuild.
+# target dir. The machine-owned build repo ($HOME/.boi/src/boi) and the binary
+# ($HOME/.boi/bin) are HOME-based and shared across installs, so we point the two
+# installs at distinct target dirs: the second install proceeds and its
+# install_or_upgrade_boi sees the existing build repo → fetch + checkout + rebuild.
 BASE_TARGET="$HOME/hex-baseline"
 HEAD_TARGET="$HOME/hex-head"
 
