@@ -65,61 +65,91 @@ pub fn find_latest_jsonl(projects_dir: &Path) -> Option<PathBuf> {
 
 // ── entry point ───────────────────────────────────────────────────────────────
 
-pub fn run() {
-    let home = match std::env::var("HOME").ok().map(PathBuf::from) {
-        Some(h) => h,
-        None => return,
-    };
-    let projects_dir = home.join(".claude/projects");
+/// Stop-hook stdin payload → transcript path, validated to exist.
+pub fn source_from_stdin(raw: &str) -> Option<PathBuf> {
+    let v: serde_json::Value = serde_json::from_str(raw).ok()?;
+    let p = v.get("transcript_path").and_then(|t| t.as_str())?;
+    let path = PathBuf::from(p);
+    path.is_file().then_some(path)
+}
 
-    let hex_dir = match std::env::var("HEX_DIR")
+pub fn run() {
+    let mut raw = String::new();
+    use std::io::Read;
+    let _ = std::io::stdin().read_to_string(&mut raw);
+    let hex_dir = std::env::var("HEX_DIR")
         .ok()
         .or_else(|| std::env::var("CLAUDE_PROJECT_DIR").ok())
-        .map(PathBuf::from)
-    {
-        Some(d) => d,
-        None => return,
+        .map(PathBuf::from);
+    let Some(hex_dir) = hex_dir else {
+        fail("HEX_DIR and CLAUDE_PROJECT_DIR both unset");
+        return;
     };
+    run_inner(&raw, &hex_dir);
+}
+
+fn run_inner(raw: &str, hex_dir: &Path) {
+    let Some(home) = std::env::var("HOME").ok().map(PathBuf::from) else {
+        fail("HOME unset");
+        return;
+    };
+    let projects_dir = home.join(".claude/projects");
     let backup_dir = hex_dir.join("raw/transcripts");
 
-    // Determine source path.
-    let source: Option<PathBuf> = {
-        let session_id = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
-        let project_dir = std::env::var("CLAUDE_PROJECT_DIR").unwrap_or_default();
-
-        if !session_id.is_empty() && !project_dir.is_empty() {
-            let candidate = fast_path_source(&projects_dir, &project_dir, &session_id);
-            if candidate.is_file() {
-                Some(candidate)
-            } else {
-                find_latest_jsonl(&projects_dir)
-            }
-        } else {
+    // Priority: stdin payload (authoritative) → env fast path → newest scan.
+    let source = source_from_stdin(raw)
+        .or_else(|| {
+            let sid = std::env::var("CLAUDE_SESSION_ID").unwrap_or_default();
+            let pd = std::env::var("CLAUDE_PROJECT_DIR").unwrap_or_default();
+            (!sid.is_empty() && !pd.is_empty())
+                .then(|| fast_path_source(&projects_dir, &pd, &sid))
+                .filter(|p| p.is_file())
+        })
+        .or_else(|| {
+            eprintln!("hex hook capture: no transcript_path on stdin — falling back to newest-jsonl scan (race-prone)");
             find_latest_jsonl(&projects_dir)
-        }
-    };
+        });
 
-    let source = match source {
-        Some(s) => s,
-        None => return,
+    let Some(source) = source else {
+        fail("no transcript source found (stdin, env, and scan all empty)");
+        return;
     };
-
-    let basename = match source.file_name() {
-        Some(n) => n.to_os_string(),
-        None => return,
+    let Some(basename) = source.file_name().map(|n| n.to_os_string()) else {
+        fail(&format!("source has no basename: {}", source.display()));
+        return;
     };
-    let dest = backup_dir.join(&basename);
-
-    // Spawn a child `cp` process so the hook returns immediately.
-    // A spawned subprocess lives independently after the parent exits,
-    // faithfully mirroring the shell `(...) &` backgrounding in backup_session.sh.
-    if std::fs::create_dir_all(&backup_dir).is_ok() {
-        std::process::Command::new("cp")
-            .arg(&source)
-            .arg(&dest)
-            .spawn()
-            .ok();
+    if let Err(e) = std::fs::create_dir_all(&backup_dir) {
+        fail(&format!("create {}: {e}", backup_dir.display()));
+        return;
     }
+    let dest = backup_dir.join(&basename);
+    match std::fs::copy(&source, &dest) {
+        Ok(bytes) => {
+            crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+                source: "hook::capture".into(),
+                event: "capture".into(),
+                status: "ok".into(),
+                duration_ms: None,
+                exit_code: Some(0),
+                detail: Some(format!("{} ({bytes} bytes)", dest.display())),
+            });
+        }
+        Err(e) => fail(&format!("copy {} -> {}: {e}", source.display(), dest.display())),
+    }
+}
+
+/// Loud but never blocking: a failed backup must not disrupt the session, so
+/// the hook process always exits 0 — loudness lives in stderr + telemetry.
+fn fail(msg: &str) {
+    eprintln!("hex hook capture: {msg}");
+    crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+        source: "hook::capture".into(),
+        event: "capture".into(),
+        status: "error".into(),
+        duration_ms: None,
+        exit_code: Some(0),
+        detail: Some(msg.to_string()),
+    });
 }
 
 // ── tests ─────────────────────────────────────────────────────────────────────
@@ -183,5 +213,39 @@ mod tests {
         std::fs::write(proj.join("session.log"), b"not jsonl").unwrap();
 
         assert!(find_latest_jsonl(projects_dir).is_none());
+    }
+
+    #[test]
+    fn stdin_transcript_path_wins() {
+        let tmp = TempDir::new().unwrap();
+        let t = tmp.path().join("abc.jsonl");
+        std::fs::write(&t, b"{}").unwrap();
+        let raw = format!(
+            r#"{{"session_id":"abc","transcript_path":"{}","hook_event_name":"Stop"}}"#,
+            t.display()
+        );
+        assert_eq!(source_from_stdin(&raw), Some(t));
+    }
+
+    #[test]
+    fn run_inner_copies_stdin_transcript() {
+        let tmp = TempDir::new().unwrap();
+        let hex = tmp.path().join("hex");
+        std::fs::create_dir_all(&hex).unwrap();
+        let t = tmp.path().join("sess.jsonl");
+        std::fs::write(&t, b"line1").unwrap();
+        let raw = format!(r#"{{"transcript_path":"{}"}}"#, t.display());
+        run_inner(&raw, &hex);
+        assert!(hex.join("raw/transcripts/sess.jsonl").is_file());
+    }
+
+    #[test]
+    fn stdin_rejects_missing_file_and_garbage() {
+        assert_eq!(
+            source_from_stdin(r#"{"transcript_path":"/nonexistent/x.jsonl"}"#),
+            None
+        );
+        assert_eq!(source_from_stdin("not json"), None);
+        assert_eq!(source_from_stdin(r#"{"session_id":"abc"}"#), None);
     }
 }
