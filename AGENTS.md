@@ -38,6 +38,8 @@ Verify: hex info repo-mission
 
 **Build status:** Run `cargo build` in `system/harness/` to verify binary compiles.
 
+Live session state lives in [PROGRESS.md](PROGRESS.md) — read it when the static answer above looks stale.
+
 Verify: hex doctor
 
 ---
@@ -84,6 +86,8 @@ Verify: ~/.boi/bin/boi dashboard
 **BOI spec completion claims (verify outputs against codebase):**
 
 Verify: hex verify-claims
+
+Full test matrix — unit, core-e2e, codex-parity, containerized — in [docs/testing.md](docs/testing.md); read it before running or adding tests.
 
 ---
 
@@ -158,7 +162,7 @@ If your runtime exposes structured file/search tools, use them. If it only gives
 | Delegate work | Subagent | `boi dispatch <spec>` | BOI handles all delegation |
 | Track todos | TodoWrite | Write to `todo.md` | Same format, manual file write |
 
-**If web search is unavailable in your runtime:** for research tasks requiring web access, write a BOI spec with mode=generate and note the limitation in the spec context.
+**If web search is unavailable in your runtime:** for research tasks requiring web access, write a BOI spec and note the limitation in `[contract].scope`.
 
 ---
 
@@ -336,7 +340,7 @@ Surface in the next session. Wait for approval.
 
 Cross-reference new information against `todo.md` on each message. If anything relates to a tracked item, surface it with the recommended action.
 
-Consolidated 2026-04-29 (39 → 18 rules). Lineage tags trace to pre-consolidation numbering.
+Consolidated 2026-04-29 (39 → 18 rules). Lineage tags trace to pre-consolidation numbering. The Layer-2 activation mechanisms that make these rules operative are in [docs/standing-orders.md](docs/standing-orders.md) — read it before any multi-step task or design decision.
 
 ### Core Rules
 
@@ -407,51 +411,58 @@ BOI is the **ONLY** delegation system in hex. Multi-step work, research, generat
 
 ### How BOI Works
 
-1. Write a TOML spec file with `[[tasks]]` entries
+_BOI v2 contract — updated 2026-05-24._
+
+1. Write a spec — a **TOML** file with `title`, a `[contract]` block, and one or more `[[tasks]]`.
 2. Dispatch: `~/.boi/bin/boi dispatch <spec.toml>`
-3. Worker picks it up from queue, executes task, moves to next task
-4. Check status: `~/.boi/bin/boi dashboard`
+3. Worker picks it up, executes the task, the critic reviews, the next task runs.
+4. Inspect with `~/.boi/bin/boi dashboard` or `~/.boi/bin/boi log <spec-id>`.
 
 ### Spec Template
 
 ```toml
 title = "Short descriptive title"
-mode = "execute"
 
-context = """
-Why this work is needed, what the end state looks like.
-"""
-
-[[tasks]]
-id = "t-1"
-title = "First task"
-spec = """
-What to do. Be specific about files, functions, acceptance criteria.
-"""
-verify = "test -f /expected/output.md"
+[contract]
+scope = "Why this work is needed, what the end state looks like."
+# Workspace-conditional: "develop" if the workspace commits a .boi-policy.toml
+# marker (model = "gitflow") at its root — e.g. boi, hex-foundation; "main" for
+# unmanaged workspaces (no marker).
+base_branch = "main"
+workspace = "~/github.com/mrap/{repo}"
 
 [[tasks]]
-id = "t-2"
-title = "Second task"
-spec = "..."
-verify = "command that returns 0 on success"
-depends = ["t-1"]
+ref = "first-task"
+behavior = "What to do. Be specific about files, functions, acceptance criteria."
+verifications = [
+  { intent = "What success looks like" },
+  { command = "shell command that returns 0 on success" },
+]
+
+[[tasks]]
+ref = "second-task"
+behavior = "..."
+blocked_by = ["first-task"]
+verifications = [
+  { command = "..." },
+]
 ```
 
-### Modes
+### Rejected v1 fields (typed errors)
 
-- `execute` — complete tasks exactly as specified
-- `challenge` — execute but question assumptions along the way
-- `discover` — execute; append new tasks if unexpected work is found
-- `generate` — full creative authority; add/modify tasks as needed (for research, design, generation)
+The v2 parser rejects these with typed errors (see `boi/src/config/spec.rs:180-191`). Do NOT include them: `mode` (modes were removed; behavior is implied by the spec), `initiative`, `max_iterations`, `clean_state`. Per-task `id`/`title`/`spec`/`verify`/`depends` are likewise v1 — use `ref`/`behavior`/`verifications`/`blocked_by`.
 
 ### CLI
 
 ```bash
-~/.boi/bin/boi dispatch <spec.toml>      # enqueue a spec
-~/.boi/bin/boi dashboard                 # queue + worker status / interactive TUI
-~/.boi/bin/boi log <queue-id>            # iteration history
-~/.boi/bin/boi cancel <queue-id>         # stop a spec
+~/.boi/bin/boi dispatch <spec.toml>          # parse, validate, persist, start
+~/.boi/bin/boi dashboard [spec-id]           # observability TUI
+~/.boi/bin/boi log <spec-id>                 # phase-run history
+~/.boi/bin/boi cancel <id> --reason "..."    # cancel spec or task (--reason MANDATORY)
+~/.boi/bin/boi fail <spec-id> --reason "..." # mark spec failed (--reason MANDATORY)
+~/.boi/bin/boi unblock <task-id>             # force a blocked task back to active
+~/.boi/bin/boi clean <spec-id>               # delete spec + cascade (retention)
+~/.boi/bin/boi spec show <spec-id>           # print stored spec snapshot
 ```
 
 ---

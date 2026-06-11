@@ -653,24 +653,56 @@ fn docker_suite(
         return GateResult::Pass;
     }
     if carveout {
-        doctor_carveout(&r.combined())
+        doctor_carveout(&r.combined(), r.code)
     } else {
-        GateResult::Fail(format!("{label} failed (exit {})", r.code))
+        GateResult::Fail(format!(
+            "{label} failed (exit {}); output tail: {}",
+            r.code,
+            output_tail(&r.combined(), 400)
+        ))
     }
 }
 
 /// The pinned doctor carve-out: a Doctor failure inside Docker is expected
 /// (no runtime binary in the container). Pass iff the combined output has
 /// <= 1 line containing `FAIL:` AND matches `FAIL.*Doctor` (case-sensitive).
-fn doctor_carveout(combined: &str) -> GateResult {
+/// Failures carry the container exit code + an output tail: a container
+/// killed before emitting any FAIL lines (exit 137 = SIGKILL, usually the
+/// docker VM OOM/resource killer) previously reported an unattributable
+/// "(0 failures)" with the exit code discarded (v0.38.0 attempt 1,
+/// 2026-06-11 — root-caused only via telemetry archaeology).
+fn doctor_carveout(combined: &str, exit_code: i32) -> GateResult {
     let fail_count = combined.lines().filter(|l| l.contains("FAIL:")).count();
     let doctor_re = Regex::new("FAIL.*Doctor").expect("static regex must compile");
     if fail_count <= 1 && doctor_re.is_match(combined) {
         println!("  regression suite: PASS (doctor skip expected in Docker)");
         GateResult::Pass
     } else {
-        GateResult::Fail(format!("regression suite failed ({fail_count} failures)"))
+        let kill_note = if exit_code == 137 {
+            " — SIGKILL, likely OOM/resource kill in the docker VM"
+        } else {
+            ""
+        };
+        GateResult::Fail(format!(
+            "regression suite failed (exit {exit_code}{kill_note}; {fail_count} FAIL line(s)); output tail: {}",
+            output_tail(combined, 400)
+        ))
     }
+}
+
+/// Last `n` chars of `s`, newline-flattened, char-boundary safe — the
+/// diagnostic tail for gate failures (heads are usually build noise; tails
+/// carry the death rattle).
+fn output_tail(s: &str, n: usize) -> String {
+    let flat = s.trim().replace('\n', " | ");
+    if flat.len() <= n {
+        return flat;
+    }
+    let mut start = flat.len() - n;
+    while start > 0 && !flat.is_char_boundary(start) {
+        start -= 1;
+    }
+    format!("…{}", &flat[start..])
 }
 
 fn gate_docker_e2e(repo_root: &Path, skip: SkipFlags) -> GateResult {
@@ -1104,10 +1136,36 @@ fn is_ancestor(repo_root: &Path, ancestor: &str, descendant: &str) -> Result<boo
 
 /// SHA of `refname` on origin, `None` if absent. A failing `ls-remote` is a
 /// hard error — "cannot verify" must never read as "absent".
+///
+/// Annotated tags: `ls-remote` lists the tag OBJECT sha on the `refname`
+/// line and the peeled COMMIT sha on a trailing `refname^{}` line. The
+/// peeled line wins — the local side compares `^{commit}` SHAs (see
+/// `tag_sha`), so taking the tag-object sha would report a false
+/// "SHA MISMATCH after tag push" on a successfully pushed annotated tag.
 fn ls_remote_sha(repo_root: &Path, refname: &str) -> Result<Option<String>> {
     let out = git_stdout(repo_root, &["ls-remote", "origin", refname])
         .with_context(|| format!("checking origin for {refname}"))?;
-    Ok(out.split_whitespace().next().map(str::to_string))
+    Ok(parse_ls_remote(&out, refname))
+}
+
+/// Parse `git ls-remote` output for `refname`, preferring the peeled
+/// (`refname^{}`) commit sha over the unpeeled ref sha.
+fn parse_ls_remote(out: &str, refname: &str) -> Option<String> {
+    let peeled_ref = format!("{refname}^{{}}");
+    let mut unpeeled = None;
+    for line in out.lines() {
+        let mut cols = line.split_whitespace();
+        let (Some(sha), Some(r)) = (cols.next(), cols.next()) else {
+            continue;
+        };
+        if r == peeled_ref {
+            return Some(sha.to_string());
+        }
+        if r == refname {
+            unpeeled = Some(sha.to_string());
+        }
+    }
+    unpeeled
 }
 
 /// `git merge --no-ff` of `branch` into the current branch. `Err` carries
@@ -2085,27 +2143,64 @@ mod tests {
 
     #[test]
     fn doctor_carveout_pinned_semantics() {
+        let fail_msg = |r: GateResult| match r {
+            GateResult::Fail(m) => m,
+            other => panic!("expected Fail, got {other:?}"),
+        };
         // Exactly one FAIL: line that is the Doctor check → pass.
         let one_doctor = "ok\nFAIL: Doctor check (no runtime binary)\nok\n";
-        assert_eq!(doctor_carveout(one_doctor), GateResult::Pass);
-        // Two FAIL: lines → fail, with the count reported.
+        assert_eq!(doctor_carveout(one_doctor, 1), GateResult::Pass);
+        // Two FAIL: lines → fail, with count, exit code, and output tail.
         let two = "FAIL: Doctor check\nFAIL: memory index\n";
-        assert_eq!(
-            doctor_carveout(two),
-            GateResult::Fail("regression suite failed (2 failures)".into())
-        );
-        // Nonzero exit with no FAIL lines at all → still a failure.
+        let msg = fail_msg(doctor_carveout(two, 1));
+        assert!(msg.contains("exit 1"), "exit code must be reported: {msg}");
+        assert!(msg.contains("2 FAIL line(s)"), "{msg}");
+        assert!(msg.contains("FAIL: memory index"), "output tail must carry evidence: {msg}");
+        // Killed container: nonzero exit, ZERO FAIL lines — the v0.38.0
+        // attempt-1 shape. Must name the exit code and classify 137.
         let none = "container crashed before the suite started\n";
-        assert_eq!(
-            doctor_carveout(none),
-            GateResult::Fail("regression suite failed (0 failures)".into())
-        );
+        let msg = fail_msg(doctor_carveout(none, 137));
+        assert!(msg.contains("exit 137"), "{msg}");
+        assert!(msg.contains("OOM"), "137 must be classified as a likely OOM kill: {msg}");
+        assert!(msg.contains("0 FAIL line(s)"), "{msg}");
+        assert!(msg.contains("container crashed"), "output tail must surface: {msg}");
+        // Non-137 exits get no OOM note.
+        let msg = fail_msg(doctor_carveout(none, 2));
+        assert!(!msg.contains("OOM"), "{msg}");
         // Case-sensitive: lowercase doctor does not qualify.
         let lower = "FAIL: doctor check\n";
+        let msg = fail_msg(doctor_carveout(lower, 1));
+        assert!(msg.contains("1 FAIL line(s)"), "{msg}");
+    }
+
+    #[test]
+    fn output_tail_flattens_and_keeps_the_end() {
+        let long = format!("head\n{}\nthe death rattle", "x".repeat(1000));
+        let t = output_tail(&long, 50);
+        assert!(t.ends_with("the death rattle"));
+        assert!(t.starts_with('…'));
+        assert_eq!(output_tail("short\nout", 50), "short | out");
+    }
+
+    #[test]
+    fn parse_ls_remote_prefers_peeled_commit() {
+        // Annotated tag: tag object on the ref line, commit on the ^{} line.
+        let annotated = "aaa111\trefs/tags/v1.0.0\nbbb222\trefs/tags/v1.0.0^{}\n";
         assert_eq!(
-            doctor_carveout(lower),
-            GateResult::Fail("regression suite failed (1 failures)".into())
+            parse_ls_remote(annotated, "refs/tags/v1.0.0"),
+            Some("bbb222".to_string())
         );
+        // Lightweight tag / branch: single line, unpeeled sha is correct.
+        let light = "ccc333\trefs/tags/v1.0.0\n";
+        assert_eq!(
+            parse_ls_remote(light, "refs/tags/v1.0.0"),
+            Some("ccc333".to_string())
+        );
+        // Absent ref.
+        assert_eq!(parse_ls_remote("", "refs/tags/v1.0.0"), None);
+        // Prefix-sharing refs never match.
+        let noise = "ddd444\trefs/tags/v1.0.0-rc1\neee555\trefs/heads/main\n";
+        assert_eq!(parse_ls_remote(noise, "refs/tags/v1.0.0"), None);
     }
 
     #[test]

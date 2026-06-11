@@ -128,6 +128,19 @@ If you find a reference, it is stale — flag it for the next audit pass.
 
 ---
 
+## Deep Dives
+
+Per-subsystem architecture documents live in [architecture/](architecture/) — start
+with the [registry & standard of practice](architecture/README.md), which defines how
+these docs stay verified against the code (machine-readable `verified-against:`
+headers; docs ride the change; registry pinned by a harness test).
+
+| Subsystem | Doc |
+|-----------|-----|
+| Memory pipeline (index · distill · recall · consolidation · maintain · backup) | [architecture/memory.md](architecture/memory.md) |
+
+---
+
 ## Further Reading
 
 | Doc | Contents |
@@ -136,3 +149,5 @@ If you find a reference, it is stale — flag it for the next audit pass.
 | [testing.md](testing.md) | Test matrix and how to run it |
 | [versioning.md](versioning.md) | Version source of truth and bump flow |
 | [hex-ops.md](hex-ops.md) | Operational scripts reference |
+| [iii-hex.md](iii-hex.md) | iii engine mental model and trigger config — read when wiring iii workers or triggers |
+| [doc-maintenance.md](doc-maintenance.md) | Doc routing map + verified-claim checks — read before any documentation pass |

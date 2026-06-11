@@ -7,7 +7,7 @@
 name = "hex-harness"
 # Source of truth for hex version. Bumped by `hex release cut`; build.rs
 # injects this via env!("CARGO_PKG_VERSION") at compile time.
-version = "0.39.0"
+version = "0.40.0"
 edition = "2021"
 
 # Keep the lib + bin named `hex` even though the package is `hex-harness`.
@@ -87,6 +87,10 @@ daemon-green = { git = "https://github.com/mrap/daemon-green", rev = "5171fbb206
 # (CLAUDE.md auto-discovery is cwd-based — spawning from a workspace cwd will
 # slurp CLAUDE.md). Already used widely in `#[cfg(test)]` modules.
 tempfile = "3"
+# code-intel library (package `scipd`, lib `scipd_core`): the
+# `hex-codeintel-indexer` module calls `scipd_core::indexer::run` directly for
+# the nightly reindex (replaces the per-workspace launchd indexer plist).
+scipd = { path = "../code-intel" }
 
 [features]
 personal = []

@@ -1,4 +1,5 @@
 pub mod boi_health;
+pub mod charter_drift;
 pub mod claude_md;
 pub mod claude_runs_config;
 pub mod codex;

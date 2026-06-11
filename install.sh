@@ -116,8 +116,8 @@ mkdir -p "$TARGET_DIR/.hex/extensions"
 mkdir -p "$TARGET_DIR/.hex/memory"
 
 # Copy root templates
-cp "$SCRIPT_DIR/templates/CLAUDE.md"  "$TARGET_DIR/CLAUDE.md"
 cp "$SCRIPT_DIR/templates/AGENTS.md"  "$TARGET_DIR/AGENTS.md"
+ln -sfn AGENTS.md "$TARGET_DIR/CLAUDE.md"
 cp "$SCRIPT_DIR/templates/todo.md"    "$TARGET_DIR/todo.md"
 
 # Copy user data templates
@@ -484,6 +484,44 @@ _harness_build_from_source() {
     cp "$built" "$TARGET_DIR/.hex/bin/hex"
     chmod +x "$TARGET_DIR/.hex/bin/hex"
     ln -sf hex "$TARGET_DIR/.hex/bin/hex-agent"
+    _code_intel_build_and_deploy || true
+    return 0
+}
+
+# Build + deploy the code-intel binaries (cq, scipd). system/code-intel is a
+# workspace sibling of system/harness; the harness depends on it via
+# `scipd = { path = "../code-intel" }`, and the bulk `cp -r system → .hex`
+# above already lands its SOURCE at .hex/code-intel so the synced
+# .hex/harness/Cargo.toml resolves. This step deploys the BINARIES alongside
+# hex. Best-effort: a failure here must not fail the hex install (and must not
+# trigger the prebuilt-hex download fallback) — warn loudly and move on.
+_code_intel_build_and_deploy() {
+    if [ ! -f "$SCRIPT_DIR/system/code-intel/Cargo.toml" ]; then
+        return 0
+    fi
+    echo "  Building code-intel binaries (cq, scipd)..."
+    if ! ( cd "$SCRIPT_DIR/system/code-intel" && cargo build --release 2>&1 ); then
+        echo "  WARNING: code-intel build failed — cq/scipd not installed (hex still works)" >&2
+        return 1
+    fi
+    local name ci_bin candidate
+    for name in cq scipd; do
+        ci_bin=""
+        # Same dual probe as the hex binary: workspace builds emit to the
+        # workspace-root target dir, standalone builds to the crate's own.
+        for candidate in \
+            "$SCRIPT_DIR/system/code-intel/target/release/$name" \
+            "$SCRIPT_DIR/target/release/$name"; do
+            if [ -x "$candidate" ]; then ci_bin="$candidate"; break; fi
+        done
+        if [ -n "$ci_bin" ]; then
+            cp "$ci_bin" "$TARGET_DIR/.hex/bin/$name"
+            chmod +x "$TARGET_DIR/.hex/bin/$name"
+            echo "  $name binary           ✓"
+        else
+            echo "  WARNING: $name binary not found after code-intel build" >&2
+        fi
+    done
 }
 
 _harness_download_prebuilt() {
@@ -494,6 +532,8 @@ _harness_download_prebuilt() {
     echo "  Downloading hex from ${harness_url}..."
     curl -fSL "$harness_url" -o "$TARGET_DIR/.hex/bin/hex" && chmod +x "$TARGET_DIR/.hex/bin/hex"
     ln -sf hex "$TARGET_DIR/.hex/bin/hex-agent"
+    # No prebuilt cq/scipd on releases — code-intel binaries require cargo.
+    echo "  NOTE: cq/scipd (code-intel) skipped — install Rust and re-run to build them."
 }
 
 _harness_warn_missing() {

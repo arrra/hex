@@ -151,7 +151,7 @@ fn meta_update(db: &Path, key: &str, value: &str) {
 // ---- spec §5 table, row by row ----
 
 #[test]
-fn def_happy_path_exit_0() {
+fn def_success_path_exit_0() {
     let home = tempfile::tempdir().unwrap();
     let repo = golden_repo();
     let ws_id = register_and_index(home.path(), repo.path());
@@ -197,7 +197,7 @@ fn def_happy_path_exit_0() {
 }
 
 #[test]
-fn other_verbs_happy_path_exit_0() {
+fn other_verbs_success_path_exit_0() {
     let home = tempfile::tempdir().unwrap();
     let repo = golden_repo();
     register_and_index(home.path(), repo.path());

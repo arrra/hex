@@ -89,11 +89,18 @@ async fn run(workers: Vec<Worker>) -> i32 {
 
     // 1. Build + start the in-process iii engine (default config: state/cron/
     //    queue builtins via the inventory registry; rabbitmq dropped at the
-    //    Cargo level). `serve()` is long-lived, so it runs on its own task.
+    //    Cargo level). Instance-declared workers from
+    //    `$HEX_DIR/.hex/iii/engine-workers.yaml` are merged in BEFORE the
+    //    loopback rewrite, so a declared listener still gets its host pinned.
+    //    `serve()` is long-lived, so it runs on its own task.
     use iii_engine::workers::config::EngineConfig;
     use iii_engine::EngineBuilder;
+    let mut base_config = EngineConfig::default_config();
+    if let Some(path) = instance_engine_workers_path() {
+        merge_instance_workers(&mut base_config, instance_engine_workers(&path));
+    }
     let engine = match EngineBuilder::new()
-        .with_config(EngineConfig::default_config())
+        .with_config(loopback_engine_config(base_config))
         .build()
         .await
     {
@@ -298,6 +305,129 @@ async fn run(workers: Vec<Worker>) -> i32 {
     engine_task.abort();
     eprintln!("hex harness serve: stopped cleanly");
     0
+}
+
+/// The engine's listener workers and the bind-host override slot each exposes.
+/// Upstream defaults all three to `0.0.0.0`, which puts the agent control
+/// plane (WS :49134, HTTP :3111, stream :3112) on every interface — reachable
+/// off-host on a corp network. We pin them to loopback; cross-host access is
+/// an explicit opt-in via `III_BIND_HOST`.
+const LISTENER_WORKERS: &[&str] = &["iii-worker-manager", "iii-http", "iii-stream"];
+const DEFAULT_BIND_HOST: &str = "127.0.0.1";
+
+/// Path of the instance-declared engine workers file:
+/// `$HEX_DIR/.hex/iii/engine-workers.yaml`. `.hex/iii/` is an ADDITIVE upgrade
+/// dir (synced but never in the deletion pass), so this file is instance-owned
+/// and survives `/hex-upgrade`. Foundation must never ship a file at this exact
+/// path — additive sync would overwrite the instance's copy on every upgrade
+/// (it ships `engine-workers.example.yaml` instead).
+fn instance_engine_workers_path() -> Option<std::path::PathBuf> {
+    std::env::var("HEX_DIR").ok().map(|d| {
+        std::path::Path::new(&d)
+            .join(".hex")
+            .join("iii")
+            .join("engine-workers.yaml")
+    })
+}
+
+/// Instance-declared engine workers, merged into the in-process engine config
+/// at boot. The file schema mirrors the engine config: a top-level `workers:`
+/// list of `{name, image?, config?}` entries (e.g. an `iii-exec` entry hosting
+/// a long-lived local process — the no-LaunchAgents path for persistent
+/// daemons). Changes require a harness restart; the engine's hot-reload only
+/// watches file-backed configs, which this deliberately is not.
+///
+/// Missing file → empty (the common case). Unreadable or unparseable file →
+/// LOUD (stderr + alert) and empty: a typo in a personal services file must
+/// not crash-loop the whole harness, but it must never be silent either.
+fn instance_engine_workers(path: &std::path::Path) -> Vec<iii_engine::workers::config::WorkerEntry> {
+    #[derive(serde::Deserialize)]
+    #[serde(deny_unknown_fields)]
+    struct InstanceWorkersFile {
+        #[serde(default)]
+        workers: Vec<iii_engine::workers::config::WorkerEntry>,
+    }
+
+    if !path.exists() {
+        return Vec::new();
+    }
+    let loud_skip = |detail: String| {
+        eprintln!(
+            "hex harness serve: IGNORING instance engine workers file {} — {detail}",
+            path.display()
+        );
+        crate::alert::notify(
+            "instance-engine-workers",
+            "hex: engine-workers.yaml ignored",
+            &format!("{}: {detail}", path.display()),
+        );
+        Vec::new()
+    };
+    let raw = match std::fs::read_to_string(path) {
+        Ok(s) => s,
+        Err(e) => return loud_skip(format!("unreadable: {e}")),
+    };
+    match serde_yaml::from_str::<InstanceWorkersFile>(&raw) {
+        Ok(file) => {
+            for entry in &file.workers {
+                eprintln!(
+                    "hex harness serve: instance engine worker '{}' (from {})",
+                    entry.name,
+                    path.display()
+                );
+            }
+            file.workers
+        }
+        Err(e) => loud_skip(format!("parse error: {e}")),
+    }
+}
+
+/// Merge instance entries into the engine config. An entry whose name matches
+/// an existing default module/worker REPLACES that entry in place — that's how
+/// an instance reconfigures a default (e.g. `iii-observability` → memory
+/// exporter so the console trace explorer has data). Anything else appends as
+/// a new worker. Appending on a name match would instead spawn a SECOND
+/// instance of the worker (`#1` via assign_instance_ids), not reconfigure it.
+fn merge_instance_workers(
+    config: &mut iii_engine::workers::config::EngineConfig,
+    entries: Vec<iii_engine::workers::config::WorkerEntry>,
+) {
+    for entry in entries {
+        if let Some(existing) = config
+            .modules
+            .iter_mut()
+            .chain(config.workers.iter_mut())
+            .find(|e| e.name == entry.name)
+        {
+            *existing = entry;
+        } else {
+            config.workers.push(entry);
+        }
+    }
+}
+
+/// Rewrite the engine config so every listener worker binds `III_BIND_HOST`
+/// (default loopback). Only sets `host`; ports and the rest of each worker's
+/// config keep their defaults (an existing per-worker config is preserved and
+/// only its `host` key overridden).
+fn loopback_engine_config(
+    mut config: iii_engine::workers::config::EngineConfig,
+) -> iii_engine::workers::config::EngineConfig {
+    let host =
+        std::env::var("III_BIND_HOST").unwrap_or_else(|_| DEFAULT_BIND_HOST.to_string());
+    for entry in config.modules.iter_mut().chain(config.workers.iter_mut()) {
+        if LISTENER_WORKERS.contains(&entry.name.as_str()) {
+            let mut cfg = entry
+                .config
+                .take()
+                .unwrap_or_else(|| serde_json::json!({}));
+            if let Some(obj) = cfg.as_object_mut() {
+                obj.insert("host".to_string(), serde_json::json!(host));
+            }
+            entry.config = Some(cfg);
+        }
+    }
+    config
 }
 
 /// Deliver one emission to the engine through an EXISTING `iii` connection,
@@ -525,6 +655,161 @@ mod tests {
     use std::sync::atomic::{AtomicU32, Ordering};
     use std::sync::Arc;
     use tempfile::tempdir;
+
+    /// Every listener worker in the default engine config gets its bind host
+    /// pinned to loopback (mrap/hex#8 — upstream defaults are 0.0.0.0).
+    #[test]
+    fn loopback_config_pins_every_listener_host() {
+        let config =
+            loopback_engine_config(iii_engine::workers::config::EngineConfig::default_config());
+        let all: Vec<_> = config.modules.iter().chain(config.workers.iter()).collect();
+        for name in LISTENER_WORKERS {
+            let entry = all
+                .iter()
+                .find(|e| e.name == *name)
+                .unwrap_or_else(|| panic!("default config must include listener '{name}'"));
+            let host = entry
+                .config
+                .as_ref()
+                .and_then(|c| c.get("host"))
+                .and_then(|h| h.as_str())
+                .unwrap_or_else(|| panic!("listener '{name}' must carry a host override"));
+            assert_eq!(host, DEFAULT_BIND_HOST, "listener '{name}' must bind loopback");
+        }
+    }
+
+    /// Missing instance file is the common case: empty, no noise.
+    #[test]
+    fn instance_engine_workers_missing_file_is_empty() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("engine-workers.yaml");
+        assert!(instance_engine_workers(&path).is_empty());
+    }
+
+    /// A valid file parses into engine WorkerEntry values, config intact.
+    #[test]
+    fn instance_engine_workers_parses_entries() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("engine-workers.yaml");
+        std::fs::write(
+            &path,
+            r#"
+workers:
+  - name: iii-exec
+    config:
+      exec:
+        - echo hello
+        - sleep 1
+"#,
+        )
+        .unwrap();
+        let entries = instance_engine_workers(&path);
+        assert_eq!(entries.len(), 1);
+        assert_eq!(entries[0].name, "iii-exec");
+        let cfg = entries[0].config.as_ref().expect("config preserved");
+        assert_eq!(cfg["exec"][0], "echo hello");
+    }
+
+    /// Malformed YAML must not crash the harness — loud skip, empty result.
+    #[test]
+    fn instance_engine_workers_malformed_is_loud_skip() {
+        let tmp = tempdir().unwrap();
+        std::env::set_var("HEX_DIR", tmp.path()); // hermetic alert/telemetry writes
+        let path = tmp.path().join("engine-workers.yaml");
+        std::fs::write(&path, "workers: [unclosed").unwrap();
+        assert!(instance_engine_workers(&path).is_empty());
+    }
+
+    /// Top-level typos (e.g. `worker:` for `workers:`) are parse errors, not
+    /// silently-ignored keys.
+    #[test]
+    fn instance_engine_workers_rejects_unknown_top_level_keys() {
+        let tmp = tempdir().unwrap();
+        std::env::set_var("HEX_DIR", tmp.path());
+        let path = tmp.path().join("engine-workers.yaml");
+        std::fs::write(&path, "worker:\n  - name: iii-exec\n").unwrap();
+        assert!(instance_engine_workers(&path).is_empty());
+    }
+
+    /// Instance workers merged before the loopback rewrite keep their config
+    /// (non-listeners are untouched by the rewrite).
+    #[test]
+    fn instance_workers_survive_loopback_rewrite() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("engine-workers.yaml");
+        std::fs::write(
+            &path,
+            "workers:\n  - name: iii-exec\n    config:\n      exec: [\"echo x\"]\n",
+        )
+        .unwrap();
+        let mut config = iii_engine::workers::config::EngineConfig::default_config();
+        merge_instance_workers(&mut config, instance_engine_workers(&path));
+        let config = loopback_engine_config(config);
+        let entry = config
+            .workers
+            .iter()
+            .find(|e| e.name == "iii-exec")
+            .expect("merged instance worker present");
+        assert_eq!(entry.config.as_ref().unwrap()["exec"][0], "echo x");
+    }
+
+    /// A name match on a default module REPLACES it in place — one entry,
+    /// instance config — instead of appending a second instance of the worker.
+    #[test]
+    fn merge_overrides_default_module_in_place() {
+        let mut config = iii_engine::workers::config::EngineConfig::default_config();
+        let default_count = config.modules.len() + config.workers.len();
+        merge_instance_workers(
+            &mut config,
+            vec![iii_engine::workers::config::WorkerEntry {
+                name: "iii-observability".into(),
+                image: None,
+                config: Some(serde_json::json!({"exporter": "memory"})),
+            }],
+        );
+        let total = config.modules.len() + config.workers.len();
+        assert_eq!(total, default_count, "override must not add an entry");
+        let all: Vec<_> = config.modules.iter().chain(config.workers.iter()).collect();
+        let matches: Vec<_> = all.iter().filter(|e| e.name == "iii-observability").collect();
+        assert_eq!(matches.len(), 1, "exactly one iii-observability entry");
+        assert_eq!(
+            matches[0].config.as_ref().unwrap()["exporter"],
+            "memory",
+            "override config applied"
+        );
+    }
+
+    /// Non-matching names append as new workers.
+    #[test]
+    fn merge_appends_unknown_workers() {
+        let mut config = iii_engine::workers::config::EngineConfig::default_config();
+        let before = config.workers.len();
+        merge_instance_workers(
+            &mut config,
+            vec![iii_engine::workers::config::WorkerEntry {
+                name: "iii-exec".into(),
+                image: None,
+                config: Some(serde_json::json!({"exec": ["echo x"]})),
+            }],
+        );
+        assert_eq!(config.workers.len(), before + 1);
+    }
+
+    /// Non-listener workers are left untouched — no config injected.
+    #[test]
+    fn loopback_config_leaves_other_workers_alone() {
+        let config =
+            loopback_engine_config(iii_engine::workers::config::EngineConfig::default_config());
+        for entry in config.modules.iter().chain(config.workers.iter()) {
+            if !LISTENER_WORKERS.contains(&entry.name.as_str()) {
+                assert!(
+                    entry.config.is_none(),
+                    "non-listener '{}' must not gain a config override",
+                    entry.name
+                );
+            }
+        }
+    }
 
     /// INVARIANT 1a: in normal operation Ctx::emit hits the engine.
     #[test]

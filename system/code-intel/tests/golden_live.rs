@@ -266,7 +266,7 @@ fn worktree_edit_escalates_live_while_no_live_misses_and_flags_stale() {
 /// a compile check: applying this rename WOULD break compilation (the
 /// macro body still calls `double`), which is the documented limitation.
 ///
-/// The macro-free happy path (`generic_max` → `generic_maximum` with
+/// The macro-free success path (`generic_max` → `generic_maximum` with
 /// `--apply`, then `cargo check` green) is covered by
 /// `tests/cli_live.rs::rename_plan_then_apply_then_compiles`.
 #[test]

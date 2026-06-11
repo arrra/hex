@@ -723,6 +723,30 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
             }
         }
 
+        // The harness depends on scipd via `scipd = { path = "../code-intel" }`
+        // (system/code-intel, workspace sibling). Sync it to .hex/code-intel —
+        // sibling of .hex/harness — BEFORE the cargo build, or the path dep
+        // cannot resolve and the rebuild fails. Same mechanism as the harness
+        // sync above: full-dir apply_sync + deletion pass scoped to src/ and
+        // tests/ only (never target/ or generated Cargo.lock).
+        let codeintel_src = source_dir.join("system/code-intel");
+        let codeintel_dst = hex_dot_dir.join("code-intel");
+        if codeintel_src.exists() {
+            if let Err(e) = apply_sync(&codeintel_src, &codeintel_dst, None) {
+                eprintln!("  [WARN] Failed to sync code-intel source: {e}");
+                return;
+            }
+            for sub in &["src", "tests"] {
+                let dst_sub = codeintel_dst.join(sub);
+                let src_sub = codeintel_src.join(sub);
+                if dst_sub.exists() && src_sub.exists() {
+                    if let Err(e) = deletion_pass(&dst_sub, &src_sub, &backup_dir) {
+                        eprintln!("  [WARN] code-intel deletion pass on {sub}/ failed: {e}");
+                    }
+                }
+            }
+        }
+
         // Detect a personal overlay and build with --features personal (and set
         // HEX_DIR so build.rs can find it). Keyed on overlay PRESENCE — a
         // `harness-personal/` dir (integration probes) or a `modules/` dir
@@ -763,6 +787,10 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                         // OLD binary in memory — engine + every worker run inside
                         // it. Restart it so the whole stack reloads.
                         restart_harness();
+                        // Refresh the code-intel binaries (cq, scipd) so they
+                        // deploy alongside hex. Best-effort + loud (S6): a
+                        // failure here never blocks the hex swap above.
+                        build_and_install_code_intel(&hex_dot_dir);
                     }
                     Err(e) => { eprintln!("  [FAIL] atomic binary install failed: {e}"); return; }
                 }
@@ -773,6 +801,41 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
         }
     } else {
         println!("  [OK] hex binary already at v{cargo_ver} (SHA matches) — no rebuild needed");
+    }
+}
+
+/// Build the synced `.hex/code-intel` crate and atomically install its `cq`
+/// and `scipd` binaries into `.hex/bin/`, alongside `hex`. Mirrors the harness
+/// rebuild: `--target-dir` pinned to the crate's own `target/` so the output
+/// location is deterministic regardless of workspace nesting (OBS-017), and
+/// `atomic_install_binary` for the swap (codesign + rename, never mutates the
+/// live inode). Best-effort: warns loudly on failure, never fails the upgrade.
+fn build_and_install_code_intel(hex_dot_dir: &Path) {
+    let codeintel_dst = hex_dot_dir.join("code-intel");
+    if !codeintel_dst.join("Cargo.toml").exists() {
+        return; // code-intel not synced (older foundation) — nothing to build
+    }
+    println!("  → Building code-intel binaries (cq, scipd)...");
+    let target_dir = codeintel_dst.join("target");
+    let target_dir_str = target_dir.to_string_lossy().into_owned();
+    let build_status = Command::new("cargo")
+        .args(["build", "--release", "--target-dir", &target_dir_str])
+        .current_dir(&codeintel_dst)
+        .status();
+    match build_status {
+        Ok(s) if s.success() => {
+            for name in ["cq", "scipd"] {
+                let release_bin = target_dir.join("release").join(name);
+                let dst = hex_dot_dir.join("bin").join(name);
+                match atomic_install_binary(&release_bin, &dst) {
+                    Ok(()) => println!("  [OK] {name} binary installed (atomic)"),
+                    Err(e) => eprintln!("  [WARN] could not install {name}: {e}"),
+                }
+            }
+        }
+        _ => eprintln!(
+            "  [WARN] code-intel cargo build failed — cq/scipd not refreshed (hex swap unaffected)"
+        ),
     }
 }
 
