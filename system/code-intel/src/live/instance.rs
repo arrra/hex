@@ -101,7 +101,13 @@ pub trait LiveBackend: Send {
     /// Idempotent; failures are logged loudly, never swallowed silently.
     fn shutdown(&mut self);
     /// Resident set size in MB via `ps -o rss=`; `None` if unmeasurable.
+    /// NOT the watchdog metric — `ps` RSS under-reports idle rust-analyzer
+    /// by >50x on macOS (SPEC-A2 §4 "Memory metric").
     fn rss_mb(&self) -> Option<u64>;
+    /// Physical footprint in MB — THE watchdog metric (SPEC-A2 §4): tries
+    /// `footprint -p <pid>`, falls back to `ps` RSS with a once-logged
+    /// under-reporting caveat. `None` if both are unmeasurable.
+    fn footprint_mb(&self) -> Option<u64>;
     /// Last time `request()` was attempted past the state gate (LRU input).
     fn last_used(&self) -> Instant;
 }
@@ -356,6 +362,10 @@ impl LiveBackend for LiveInstance {
         rss_mb_of(self.pid)
     }
 
+    fn footprint_mb(&self) -> Option<u64> {
+        footprint_mb_of(self.pid)
+    }
+
     fn last_used(&self) -> Instant {
         *self.last_used.lock().unwrap()
     }
@@ -376,6 +386,54 @@ impl Drop for LiveInstance {
             eprintln!("live: pid {} reap on drop failed: {e}", self.pid);
         }
     }
+}
+
+/// Physical footprint in MB (SPEC-A2 §4 "Memory metric"): `footprint -p
+/// <pid>` when it runs unprivileged, falling back to `ps` RSS with the
+/// under-reporting caveat logged once per daemon process. `None` only when
+/// both paths fail (process gone).
+fn footprint_mb_of(pid: u32) -> Option<u64> {
+    if let Some(mb) = Command::new("footprint")
+        .args(["-p", &pid.to_string()])
+        .output()
+        .ok()
+        .filter(|out| out.status.success())
+        .and_then(|out| parse_footprint_mb(&String::from_utf8_lossy(&out.stdout)))
+    {
+        return Some(mb);
+    }
+    static FOOTPRINT_FALLBACK_CAVEAT: std::sync::Once = std::sync::Once::new();
+    FOOTPRINT_FALLBACK_CAVEAT.call_once(|| {
+        eprintln!(
+            "live: `footprint -p` unavailable or unparseable — memory watchdog falling back \
+             to `ps` RSS, which under-reports idle rust-analyzer by >50x on macOS \
+             (compressed/cold pages); mem_limit_mb will fire late"
+        );
+    });
+    rss_mb_of(pid)
+}
+
+/// Parse the `footprint -p <pid>` summary line, e.g.
+/// `rust-analyzer [12345]: 64-bit    Footprint: 2240 KB (16384 bytes per page)`
+/// → MB. Case-sensitive `Footprint:` deliberately skips the lowercase
+/// `phys_footprint:` auxiliary lines. `None` on any unexpected shape.
+fn parse_footprint_mb(text: &str) -> Option<u64> {
+    let rest = text
+        .lines()
+        .find_map(|line| line.split("Footprint:").nth(1))?;
+    let mut parts = rest.split_whitespace();
+    let value: f64 = parts.next()?.parse().ok()?;
+    let mb = match parts.next()? {
+        "B" => value / (1024.0 * 1024.0),
+        "KB" => value / 1024.0,
+        "MB" => value,
+        "GB" => value * 1024.0,
+        other => {
+            eprintln!("live: footprint summary line has unknown unit `{other}`: {rest}");
+            return None;
+        }
+    };
+    Some(mb.round() as u64)
 }
 
 /// `ps -o rss= -p <pid>` (KB) → MB. `None` when the process is gone or the
@@ -615,6 +673,63 @@ mod tests {
             .output()
             .map(|o| o.status.success())
             .unwrap_or(false)
+    }
+
+    /// Canned `footprint -p <pid>` output captured on macOS 2026-06-11 —
+    /// tests never require the real tool (plan T3).
+    const FOOTPRINT_OUTPUT: &str = "\
+======================================================================
+rust-analyzer [91533]: 64-bit    Footprint: 2240 KB (16384 bytes per page)
+======================================================================
+
+  Dirty      Clean  Reclaimable    Regions    Category
+    ---        ---          ---        ---    ---
+ 976 KB        0 B          0 B          5    MALLOC_SMALL
+    ---        ---          ---        ---    ---
+2240 KB     560 KB          0 B        411    TOTAL
+
+Auxiliary data:
+    phys_footprint: 2256 KB
+    phys_footprint_peak: 2320 KB
+";
+
+    #[test]
+    fn footprint_parser_reads_summary_line_kb() {
+        // 2240 KB → 2.19 MB → rounds to 2.
+        assert_eq!(parse_footprint_mb(FOOTPRINT_OUTPUT), Some(2));
+    }
+
+    #[test]
+    fn footprint_parser_handles_mb_and_gb_units() {
+        let mb = "ra [1]: 64-bit    Footprint: 512 MB (16384 bytes per page)\n";
+        assert_eq!(parse_footprint_mb(mb), Some(512));
+        let gb = "ra [1]: 64-bit    Footprint: 2.0 GB (16384 bytes per page)\n";
+        assert_eq!(parse_footprint_mb(gb), Some(2048));
+        let gb_frac = "ra [1]: 64-bit    Footprint: 1.4 GB (16384 bytes per page)\n";
+        assert_eq!(parse_footprint_mb(gb_frac), Some(1434));
+    }
+
+    #[test]
+    fn footprint_parser_skips_lowercase_phys_footprint_aux_lines() {
+        // No summary line — must NOT latch onto `phys_footprint:`.
+        let aux_only = "Auxiliary data:\n    phys_footprint: 2256 KB\n";
+        assert_eq!(parse_footprint_mb(aux_only), None);
+    }
+
+    #[test]
+    fn footprint_parser_rejects_garbage_and_unknown_units() {
+        assert_eq!(parse_footprint_mb(""), None);
+        assert_eq!(parse_footprint_mb("no memory info here"), None);
+        assert_eq!(parse_footprint_mb("x [1]: Footprint: lots KB"), None);
+        assert_eq!(parse_footprint_mb("x [1]: Footprint: 12 parsecs"), None);
+        assert_eq!(parse_footprint_mb("x [1]: Footprint:"), None);
+    }
+
+    #[test]
+    fn footprint_mb_of_dead_pid_falls_back_then_none() {
+        // Beyond macOS's pid range: `footprint` finds nothing, the RSS
+        // fallback errors ("process id too large") → None, no panic.
+        assert_eq!(footprint_mb_of(4_000_000), None);
     }
 
     #[test]
