@@ -106,6 +106,120 @@ pub fn record_du(sizes: &BTreeMap<String, i64>) {
     });
 }
 
+#[derive(Debug, Clone, PartialEq)]
+pub enum Breach {
+    Floor { free_gb: i64 },
+    Trend { dir: String, growth_gb: i64, window_hours: i64 },
+}
+
+/// Deterministic tier-1 rules over the current df sample + du history rows.
+/// LEVEL-TRIGGERED by design: callers re-evaluate every sample tick and
+/// re-emit while in breach (at-most-once event delivery means a single edge
+/// emit can vanish; alert::notify's 6h dedupe caps human-facing noise).
+pub fn evaluate_rules(
+    df: &DfSample,
+    now: chrono::DateTime<chrono::Utc>,
+) -> rusqlite::Result<Vec<Breach>> {
+    let mut out = Vec::new();
+    if df.free_gb < FLOOR_FREE_GB {
+        out.push(Breach::Floor { free_gb: df.free_gb });
+    }
+    // No telemetry store yet → no du history → floor rule only. (open_ro on a
+    // missing file is an open error, not empty history — never create the db
+    // from a read-only consumer.)
+    if !crate::telemetry::db_exists() {
+        return Ok(out);
+    }
+    // Trend: compare oldest du sample inside the window to the newest.
+    let conn = crate::telemetry::open_ro()?;
+    let since = (now - chrono::Duration::hours(TREND_WINDOW_HOURS)).to_rfc3339();
+    let mut stmt = conn.prepare(
+        "SELECT detail FROM events
+         WHERE source='hex-resources' AND event='sample::du' AND ts >= ?1 AND detail IS NOT NULL
+         ORDER BY ts",
+    )?;
+    let details: Vec<String> = stmt
+        .query_map([&since], |r| r.get::<_, String>(0))?
+        .filter_map(|r| r.ok())
+        .collect();
+    if details.len() >= 2 {
+        let parse = |s: &str| -> BTreeMap<String, i64> {
+            serde_json::from_str(s).unwrap_or_default()
+        };
+        let oldest = parse(&details[0]);
+        let newest = parse(details.last().unwrap());
+        for (dir, new_gb) in &newest {
+            if let Some(old_gb) = oldest.get(dir) {
+                let growth = new_gb - old_gb;
+                if growth > TREND_GROWTH_GB {
+                    out.push(Breach::Trend {
+                        dir: dir.clone(),
+                        growth_gb: growth,
+                        window_hours: TREND_WINDOW_HOURS,
+                    });
+                }
+            }
+        }
+    }
+    Ok(out)
+}
+
+#[cfg(test)]
+mod rule_tests {
+    use super::*;
+    use chrono::{Duration, TimeZone, Utc};
+
+    fn seed_row(event: &str, ts: chrono::DateTime<Utc>, detail: &str) {
+        // schema first
+        crate::telemetry::record(&crate::telemetry::TelemetryEvent {
+            source: "seed".into(), event: "seed".into(), status: "ok".into(),
+            duration_ms: None, exit_code: None, detail: None }).unwrap();
+        let conn = rusqlite::Connection::open(
+            std::path::PathBuf::from(std::env::var("HEX_DIR").unwrap())
+                .join(".hex/telemetry/events.db")).unwrap();
+        conn.execute(
+            "INSERT INTO events (ts, source, event, status, detail) VALUES (?1,'hex-resources',?2,'ok',?3)",
+            rusqlite::params![ts.to_rfc3339(), event, detail]).unwrap();
+    }
+
+    #[test]
+    fn floor_breach_detected() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        let breaches = evaluate_rules(
+            &DfSample { free_gb: 100, used_gb: 900 }, now).unwrap();
+        assert!(breaches.iter().any(|b| matches!(b, Breach::Floor { free_gb: 100 })));
+    }
+
+    #[test]
+    fn trend_breach_from_history() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        seed_row("sample::du", now - Duration::hours(70), r#"{"/x/target":5}"#);
+        seed_row("sample::du", now - Duration::hours(1), r#"{"/x/target":40}"#);
+        let breaches = evaluate_rules(
+            &DfSample { free_gb: 999, used_gb: 1 }, now).unwrap();
+        match breaches.iter().find(|b| matches!(b, Breach::Trend { .. })) {
+            Some(Breach::Trend { dir, growth_gb, .. }) => {
+                assert_eq!(dir, "/x/target");
+                assert_eq!(*growth_gb, 35);
+            }
+            _ => panic!("expected trend breach: {breaches:?}"),
+        }
+    }
+
+    #[test]
+    fn no_breach_when_healthy() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        seed_row("sample::du", now - Duration::hours(70), r#"{"/x/target":5}"#);
+        seed_row("sample::du", now - Duration::hours(1), r#"{"/x/target":6}"#);
+        let breaches = evaluate_rules(
+            &DfSample { free_gb: 999, used_gb: 1 }, now).unwrap();
+        assert!(breaches.is_empty(), "{breaches:?}");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
