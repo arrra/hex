@@ -85,14 +85,21 @@ cq (CLI, per query) ──fresh──────────────► SQL
 | `pool_cap` | **2** | LRU evict (SIGTERM→SIGKILL) on overflow; eviction logged + visible in `status` |
 | `idle_ttl_secs` | 1800 | reaper kills instances idle past TTL |
 | `vanish_reap` | always on | instance whose worktree path no longer exists is killed immediately |
-| `mem_limit_mb` | **3072** per instance | watchdog polls every 30s; over limit → kill + log + `status` red note; NEXT query respawns. **Grace: no kill within 180s of spawn** (priming spikes). Pool-wide alarm (log+status only) at **6144**. |
+| `mem_limit_mb` | **3500** per instance | watchdog polls every 30s; over limit → kill + log + `status` red note; NEXT query respawns. **Grace: no kill within 180s of spawn** (priming spikes). Pool-wide alarm (log+status only) at **7000**. |
 | `max_warm_wait` | n/a | cq never blocks on warming; there is no wait knob by design |
 
-**Memory metric (smoke #3 finding):** `ps` RSS under-reports idle rust-analyzer by >50x on
-macOS (compressed/cold pages — 16MB reported vs >1GB held). The watchdog measures **physical
-footprint** (`footprint -p <pid>` when runnable unprivileged; fall back to
-`ps -o rss=` with the under-reporting caveat logged once at startup). Smoke #3 measured
-steady-state: hex-foundation 861MB, boi 1451MB quiescent; prime 94s/111s.
+**Memory metric (smoke #3 finding, verified by solo cold re-run):** `ps` RSS under-reports
+idle rust-analyzer by >50x on macOS (compressed/cold pages — ~20MB reported vs >1GB held).
+The watchdog measures **physical footprint** (`footprint -p <pid>` when runnable
+unprivileged; fall back to `ps -o rss=` with the under-reporting caveat logged once at
+startup). Verified cold numbers: hex-foundation prime 41s, steady footprint ~2.0GB;
+boi prime 112-150s, steady footprint ~1.4GB.
+
+**Quiescent-signal caveat (smoke #3):** boi did NOT emit a quiescent serverStatus on a cold
+prime (build-script-heavy deps). Instance readiness therefore uses serverStatus
+quiescent=true when it arrives, with a fallback: if no quiescent after `warm_fallback_secs`
+(default 240), probe with a cheap request — successful response ⇒ Ready (log the fallback).
+Never wait forever; never mark Ready on time alone without a successful probe.
 
 ## 5. cq changes
 
