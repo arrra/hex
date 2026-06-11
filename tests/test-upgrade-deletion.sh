@@ -38,7 +38,7 @@ ln -sf "$PATH_MAP_SH" "$INSTALL/.hex/scripts/path-mapping.sh"
 # Foundation source dir (v2 layout — system/ prefix)
 mkdir -p "$SOURCE/system/scripts" "$SOURCE/system/skills" \
          "$SOURCE/system/commands" "$SOURCE/templates"
-echo "# CLAUDE.md stub" > "$SOURCE/templates/CLAUDE.md"
+echo "# AGENTS.md stub" > "$SOURCE/templates/AGENTS.md"
 
 # Fake HOME stubs so install side-effects are no-ops
 mkdir -p "$FAKE_HOME/.boi/src"

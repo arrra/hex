@@ -37,7 +37,7 @@ ln -sf "$PATH_MAP_SH"  "$INSTALL/.hex/scripts/path-mapping.sh"
 # Foundation source dir (v2 layout)
 mkdir -p "$SOURCE/system/scripts" "$SOURCE/system/skills" "$SOURCE/system/commands"
 mkdir -p "$SOURCE/system/harness/src" "$SOURCE/templates"
-echo "# CLAUDE.md stub" > "$SOURCE/templates/CLAUDE.md"
+echo "# AGENTS.md stub" > "$SOURCE/templates/AGENTS.md"
 echo 'fn main() {}' > "$SOURCE/system/harness/src/main.rs"
 
 # Fake HOME: pre-stub .boi and hex-events so install steps are no-ops
