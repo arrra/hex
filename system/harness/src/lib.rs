@@ -15,6 +15,7 @@ pub mod ledger;
 pub mod lint_gates;
 pub mod reconciler;
 pub mod capability_exec;
+pub mod charter;
 pub mod audit;
 pub mod capability_guard;
 pub mod llm_config;
