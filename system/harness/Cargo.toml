@@ -82,12 +82,16 @@ libc = "0.2"
 # rev to keep `cargo build` green. The `df4ab27` string is preserved here so
 # any historical pin-audit grep still resolves to this file.
 daemon-green = { git = "https://github.com/mrap/daemon-green", rev = "5171fbb206e93b56523275f72bd1b97c776de90a" }
+# Moved from dev-dependencies (2026-06-10, spec Sbe8m4886 / task T0mnyfwa7):
+# the claude-cli transport needs a tempdir at runtime for `claude -p`'s cwd
+# (CLAUDE.md auto-discovery is cwd-based — spawning from a workspace cwd will
+# slurp CLAUDE.md). Already used widely in `#[cfg(test)]` modules.
+tempfile = "3"
 
 [features]
 personal = []
 
 [dev-dependencies]
-tempfile = "3"
 filetime = "0.2"
 
 [profile.release]

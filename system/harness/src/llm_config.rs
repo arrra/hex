@@ -1,9 +1,12 @@
 //! Per-use-case LLM configuration registry.
 //!
-//! See spec Sy23e65a2. This module is the source of truth for which model,
-//! max_tokens, base_url, and api_key_env each LLM-backed hex use case should
-//! call. Resolution order (highest wins):
-//!   1. env var HEX_LLM_MODEL_<USE_CASE_UPPER> (model only)
+//! See spec Sy23e65a2 (initial registry) and spec Sbe8m4886 task T66j95j4d
+//! (transport + claude_settings_file additions). This module is the source of
+//! truth for which model, max_tokens, base_url, api_key_env, transport, and
+//! optional claude-cli settings file each LLM-backed hex use case should call.
+//! Resolution order (highest wins):
+//!   1. env vars HEX_LLM_MODEL_<USE_CASE_UPPER> (model only) and
+//!      HEX_LLM_TRANSPORT_<USE_CASE_UPPER> (transport only)
 //!      - HEX_CONSOLIDATE_MODEL is honored as an alias for consolidate_audit
 //!   2. [use_cases.<name>] in $HEX_DIR/.hex/config/llm.toml
 //!   3. [defaults]            in $HEX_DIR/.hex/config/llm.toml
@@ -11,7 +14,8 @@
 //!
 //! Missing llm.toml → built-ins (zero behavior change). Malformed llm.toml →
 //! LOUD error returned from `resolve()`. Unknown [use_cases.*] table names →
-//! warning to stderr but tolerated (per spec).
+//! warning to stderr but tolerated (per spec). Unknown `transport` values are a
+//! hard error from `resolve()` — see S6 "no quiet failures".
 
 use anyhow::{Context, Result};
 use serde::Deserialize;
@@ -27,6 +31,40 @@ pub struct ResolvedLlm {
     /// Optional cap on estimated INPUT tokens per call. Used by distill to
     /// slice oversize spans. None means "no input cap configured".
     pub max_input_tokens: Option<u32>,
+    /// Transport seam for this use case. Always one of:
+    ///   * "http" — call an OpenAI-compatible HTTP endpoint (default,
+    ///     matches every deployment from before spec Sbe8m4886).
+    ///   * "claude-cli" — shell out to a headless `claude -p` process,
+    ///     authenticated via the macOS login keychain.
+    ///
+    /// Unknown values cause `resolve()` to return a loud error.
+    pub transport: String,
+    /// Optional path to a `--settings` JSON file for the `claude-cli`
+    /// transport. None means "use the built-in inline default settings".
+    /// Meaningful only when `transport == "claude-cli"`.
+    pub claude_settings_file: Option<String>,
+}
+
+/// Transport identifiers accepted in llm.toml and HEX_LLM_TRANSPORT_*.
+pub const TRANSPORT_HTTP: &str = "http";
+pub const TRANSPORT_CLAUDE_CLI: &str = "claude-cli";
+
+fn known_transports() -> &'static [&'static str] {
+    &[TRANSPORT_HTTP, TRANSPORT_CLAUDE_CLI]
+}
+
+/// Validate a transport string from either llm.toml or env. `source` is a
+/// short tag included in the error message so the operator can find the
+/// offending knob fast (S6 — no quiet failures).
+fn validate_transport(value: &str, source: &str) -> Result<()> {
+    if known_transports().contains(&value) {
+        Ok(())
+    } else {
+        Err(anyhow::anyhow!(
+            "invalid transport `{value}` in {source} — known transports are: {}",
+            known_transports().join(", ")
+        ))
+    }
 }
 
 /// Built-in default for a known use case. These are the values that were
@@ -101,6 +139,15 @@ struct SectionFields {
     api_key_env: Option<String>,
     #[serde(default)]
     max_input_tokens: Option<u32>,
+    /// Optional transport override. See ResolvedLlm::transport for legal
+    /// values. Validated at resolve() time, not at deserialize, so the error
+    /// message can name [defaults] vs [use_cases.X] vs env.
+    #[serde(default)]
+    transport: Option<String>,
+    /// Optional path to a `--settings` JSON file passed to claude-cli.
+    /// Inert for the http transport.
+    #[serde(default)]
+    claude_settings_file: Option<String>,
 }
 
 fn config_path() -> PathBuf {
@@ -156,6 +203,17 @@ fn env_model_for(use_case: &str) -> Option<String> {
     None
 }
 
+/// Read HEX_LLM_TRANSPORT_<USE_CASE_UPPER> if set and non-empty. Validation of
+/// the value happens later in `resolve()` so the error can be uniform with
+/// file-sourced misconfiguration.
+fn env_transport_for(use_case: &str) -> Option<String> {
+    let key = format!("HEX_LLM_TRANSPORT_{}", use_case.to_uppercase());
+    match std::env::var(&key) {
+        Ok(v) if !v.is_empty() => Some(v),
+        _ => None,
+    }
+}
+
 pub fn resolve(use_case: &str) -> Result<ResolvedLlm> {
     let bi = builtin(use_case).with_context(|| {
         format!(
@@ -199,12 +257,40 @@ pub fn resolve(use_case: &str) -> Result<ResolvedLlm> {
         .or(defaults.max_input_tokens)
         .or(bi.max_input_tokens);
 
+    // Transport resolution. Order: env (HEX_LLM_TRANSPORT_<UC_UPPER>) >
+    // [use_cases.<uc>].transport > [defaults].transport > "http".
+    // Each layer is validated as it's chosen so the error message names the
+    // actual source of the bad value.
+    let transport = if let Some(env_val) = env_transport_for(use_case) {
+        validate_transport(
+            &env_val,
+            &format!("env HEX_LLM_TRANSPORT_{}", use_case.to_uppercase()),
+        )?;
+        env_val
+    } else if let Some(uc_val) = uc.transport.clone() {
+        validate_transport(&uc_val, &format!("[use_cases.{use_case}].transport"))?;
+        uc_val
+    } else if let Some(def_val) = defaults.transport.clone() {
+        validate_transport(&def_val, "[defaults].transport")?;
+        def_val
+    } else {
+        TRANSPORT_HTTP.to_string()
+    };
+
+    // claude_settings_file flows through use_case > defaults. It's only
+    // meaningful for the claude-cli transport, but we don't gate on transport
+    // here — the seam may set it at [defaults] alongside a use-case-level
+    // transport override.
+    let claude_settings_file = uc.claude_settings_file.or(defaults.claude_settings_file);
+
     Ok(ResolvedLlm {
         model,
         max_tokens,
         base_url,
         api_key_env,
         max_input_tokens,
+        transport,
+        claude_settings_file,
     })
 }
 
@@ -225,6 +311,10 @@ mod tests {
         "HEX_LLM_MODEL_CONSOLIDATE_AUDIT",
         "HEX_LLM_MODEL_HEALTH_CHECK",
         "HEX_CONSOLIDATE_MODEL",
+        "HEX_LLM_TRANSPORT_MEMORY_EXTRACT",
+        "HEX_LLM_TRANSPORT_MEMORY_JUDGE",
+        "HEX_LLM_TRANSPORT_CONSOLIDATE_AUDIT",
+        "HEX_LLM_TRANSPORT_HEALTH_CHECK",
     ];
 
     fn clear_env() {

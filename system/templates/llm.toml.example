@@ -1,12 +1,14 @@
 # hex LLM configuration — copy to $HEX_DIR/.hex/config/llm.toml to customize.
 #
-# Every LLM-backed feature in hex resolves its model, max_tokens, base URL, and
-# API key environment variable through this file. Missing file -> built-in
-# defaults (zero behavior change). Malformed file -> hex fails loudly to stderr.
+# Every LLM-backed feature in hex resolves its model, max_tokens, base URL,
+# API key environment variable, transport, and optional claude-cli settings
+# file through this file. Missing file -> built-in defaults (zero behavior
+# change). Malformed file -> hex fails loudly to stderr.
 #
 # Resolution order for each field (highest wins):
-#   1. Environment variable HEX_LLM_MODEL_<USE_CASE_UPPER>
-#        e.g. HEX_LLM_MODEL_MEMORY_EXTRACT, HEX_LLM_MODEL_HEALTH_CHECK
+#   1. Environment variables
+#        HEX_LLM_MODEL_<USE_CASE_UPPER>      e.g. HEX_LLM_MODEL_MEMORY_EXTRACT
+#        HEX_LLM_TRANSPORT_<USE_CASE_UPPER>  e.g. HEX_LLM_TRANSPORT_MEMORY_EXTRACT
 #        Back-compat: HEX_CONSOLIDATE_MODEL is still honored as an alias for
 #        the consolidate_audit use case.
 #   2. [use_cases.<name>] table below
@@ -18,19 +20,44 @@
 #   memory_judge       — distill: judge candidate memories for retention
 #   consolidate_audit  — memory consolidate full: operating-model audit
 #   health_check       — doctor: provider connectivity probe
+#
+# Transports:
+#   "http"       — POST to an OpenAI-compatible chat/completions endpoint
+#                  (uses base_url + api_key_env). The historical default; every
+#                  use case ships as "http" out of the box.
+#   "claude-cli" — Shell out to a headless `claude -p` process, authenticated
+#                  via the macOS login keychain. base_url / api_key_env are
+#                  ignored. The optional claude_settings_file path becomes
+#                  `claude --settings <path>`; leave it unset to use hex's
+#                  hardened inline defaults. max_tokens is NOT enforceable in
+#                  this transport — the cap is silently ignored.
+#                  Setting an unknown transport value (in this file OR in the
+#                  env override) is a hard error from `resolve()`.
 
 [defaults]
 # Default model for every use case unless overridden below.
 model = "anthropic/claude-sonnet-4.5"
 
+# Default transport for every use case. "http" preserves pre-Sbe8m4886
+# behavior. Switch to "claude-cli" globally or per-use-case below to drive
+# `claude -p` through the macOS login keychain instead of an HTTP endpoint.
+# transport = "http"
+
 # OpenAI-compatible chat/completions endpoint. Override for Ollama, vLLM, or
-# any OpenAI-compatible gateway. Default targets OpenRouter.
+# any OpenAI-compatible gateway. Default targets OpenRouter. Only consulted
+# when transport = "http".
 # base_url = "https://openrouter.ai/api/v1/chat/completions"
 
 # Environment variable name to read the API key from. The OpenRouter file
 # fallback ($HEX_DIR/.hex/secrets/openrouter.env) only applies when this is
-# left at the default "OPENROUTER_API_KEY".
+# left at the default "OPENROUTER_API_KEY". Only consulted when
+# transport = "http".
 # api_key_env = "OPENROUTER_API_KEY"
+
+# Optional path to a JSON file passed to `claude --settings <path>` when
+# transport = "claude-cli". Leave unset to use hex's hardened inline defaults
+# (disable hooks, telemetry, auto-updater, etc).
+# claude_settings_file = "/absolute/path/to/claude-settings.json"
 
 # Per-use-case overrides. Any field may be set; unset fields fall through to
 # [defaults], then to the built-in registry. Tables for unknown use cases
@@ -65,4 +92,15 @@ model = "anthropic/claude-sonnet-4.5"
 # max_tokens  = 8192
 # base_url    = "http://localhost:11434/v1/chat/completions"
 # api_key_env = "OLLAMA_API_KEY"   # any non-empty value works for Ollama
+# ---------------------------------------------------------------------------
+
+# ---------------------------------------------------------------------------
+# Example: route memory_extract through the local `claude` CLI (authenticated
+# via the macOS login keychain), keeping the other use cases on OpenRouter.
+# max_tokens has no effect under the claude-cli transport.
+#
+# [use_cases.memory_extract]
+# transport            = "claude-cli"
+# model                = "sonnet"   # claude-cli alias, no "anthropic/" prefix
+# claude_settings_file = "/Users/me/.hex/config/claude-settings.json"
 # ---------------------------------------------------------------------------

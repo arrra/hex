@@ -4,6 +4,56 @@
 use crate::harness::Prompt;
 use std::process::Command;
 
+/// Decision computed by `decide_bare_auth_injection`: whether to inject
+/// `ANTHROPIC_AUTH_TOKEN` into the child env and whether to emit a loud
+/// stderr warning. See the bare-run auth injection notes below.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BareAuthDecision {
+    /// `Some(value)` → inject `ANTHROPIC_AUTH_TOKEN=<value>` into the spawned
+    /// child's env (and ONLY that child's env). `None` → do not inject.
+    pub inject_value: Option<String>,
+    /// `true` → emit a loud stderr warning ("bare claude run has no auth
+    /// path") before spawning anyway. Standing Order S6: no quiet failures.
+    pub warn: bool,
+}
+
+/// Decide whether a headless `claude` spawn with a resolved profile needs
+/// `ANTHROPIC_AUTH_TOKEN` injected from the harness's
+/// `CLAUDE_CODE_OAUTH_TOKEN`.
+///
+/// Background: `claude --bare` skips keychain reads AND ignores
+/// `CLAUDE_CODE_OAUTH_TOKEN` (upstream issue #51047 — closed not-planned).
+/// `--bare` DOES honor `ANTHROPIC_AUTH_TOKEN`, and the setup-token works as
+/// that bearer (verified 2026-06-10). Decision matrix:
+///
+/// | bare  | token                  | action                                      |
+/// |-------|------------------------|---------------------------------------------|
+/// | true  | `Some(non-empty)`      | inject the value into the child's env       |
+/// | true  | `None` or `Some("")`   | emit loud warning, do NOT inject            |
+/// | false | (any)                  | NEVER inject (keychain path must stay)      |
+///
+/// Pure function; no I/O. The caller is responsible for actually setting the
+/// env var on the child `Command` and writing the warning to stderr.
+pub fn decide_bare_auth_injection(bare: bool, token: Option<&str>) -> BareAuthDecision {
+    if !bare {
+        // Non-bare profiles fall through to keychain. Never inject; never warn.
+        return BareAuthDecision {
+            inject_value: None,
+            warn: false,
+        };
+    }
+    match token {
+        Some(t) if !t.is_empty() => BareAuthDecision {
+            inject_value: Some(t.to_string()),
+            warn: false,
+        },
+        _ => BareAuthDecision {
+            inject_value: None,
+            warn: true,
+        },
+    }
+}
+
 pub enum WorkerOutput {
     Answer(String),
     Question(Prompt),
@@ -112,8 +162,24 @@ pub fn run_worker(input: &str) -> Result<WorkerOutput, String> {
         OUTPUT_SCHEMA.to_string(),
         input.to_string(),
     ]);
-    let out = Command::new("claude")
-        .args(&args)
+    // Bare-run auth injection: `--bare` skips keychain reads and ignores
+    // CLAUDE_CODE_OAUTH_TOKEN. Child-scoped injection of ANTHROPIC_AUTH_TOKEN
+    // (with the setup-token's value) is the verified workaround. Strictly
+    // child env — never process-wide std::env::set_var, never launchctl. See
+    // decision daemon-token-scoped-not-session-wide-2026-06-10.
+    let oauth_token = std::env::var("CLAUDE_CODE_OAUTH_TOKEN").ok();
+    let decision = decide_bare_auth_injection(resolved.bare, oauth_token.as_deref());
+    if decision.warn {
+        eprintln!(
+            "hex: WARNING: bare claude run has no auth path — CLAUDE_CODE_OAUTH_TOKEN is unset/empty and --bare ignores keychain. Spawn will likely fail with 'Not logged in'."
+        );
+    }
+    let mut cmd = Command::new("claude");
+    cmd.args(&args);
+    if let Some(value) = &decision.inject_value {
+        cmd.env("ANTHROPIC_AUTH_TOKEN", value);
+    }
+    let out = cmd
         .output()
         .map_err(|e| format!("spawn claude failed: {e}"))?;
     if !out.status.success() {
@@ -156,5 +222,74 @@ mod tests {
     fn malformed_fails_loud() {
         assert!(parse_worker_json(r#"{"kind":"prompt"}"#).is_err()); // missing options
         assert!(parse_worker_json(r#"not json"#).is_err());
+    }
+
+    // ----- Bare-run auth injection (deploy gate fix; task Tzxv4h994) -----
+    //
+    // When the harness spawns headless `claude` with a claude_runs profile
+    // resolved to bare=true, `--bare` skips keychain reads AND ignores
+    // CLAUDE_CODE_OAUTH_TOKEN. The verified workaround is to inject
+    // ANTHROPIC_AUTH_TOKEN=<oauth-token-value> into THAT CHILD's env only.
+    //
+    // Decision matrix:
+    //   bare=true,  token=Some(non-empty)  -> inject the token value
+    //   bare=true,  token=None or empty    -> emit loud warning, do NOT inject
+    //   bare=false, token=*                -> NEVER inject (non-bare uses keychain)
+    //
+    // The injection must be child-scoped (no process-wide std::env::set_var,
+    // no launchctl setenv). See decision daemon-token-scoped-not-session-wide-2026-06-10.
+
+    #[test]
+    fn bare_with_token_injects_anthropic_auth_token_value() {
+        let d = decide_bare_auth_injection(true, Some("sk-test-token-12345"));
+        assert_eq!(
+            d.inject_value.as_deref(),
+            Some("sk-test-token-12345"),
+            "bare profile + non-empty token must inject that exact value"
+        );
+        assert!(!d.warn, "no warning when injection succeeds");
+    }
+
+    #[test]
+    fn bare_without_token_warns_and_does_not_inject() {
+        let d = decide_bare_auth_injection(true, None);
+        assert!(
+            d.inject_value.is_none(),
+            "no inject value when token is absent"
+        );
+        assert!(
+            d.warn,
+            "must emit loud warning that bare run has no auth path"
+        );
+    }
+
+    #[test]
+    fn bare_with_empty_token_warns_and_does_not_inject() {
+        let d = decide_bare_auth_injection(true, Some(""));
+        assert!(
+            d.inject_value.is_none(),
+            "empty token is not a usable auth value"
+        );
+        assert!(d.warn, "empty token still warrants the loud warning");
+    }
+
+    #[test]
+    fn non_bare_with_token_never_injects() {
+        let d = decide_bare_auth_injection(false, Some("sk-test-token-12345"));
+        assert!(
+            d.inject_value.is_none(),
+            "non-bare profile MUST NOT inject ANTHROPIC_AUTH_TOKEN — keychain auth path must remain intact"
+        );
+        assert!(!d.warn, "non-bare path is fine; no warning");
+    }
+
+    #[test]
+    fn non_bare_without_token_does_nothing() {
+        let d = decide_bare_auth_injection(false, None);
+        assert!(d.inject_value.is_none());
+        assert!(
+            !d.warn,
+            "non-bare profiles never warn about missing oauth token"
+        );
     }
 }
