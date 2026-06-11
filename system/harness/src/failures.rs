@@ -436,6 +436,68 @@ mod signature_tests {
     }
 }
 
+/// Compare *.worker.rs files on disk under $HEX_DIR/.hex/modules/ against the
+/// basenames compiled into this binary. A file on disk absent from the binary
+/// = written-but-never-deployed (the actual orbstack-prune failure mode).
+/// Recursive to mirror build.rs's glob.
+pub fn modules_not_landed(hex_dir: &std::path::Path, compiled_basenames: &[String]) -> Vec<String> {
+    let root = hex_dir.join(".hex").join("modules");
+    let mut found = Vec::new();
+    collect_worker_files(&root, &mut found);
+    let compiled: std::collections::BTreeSet<&str> =
+        compiled_basenames.iter().map(|s| s.as_str()).collect();
+    let mut out: Vec<String> = found
+        .into_iter()
+        .filter_map(|p| p.file_name().map(|f| f.to_string_lossy().into_owned()))
+        .filter(|base| !compiled.contains(base.as_str()))
+        .collect();
+    out.sort();
+    out
+}
+
+fn collect_worker_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
+    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    for e in entries.flatten() {
+        let p = e.path();
+        if p.is_dir() {
+            collect_worker_files(&p, out);
+        } else if p.file_name().map_or(false, |f| f.to_string_lossy().ends_with(".worker.rs")) {
+            out.push(p);
+        }
+    }
+}
+
+/// Compiled basenames from the build-generated module_paths().
+/// (Generated signature verified in build.rs: `hex_modules::module_paths()
+/// -> Vec<(String, &'static str)>` — name, absolute source path.)
+pub fn compiled_module_basenames() -> Vec<String> {
+    crate::workers::hex_modules::module_paths()
+        .into_iter()
+        .filter_map(|(_name, path)| {
+            std::path::Path::new(path)
+                .file_name()
+                .map(|f| f.to_string_lossy().into_owned())
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod not_landed_tests {
+    use super::*;
+
+    #[test]
+    fn detects_disk_module_missing_from_binary() {
+        let tmp = tempfile::tempdir().unwrap();
+        let modules = tmp.path().join(".hex/modules");
+        std::fs::create_dir_all(&modules).unwrap();
+        std::fs::write(modules.join("orbstack_prune.worker.rs"), "// w").unwrap();
+        std::fs::write(modules.join("known.worker.rs"), "// w").unwrap();
+        let compiled = vec!["known.worker.rs".to_string()];
+        let missing = modules_not_landed(tmp.path(), &compiled);
+        assert_eq!(missing, vec!["orbstack_prune.worker.rs".to_string()]);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
