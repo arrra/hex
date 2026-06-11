@@ -164,3 +164,70 @@ Never wait forever; never mark Ready on time alone without a successful probe.
 - launchd template `system/templates/launchd/com.hex.scipd.plist` (KeepAlive=true).
 - All A1 behavior unchanged when daemon absent. A1 tests must keep passing untouched
   (except envelope `source` plumbing).
+
+## 8. Acceptance record (Task 9 audit)
+
+**Date:** 2026-06-11. **Auditor:** Task 9 worker (branch `code-intel-a2/t9`). All gates run
+in the T9 worktree at the A2 merge head.
+
+**Gates:** `cargo build --release` (workspace) green; `cargo test -p scipd` → **231 passed,
+0 failed** (lib 201, bin cq 2, cli.rs 8, cli_live.rs 6, golden.rs 4, golden_live.rs 3,
+scipd.rs 7); `cargo clippy -p scipd --all-targets -- -D warnings` clean;
+`cargo test -p hex-harness` → **515 passed, 0 failed**, zero compiler warnings (T8's two
+flagged diagnostics fixed in this task: dead `chars` assignment in
+`system/harness/src/memory/assemble.rs`, unused `TOP_K` const in
+`system/harness/src/memory/recall.rs`; plus an unused test import in
+`system/harness/src/integration.rs`).
+
+**E2E:** `tests/e2e/code-intel-e2e.sh` → PASS (S3–S8), sections 1–6 all green; timings:
+index emit 50.2s, worktree cold start 74ms, freshness p95 25.8ms, query p95 53.7ms.
+`tests/e2e/code-intel-live-e2e.sh` → PASS (A2-S5/S7/S8), sections 1–3 all green; timings:
+index 58.5s, warming reply 108ms, time-to-live 41s, daemon-down fresh 55ms / stale 56ms /
+rename 36ms, solo check 56.6s, concurrent checks 70.0s (< 2× solo — no lock contention).
+
+| # | Criterion | Evidence | Status |
+|---|---|---|---|
+| A2-S1 | Build + scipd tests + clippy + harness | Gates above: release build green; scipd 231/231; clippy `-D warnings` clean; hex-harness 515/515, warning-free | **PASS** |
+| A2-S2 | Live answers on edited worktree, `source:"live"` | `tests/golden_live.rs::worktree_edit_escalates_live_while_no_live_misses_and_flags_stale` (asserts both the live hit on the new call site AND that `--no-live` misses it + flags stale); live E2E section 1 on the real repo | **PASS** |
+| A2-S3 | Live == index on fresh files for every golden symbol | `tests/golden_live.rs::live_answers_match_index_for_every_golden_symbol` | **PASS** |
+| A2-S4 | Rename happy path + abort + macro-body pin | `tests/cli_live.rs::rename_plan_then_apply_then_compiles` (`generic_max`→`generic_maximum`, `--apply`, fixture compiles); `src/rename_apply.rs::tests::content_mismatch_aborts_with_zero_files_modified` (RENAME_ABORTED, exit 7, zero writes); `tests/golden_live.rs::rename_double_plan_pins_macro_body_blindness_at_three_edits` (3 edits, macro body untouched) | **PASS** |
+| A2-S5 | Warming loud + non-blocking, then live | Live E2E section 1: warming reply in 108ms with `escalated.warming`, live answer at 41s; `tests/cli_live.rs::stale_query_escalates_to_live_after_warming` | **PASS** |
+| A2-S6 | Pool policy observable: cap/LRU, idle TTL, vanish, mem watchdog | `src/live/pool.rs` tests: `cap_overflow_evicts_least_recently_used`, `idle_ttl_reap_via_injected_clock`, `vanish_reap_kills_instance_for_deleted_worktree`, `mem_watchdog_respects_post_spawn_grace`, `mem_watchdog_red_note_retained_until_next_successful_spawn`, `mem_watchdog_kills_worst_offender_only`, `pool_alarm_logs_and_notes_without_killing`, `evict_op_drops_instance_and_reports_absence`; `tests/scipd.rs::live_pool_lifecycle_over_the_socket` (real daemon + instance) | **PASS** |
+| A2-S7 | Daemon-down degradation, nothing hangs | Live E2E section 2 (SIGTERM: A1 intact, `escalated.daemon-unavailable`, rename exit 7 in 36ms, no orphan rust-analyzer); `tests/cli_live.rs::{daemon_down_degrades_loudly_and_fast, forced_live_with_daemon_down_exits_7, rename_with_daemon_down_exits_7}` | **PASS** |
+| A2-S8 | `cq check` clean/diagnostic/concurrent | Live E2E section 3: clean→exit 0, injected E0308 at correct path:line, concurrent 70.0s < 2× solo 56.6s, separate `target-cq` dirs; `tests/cli_live.rs::check_clean_then_diagnostic_then_check_failed` | **PASS** |
+| A2-S9 | No silent failures; pool transitions logged | T9 S6 audit (below): 40 pattern hits reviewed, 1 bug fixed (`rename_apply.rs` silently skipped permission preservation on metadata failure — now a loud error), all others justified; every pool transition goes through `log_transition` (stderr + status ring) | **PASS** |
+| A2-S10 | Deployed: launchd agent + doctor green + real escalation | **Orchestrator step** — verify after deploy with: `launchctl print gui/$(id -u)/com.hex.scipd` (state = running); `cq doctor` (scipd section green: socket reachable, pool status); then edit a file in a real hex-foundation worktree and run `cq refs <symbol>` twice — first reply carries `escalated.warming`, a later reply carries `source:"live"` | **PENDING (orchestrator)** |
+
+### S6 silent-failure audit (A2-S9 detail)
+
+Method: grep all A2 modules (`proto.rs`, `config.rs`, `daemon.rs`, `bin/scipd.rs`,
+`live/*`, `check.rs`, `rename_apply.rs`, `respond.rs` routing, `doctor.rs` scipd section)
+for `unwrap_or_default`, `.ok()`, `let _ =`, `unwrap_or(`, and else-less `if let Ok(`.
+40 hits, per-hit verdicts:
+
+- **Bug (fixed):** `rename_apply.rs` write phase — `if let Ok(meta) = fs::metadata(&full)`
+  silently skipped permission preservation when metadata failed; now a loud
+  context-carrying error (the file is known to exist — phase 1 read it).
+- **Justified — test code (12):** `daemon.rs` FakeBackend canned-response default;
+  `respond.rs`/`live/instance.rs`/`live/translate.rs` test-helper PATH fallbacks and
+  ra-binary/pid-liveness probes; `live/client.rs` test-server `let _ =` writes/accepts.
+- **Justified — documented best-effort by design (9):** `proto.rs` best-effort id
+  extraction for addressable error replies (commented); `doctor.rs` launchctl/`id -u`
+  probes (`None` = launchctl unavailable, commented); `doctor.rs`/`respond.rs` clock-skew
+  age floor (commented); `respond.rs` `live_target` returning `None` surfaced later as a
+  loud `NoTarget` failure (commented).
+- **Justified — fallback chain with loud logging (5):** `live/instance.rs` footprint→ps
+  RSS fallback logs a one-time caveat; unknown footprint unit logged; `rss_mb_of` `None`
+  only when the process is gone (watchdog treats separately).
+- **Justified — protocol/display semantics (14):** LSP null result → `Value::Null` (LSP
+  allows null); `uri_to_path` `None` → hard error at the only production caller
+  (`translate::relativize`); `definition_locations` has a loud else branch; `check.rs`
+  defensive span-field defaults render visibly (`<unknown>`/0) rather than dropping;
+  `pool.rs` status rss display 0 when process gone (state field still shows truth);
+  `rename_apply.rs` last-line exclusive end (documented); status formatting
+  `unwrap_or_default`/`unwrap_or(0)` on optional display fields.
+
+**Config defaults check:** `ScipdConfig::default()` confirmed at the spec §4 smoke-#3
+values — `pool_cap=2`, `mem_limit_mb=3500`, `pool_alarm_mb=7000`, `spawn_grace_secs=180`,
+`warm_fallback_secs=240`, `idle_ttl_secs=1800` — locked by
+`config::tests::defaults_match_spec_smoke3_values`. No drift.
