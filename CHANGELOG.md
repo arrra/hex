@@ -43,6 +43,22 @@ One consolidated pass over the memory pipeline (reference: mrap-hex assessment
   hook recall path stays FTS-only by design (no embedder cold-load inside
   the UserPromptSubmit latency budget).
 
+## [2026-06-11] — remove session title-nudge hook (third-party mobile session manager sunset 2026-06-09)
+
+The third-party mobile session manager (mobile control plane) was sunset
+2026-06-09; hex uses native Claude Code Remote Control. The harness still
+shipped the manager's session-title nudge, which told sessions to call a
+now-removed MCP titling tool and `create_dir_all`'d the manager's state dir on
+every user prompt.
+
+### Removed
+- **`title_nudge` hook** (`system/harness/src/hook/title_nudge.rs`, added
+  v0.19.4): deleted, along with its module declaration and its call site in the
+  `UserPromptSubmit` hook. Memory-recall injection behavior is unchanged (same
+  JSON output shape, same fail-open semantics).
+- `filetime`/`tempfile` dev-deps retained — both still used by other tests
+  (`memory/embed.rs` and 30+ files respectively).
+
 ## [2026-06-05] — harness lifecycle adopts daemon-green (v0.31.0)
 
 The hex harness no longer hand-rolls launchctl/plist logic. `hex harness

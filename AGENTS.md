@@ -162,6 +162,28 @@ If your runtime exposes structured file/search tools, use them. If it only gives
 
 ---
 
+## Code intelligence (cq)
+
+**Prefer `cq` over grep for def/refs/callers questions in Rust repos** — it answers from a semantic SCIP index, not text matching. Binary: `cargo build --release -p scipd` → `target/release/cq`. Full guide: [docs/code-intel.md](docs/code-intel.md).
+
+```bash
+cq def <name | FILE:LINE:COL>      # definition site(s)        (positions are 1-based)
+cq refs <name | FILE:LINE:COL>     # all reference sites, definitions flagged
+cq callers <name>                  # enclosing functions of call sites
+cq symbols <FILE>                  # outline of one file
+cq search <query>                  # fuzzy/prefix search over symbol names
+cq index --workspace <path>        # rebuild the index (one-time setup: cq register <path>)
+cq doctor                          # health; exit !=0 with red_reasons when broken
+```
+
+Every query prints one JSON envelope on stdout: `source`, `workspace_id`, `indexed_commit`, `index_age_secs`, `stale_files`, `latency_ms`, `results[]` (`path`, `line`, `col`, `display_name`, `kind`, `role`, `snippet`). `stale_files` = result files whose worktree content drifted from the indexed commit — positions for those may be off; snippets are withheld. Reindex to clear, or pass `--strict` to refuse stale answers outright.
+
+Exit codes: `0` fresh OK · `2` stale results (or `--strict` refusal) · `3` no index (`cq index`) · `4` unregistered/unsupported workspace (`cq register`) · `5` not found · `6` emit failed. All errors are structured JSON on stderr (`error.code/message/hint`) — never silent.
+
+Works from any git worktree of a registered repo (resolves to the parent workspace automatically). Known limitation: call sites inside `macro_rules!` *bodies* are invisible to `callers` (macro *arguments* are captured) — grep for that edge.
+
+---
+
 ## Skill Discovery
 
 If your runtime lacks first-class skill commands, read skills directly from disk.
@@ -560,9 +582,10 @@ Every status change gets a timestamped changelog entry at the bottom.
 2. **Standing Orders changes**: edit the relevant table row above; append new rules at the bottom with today's date in a note.
 3. **Add a new skill**: create `system/skills/<name>/SKILL.md` following the template in `system/templates/`.
 4. **Distribute to instances**: after editing AGENTS.md, copy the system block to any downstream hex instance's `AGENTS.md` via `hex upgrade` (or manually copy the system section between the markers).
-5. **Cut a version**: update `system/version.txt`, add an entry to `CHANGELOG.md`, commit locally.
-6. **Test before deploying**: run `bash tests/run.sh` if tests exist; then run `hex upgrade` in a test instance and verify it picks up the changes.
-7. **Per SO #5 (Communication gates)**: commit locally; never push without explicit approval.
+5. **Branch flow is GitFlow**: feature branches merge to `develop`, never to `main` directly. BOI specs targeting this repo MUST set `base_branch = "develop"` once the `develop` branch exists (bootstrap if missing: `git branch develop main && git push origin develop`).
+6. **Cut a release**: `hex release cut --level <patch|minor|major>` (or emit the `release.requested` event for the `oss-releaser` worker). Hotfix from `main`: `hex release cut --hotfix`. The ceremony runs the gate battery, bumps versions, merges to `main`, tags, back-merges, and pushes. Other repos are profile-driven via `$HEX_DIR/.hex/config/releases.toml` (example: `system/templates/releases.toml.example`). See `docs/versioning.md`.
+7. **Test before deploying**: run `bash tests/run.sh` if tests exist; then run `hex upgrade` in a test instance and verify it picks up the changes.
+8. **Per SO #5 (Communication gates)**: feature work pushes only with explicit approval; release pushes happen inside `hex release cut`.
 
 <!-- hex:system-end -->
 

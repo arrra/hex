@@ -52,7 +52,7 @@ generate inline-snapshot characterization tests using the following approach:
 For each module in the list:
 1. Read the module source to identify all public functions and classes (those not starting with `_`)
 2. For each public function/method, generate test cases covering:
-   - Typical/happy-path inputs
+   - Typical/success-path inputs
    - Boundary values: empty strings, empty lists, `None`, zero, negative numbers, large inputs, unicode
    - Expected exception types for invalid inputs (use `pytest.raises`)
 3. Use `snapshot()` from `inline_snapshot` for all return value assertions

@@ -185,6 +185,62 @@ enum Commands {
     /// hex-backup cron worker (04:00 daily).
     #[command(display_order = 14)]
     Backup,
+    /// GitFlow release ceremony (oss-releaser). One verb: `cut`.
+    #[command(display_order = 14)]
+    Release {
+        #[command(subcommand)]
+        command: ReleaseCommands,
+    },
+    /// Scan the repo for personalization violations (exit 0 clean, 1 found)
+    #[command(display_order = 14)]
+    Sanitize {
+        /// Print each matching line instead of per-category counts
+        #[arg(long)]
+        verbose: bool,
+    },
+    /// Git hook backends (invoked by the .githooks exec shims).
+    #[command(name = "git-guard", hide = true)]
+    GitGuard {
+        #[command(subcommand)]
+        command: GitGuardCommands,
+    },
+}
+
+#[derive(Subcommand)]
+enum ReleaseCommands {
+    /// Cut a GitFlow release: gate battery, bump, merge, tag, push (--dry-run stops after the battery)
+    Cut {
+        /// Bump tier off the latest semver tag: patch | minor | major (default patch)
+        #[arg(long)]
+        level: Option<String>,
+        /// Explicit next version X.Y.Z (wins over --level)
+        #[arg(long)]
+        version: Option<String>,
+        /// Cut hotfix/X.Y.Z from main instead of release/X.Y.Z from develop
+        #[arg(long)]
+        hotfix: bool,
+        /// Run the gate battery against the pinned SHA and stop (exit 0 all green / 1 blocked)
+        #[arg(long)]
+        dry_run: bool,
+        /// Skip the docker e2e gate (implies --skip-parity) — loud Skipped, never silent
+        #[arg(long)]
+        skip_e2e: bool,
+        /// Skip the codex-parity gate — loud Skipped, never silent
+        #[arg(long)]
+        skip_parity: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum GitGuardCommands {
+    /// Backend for the pre-push hook: reads the standard ref-update lines on
+    /// stdin and blocks a refs/heads/main push unless HEX_RELEASE_PIPELINE=1.
+    #[command(name = "pre-push")]
+    PrePush {
+        /// Hook args the shim forwards (remote name, remote URL) — unused.
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        args: Vec<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -265,10 +321,16 @@ enum LedgerCommands {
 
 #[derive(Subcommand)]
 enum ModuleCommands {
-    /// List every registered worker, its triggers, and its source
+    /// List every registered worker, its triggers, its source, and its
+    /// enabled/disabled state
     List,
-    /// Show one worker: triggers + source file
+    /// Show one worker: triggers + source file + enabled/disabled state
     Status { name: String },
+    /// Re-enable a disabled module (takes effect at its next fire; no restart)
+    Enable { name: String },
+    /// Disable a module: it stays scheduled, but every fire logs a loud skip
+    /// and does nothing (takes effect at its next fire; no restart)
+    Disable { name: String },
 }
 
 #[derive(Subcommand)]
@@ -863,15 +925,42 @@ fn main() {
         }
         Commands::Module { command } => match command {
             ModuleCommands::List => {
-                for w in hex::workers::registry() {
+                let hex_dir = get_hex_dir();
+                let disabled = match hex::module_state::disabled_set(&hex_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("hex module list: disabled-store unreadable ({e}) — states shown as enabled");
+                        Default::default()
+                    }
+                };
+                let registry = hex::workers::registry();
+                for w in &registry {
                     let (kind, _path) = module_source(&w.name);
-                    println!("{:<28} [{}]  {}", w.name, kind, trigger_summary(&w));
+                    let state = if disabled.contains(&w.name) { "  DISABLED" } else { "" };
+                    println!("{:<28} [{}]  {}{}", w.name, kind, trigger_summary(w), state);
+                }
+                // A disabled name with no registered worker is drift — loud.
+                for name in &disabled {
+                    if !registry.iter().any(|w| &w.name == name) {
+                        eprintln!(
+                            "hex module list: WARNING — '{name}' is in the disabled store but not in this binary's registry"
+                        );
+                    }
                 }
                 std::process::exit(0)
             }
             ModuleCommands::Status { name } => {
                 match hex::workers::registry().into_iter().find(|w| w.name == name) {
                     Some(w) => {
+                        let hex_dir = get_hex_dir();
+                        let state = match hex::module_state::disabled_set(&hex_dir) {
+                            Ok(s) if s.contains(&w.name) => "disabled",
+                            Ok(_) => "enabled",
+                            Err(e) => {
+                                eprintln!("hex module status: disabled-store unreadable ({e})");
+                                "unknown (store unreadable)"
+                            }
+                        };
                         let (kind, path) = module_source(&w.name);
                         println!("name:     {}", w.name);
                         println!("source:   {kind}");
@@ -879,6 +968,7 @@ fn main() {
                             println!("file:     {path}");
                         }
                         println!("triggers: {}", trigger_summary(&w));
+                        println!("state:    {state}");
                         std::process::exit(0)
                     }
                     None => {
@@ -886,6 +976,12 @@ fn main() {
                         std::process::exit(1)
                     }
                 }
+            }
+            ModuleCommands::Enable { name } => {
+                std::process::exit(module_set_enabled(&name, true));
+            }
+            ModuleCommands::Disable { name } => {
+                std::process::exit(module_set_enabled(&name, false));
             }
         },
         Commands::Ledger { command } => {
@@ -1081,6 +1177,76 @@ fn main() {
             GatekeeperCommands::Probe { store } => {
                 let hex_dir = get_hex_dir();
                 std::process::exit(hex::gatekeeper::cli_probe(&store, &hex_dir));
+            }
+        },
+        Commands::Release { command } => match command {
+            ReleaseCommands::Cut { level, version, hotfix, dry_run, skip_e2e, skip_parity } => {
+                // `version` wins over `level`; `level` defaults to patch —
+                // CutOptions owns that precedence, clap passes both raw.
+                let level = match level.as_deref().map(str::parse::<hex::release::BumpLevel>) {
+                    Some(Ok(l)) => Some(l),
+                    Some(Err(e)) => {
+                        eprintln!("hex release cut: {e}");
+                        std::process::exit(1);
+                    }
+                    None => None,
+                };
+                let opts = hex::release::CutOptions {
+                    level,
+                    version,
+                    hotfix,
+                    dry_run,
+                    skip: hex::release::SkipFlags { skip_e2e, skip_parity },
+                };
+                match hex::release::cut(&opts) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("hex release cut: {e:#}");
+                        std::process::exit(1);
+                    }
+                }
+            }
+        },
+        Commands::Sanitize { verbose } => {
+            // Scan the repo containing the current directory — the analog of
+            // the bash script scanning its own repo root.
+            let repo_root = match std::process::Command::new("git")
+                .args(["rev-parse", "--show-toplevel"])
+                .output()
+            {
+                Ok(out) if out.status.success() => {
+                    PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
+                }
+                _ => {
+                    eprintln!("hex sanitize: not inside a git repository — run from the repo to scan");
+                    std::process::exit(2);
+                }
+            };
+            match hex::sanitize::scan(&repo_root, verbose) {
+                Ok(violations) if violations.is_empty() => std::process::exit(0),
+                Ok(_) => std::process::exit(1),
+                Err(e) => {
+                    eprintln!("hex sanitize: {e:#}");
+                    std::process::exit(2);
+                }
+            }
+        }
+        Commands::GitGuard { command } => match command {
+            GitGuardCommands::PrePush { args: _ } => {
+                // The pre-push hook protocol: one "<local ref> <local sha>
+                // <remote ref> <remote sha>" line per ref on stdin.
+                let mut input = String::new();
+                if let Err(e) = io::Read::read_to_string(&mut io::stdin(), &mut input) {
+                    eprintln!("hex git-guard pre-push: reading stdin: {e}");
+                    std::process::exit(1);
+                }
+                match hex::release::git_guard_pre_push(&input) {
+                    Ok(()) => std::process::exit(0),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
+                    }
+                }
             }
         },
     }
@@ -1656,6 +1822,41 @@ fn module_source(name: &str) -> (&'static str, String) {
         }
     }
     ("builtin", String::new())
+}
+
+/// `hex module enable|disable <name>` — mutate the disabled store. The name
+/// must exist in THIS binary's registry (typo protection; a personal module
+/// missing from a non-overlay build errors here rather than silently storing
+/// a name nothing honors). Idempotent; takes effect at the module's next fire.
+fn module_set_enabled(name: &str, enable: bool) -> i32 {
+    let verb = if enable { "enable" } else { "disable" };
+    if !hex::workers::registry().iter().any(|w| w.name == name) {
+        eprintln!(
+            "hex module {verb}: no worker named '{name}' in this binary's registry (see: hex module list)"
+        );
+        return 1;
+    }
+    let hex_dir = get_hex_dir();
+    match hex::module_state::set_disabled(&hex_dir, name, !enable) {
+        Ok(true) => {
+            println!(
+                "hex module {verb}: '{name}' {} (effective at its next fire; no restart needed)",
+                if enable { "enabled" } else { "disabled" }
+            );
+            0
+        }
+        Ok(false) => {
+            println!(
+                "hex module {verb}: '{name}' already {}",
+                if enable { "enabled" } else { "disabled" }
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("hex module {verb}: {e} — fix or delete the state db first");
+            1
+        }
+    }
 }
 
 #[cfg(test)]

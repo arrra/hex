@@ -143,6 +143,14 @@ async fn run(workers: Vec<Worker>) -> i32 {
                         if stopping.load(Ordering::SeqCst) {
                             return Ok(serde_json::json!({ "skipped": "draining" }));
                         }
+                        // `hex module disable <name>` — read fresh per fire so
+                        // toggling needs no restart. Loud skip, never silent.
+                        if crate::module_state::is_disabled(&wname) {
+                            eprintln!(
+                                "hex harness serve: module '{wname}' is DISABLED — skipping fire (re-enable: hex module enable {wname})"
+                            );
+                            return Ok(serde_json::json!({ "skipped": "disabled" }));
+                        }
                         // Track this invocation so drain can wait for it. The
                         // guard decrements even if the handler panics.
                         let _guard = InflightGuard::enter(&inflight);

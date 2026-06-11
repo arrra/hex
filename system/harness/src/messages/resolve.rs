@@ -93,7 +93,7 @@ mod tests {
     }
 
     #[test]
-    fn happy_single_select_pins_choice() {
+    fn single_select_pins_choice() {
         let r = resolve_answer(
             &q(),
             &Answer {
