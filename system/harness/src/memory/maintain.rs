@@ -42,25 +42,23 @@ pub fn run_maintain(conn: &Connection, hex_dir: &Path, backfill_facts: bool) -> 
         }
     }
 
-    // 3. transcript_files hygiene: only relative raw/transcripts/*.md rows are
-    //    legitimate. Foreign rows (me/*.md etc.) and absolute-path duplicates
-    //    polluted the table (assessment, medium): fold dupes into the relative
-    //    row keeping the furthest watermark, then purge everything foreign.
-    let fold = conn.execute_batch(
-        "UPDATE transcript_files AS rel
-           SET last_offset = MAX(rel.last_offset,
-               COALESCE((SELECT MAX(abs.last_offset) FROM transcript_files abs
-                          WHERE abs.path LIKE '%/' || rel.path
-                            AND abs.path != rel.path), 0))
-         WHERE rel.path LIKE 'raw/transcripts/%.md';
-         DELETE FROM transcript_files
-          WHERE path NOT LIKE 'raw/transcripts/%.md'
-             OR path LIKE '/%';",
-    );
-    match fold {
-        Ok(()) => println!("maintain: transcript_files canonicalized"),
+    // 3. transcript_files hygiene. Canonical rows are keyed EXACTLY as the
+    //    live writer writes them: op_transcript_backstop (consolidate.rs)
+    //    registers the ABSOLUTE path under `<hex_dir>/raw/transcripts/`, and
+    //    distill::run_on_file opens that string directly. (Review-fix
+    //    2026-06-11: the original SQL treated RELATIVE rows as canonical and
+    //    deleted every absolute row — wiping the live watermarks weekly and
+    //    forcing a full-corpus re-distillation. Never purge rows the live
+    //    writer recreates.) Non-canonical transcript-shaped rows (relative
+    //    `raw/transcripts/…`, stale absolute prefixes) fold into their
+    //    canonical row keeping the furthest watermark; rows that are not
+    //    transcript-shaped at all (me/*.md etc.) are purged.
+    match transcript_files_hygiene(conn, hex_dir) {
+        Ok((folded, purged)) => println!(
+            "maintain: transcript_files canonicalized ({folded} folded, {purged} purged)"
+        ),
         Err(e) => {
-            eprintln!("maintain: transcript_files purge FAILED: {e}");
+            eprintln!("maintain: transcript_files hygiene FAILED: {e}");
             failures += 1;
         }
     }
@@ -76,6 +74,64 @@ pub fn run_maintain(conn: &Connection, hex_dir: &Path, backfill_facts: bool) -> 
     }
 
     failures
+}
+
+/// Canonicalize `transcript_files` to the form the live writer uses: the
+/// absolute path `<hex_dir>/raw/transcripts/<file>.md`. Returns
+/// `(folded, purged)` row counts.
+///
+/// - Canonical rows (absolute, directly under the current hex_dir's
+///   transcripts dir) are kept untouched — these are the live watermarks.
+/// - Other transcript-shaped rows (`…raw/transcripts/<file>.md` under any
+///   prefix: relative rows, stale absolute prefixes from an old hex_dir
+///   location) fold INTO the canonical row, keeping the furthest watermark,
+///   then the non-canonical row is deleted.
+/// - Rows that are not transcript-shaped (me/learnings.md etc.) are purged.
+fn transcript_files_hygiene(
+    conn: &Connection,
+    hex_dir: &Path,
+) -> rusqlite::Result<(usize, usize)> {
+    let canon_dir = hex_dir.join("raw").join("transcripts");
+    let canon_prefix = format!("{}/", canon_dir.display());
+
+    let rows: Vec<(String, i64)> = conn
+        .prepare("SELECT path, last_offset FROM transcript_files")?
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+
+    let mut folded = 0usize;
+    let mut purged = 0usize;
+    for (path, offset) in rows {
+        let is_canonical = path
+            .strip_prefix(&canon_prefix)
+            .is_some_and(|rest| rest.ends_with(".md") && !rest.contains('/'));
+        if is_canonical {
+            continue;
+        }
+        // Transcript-shaped under a non-canonical prefix? Extract the basename.
+        let basename = path
+            .rsplit_once("raw/transcripts/")
+            .map(|(_, base)| base)
+            .filter(|base| base.ends_with(".md") && !base.contains('/') && base.len() > 3);
+        if let Some(base) = basename {
+            let canon_path = canon_dir.join(base);
+            conn.execute(
+                "INSERT INTO transcript_files (path, last_offset)
+                 VALUES (?1, ?2)
+                 ON CONFLICT(path) DO UPDATE SET
+                     last_offset = MAX(transcript_files.last_offset, excluded.last_offset)",
+                rusqlite::params![canon_path.to_string_lossy(), offset],
+            )?;
+            folded += 1;
+        } else {
+            purged += 1;
+        }
+        conn.execute(
+            "DELETE FROM transcript_files WHERE path = ?1",
+            rusqlite::params![path],
+        )?;
+    }
+    Ok((folded, purged))
 }
 
 /// CLI entry: open memory.db, run the conn-level sweeps, optionally VACUUM,
@@ -129,9 +185,56 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    /// Plan Task 10 Step 1: maintenance must (a) sweep vec rows whose chunk is
-    /// gone and (b) canonicalize transcript_files — fold absolute-path dupes
-    /// into the relative row keeping the furthest watermark, purge foreign rows.
+    /// Review-fix 2026-06-11: hygiene must NEVER purge the rows the live
+    /// writer creates. `op_transcript_backstop` (consolidate.rs) registers
+    /// watermarks keyed by the ABSOLUTE path under
+    /// `<hex_dir>/raw/transcripts/`, and `distill::run_on_file` opens that
+    /// exact string. The original hygiene SQL deleted every absolute-path row
+    /// weekly, wiping the live watermarks and forcing a full-corpus
+    /// re-distillation after each maintain run.
+    #[test]
+    fn maintain_preserves_live_backstop_watermarks() {
+        use rusqlite::OptionalExtension;
+
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        std::fs::create_dir_all(hex_root.join(".hex")).unwrap();
+        let db_path = crate::memory::db_path(hex_root);
+        let conn = crate::memory::open_db(&db_path).unwrap();
+        crate::memory::index::init_db(&conn).unwrap();
+
+        // Register the watermark with the SAME primitive the backstop uses,
+        // keyed by the absolute path it derives from read_dir(hex_dir).
+        let abs = hex_root.join("raw").join("transcripts").join("live.md");
+        let abs_str = abs.to_str().unwrap();
+        crate::memory::distill::watermark::advance_offset(&conn, abs_str, 1234).unwrap();
+
+        let failures = run_maintain(&conn, hex_root, false);
+        assert_eq!(failures, 0, "no maintenance step may fail on this fixture");
+
+        let offset: Option<i64> = conn
+            .query_row(
+                "SELECT last_offset FROM transcript_files WHERE path = ?1",
+                [abs_str],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            offset,
+            Some(1234),
+            "the live backstop watermark (absolute path under hex_dir) must \
+             survive maintain — purging it forces full re-distillation"
+        );
+    }
+
+    /// Plan Task 10 Step 1, amended by review-fix 2026-06-11: maintenance must
+    /// (a) sweep vec rows whose chunk is gone and (b) canonicalize
+    /// transcript_files. The canonical key is the ABSOLUTE path under the
+    /// current `<hex_dir>/raw/transcripts/` (the form the live backstop
+    /// writes), NOT the relative form the original plan assumed — relative
+    /// rows and stale absolute prefixes fold into it keeping the furthest
+    /// watermark; foreign rows are purged.
     #[test]
     fn maintain_sweeps_orphan_vectors_and_canonicalizes_transcript_files() {
         let tmp = TempDir::new().unwrap();
@@ -148,8 +251,10 @@ mod tests {
         let v = vec![0.25f32; crate::memory::vector::EMBED_DIM];
         crate::memory::vector::insert_vec(&conn, 999, &v).unwrap();
 
-        // (b) transcript_files pollution: a foreign row, the legitimate
-        // relative row, and an absolute-path duplicate with a further offset.
+        // (b) transcript_files pollution: a foreign row, a relative row, and
+        // a stale-absolute-prefix duplicate with a further offset. Both
+        // transcript-shaped rows must fold into ONE canonical row keyed by
+        // the absolute path under THIS hex_dir.
         conn.execute_batch(
             "INSERT INTO transcript_files (path, last_offset) VALUES ('me/learnings.md', 7);
              INSERT INTO transcript_files (path, last_offset) VALUES ('raw/transcripts/a.md', 10);
@@ -181,7 +286,17 @@ mod tests {
             1,
             "exactly one canonical transcript_files row must remain, got {rows:?}"
         );
-        assert_eq!(rows[0].0, "raw/transcripts/a.md");
+        let canon = hex_root
+            .join("raw")
+            .join("transcripts")
+            .join("a.md")
+            .to_string_lossy()
+            .to_string();
+        assert_eq!(
+            rows[0].0, canon,
+            "canonical key is the absolute path under this hex_dir (the form \
+             the live backstop writes)"
+        );
         assert_eq!(rows[0].1, 99, "watermark must fold to the furthest offset");
     }
 }
