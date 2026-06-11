@@ -1,3 +1,4 @@
+pub mod claude_cli;
 pub mod consolidate;
 pub mod distill;
 pub mod embed;

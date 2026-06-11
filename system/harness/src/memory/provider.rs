@@ -96,11 +96,25 @@ pub fn generate(prompt: &str, model: &str, max_tokens: u32) -> Result<String, Pr
 
 /// Resolve LLM config for `use_case` (via `llm_config::resolve`) and call the
 /// underlying transport. This is the preferred entry point for new code —
-/// honors per-use-case overrides for model, max_tokens, base_url, and
-/// api_key_env from `$HEX_DIR/.hex/config/llm.toml`.
+/// honors per-use-case overrides for model, max_tokens, base_url,
+/// api_key_env, and (since spec Sbe8m4886) the `transport` seam from
+/// `$HEX_DIR/.hex/config/llm.toml`.
+///
+/// Transport branch: when `transport == "claude-cli"`, shells out to a
+/// headless `claude -p` process (see `memory::claude_cli`); otherwise the
+/// default HTTP path via `generate_inner`.
 pub fn generate_for(use_case: &str, prompt: &str) -> Result<String, ProviderError> {
     let cfg = crate::llm_config::resolve(use_case)
         .map_err(|e| ProviderError::Deferred(format!("llm_config::resolve({use_case}): {e:#}")))?;
+    if cfg.transport == crate::llm_config::TRANSPORT_CLAUDE_CLI {
+        return crate::memory::claude_cli::generate(
+            use_case,
+            prompt,
+            &cfg.model,
+            cfg.max_tokens,
+            cfg.claude_settings_file.as_deref(),
+        );
+    }
     generate_inner(
         prompt,
         &cfg.model,

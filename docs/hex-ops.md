@@ -141,9 +141,9 @@ natively in the Rust harness.
 
 Every LLM-backed feature in hex — memory distill (extract + judge), memory
 consolidate's operating-model audit, and the doctor provider health check —
-resolves its provider endpoint, model, max_tokens, and API key environment
-variable through a single registry. Defaults are baked in, so a fresh install
-with no config behaves exactly as today.
+resolves its provider endpoint, model, max_tokens, transport, and API key
+environment variable through a single registry. Defaults are baked in, so a
+fresh install with no config behaves exactly as today.
 
 To customize: copy `system/templates/llm.toml.example` to
 `$HEX_DIR/.hex/config/llm.toml` and edit. The example file documents the full
@@ -161,12 +161,48 @@ schema with commented-out defaults for each known use case.
 ### Resolution order (highest wins)
 
 1. **Env var** `HEX_LLM_MODEL_<USE_CASE_UPPER>` — e.g.
-   `HEX_LLM_MODEL_MEMORY_EXTRACT=anthropic/claude-opus-4.5`.
+   `HEX_LLM_MODEL_MEMORY_EXTRACT=anthropic/claude-opus-4.5` — and
+   `HEX_LLM_TRANSPORT_<USE_CASE_UPPER>` for the transport.
    `HEX_CONSOLIDATE_MODEL` is still honored as a back-compat alias for
    `consolidate_audit`.
 2. **`[use_cases.<name>]`** table in `llm.toml`.
 3. **`[defaults]`** table in `llm.toml`.
 4. **Built-in registry defaults** (the values above).
+
+### Transports
+
+Each use case resolves a `transport` (spec Sbe8m4886):
+
+- **`http`** (default for every use case) — POST to an OpenAI-compatible
+  chat/completions endpoint using `base_url` + `api_key_env`. Pre-existing
+  behavior; nothing changes unless you opt in below.
+- **`claude-cli`** — shell out to a headless `claude -p`, authenticated via
+  the **macOS login keychain** (explicitly NOT the daemon setup-token — see
+  decision `memory-cli-transport-no-setup-token-2026-06-10`). Useful for
+  shifting heavy use cases (`memory_extract`, `consolidate_audit`) onto a
+  Claude subscription instead of metered HTTP.
+
+How the `claude-cli` spawn works (`system/harness/src/memory/claude_cli.rs`,
+verified recipe 2026-06-10):
+
+- Runs `claude -p <prompt> --strict-mcp-config --mcp-config '{"mcpServers":{}}'
+  --no-session-persistence --setting-sources '' --disable-slash-commands
+  --settings <…> --model <…> --output-format json` from a **fresh tempdir**
+  (CLAUDE.md auto-discovery is cwd-based; a workspace cwd would slurp it).
+- Strips `CLAUDE_CODE_OAUTH_TOKEN`, `ANTHROPIC_API_KEY`, and
+  `ANTHROPIC_AUTH_TOKEN` from the child env so claude falls through to the
+  login keychain (any of them would shadow it).
+- `--settings` gets the optional `claude_settings_file` path, else a hardened
+  inline JSON (hooks/auto-memory/skills/plugins/telemetry all disabled).
+- Caveats: requires an unlocked login keychain in the `gui/<uid>` session
+  (see LaunchAgents above); **`max_tokens` is NOT enforceable** in this
+  transport (the CLI has no flag for it) — the cap is ignored; model ids are
+  mapped from registry form to CLI form (`anthropic/claude-sonnet-4.5` →
+  `claude-sonnet-4-5`), non-`anthropic/` ids pass through verbatim, so
+  CLI aliases like `"sonnet"` work directly in `llm.toml`.
+- Unknown transport value (file or env override) is a hard `resolve()` error;
+  a configured-but-missing `claude_settings_file` is a loud failure, never a
+  silent fallback (S6).
 
 ### Schema (excerpt)
 
@@ -175,10 +211,13 @@ schema with commented-out defaults for each known use case.
 model       = "anthropic/claude-sonnet-4.5"
 base_url    = "https://openrouter.ai/api/v1/chat/completions"
 api_key_env = "OPENROUTER_API_KEY"
+# transport = "http"                       # or "claude-cli"
 
 [use_cases.memory_extract]
 model      = "..."
 max_tokens = 16384
+# transport            = "claude-cli"      # keychain-authed headless claude -p
+# claude_settings_file = "/path/to/settings.json"  # optional --settings file
 ```
 
 `base_url` lets you point any use case at an OpenAI-compatible alternative
@@ -225,6 +264,27 @@ Lean default = `--bare --strict-mcp-config --mcp-config '{}'
 plugin sync, auto-memory, CLAUDE.md, and plugin/MCP/skill auto-discovery.
 The explicit empty strict mcp config ensures no MCP server loads even on a
 future Claude Code version where `--bare` covers less.
+
+### Bare-run auth injection
+
+`--bare` also skips **keychain reads** and ignores `CLAUDE_CODE_OAUTH_TOKEN`
+by design (upstream anthropics/claude-code#51047, closed not-planned) — so a
+bare run has no auth path on its own. The harness compensates at spawn time
+(`system/harness/src/worker/run.rs`, spec Sbe8m4886): when the resolved
+profile is `bare = true` and the harness has a non-empty
+`CLAUDE_CODE_OAUTH_TOKEN` (the daemon setup-token), it injects that value as
+`ANTHROPIC_AUTH_TOKEN` into **that child's env only** — `--bare` honors the
+bearer var, and the setup-token works as a bearer (verified 2026-06-10).
+
+Rules (decision `daemon-token-scoped-not-session-wide-2026-06-10`):
+
+- **Child-scoped only.** Never `launchctl setenv`, never process-wide
+  `std::env::set_var` — `ANTHROPIC_AUTH_TOKEN` sits at precedence level 2
+  and would shadow every other auth path if leaked session-wide.
+- **Bare + no token** → loud stderr warning ("bare claude run has no auth
+  path"), then spawn anyway (S6 — fail loud, not silent).
+- **Non-bare profiles never get the injection** — they must keep falling
+  through to the login keychain.
 
 ### Profile schema
 

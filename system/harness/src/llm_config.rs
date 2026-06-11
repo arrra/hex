@@ -5,9 +5,9 @@
 //! truth for which model, max_tokens, base_url, api_key_env, transport, and
 //! optional claude-cli settings file each LLM-backed hex use case should call.
 //! Resolution order (highest wins):
-//!   1. env var HEX_LLM_MODEL_<USE_CASE_UPPER>     (model only)
+//!   1. env vars HEX_LLM_MODEL_<USE_CASE_UPPER> (model only) and
+//!      HEX_LLM_TRANSPORT_<USE_CASE_UPPER> (transport only)
 //!      - HEX_CONSOLIDATE_MODEL is honored as an alias for consolidate_audit
-//!      env var HEX_LLM_TRANSPORT_<USE_CASE_UPPER> (transport only)
 //!   2. [use_cases.<name>] in $HEX_DIR/.hex/config/llm.toml
 //!   3. [defaults]            in $HEX_DIR/.hex/config/llm.toml
 //!   4. built-in registry defaults below
@@ -32,10 +32,11 @@ pub struct ResolvedLlm {
     /// slice oversize spans. None means "no input cap configured".
     pub max_input_tokens: Option<u32>,
     /// Transport seam for this use case. Always one of:
-    ///   * "http"       — call an OpenAI-compatible HTTP endpoint (default,
-    ///                    matches every deployment from before spec Sbe8m4886).
+    ///   * "http" — call an OpenAI-compatible HTTP endpoint (default,
+    ///     matches every deployment from before spec Sbe8m4886).
     ///   * "claude-cli" — shell out to a headless `claude -p` process,
-    ///                    authenticated via the macOS login keychain.
+    ///     authenticated via the macOS login keychain.
+    ///
     /// Unknown values cause `resolve()` to return a loud error.
     pub transport: String,
     /// Optional path to a `--settings` JSON file for the `claude-cli`
@@ -56,7 +57,7 @@ fn known_transports() -> &'static [&'static str] {
 /// short tag included in the error message so the operator can find the
 /// offending knob fast (S6 — no quiet failures).
 fn validate_transport(value: &str, source: &str) -> Result<()> {
-    if known_transports().iter().any(|t| *t == value) {
+    if known_transports().contains(&value) {
         Ok(())
     } else {
         Err(anyhow::anyhow!(
