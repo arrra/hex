@@ -905,7 +905,7 @@ fn main() {
         Commands::Module { command } => match command {
             ModuleCommands::List => {
                 let hex_dir = get_hex_dir();
-                let disabled = match hex::module_state::load(&hex_dir) {
+                let disabled = match hex::module_state::disabled_set(&hex_dir) {
                     Ok(s) => s,
                     Err(e) => {
                         eprintln!("hex module list: disabled-store unreadable ({e}) — states shown as enabled");
@@ -932,7 +932,7 @@ fn main() {
                 match hex::workers::registry().into_iter().find(|w| w.name == name) {
                     Some(w) => {
                         let hex_dir = get_hex_dir();
-                        let state = match hex::module_state::load(&hex_dir) {
+                        let state = match hex::module_state::disabled_set(&hex_dir) {
                             Ok(s) if s.contains(&w.name) => "disabled",
                             Ok(_) => "enabled",
                             Err(e) => {
@@ -1816,35 +1816,23 @@ fn module_set_enabled(name: &str, enable: bool) -> i32 {
         return 1;
     }
     let hex_dir = get_hex_dir();
-    let mut disabled = match hex::module_state::load(&hex_dir) {
-        Ok(s) => s,
-        Err(e) => {
-            eprintln!("hex module {verb}: {e} — refusing to overwrite an unreadable store; fix or delete it first");
-            return 1;
-        }
-    };
-    let changed = if enable {
-        disabled.remove(name)
-    } else {
-        disabled.insert(name.to_string())
-    };
-    if !changed {
-        println!(
-            "hex module {verb}: '{name}' already {}",
-            if enable { "enabled" } else { "disabled" }
-        );
-        return 0;
-    }
-    match hex::module_state::save(&hex_dir, &disabled) {
-        Ok(()) => {
+    match hex::module_state::set_disabled(&hex_dir, name, !enable) {
+        Ok(true) => {
             println!(
                 "hex module {verb}: '{name}' {} (effective at its next fire; no restart needed)",
                 if enable { "enabled" } else { "disabled" }
             );
             0
         }
+        Ok(false) => {
+            println!(
+                "hex module {verb}: '{name}' already {}",
+                if enable { "enabled" } else { "disabled" }
+            );
+            0
+        }
         Err(e) => {
-            eprintln!("hex module {verb}: {e}");
+            eprintln!("hex module {verb}: {e} — fix or delete the state db first");
             1
         }
     }
