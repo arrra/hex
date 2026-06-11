@@ -915,6 +915,16 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
         }
     }
 
+    // Backfill: chunks whose embed failed in an earlier run stay FTS5-only
+    // FOREVER unless their file changes (assessment: 1,060 chunks / 7.1%
+    // invisible to semantic recall). Re-embed up to a per-run cap here.
+    const BACKFILL_CAP: usize = 500;
+    match backfill_missing_vectors(&conn, &embedder, BACKFILL_CAP) {
+        Ok(0) => {}
+        Ok(n) => println!("index: backfilled {n} missing chunk vector(s)"),
+        Err(e) => eprintln!("index: vector backfill FAILED: {e}"),
+    }
+
     set_metadata(&conn, "last_run", &Local::now().to_rfc3339());
     set_metadata(
         &conn,
@@ -930,6 +940,46 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
     );
 
     0
+}
+
+/// Re-embed chunks that have FTS5 rows but no `vec_chunks` vector (an embed
+/// failure in an earlier run). Capped per run so a large gap burns down over
+/// successive 15-min cron ticks without blowing the run's time budget.
+/// Mirrors the per-file embed block in `index_file` (EMBED_BATCH=8,
+/// `embed_documents`, `insert_vec`): failures are loud but non-fatal.
+fn backfill_missing_vectors(
+    conn: &Connection,
+    embedder: &super::embed::Embedder,
+    cap: usize,
+) -> rusqlite::Result<usize> {
+    let mut stmt = conn.prepare(
+        "SELECT c.rowid, c.content FROM chunks c
+         WHERE c.rowid NOT IN (SELECT rowid FROM vec_chunks)
+         LIMIT ?1",
+    )?;
+    let rows: Vec<(i64, String)> = stmt
+        .query_map([cap as i64], |r| Ok((r.get(0)?, r.get(1)?)))?
+        .filter_map(|r| r.ok())
+        .collect();
+    let mut done = 0;
+    for batch in rows.chunks(8) {
+        let texts: Vec<String> = batch.iter().map(|(_, c)| c.clone()).collect();
+        match embedder.embed_documents(&texts) {
+            Ok(vecs) if vecs.len() == batch.len() => {
+                for ((rowid, _), vec) in batch.iter().zip(vecs) {
+                    super::vector::insert_vec(conn, *rowid, &vec)?;
+                    done += 1;
+                }
+            }
+            Ok(v) => eprintln!(
+                "index backfill: batch len mismatch ({} != {})",
+                v.len(),
+                batch.len()
+            ),
+            Err(e) => eprintln!("index backfill: embed batch failed: {e}"),
+        }
+    }
+    Ok(done)
 }
 
 // ── Stats ─────────────────────────────────────────────────────────────────────

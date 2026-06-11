@@ -13,6 +13,13 @@ pub struct StatsReport {
     /// rows where the on-disk file is larger than the recorded watermark.
     /// Lets operators watch the distill backlog burn down slice-by-slice.
     pub backfill_pending_bytes: i64,
+    /// Chunks with FTS5 rows but no `vec_chunks` vector — invisible to
+    /// semantic recall until the index backfill re-embeds them. `-1` = the
+    /// gap query itself failed (must be visible, not a silent zero).
+    pub unembedded_chunks: i64,
+    /// `vec_chunks` rows whose backing chunk is gone (swept by
+    /// `hex memory maintain`). `-1` = query failed.
+    pub orphan_vectors: i64,
 }
 
 pub fn run(hex_root: &Path, json: bool) -> i32 {
@@ -130,6 +137,17 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
         total
     };
 
+    // Vector-gap surfacing: -1 (query failed) printing is intentional — a
+    // broken gap-query must be visible, not a silent zero.
+    let unembedded_chunks: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM chunks WHERE rowid NOT IN (SELECT rowid FROM vec_chunks)",
+        [], |r| r.get(0),
+    ).unwrap_or(-1);
+    let orphan_vectors: i64 = conn.query_row(
+        "SELECT COUNT(*) FROM vec_chunks WHERE rowid NOT IN (SELECT rowid FROM chunks)",
+        [], |r| r.get(0),
+    ).unwrap_or(-1);
+
     Ok(StatsReport {
         files_indexed,
         total_facts,
@@ -139,6 +157,8 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
         last_consolidated,
         schema_version,
         backfill_pending_bytes,
+        unembedded_chunks,
+        orphan_vectors,
     })
 }
 
@@ -148,6 +168,14 @@ fn print_table(r: &StatsReport) {
     println!(
         "Files indexed:     {}",
         r.files_indexed
+    );
+    println!(
+        "Unembedded chunks: {}   (semantic recall misses these — index backfills ≤500/run)",
+        r.unembedded_chunks
+    );
+    println!(
+        "Orphan vectors:    {}   (swept by hex memory maintain)",
+        r.orphan_vectors
     );
     println!("Facts (live):      {}", r.total_facts);
     println!(
@@ -213,6 +241,8 @@ fn print_json(r: &StatsReport) {
         "schema_version": r.schema_version,
         "last_consolidated": r.last_consolidated,
         "backfill_pending_bytes": r.backfill_pending_bytes,
+        "unembedded_chunks": r.unembedded_chunks,
+        "orphan_vectors": r.orphan_vectors,
         "top_predicates": predicates,
         "top_subjects": subjects,
     });
@@ -354,6 +384,45 @@ mod tests {
             report.backfill_pending_bytes, 600,
             "stats must compute backfill_pending_bytes = sum(file_size - last_offset) \
              over transcript_files; expected 600 (1000-byte file at offset 400)"
+        );
+    }
+
+    /// Vector-gap surfacing (Task 9): chunks without a vector are invisible to
+    /// semantic recall; orphan vectors are dead weight. Both must show up in
+    /// stats instead of staying silent.
+    #[test]
+    fn stats_reports_unembedded_chunks_and_orphan_vectors() {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        std::fs::create_dir_all(hex_root.join(".hex")).unwrap();
+
+        let db_path = super::super::db_path(hex_root);
+        let conn = super::super::open_db(&db_path).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::index::init_db(&conn).unwrap();
+
+        // 3 chunks; only the first gets a vector → 2 unembedded.
+        for i in 0..3 {
+            conn.execute(
+                "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
+                 VALUES ('1', 'me/test.md', 'h', ?1, 'chunk content', 0)",
+                rusqlite::params![i.to_string()],
+            )
+            .unwrap();
+        }
+        let v = vec![0.1f32; crate::memory::vector::EMBED_DIM];
+        crate::memory::vector::insert_vec(&conn, 1, &v).unwrap();
+        // 1 orphan vector: rowid 99 has no chunks row.
+        crate::memory::vector::insert_vec(&conn, 99, &v).unwrap();
+
+        let report = gather(&conn, &db_path).unwrap();
+        assert_eq!(
+            report.unembedded_chunks, 2,
+            "chunks without vectors must be counted (semantic recall misses them)"
+        );
+        assert_eq!(
+            report.orphan_vectors, 1,
+            "vectors without a backing chunk must be counted"
         );
     }
 

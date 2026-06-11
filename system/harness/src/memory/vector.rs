@@ -61,7 +61,27 @@ pub fn delete_vecs(conn: &Connection, rowids: &[i64]) -> rusqlite::Result<()> {
     Ok(())
 }
 
+/// vec0 FLOAT[768] MATCH distance is L2; fastembed nomic vectors are
+/// normalized, so d² = 2(1-cos): d=1.0 ≈ cos 0.5, d=1.15 ≈ cos 0.34.
+/// Beyond 1.15 a "neighbor" shares almost nothing with the query — garbage
+/// and empty-ish queries previously returned confident top-k (assessment
+/// finding: no relevance floor). Tune with HEX_KNN_MAX_DISTANCE if needed.
+pub const KNN_MAX_DISTANCE: f64 = 1.15;
+
+pub fn filter_by_distance(hits: Vec<(i64, f64)>, max: f64) -> Vec<(i64, f64)> {
+    hits.into_iter().filter(|(_, d)| *d <= max).collect()
+}
+
+fn max_distance() -> f64 {
+    std::env::var("HEX_KNN_MAX_DISTANCE")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(KNN_MAX_DISTANCE)
+}
+
 /// K-nearest-neighbour search. Returns (chunk_rowid, distance), nearest first.
+/// Hits beyond the relevance floor (see [`KNN_MAX_DISTANCE`]) are dropped so
+/// every caller gets the floor.
 pub fn knn(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(i64, f64)>> {
     let mut stmt = conn.prepare(
         "SELECT rowid, distance FROM vec_chunks \
@@ -70,12 +90,19 @@ pub fn knn(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(
     let rows = stmt.query_map(params![f32s_to_le_bytes(query), k as i64], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
     })?;
-    rows.collect()
+    let hits: Vec<(i64, f64)> = rows.collect::<rusqlite::Result<_>>()?;
+    Ok(filter_by_distance(hits, max_distance()))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn distance_floor_filters() {
+        let hits = vec![(1i64, 0.4f64), (2, 0.9), (3, 1.4)];
+        assert_eq!(filter_by_distance(hits, KNN_MAX_DISTANCE), vec![(1, 0.4), (2, 0.9)]);
+    }
 
     #[test]
     fn sqlite_vec_loads() {
