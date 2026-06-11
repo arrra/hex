@@ -4,6 +4,7 @@ pub mod distill;
 pub mod embed;
 pub mod index;
 pub mod maintain;
+pub mod maintain_facts;
 pub mod parse_transcripts;
 pub mod predicates;
 pub mod provider;

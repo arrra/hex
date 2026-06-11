@@ -6,21 +6,17 @@
 use rusqlite::Connection;
 use std::path::Path;
 
-/// Stub for the facts-embedding backfill — real impl: Task 11
-/// (`maintain_facts::backfill` populates facts_vec). Kept callable now so the
-/// `--backfill-facts` flag parses and the cron argv is stable before Task 11.
-fn backfill_facts_stub(_conn: &Connection) -> rusqlite::Result<usize> {
-    Ok(0)
-}
-
 /// Conn-level maintenance core: orphan-vector sweep, FTS5 optimize,
 /// transcript_files hygiene, optional facts backfill. Extracted from [`run`]
-/// so tests can drive it against a tempdir DB without a hex_dir.
+/// so tests can drive it against a tempdir DB. `hex_dir` resolves the
+/// embedder cache and is only touched when `backfill_facts` is true with
+/// pending facts — tests passing `backfill_facts = false` can hand in any
+/// path.
 ///
 /// Every step is loud-but-continue (Standing Order S6): a failed sweep must
 /// not abort the remaining repairs, so this returns the failed-step count
 /// instead of a `Result` (an early `?` would lose the tally `run` reports).
-pub fn run_maintain(conn: &Connection, backfill_facts: bool) -> usize {
+pub fn run_maintain(conn: &Connection, hex_dir: &Path, backfill_facts: bool) -> usize {
     let mut failures = 0;
 
     // 1. Orphan vector sweep (vec rows whose chunk was deleted pre-fix).
@@ -70,8 +66,7 @@ pub fn run_maintain(conn: &Connection, backfill_facts: bool) -> usize {
     }
 
     if backfill_facts {
-        // real impl: Task 11
-        match backfill_facts_stub(conn) {
+        match super::maintain_facts::backfill(conn, hex_dir) {
             Ok(n) => println!("maintain: embedded {n} fact(s)"),
             Err(e) => {
                 eprintln!("maintain: facts backfill FAILED: {e}");
@@ -94,7 +89,7 @@ pub fn run(hex_dir: &Path, vacuum: bool, backfill_facts: bool) -> i32 {
             return 1;
         }
     };
-    let mut failures = run_maintain(&conn, backfill_facts);
+    let mut failures = run_maintain(&conn, hex_dir, backfill_facts);
 
     // 4. VACUUM last (rebuilds the file: dead vec slots + freelist reclaimed;
     //    assessment: 305MB file, ~100MB live).
@@ -162,7 +157,7 @@ mod tests {
         )
         .unwrap();
 
-        let failures = run_maintain(&conn, false);
+        let failures = run_maintain(&conn, hex_root, false);
         assert_eq!(failures, 0, "no maintenance step may fail on this fixture");
 
         let orphans: i64 = conn
