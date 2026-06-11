@@ -315,10 +315,16 @@ enum LedgerCommands {
 
 #[derive(Subcommand)]
 enum ModuleCommands {
-    /// List every registered worker, its triggers, and its source
+    /// List every registered worker, its triggers, its source, and its
+    /// enabled/disabled state
     List,
-    /// Show one worker: triggers + source file
+    /// Show one worker: triggers + source file + enabled/disabled state
     Status { name: String },
+    /// Re-enable a disabled module (takes effect at its next fire; no restart)
+    Enable { name: String },
+    /// Disable a module: it stays scheduled, but every fire logs a loud skip
+    /// and does nothing (takes effect at its next fire; no restart)
+    Disable { name: String },
 }
 
 #[derive(Subcommand)]
@@ -898,15 +904,42 @@ fn main() {
         }
         Commands::Module { command } => match command {
             ModuleCommands::List => {
-                for w in hex::workers::registry() {
+                let hex_dir = get_hex_dir();
+                let disabled = match hex::module_state::load(&hex_dir) {
+                    Ok(s) => s,
+                    Err(e) => {
+                        eprintln!("hex module list: disabled-store unreadable ({e}) — states shown as enabled");
+                        Default::default()
+                    }
+                };
+                let registry = hex::workers::registry();
+                for w in &registry {
                     let (kind, _path) = module_source(&w.name);
-                    println!("{:<28} [{}]  {}", w.name, kind, trigger_summary(&w));
+                    let state = if disabled.contains(&w.name) { "  DISABLED" } else { "" };
+                    println!("{:<28} [{}]  {}{}", w.name, kind, trigger_summary(w), state);
+                }
+                // A disabled name with no registered worker is drift — loud.
+                for name in &disabled {
+                    if !registry.iter().any(|w| &w.name == name) {
+                        eprintln!(
+                            "hex module list: WARNING — '{name}' is in the disabled store but not in this binary's registry"
+                        );
+                    }
                 }
                 std::process::exit(0)
             }
             ModuleCommands::Status { name } => {
                 match hex::workers::registry().into_iter().find(|w| w.name == name) {
                     Some(w) => {
+                        let hex_dir = get_hex_dir();
+                        let state = match hex::module_state::load(&hex_dir) {
+                            Ok(s) if s.contains(&w.name) => "disabled",
+                            Ok(_) => "enabled",
+                            Err(e) => {
+                                eprintln!("hex module status: disabled-store unreadable ({e})");
+                                "unknown (store unreadable)"
+                            }
+                        };
                         let (kind, path) = module_source(&w.name);
                         println!("name:     {}", w.name);
                         println!("source:   {kind}");
@@ -914,6 +947,7 @@ fn main() {
                             println!("file:     {path}");
                         }
                         println!("triggers: {}", trigger_summary(&w));
+                        println!("state:    {state}");
                         std::process::exit(0)
                     }
                     None => {
@@ -921,6 +955,12 @@ fn main() {
                         std::process::exit(1)
                     }
                 }
+            }
+            ModuleCommands::Enable { name } => {
+                std::process::exit(module_set_enabled(&name, true));
+            }
+            ModuleCommands::Disable { name } => {
+                std::process::exit(module_set_enabled(&name, false));
             }
         },
         Commands::Ledger { command } => {
@@ -1761,6 +1801,53 @@ fn module_source(name: &str) -> (&'static str, String) {
         }
     }
     ("builtin", String::new())
+}
+
+/// `hex module enable|disable <name>` — mutate the disabled store. The name
+/// must exist in THIS binary's registry (typo protection; a personal module
+/// missing from a non-overlay build errors here rather than silently storing
+/// a name nothing honors). Idempotent; takes effect at the module's next fire.
+fn module_set_enabled(name: &str, enable: bool) -> i32 {
+    let verb = if enable { "enable" } else { "disable" };
+    if !hex::workers::registry().iter().any(|w| w.name == name) {
+        eprintln!(
+            "hex module {verb}: no worker named '{name}' in this binary's registry (see: hex module list)"
+        );
+        return 1;
+    }
+    let hex_dir = get_hex_dir();
+    let mut disabled = match hex::module_state::load(&hex_dir) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("hex module {verb}: {e} — refusing to overwrite an unreadable store; fix or delete it first");
+            return 1;
+        }
+    };
+    let changed = if enable {
+        disabled.remove(name)
+    } else {
+        disabled.insert(name.to_string())
+    };
+    if !changed {
+        println!(
+            "hex module {verb}: '{name}' already {}",
+            if enable { "enabled" } else { "disabled" }
+        );
+        return 0;
+    }
+    match hex::module_state::save(&hex_dir, &disabled) {
+        Ok(()) => {
+            println!(
+                "hex module {verb}: '{name}' {} (effective at its next fire; no restart needed)",
+                if enable { "enabled" } else { "disabled" }
+            );
+            0
+        }
+        Err(e) => {
+            eprintln!("hex module {verb}: {e}");
+            1
+        }
+    }
 }
 
 #[cfg(test)]
