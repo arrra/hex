@@ -21,6 +21,7 @@ pub mod llm_config;
 pub mod memory;
 pub mod messages;
 pub mod ops;
+pub mod reaper;
 pub mod registry;
 pub mod telemetry;
 pub mod types;

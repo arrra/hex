@@ -106,6 +106,37 @@ fn settings_arg_value(claude_settings_file: Option<&str>) -> Result<String, Prov
     }
 }
 
+/// RAII pidfile for a spawned `claude -p` child. The child runs in its own
+/// process group (see `build_command`), so if the harness's group is killed
+/// (launchd stop) the child survives, orphaned to PID 1, with no timeout
+/// enforcement left. The pidfile makes it findable by `reaper::sweep` at the
+/// next serve startup; Drop removes the file on EVERY exit path (success,
+/// timeout-kill, error) so live runs never leave stale entries.
+struct PidfileGuard(Option<std::path::PathBuf>);
+
+impl PidfileGuard {
+    fn new(child_pid: u32) -> Self {
+        let p = std::env::var("HEX_DIR").ok().map(|d| {
+            let dir = std::path::Path::new(&d).join(".hex/run/distill");
+            let _ = std::fs::create_dir_all(&dir);
+            let p = dir.join(format!("distill-{child_pid}.pid"));
+            if let Err(e) = std::fs::write(&p, b"") {
+                eprintln!("claude_cli: pidfile write failed ({}): {e}", p.display());
+            }
+            p
+        });
+        PidfileGuard(p)
+    }
+}
+
+impl Drop for PidfileGuard {
+    fn drop(&mut self) {
+        if let Some(p) = self.0.take() {
+            let _ = std::fs::remove_file(p);
+        }
+    }
+}
+
 /// Generate a completion via the `claude -p` headless transport.
 ///
 /// `use_case` flows through to the cost-telemetry log line only.
@@ -129,6 +160,9 @@ pub fn generate(
     let child = build_command(&args, cwd_guard.path())
         .spawn()
         .map_err(|e| ProviderError::Upstream(format!("spawn `claude` failed: {e}")))?;
+
+    // Pidfile so reaper::sweep can find this child if WE die before it does.
+    let _pidfile = PidfileGuard::new(child.id());
 
     let (status, stdout, stderr) = run_with_timeout(child, DEFAULT_TIMEOUT)?;
 
@@ -472,7 +506,10 @@ mod tests {
         model: &str,
         claude_settings_file: Option<&str>,
     ) -> Result<String, ProviderError> {
-        let _g = crate::telemetry::test_support::lock_env();
+        // isolate() (not lock_env()): generate() now writes a PidfileGuard
+        // under $HEX_DIR/.hex/run/distill — point HEX_DIR at a tempdir so the
+        // test never touches a real workspace.
+        let (_hex_tmp, _g) = crate::telemetry::test_support::isolate();
         let old_path = std::env::var("PATH").ok();
         // Prepend the shim dir so `Command::new("claude")` resolves to it.
         let new_path = match &old_path {
