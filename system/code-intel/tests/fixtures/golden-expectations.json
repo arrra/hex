@@ -5,7 +5,10 @@
     "generated_with": "rust-analyzer 0.0.0 (c5d30e2331 2026-05-31), `rust-analyzer scip .` run on a git-initialized copy of golden-crate; occurrences dumped via the scip 0.5 protobuf bindings",
     "generated_at": "2026-06-11",
     "refs_count_includes_definition": true,
-    "callers_gate_note": "Per spec §8 callers gate: call sites expanded from macro_rules! bodies do NOT produce an occurrence of the callee in the rust-analyzer SCIP emit (verified: macro_caller's body references only ops/call_double! — there is no ops/double() occurrence inside macro_caller). Entries marked macro_case=expected_but_gated are ground-truth callers that the index cannot see; assert them only per tests/fixtures/callers-gate.json."
+    "callers_gate_note": "Per spec §8 callers gate: call sites expanded from macro_rules! bodies do NOT produce an occurrence of the callee in the rust-analyzer SCIP emit (verified: macro_caller's body references only ops/call_double! — there is no ops/double() occurrence inside macro_caller). Entries marked macro_case=expected_but_gated are ground-truth callers that the index cannot see; assert them only per tests/fixtures/callers-gate.json.",
+    "corrections": [
+      "2026-06-11 (Task 10): file_outlines were missing each file's own module symbol — rust-analyzer emits a kind=29 (Module) definition occurrence at 1:1 of every file (crate/ for lib.rs, ops/ and shapes/ for the inline-file modules). Verified against a fresh `rust-analyzer scip .` emit ingested through the real pipeline; prepended crate/ops/shapes to the three outlines."
+    ]
   },
   "symbols": [
     {
@@ -163,9 +166,9 @@
     }
   ],
   "file_outlines": {
-    "src/shapes.rs": ["Area", "area", "Circle", "r", "area", "Sq", "s", "area", "total_area"],
-    "src/ops.rs": ["double", "generic_max", "call_double", "macro_caller", "fmt_user"],
-    "src/lib.rs": ["top_level_fn"]
+    "src/shapes.rs": ["shapes", "Area", "area", "Circle", "r", "area", "Sq", "s", "area", "total_area"],
+    "src/ops.rs": ["ops", "double", "generic_max", "call_double", "macro_caller", "fmt_user"],
+    "src/lib.rs": ["crate", "top_level_fn"]
   },
   "search": [
     { "query": "gener", "must_include": ["generic_max"] },
