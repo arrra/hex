@@ -36,10 +36,10 @@ login session — the gui LaunchAgent's only downside ("dies on logout") is moot
 ### Operational gotchas (learned 2026-06-05)
 
 - **Bootstrap only from a real GUI login session.** `launchctl bootstrap` returns
-  `Input/output error` (errno 5) when run from a *detached* session — inside **tmux**,
-  under the **Happy daemon**, or over plain **SSH** — because those carry their own audit
-  session (`asid`), not the Aqua login session. The sandboxed agent shell cannot bootstrap
-  either. Run it from **Terminal.app at the Mac console or via Screen Sharing**.
+  `Input/output error` (errno 5) when run from a *detached* session — inside **tmux** or
+  over plain **SSH** — because those carry their own audit session (`asid`), not the
+  Aqua login session. The sandboxed agent shell cannot bootstrap either. Run it from
+  **Terminal.app at the Mac console or via Screen Sharing**.
 - **Reload = `bootout` THEN `bootstrap`.** `bootstrap` alone fails on an already-loaded
   service. After editing a plist:
   ```

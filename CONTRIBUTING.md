@@ -35,7 +35,7 @@ CI, the install isn't tested.
 ### What counts as sufficient coverage
 
 A new E2E entry must cover at minimum:
-1. The happy path (installs/runs correctly)
+1. The success path (installs/runs correctly)
 2. One failure mode (e.g., missing binary, stale symlink, wrong version)
 
 See `tests/core-e2e/suites/test-boi-install.sh` and `test-boi-upgrade.sh` as reference
