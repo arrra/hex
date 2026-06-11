@@ -43,6 +43,34 @@ One consolidated pass over the memory pipeline (reference: personal-instance ass
   hook recall path stays FTS-only by design (no embedder cold-load inside
   the UserPromptSubmit latency budget).
 
+## [2026-06-11] — sanitize gate: banned-strings category + idiom re-purge
+
+The sunset third-party session manager's name has crept back into the tree
+four times since its removal. The release-cut sanitize gate is the chokepoint
+that makes the purge permanent.
+
+### Added
+- **`banned string: sunset session-manager name`** category in
+  `system/harness/src/sanitize.rs::registry()`: case-insensitive substring
+  match over every file type — docs and tests deliberately included (the
+  recurring hits live there) — with only the common exclude dirs and filters.
+  The pattern encodes the word via a regex hex escape so the scanner source
+  never contains the literal it bans; test fixtures build it by concatenation
+  for the same reason.
+
+### Changed
+- Re-purged the seven idiom hits current on develop: the recurring "…-path"
+  idiom reworded to "success path" in docs (`docs/code-intel/SPEC-A2.md`, two
+  superpowers plans), code comments (`system/code-intel/src/daemon.rs`,
+  `tests/golden_live.rs`), and test fn names (`system/code-intel/tests/cli.rs`
+  `def_*`/`other_verbs_*` renamed to the `success_path_exit_0` form, with the
+  matching plan snippet updated to keep doc↔code consistent).
+- `COMMON_EXCLUDE_DIRS` now prunes `.fastembed_cache/` (gitignored local
+  embedding-model cache; its tokenizer vocab blobs contain arbitrary English
+  words, which extension-less full-tree checks would false-positive on).
+- `docs/architecture/README.md` de-personalized one instance-name reference
+  (new arrival on develop; flagged by the existing identifier category).
+
 ## [2026-06-11] — remove session title-nudge hook (third-party mobile session manager sunset 2026-06-09)
 
 The third-party mobile session manager (mobile control plane) was sunset

@@ -59,7 +59,8 @@ queued follow-up, together with the staleness gate:
 
 **5. Scope.** This registry covers foundation-shipped subsystems (`system/`). Personal
 instances receive these docs via `/hex-upgrade`; instance-specific docs (e.g.
-mrap-hex's `hex-essence.md`) live in the instance and are not registered here.
+a personal instance's `hex-essence.md`) live in the instance and are not
+registered here.
 
 ## Template
 

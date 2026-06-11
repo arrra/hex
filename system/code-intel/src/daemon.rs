@@ -235,7 +235,7 @@ pub fn dispatch<B: LiveBackend>(line: &str, pool: &Pool<B>) -> Reply {
 
 /// Resolve a request's worktree to its canonical root. Nonexistent or
 /// relative paths are rejected loudly (SPEC-A2 §2: one instance == one real
-/// worktree) — boxed Reply keeps the happy path lean.
+/// worktree) — boxed Reply keeps the success path lean.
 fn resolve_worktree(id: u64, worktree: &str) -> Result<PathBuf, Box<Reply>> {
     let path = Path::new(worktree);
     if !path.is_absolute() {
