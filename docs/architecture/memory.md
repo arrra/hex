@@ -1,5 +1,5 @@
 <!--
-verified-against: f6d0cfb3 (2026-06-11)
+verified-against: 3c8f6b14 (2026-06-11)
 source-paths: system/harness/src/memory/, system/harness/src/consolidate.rs, system/harness/src/hook/capture.rs, system/harness/src/hook/user_prompt_submit.rs, system/harness/src/modules/memory_maintenance.worker.rs, system/harness/src/modules/backup.worker.rs
 -->
 # Memory Pipeline Architecture
@@ -96,7 +96,8 @@ most one budget-capped slice per invocation** from the watermark forward:
 - Slice → LLM **extract** (S/P/O candidates; transport per `.hex/config/llm.toml` —
   the **code default is `http`** (OpenAI-compatible, OpenRouter via
   `OPENROUTER_API_KEY`); `claude-cli` with keychain auth is an opt-in override the
-  operating instance uses) → **deterministic dedup** (exact S/P/O match → NOOP, plain
+  operating instance uses — the prompt streams to `claude -p` on **stdin**, never
+  argv, which is capped at 128 KB per string on Linux: mrap/hex#7) → **deterministic dedup** (exact S/P/O match → NOOP, plain
   SQL, no LLM) → LLM **judge** for the ambiguous remainder (ADD/UPDATE/FLAG) → insert
   into `facts` + `fact_history` → advance `last_offset`.
 - Failure escalation: on strikes 1–2 the watermark stays put and the next tick retries
