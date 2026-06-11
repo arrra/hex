@@ -68,7 +68,9 @@ Verify claims and assess structure (per-claim recipes: §5; run commands only wh
 - **OVERSIZE / GAP** — a file over budget (§1), or a before-pass question (including progress/state) no doc answers.
 - **CONFLICT / DUPLICATE** — two files disagree or repeat a rule. Exempt: entry-file bridges (symlink/include) and bottom-of-file recap lines (§1). Nested-override nuance: §3.
 
-A finding without evidence is not a finding — drop it. Cap ~30 candidates; findings beyond the cap are DEFERRED and listed in Open questions — never silently chased. Record what is already good — it must survive untouched.
+**Cross-doc claim sweep — mandatory, never sampled.** Conflicts found only where a reader happens to compare two files are luck, not coverage. Build a claim table over the FULL in-scope inventory: every normative claim (command, path, format/contract, version, threshold, behavior rule) keyed by subject, one row per file stating it. Two files with non-identical statements on one subject = CONFLICT candidate; byte-identical = DUPLICATE candidate. On large doc sets, fan out one reader per doc and merge tables. The table persists in the maintenance record (§10) so future runs diff against it instead of rebuilding from scratch.
+
+A finding without evidence is not a finding — drop it. Cap ~30 candidates — CONFLICTs outrank other types within the cap (a contradiction misleads on every read; a stale line misleads on one); findings beyond the cap are DEFERRED and listed in Open questions — never silently chased. Record what is already good — it must survive untouched.
 
 ### Phase 2 — Attack your own findings
 
@@ -97,6 +99,7 @@ Close with a **do-NOT-touch list**: conforming-but-imperfect text left alone, pr
 2. **Churn gate:** every hunk in `git diff <base>..HEAD` traces to a CONFIRMED finding; untraceable hunks → revert. Any non-doc path in the diff → revert it.
 3. **Conservation:** cross-check every removed line against the ledger, exactly one row each (command, self-test, and structural-line carve-out: §9).
 4. **Reachability & links:** every topic doc one pointer hop from an entry file; every pointer carries an applicability condition; links resolve — run a link checker, or fail closed by grepping every old path and anchor.
+4b. **Cohesion gate:** re-derive the claim table over the in-scope doc set (fresh eyes, same recipe as Phase 1). Any subject still carrying two divergent live statements is residue — the repo is not cohesive, and "converged" may not be claimed. Deliberate divergence (e.g. an instance template intentionally differing from the repo's own entry file) must be recorded as declined-with-reason in the maintenance record, or it counts as residue on every future run.
 5. **After-pass:** a fresh agent, from repo contents alone, answers all five before-pass questions — including how to verify a change (ordered: unit → integration → e2e) and current progress. Each remaining gap becomes an ADD (if code-verified) or an Open question.
 6. **Teardown:** push and open the PR (report file as body) only if asked; remove the worktree (§10).
 
@@ -118,3 +121,4 @@ The branch (two commit groups) plus the report — drafted out-of-tree, delivere
 - A tool-specific mechanism doing load-bearing routing (entry-file bridges exempt) → rebuild on the neutral palette.
 - A non-empty second-pass plan within addressed scope → not converged; do not deliver. Accelerator commits after the proof (§8) → re-run the proof.
 - Zero retractions in Phase 2 on a sizable doc set → you didn't attack hard enough (on a small or genuinely clean set, say so explicitly).
+- CONFLICT findings only from incidental reading, no claim table built → cohesion was sampled, not verified; run the sweep before claiming convergence.
