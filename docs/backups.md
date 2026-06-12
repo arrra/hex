@@ -42,28 +42,31 @@ config change, not a rebuild. The job is a **deliberate no-op until `RESTIC_REPO
 set** — it prints a "not configured" line and exits 0, so it never false-alarms before setup.
 To enable:
 
+**1. Backblaze console:** create a private bucket (e.g. `mrap-hex-restic`) and an Application
+Key scoped to it (Read and Write, no expiry). Note the `keyID` and `applicationKey`.
+
+**2. Credentials → `$HEX_DIR/.hex/secrets/b2-backup.env`** (mode `0600`). This is the canonical
+hex secrets store: `hex harness serve` loads every `.hex/secrets/*.env` into its process env at
+startup (`bootstrap_secrets_env`), so the `hex-backup-offsite` worker inherits these — **no
+Keychain, no plist edit, no launchd wiring.** The file is gitignored (`*.env`) and never
+committed. restic reads all four natively:
+
 ```sh
-# 1. One-time, in the Backblaze console: create a private bucket (e.g. mrap-hex-restic) and
-#    an Application Key scoped to it. Note the keyID and applicationKey.
-
-# 2. Point restic at the B2 repo + give it the B2 creds (restic's native B2 env vars).
-export RESTIC_REPOSITORY="b2:mrap-hex-restic:hex-restic"   # b2:<bucket>:<path-in-bucket>
-export B2_ACCOUNT_ID="<keyID>"
-export B2_ACCOUNT_KEY="<applicationKey>"
-
-# 3. Repo encryption password in the macOS Keychain (separate from the B2 creds);
-#    restic reads it via RESTIC_PASSWORD_COMMAND.
-security add-generic-password -s hex-restic -a "$USER" -w   # prompts for the password
-export RESTIC_PASSWORD_COMMAND='security find-generic-password -s hex-restic -a "$USER" -w'
-
-# 4. Initialize the repo (first time only).
-restic init
+# .hex/secrets/b2-backup.env   (chmod 600 — the harness refuses looser perms)
+RESTIC_REPOSITORY=b2:mrap-hex-restic:hex-restic   # b2:<bucket>:<path-in-bucket>
+B2_ACCOUNT_ID=<keyID>
+B2_ACCOUNT_KEY=<applicationKey>
+RESTIC_PASSWORD=<strong passphrase — ALSO save in a password manager>
 ```
 
-Set `RESTIC_REPOSITORY`, `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY`, and `RESTIC_PASSWORD_COMMAND` in
-the harness env so the worker inherits them (keep the B2 creds out of source — Keychain or an
-untracked env file). The first snapshot is several GB (the workspace `.git` alone is ~4 GB);
-subsequent runs are cheap via dedup.
+**3. Initialize the repo (first time only):** with those four vars exported in your shell,
+run `restic init`. Then restart the harness so it loads the new secrets file:
+`launchctl kickstart -k gui/$(id -u)/com.hex.harness`.
+
+The first snapshot is several GB (the workspace `.git` alone is ~4 GB); subsequent runs are
+cheap via dedup. Note `.hex/secrets/` is itself part of the backed-up operating layer, so a
+full restore brings back every integration's creds — but the `RESTIC_PASSWORD` needed to
+*decrypt* that restore must come from outside (your password manager).
 
 **Fallbacks (same code, just a different `RESTIC_REPOSITORY` — no rebuild):**
 - *Stay in Google Cloud:* GCS Coldline bucket — `RESTIC_REPOSITORY="gs:<bucket>:hex-restic"`
