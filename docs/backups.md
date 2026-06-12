@@ -35,21 +35,24 @@ Each run: `restic unlock` (clears a stale lock from the eventually-consistent gd
 
 ### Configuration (one-time, machine-local)
 
-The destination is **Google Drive**, but restic is backend-agnostic — the repo is just
-`RESTIC_REPOSITORY`. Reach Drive via the **rclone backend (Drive API, direct)**, NOT the
-locally-mounted virtual filesystem: the API path does its own chunking/retries and avoids
-the mount's eventual-consistency and locking flakiness. The job is a **deliberate no-op
-until `RESTIC_REPOSITORY` is set** — it prints a "not configured" line and exits 0, so it
-never false-alarms before setup. To enable:
+The target is **Backblaze B2** (decided 2026-06-12 — restic-native, instant-read, no minimum
+storage duration, no OAuth; see the backend comparison in the design doc). restic is
+backend-agnostic — the repo is just `RESTIC_REPOSITORY`, so switching targets later is a
+config change, not a rebuild. The job is a **deliberate no-op until `RESTIC_REPOSITORY` is
+set** — it prints a "not configured" line and exits 0, so it never false-alarms before setup.
+To enable:
 
 ```sh
-# 1. One-time: configure an rclone remote named "gdrive" (type=drive) via browser OAuth.
-rclone config        # n → name it "gdrive" → storage "drive" → defaults → authorize in browser
+# 1. One-time, in the Backblaze console: create a private bucket (e.g. mrap-hex-restic) and
+#    an Application Key scoped to it. Note the keyID and applicationKey.
 
-# 2. Point restic at the Drive repo THROUGH rclone (API, not the mount).
-export RESTIC_REPOSITORY="rclone:gdrive:hex-restic"
+# 2. Point restic at the B2 repo + give it the B2 creds (restic's native B2 env vars).
+export RESTIC_REPOSITORY="b2:mrap-hex-restic:hex-restic"   # b2:<bucket>:<path-in-bucket>
+export B2_ACCOUNT_ID="<keyID>"
+export B2_ACCOUNT_KEY="<applicationKey>"
 
-# 3. Strong password in the macOS Keychain; restic reads it via RESTIC_PASSWORD_COMMAND.
+# 3. Repo encryption password in the macOS Keychain (separate from the B2 creds);
+#    restic reads it via RESTIC_PASSWORD_COMMAND.
 security add-generic-password -s hex-restic -a "$USER" -w   # prompts for the password
 export RESTIC_PASSWORD_COMMAND='security find-generic-password -s hex-restic -a "$USER" -w'
 
@@ -57,16 +60,18 @@ export RESTIC_PASSWORD_COMMAND='security find-generic-password -s hex-restic -a 
 restic init
 ```
 
-Set `RESTIC_REPOSITORY` and `RESTIC_PASSWORD_COMMAND` in the harness env so the worker
-inherits them. The first snapshot is several GB (the workspace `.git` alone is ~4 GB);
+Set `RESTIC_REPOSITORY`, `B2_ACCOUNT_ID`, `B2_ACCOUNT_KEY`, and `RESTIC_PASSWORD_COMMAND` in
+the harness env so the worker inherits them (keep the B2 creds out of source — Keychain or an
+untracked env file). The first snapshot is several GB (the workspace `.git` alone is ~4 GB);
 subsequent runs are cheap via dedup.
 
-**Fallbacks (same code, just a different `RESTIC_REPOSITORY`):**
-- *No-OAuth, less reliable:* the locally-mounted Drive as a plain path —
-  `export RESTIC_REPOSITORY="$HOME/Library/CloudStorage/GoogleDrive-<you>/My Drive/hex-restic"`.
-  Depends on the virtual mount being healthy; fine as a stopgap.
-- *Off-Google entirely, if rclone→Drive ever disappoints:* Backblaze B2
-  (`b2:bucket:hex-restic`, creds in env) or S3 (`s3:…`). Cheap, encrypted, no mount.
+**Fallbacks (same code, just a different `RESTIC_REPOSITORY` — no rebuild):**
+- *Stay in Google Cloud:* GCS Coldline bucket — `RESTIC_REPOSITORY="gs:<bucket>:hex-restic"`
+  + `GOOGLE_APPLICATION_CREDENTIALS` (service-account key). Instant-read, 11-nines durability.
+- *Consumer Google Drive (no object storage):* rclone backend (Drive API, one-time OAuth) —
+  `rclone:gdrive:hex-restic`; or the locally-mounted Drive as a plain path (less reliable —
+  virtual-mount consistency/locking).
+- Never use S3 Glacier Flexible/Deep Archive — restic can't read archived packs without a thaw.
 
 ### Failure behavior (loud — SO-S6)
 
