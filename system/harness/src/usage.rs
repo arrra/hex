@@ -1,4 +1,4 @@
-//! `hex burn` — Claude spend guardrail (credit-burn P0, decision 2026-06-12).
+//! `hex usage` — Claude usage metrics namespace. `hex usage burn` = spend guardrail (credit-burn P0, decision 2026-06-12).
 //!
 //! Reads Claude Code transcripts RECURSIVELY (subagent transcripts live in
 //! `<project>/<session>/subagents/agent-*.jsonl` — a one-level scan undercounts
@@ -7,7 +7,8 @@
 //! telemetry + macOS notification via `alert::notify`, 6h dedupe). Never a
 //! silent cap (S6): the guardrail only observes and alerts.
 //!
-//! Wire via launchd (e.g. every 10 min): `hex burn check`.
+//! Recurring cadence: the `hex-burn-guard` worker runs `hex usage burn` every 10m.
+//! Future metrics (daily totals, by-model, by-session) belong in this namespace.
 
 use chrono::{DateTime, Duration, Utc};
 use clap::Subcommand;
@@ -15,9 +16,9 @@ use std::collections::HashSet;
 use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
-pub enum BurnCommands {
-    /// Compute trailing-window burn rate; alert if above threshold
-    Check {
+pub enum UsageCommands {
+    /// Trailing-window burn rate; alert if above threshold
+    Burn {
         /// Alert threshold in USD per hour
         #[arg(long, default_value_t = 100.0)]
         threshold: f64,
@@ -132,9 +133,9 @@ fn default_projects_dir() -> PathBuf {
     Path::new(&home).join(".claude/projects")
 }
 
-pub fn run(cmd: BurnCommands) -> i32 {
+pub fn run(cmd: UsageCommands) -> i32 {
     match cmd {
-        BurnCommands::Check {
+        UsageCommands::Burn {
             threshold,
             window_mins,
             projects_dir,
