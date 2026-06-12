@@ -9,9 +9,9 @@ use std::path::Path;
 
 const MIN_QUERY_CHARS: usize = 12;
 /// Hard cap on the injected context block. Was 10_000 (spec §8); cut to 3_000
-/// on 2026-06-11 — every injected char is permanent transcript ballast that
-/// gets cache-re-read on every subsequent turn of the session (measured:
-/// ~1.17B re-read tokens ≈ $1,755/mo at the 10k cap, ~37% of all cache reads).
+/// on 2026-06-11 — injected chars are transcript ballast cache-re-read on each
+/// later turn until compaction (measured, compaction-aware: ~3-6% of cache-read
+/// volume ≈ $300-400/mo incl. writes at the 10k cap; June 2026 logs).
 const MAX_CONTEXT_CHARS: usize = 3_000;
 /// At most this many chunk snippets are rendered — chunks dominate the block;
 /// facts are cheap and carry most of the value per char.
