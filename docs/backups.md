@@ -35,19 +35,25 @@ Each run: `restic unlock` (clears a stale lock from the eventually-consistent gd
 
 ### Configuration (one-time, machine-local)
 
-The job is a **deliberate no-op until `RESTIC_REPOSITORY` is set** — it prints a "not
-configured" line and exits 0, so it never false-alarms before setup. To enable:
+The destination is **Google Drive**, but restic is backend-agnostic — the repo is just
+`RESTIC_REPOSITORY`. Reach Drive via the **rclone backend (Drive API, direct)**, NOT the
+locally-mounted virtual filesystem: the API path does its own chunking/retries and avoids
+the mount's eventual-consistency and locking flakiness. The job is a **deliberate no-op
+until `RESTIC_REPOSITORY` is set** — it prints a "not configured" line and exits 0, so it
+never false-alarms before setup. To enable:
 
 ```sh
-# 1. Point at a restic repo on the locally-mounted Google Drive (no OAuth — it's a path).
-GDRIVE="$HOME/Library/CloudStorage/GoogleDrive-<you>/My Drive"
-export RESTIC_REPOSITORY="$GDRIVE/hex-restic"
+# 1. One-time: configure an rclone remote named "gdrive" (type=drive) via browser OAuth.
+rclone config        # n → name it "gdrive" → storage "drive" → defaults → authorize in browser
 
-# 2. Strong password in the macOS Keychain; restic reads it via RESTIC_PASSWORD_COMMAND.
+# 2. Point restic at the Drive repo THROUGH rclone (API, not the mount).
+export RESTIC_REPOSITORY="rclone:gdrive:hex-restic"
+
+# 3. Strong password in the macOS Keychain; restic reads it via RESTIC_PASSWORD_COMMAND.
 security add-generic-password -s hex-restic -a "$USER" -w   # prompts for the password
 export RESTIC_PASSWORD_COMMAND='security find-generic-password -s hex-restic -a "$USER" -w'
 
-# 3. Initialize the repo (first time only).
+# 4. Initialize the repo (first time only).
 restic init
 ```
 
@@ -55,8 +61,12 @@ Set `RESTIC_REPOSITORY` and `RESTIC_PASSWORD_COMMAND` in the harness env so the 
 inherits them. The first snapshot is several GB (the workspace `.git` alone is ~4 GB);
 subsequent runs are cheap via dedup.
 
-If the gdrive virtual mount proves slow or lock-flaky, switch the repo to restic's rclone
-backend (Drive API direct, one-time OAuth): `export RESTIC_REPOSITORY="rclone:<remote>:hex-restic"`.
+**Fallbacks (same code, just a different `RESTIC_REPOSITORY`):**
+- *No-OAuth, less reliable:* the locally-mounted Drive as a plain path —
+  `export RESTIC_REPOSITORY="$HOME/Library/CloudStorage/GoogleDrive-<you>/My Drive/hex-restic"`.
+  Depends on the virtual mount being healthy; fine as a stopgap.
+- *Off-Google entirely, if rclone→Drive ever disappoints:* Backblaze B2
+  (`b2:bucket:hex-restic`, creds in env) or S3 (`s3:…`). Cheap, encrypted, no mount.
 
 ### Failure behavior (loud — SO-S6)
 
