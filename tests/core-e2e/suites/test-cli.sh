@@ -99,14 +99,17 @@ else
     assert_fail "cli-extension-removed: 'hex extension' still recognized (exit $CODE) — output: $OUT"
 fi
 
-# ── 11. hex telemetry removed (telemetry system teardown) ────────────────────
-# hex telemetry was removed in the collapse-to-cc-boi demolition.
+# ── 11. hex telemetry present (live subcommand) ──────────────────────────────
+# Telemetry was NOT removed: it is a documented, maintained subcommand
+# (.hex/telemetry/events.db; CLAUDE.md; see commit fix(telemetry): serialize
+# HEX_DIR-mutating tests). The prior "removed in the collapse-to-cc-boi
+# demolition" assertion was stale. `hex telemetry` with no subcommand prints
+# help and exits non-zero (clap), so assert it is RECOGNIZED, not the exit code.
 OUT=$("$HEX" telemetry 2>&1)
-CODE=$?
-if [ "$CODE" -ne 0 ] && echo "$OUT" | grep -qi "unrecognized subcommand"; then
-    assert_pass "cli-telemetry-removed: 'hex telemetry' correctly absent (telemetry system removed)"
+if echo "$OUT" | grep -qi "unrecognized subcommand"; then
+    assert_fail "cli-telemetry-present: 'hex telemetry' unexpectedly absent — output: $OUT"
 else
-    assert_fail "cli-telemetry-removed: 'hex telemetry' still recognized (exit $CODE) — output: $OUT"
+    assert_pass "cli-telemetry-present: 'hex telemetry' is a recognized subcommand"
 fi
 
 # ── 12. hex integration list ──────────────────────────────────────────────────
