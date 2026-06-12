@@ -213,11 +213,15 @@ enum Commands {
         #[command(subcommand)]
         command: GatekeeperCommands,
     },
-    /// Daily sqlite snapshots (memory/telemetry/ledger DBs) with 7-day
-    /// rotation under $HEX_DIR/.hex/backups/YYYY-MM-DD/. Target of the
-    /// hex-backup cron worker (04:00 daily).
+    /// Backups. Bare `hex backup` = daily sqlite snapshots (memory/telemetry/
+    /// ledger DBs) with 7-day rotation under $HEX_DIR/.hex/backups/YYYY-MM-DD/
+    /// (hex-backup cron, 04:00). `hex backup offsite` = encrypted off-site
+    /// backup of the operating layer via restic (hex-backup-offsite cron, 04:30).
     #[command(display_order = 14)]
-    Backup,
+    Backup {
+        #[command(subcommand)]
+        command: Option<BackupCommands>,
+    },
     /// GitFlow release ceremony (oss-releaser). One verb: `cut`.
     #[command(display_order = 14)]
     Release {
@@ -244,6 +248,13 @@ enum FailuresCommands {
     /// Out-of-process liveness probe: events.db staleness + harness launchd
     /// state. Run from its OWN launchd job, never from inside the harness.
     Probe,
+}
+
+#[derive(Subcommand)]
+enum BackupCommands {
+    /// Off-site encrypted backup of the operating layer via restic → mounted
+    /// gdrive. No-op until RESTIC_REPOSITORY (+ Keychain password) is set.
+    Offsite,
 }
 
 #[derive(Subcommand)]
@@ -973,9 +984,13 @@ fn main() {
             }
         }
         Commands::Env { command } => env::run_env_command(command),
-        Commands::Backup => {
+        Commands::Backup { command } => {
             let hex_dir = get_hex_dir();
-            std::process::exit(hex::backup::run(&hex_dir));
+            let code = match command {
+                Some(BackupCommands::Offsite) => hex::backup::run_offsite(&hex_dir),
+                None => hex::backup::run(&hex_dir),
+            };
+            std::process::exit(code);
         }
         Commands::Upgrade { args } => {
             std::process::exit(upgrade::run(&args));

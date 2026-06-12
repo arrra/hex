@@ -129,6 +129,25 @@ mod tests {
     }
 
     #[test]
+    fn backup_offsite_registered_at_0430() {
+        let reg = registry();
+        let off = reg
+            .iter()
+            .find(|w| w.name == "hex-backup-offsite")
+            .expect("hex-backup-offsite present");
+        let exprs = cron_exprs(off);
+        assert!(
+            exprs.iter().any(|e| e == hex_modules::backup_offsite::CRON_OFFSITE),
+            "offsite worker must register its 04:30 cron, got: {:?}",
+            exprs
+        );
+        assert_eq!(
+            hex_modules::backup_offsite::ARGV_OFFSITE,
+            &["hex", "backup", "offsite"],
+        );
+    }
+
+    #[test]
     fn registry_includes_generated_module_registry() {
         // The generated module_registry() is a source of workers in registry().
         let gen = hex_modules::module_registry();
