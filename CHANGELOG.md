@@ -2,6 +2,25 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [Unreleased] — recall injection tax cut (credit-burn P0)
+
+Per-prompt memory injection (`hex hook user-prompt-submit` → `memory::recall`)
+was permanent transcript ballast: every injected block is cache-re-read on every
+subsequent turn of the session. Measured on June logs: 4,368 injections,
+median ~1.5k tok each → ~1.17B re-read tokens ≈ $1,755/mo (~37% of all cache-read
+volume), plus a 1.6× cache-bust lift on injection-bearing prompts.
+
+- **Context budget 10k → 3k chars** (`MAX_CONTEXT_CHARS`): facts render first
+  (cheap, dense); at most **2 chunk snippets** (`MAX_CHUNKS_RENDERED`) at
+  **400 chars** each (`CHUNK_SNIPPET_CHARS`, was 5×600).
+- **Machine-prompt gate:** recall now gates harness-injected prompts
+  (`<task-notification>`, `<local-command-*>`, `<command-name>`,
+  `<command-message>`, `<system-reminder>`, `<task-reminder>`) — the hook fires
+  on those too, and was burning injections on background task notifications.
+- **Regression gate:** `memory::recall::injection_tax_tests` — budget cap,
+  chunk-render cap, and machine-prompt gating are asserted in the suite
+  (red on the old behavior, green now).
+
 ## [Unreleased] — memory pipeline holistic fix
 
 One consolidated pass over the memory pipeline (reference: personal-instance assessment
