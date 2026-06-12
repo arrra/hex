@@ -73,6 +73,18 @@ subsequent runs are cheap via dedup.
   virtual-mount consistency/locking).
 - Never use S3 Glacier Flexible/Deep Archive — restic can't read archived packs without a thaw.
 
+### Encryption & key custody
+
+restic encrypts the **entire repo client-side (AES-256)** before upload — B2 only ever
+stores ciphertext and never holds the key. That is the encryption that matters; B2's
+bucket-level Server-Side Encryption (SSE-B2) would just re-encrypt already-encrypted blobs
+with Backblaze-held keys — redundant, though free and harmless to enable.
+
+**The `RESTIC_PASSWORD` is the single point of failure: lose it and every snapshot is
+permanently unrecoverable** (no escrow, no reset). Keychain serves the running worker; keep a
+**second copy in a password manager** (and ideally one offline). The B2 Application Key is
+re-issuable; the restic password is not.
+
 ### Failure behavior (loud — SO-S6)
 
 Any restic step failing routes through `alert::notify("backup-offsite", …)` (stderr +
@@ -86,8 +98,9 @@ A backup you can't restore is theater. To rebuild on a new machine:
 
 ```sh
 brew install restic
-export RESTIC_REPOSITORY="…/My Drive/hex-restic"
-export RESTIC_PASSWORD_COMMAND='…'      # or paste the password when prompted
+export RESTIC_REPOSITORY="b2:mrap-hex-restic:hex-restic"
+export B2_ACCOUNT_ID="<keyID>"; export B2_ACCOUNT_KEY="<appKey>"
+export RESTIC_PASSWORD='<from your password manager>'   # the irreplaceable repo password
 
 restic snapshots                        # confirm the repo + list snapshots
 restic restore latest --target /tmp/hex-restore   # restore the operating layer
