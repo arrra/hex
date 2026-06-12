@@ -2,10 +2,10 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
-## [Unreleased] — spend guardrail: `hex burn check` + `hex-burn-guard` worker
+## [Unreleased] — spend guardrail: `hex usage burn` + `hex-burn-guard` worker
 
-Credit-burn P0, decision 2026-06-12 (threshold Mike's: $100/hr). `hex burn check`
-computes the trailing-60m burn rate over ALL Claude Code transcripts —
+Credit-burn P0, decision 2026-06-12 (threshold Mike's: $100/hr). `hex usage burn` (the `hex usage` namespace is the home for all usage/metrics
+tracking going forward — Mike 2026-06-12) computes the trailing-60m burn rate over ALL Claude Code transcripts —
 **recursive scan** (subagent transcripts under `<session>/subagents/` were the
 2026-06-12 root-cause blind spot), requestId-deduped, priced at current list
 rates (Opus $5/$25, Fable $10/$50; unknown claude models priced at top tier,
