@@ -5,10 +5,14 @@ All notable changes to hex-foundation will be documented in this file.
 ## [Unreleased] — recall injection tax cut (credit-burn P0)
 
 Per-prompt memory injection (`hex hook user-prompt-submit` → `memory::recall`)
-was permanent transcript ballast: every injected block is cache-re-read on every
-subsequent turn of the session. Measured on June logs: 4,368 injections,
-median ~1.5k tok each → ~1.17B re-read tokens ≈ $1,755/mo (~37% of all cache-read
-volume), plus a 1.6× cache-bust lift on injection-bearing prompts.
+is transcript ballast: each injected block is cache-re-read on every later turn
+until compaction. Measured on June logs (compaction-aware): 4,368 injections,
+median ~1.5k tok each, ~3-6% of per-turn cache-read volume ≈ $300-400/mo incl.
+writes, plus a 1.6× cache-bust lift on injection-bearing prompts and injections
+fired on machine-generated prompts. (An earlier estimate of $1,755/mo / 37%
+ignored compaction and was retracted same-day.) This fix does NOT flatten the
+cost ∝ turns^1.48 super-linearity — that is transcript accumulation generally,
+addressed by the session-length-cap workstream.
 
 - **Context budget 10k → 3k chars** (`MAX_CONTEXT_CHARS`): facts render first
   (cheap, dense); at most **2 chunk snippets** (`MAX_CHUNKS_RENDERED`) at
