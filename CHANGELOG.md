@@ -2,6 +2,19 @@
 
 All notable changes to hex-foundation will be documented in this file.
 
+## [Unreleased] — spend guardrail: `hex burn check` + `hex-burn-guard` worker
+
+Credit-burn P0, decision 2026-06-12 (threshold Mike's: $100/hr). `hex burn check`
+computes the trailing-60m burn rate over ALL Claude Code transcripts —
+**recursive scan** (subagent transcripts under `<session>/subagents/` were the
+2026-06-12 root-cause blind spot), requestId-deduped, priced at current list
+rates (Opus $5/$25, Fable $10/$50; unknown claude models priced at top tier,
+never $0). Above threshold → shared loud-alert pathway (stderr + telemetry +
+macOS notification, 6h dedupe). Observe-and-alert only — no silent caps (S6).
+Recurring cadence via the `hex-burn-guard` harness worker (every 10m), not a
+launchd plist. Regression gate: `burn::tests` incl. synthetic-spike red/green,
+nested-subagent counting, and requestId dedupe.
+
 ## [Unreleased] — recall injection tax cut (credit-burn P0)
 
 Per-prompt memory injection (`hex hook user-prompt-submit` → `memory::recall`)
