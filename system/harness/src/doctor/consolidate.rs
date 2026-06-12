@@ -52,13 +52,20 @@ pub fn run(hex_dir: &Path) -> i32 {
                     let name = entry.file_name();
                     let name_str = name.to_string_lossy();
                     if name_str == "_archive" { continue; }
+                    // Ralph research loops carry their own structure (PROMPT.md,
+                    // domains.yaml, findings.md, confidence.md) and legitimately never
+                    // hold context.md — exempt them so they aren't flagged as ORPHAN.
+                    if path.join("PROMPT.md").exists() || path.join("domains.yaml").exists() {
+                        continue;
+                    }
                     let has_context = path.join("context.md").exists();
-                    let has_checkpoint = path.join("checkpoint.md").exists();
-                    // charter.yaml is no longer required: the agent fleet and per-project
-                    // charters were removed in the fleet teardown. Requiring it would flag
-                    // every project as ORPHAN.
-                    if !has_context || !has_checkpoint {
-                        let msg = format!("ORPHAN: projects/{name_str} missing required files (context.md, checkpoint.md)");
+                    // Neither charter.yaml nor checkpoint.md is required: the agent fleet
+                    // and per-project charters were removed in the fleet teardown, and
+                    // checkpoint.md is a dead convention (0 dirs carry it) — for the same
+                    // reason charter.yaml was dropped. Requiring either would flag every
+                    // project as ORPHAN. context.md is the only required file.
+                    if !has_context {
+                        let msg = format!("ORPHAN: projects/{name_str} missing required file (context.md)");
                         lines.push(msg.clone());
                         issues.push(msg);
                     }
@@ -278,6 +285,49 @@ mod tests {
         let content = "See [section](#heading) here.";
         let links = extract_relative_links(content);
         assert!(links.is_empty(), "anchor-only links should be skipped: {links:?}");
+    }
+
+    #[test]
+    fn consolidate_orphan_check_exempts_ralph_loops_and_gates_on_context_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_dir = tmp.path();
+        let projects = hex_dir.join("projects");
+        fs::create_dir_all(&projects).unwrap();
+
+        // (a) Ralph research loop: has PROMPT.md, no context.md — must NOT be flagged.
+        let loop_dir = projects.join("research-loop");
+        fs::create_dir_all(&loop_dir).unwrap();
+        fs::write(loop_dir.join("PROMPT.md"), "loop prompt").unwrap();
+
+        // (b) Genuine non-loop project missing context.md — must be flagged.
+        let orphan_dir = projects.join("stray-project");
+        fs::create_dir_all(&orphan_dir).unwrap();
+
+        // Run the full consolidate pass; orphan lines land in the report log.
+        let _ = run(hex_dir);
+        let log = fs::read_to_string(hex_dir.join("evolution/consolidation-latest.log")).unwrap();
+
+        // (a) The Ralph loop is exempt — never flagged as ORPHAN.
+        assert!(
+            !log.contains("ORPHAN: projects/research-loop"),
+            "Ralph loop (PROMPT.md, no context.md) must not be flagged: {log}"
+        );
+
+        // (b) The genuine orphan IS flagged.
+        assert!(
+            log.contains("ORPHAN: projects/stray-project"),
+            "project missing context.md must be flagged: {log}"
+        );
+
+        // (c) The flag message names only context.md, never checkpoint.md.
+        assert!(
+            log.contains("context.md"),
+            "orphan message must name context.md: {log}"
+        );
+        assert!(
+            !log.contains("checkpoint.md"),
+            "orphan message must not reference checkpoint.md: {log}"
+        );
     }
 }
 
