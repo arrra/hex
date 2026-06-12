@@ -1,0 +1,301 @@
+//! `hex burn` — Claude spend guardrail (credit-burn P0, decision 2026-06-12).
+//!
+//! Reads Claude Code transcripts RECURSIVELY (subagent transcripts live in
+//! `<project>/<session>/subagents/agent-*.jsonl` — a one-level scan undercounts
+//! by 15–40%), dedupes by requestId, prices at current list rates, and computes
+//! the trailing-window burn rate. Above threshold → loud alert (stderr +
+//! telemetry + macOS notification via `alert::notify`, 6h dedupe). Never a
+//! silent cap (S6): the guardrail only observes and alerts.
+//!
+//! Wire via launchd (e.g. every 10 min): `hex burn check`.
+
+use chrono::{DateTime, Duration, Utc};
+use clap::Subcommand;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
+
+#[derive(Subcommand)]
+pub enum BurnCommands {
+    /// Compute trailing-window burn rate; alert if above threshold
+    Check {
+        /// Alert threshold in USD per hour
+        #[arg(long, default_value_t = 100.0)]
+        threshold: f64,
+        /// Trailing window in minutes
+        #[arg(long, default_value_t = 60)]
+        window_mins: i64,
+        /// Claude Code projects dir (transcript root)
+        #[arg(long)]
+        projects_dir: Option<PathBuf>,
+    },
+}
+
+/// List prices per MTok: (input, output, cache_read, cache_write_5m).
+/// Source: claude-api reference 2026-06 (Opus 4.x $5/$25; Fable 5 $10/$50;
+/// cache read = 0.1x input, cache write = 1.25x input). Unknown claude models
+/// fall back to Fable rates — overcounting beats a silent $0 (OBS-024).
+fn price(model: &str) -> Option<(f64, f64, f64, f64)> {
+    let m = model.to_ascii_lowercase();
+    if m.is_empty() || m == "<synthetic>" {
+        return None;
+    }
+    Some(if m.contains("haiku") {
+        (1.0, 5.0, 0.1, 1.25)
+    } else if m.contains("sonnet") {
+        (3.0, 15.0, 0.3, 3.75)
+    } else if m.contains("opus") {
+        (5.0, 25.0, 0.5, 6.25)
+    } else if m.contains("fable") || m.contains("mythos") || m.contains("claude") {
+        (10.0, 50.0, 1.0, 12.5)
+    } else {
+        return None;
+    })
+}
+
+#[derive(Debug, Default)]
+pub struct WindowSpend {
+    pub usd: f64,
+    pub turns: usize,
+    pub files: usize,
+}
+
+/// Sum deduped spend for assistant turns timestamped within (now - window, now].
+pub fn window_spend(projects_dir: &Path, now: DateTime<Utc>, window: Duration) -> WindowSpend {
+    let cutoff = now - window;
+    let mut seen: HashSet<String> = HashSet::new();
+    let mut out = WindowSpend::default();
+    for entry in walkdir::WalkDir::new(projects_dir)
+        .into_iter()
+        .filter_map(Result::ok)
+        .filter(|e| {
+            e.file_type().is_file()
+                && e.path().extension().map(|x| x == "jsonl").unwrap_or(false)
+        })
+    {
+        // Skip files untouched since before the window — cheap and safe (a
+        // file containing in-window turns must have been written in-window).
+        if let Ok(meta) = entry.metadata() {
+            if let Ok(modified) = meta.modified() {
+                if DateTime::<Utc>::from(modified) < cutoff {
+                    continue;
+                }
+            }
+        }
+        let Ok(content) = std::fs::read_to_string(entry.path()) else {
+            continue;
+        };
+        out.files += 1;
+        for line in content.lines() {
+            if !line.contains("\"usage\"") {
+                continue;
+            }
+            let Ok(v) = serde_json::from_str::<serde_json::Value>(line) else {
+                continue;
+            };
+            if v.get("type").and_then(|t| t.as_str()) != Some("assistant") {
+                continue;
+            }
+            let Some(req) = v.get("requestId").and_then(|r| r.as_str()) else {
+                continue;
+            };
+            let Some(ts) = v
+                .get("timestamp")
+                .and_then(|t| t.as_str())
+                .and_then(|t| DateTime::parse_from_rfc3339(t).ok())
+            else {
+                continue;
+            };
+            let ts = ts.with_timezone(&Utc);
+            if ts <= cutoff || ts > now || seen.contains(req) {
+                continue;
+            }
+            let msg = &v["message"];
+            let Some(p) = msg.get("model").and_then(|m| m.as_str()).and_then(price) else {
+                continue;
+            };
+            let u = &msg["usage"];
+            let tok = |k: &str| u.get(k).and_then(|x| x.as_f64()).unwrap_or(0.0);
+            seen.insert(req.to_string());
+            out.turns += 1;
+            out.usd += (tok("input_tokens") * p.0
+                + tok("output_tokens") * p.1
+                + tok("cache_read_input_tokens") * p.2
+                + tok("cache_creation_input_tokens") * p.3)
+                / 1e6;
+        }
+    }
+    out
+}
+
+fn default_projects_dir() -> PathBuf {
+    let home = std::env::var("HOME").unwrap_or_else(|_| "/".into());
+    Path::new(&home).join(".claude/projects")
+}
+
+pub fn run(cmd: BurnCommands) -> i32 {
+    match cmd {
+        BurnCommands::Check {
+            threshold,
+            window_mins,
+            projects_dir,
+        } => {
+            let dir = projects_dir.unwrap_or_else(default_projects_dir);
+            if !dir.exists() {
+                // S6: a missing transcript root is a config bug, not "zero spend".
+                crate::alert::notify(
+                    "burn-guard-config",
+                    "burn guardrail misconfigured",
+                    &format!("projects dir not found: {}", dir.display()),
+                );
+                return 1;
+            }
+            let spend = window_spend(&dir, Utc::now(), Duration::minutes(window_mins));
+            let rate = spend.usd * 60.0 / window_mins as f64;
+            println!(
+                "burn: ${:.2} over last {window_mins}m (${rate:.2}/hr) — {} turns, {} files scanned, threshold ${threshold:.0}/hr",
+                spend.usd, spend.turns, spend.files
+            );
+            let _ = crate::telemetry::record(&crate::telemetry::TelemetryEvent {
+                source: "burn-guard".into(),
+                event: "check".into(),
+                status: if rate > threshold { "alert" } else { "ok" }.into(),
+                duration_ms: None,
+                exit_code: None,
+                detail: Some(format!("rate_usd_hr={rate:.2} window_mins={window_mins}")),
+            });
+            if rate > threshold {
+                crate::alert::notify(
+                    "burn-guard",
+                    "Claude burn rate over threshold",
+                    &format!(
+                        "${rate:.0}/hr over the last {window_mins}m (threshold ${threshold:.0}/hr). \
+                         Check active sessions/subagents."
+                    ),
+                );
+            }
+            0
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::io::Write;
+
+    /// One assistant turn = `usd` dollars of pure output tokens at Fable rates
+    /// ($50/MTok output → tokens = usd / 50 * 1e6), timestamped `mins_ago`
+    /// minutes before `now()`. Relative timestamps keep the production
+    /// invariant (file mtime >= contained turn timestamps) true in fixtures.
+    fn turn(req: &str, mins_ago: i64, model: &str, usd: f64) -> String {
+        let out_tok = (usd / 50.0 * 1e6) as u64;
+        let ts = (now() - Duration::minutes(mins_ago)).to_rfc3339();
+        format!(
+            r#"{{"type":"assistant","requestId":"{req}","timestamp":"{ts}","message":{{"model":"{model}","usage":{{"input_tokens":0,"output_tokens":{out_tok},"cache_read_input_tokens":0,"cache_creation_input_tokens":0}}}}}}"#
+        )
+    }
+
+    fn write_jsonl(path: &Path, lines: &[String]) {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        let mut f = std::fs::File::create(path).unwrap();
+        for l in lines {
+            writeln!(f, "{l}").unwrap();
+        }
+    }
+
+    fn now() -> DateTime<Utc> {
+        Utc::now()
+    }
+
+    /// Synthetic spike fixture: $120 of Fable output inside the window →
+    /// the rate computation MUST cross the $100/hr threshold (red on a
+    /// guardrail that undercounts; this is the ISSUE.md regression gate).
+    #[test]
+    fn synthetic_spike_crosses_threshold() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_jsonl(
+            &tmp.path().join("-proj/session.jsonl"),
+            &[
+                turn("r1", 30, "claude-fable-5", 60.0),
+                turn("r2", 15, "claude-fable-5", 60.0),
+            ],
+        );
+        let s = window_spend(tmp.path(), now(), Duration::minutes(60));
+        assert_eq!(s.turns, 2);
+        assert!((s.usd - 120.0).abs() < 0.01, "got ${}", s.usd);
+        let rate = s.usd; // 60-min window → rate == usd
+        assert!(rate > 100.0, "spike must cross the $100/hr threshold");
+    }
+
+    /// Subagent transcripts are NESTED (`<session>/subagents/agent-*.jsonl`).
+    /// The 2026-06-12 root-cause found a one-level scan missing 1,784 such
+    /// files (40% of the worst day's spend). Recursive scan is load-bearing.
+    #[test]
+    fn nested_subagent_files_are_counted() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_jsonl(
+            &tmp.path().join("-proj/sess.jsonl"),
+            &[turn("main1", 10, "claude-fable-5", 10.0)],
+        );
+        write_jsonl(
+            &tmp.path().join("-proj/sess-uuid/subagents/agent-abc.jsonl"),
+            &[turn("sub1", 5, "claude-fable-5", 30.0)],
+        );
+        let s = window_spend(tmp.path(), now(), Duration::minutes(60));
+        assert_eq!(s.turns, 2, "must include the nested subagent turn");
+        assert!((s.usd - 40.0).abs() < 0.01, "got ${}", s.usd);
+    }
+
+    /// Dedupe by requestId — Claude Code copies transcripts on resume, so the
+    /// same request appears in multiple files (naive summation ≈ 2x).
+    #[test]
+    fn duplicate_request_ids_counted_once() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let t = turn("same-req", 20, "claude-fable-5", 25.0);
+        write_jsonl(&tmp.path().join("-proj/a.jsonl"), &[t.clone()]);
+        write_jsonl(&tmp.path().join("-proj/b.jsonl"), &[t]);
+        let s = window_spend(tmp.path(), now(), Duration::minutes(60));
+        assert_eq!(s.turns, 1);
+        assert!((s.usd - 25.0).abs() < 0.01);
+    }
+
+    /// Turns outside the trailing window don't count.
+    #[test]
+    fn old_turns_excluded() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_jsonl(
+            &tmp.path().join("-proj/s.jsonl"),
+            &[
+                turn("old", 90, "claude-fable-5", 500.0),
+                turn("new", 30, "claude-fable-5", 5.0),
+            ],
+        );
+        let s = window_spend(tmp.path(), now(), Duration::minutes(60));
+        assert_eq!(s.turns, 1);
+        assert!((s.usd - 5.0).abs() < 0.01, "got ${}", s.usd);
+    }
+
+    /// Quiet hour → rate stays under threshold (green side of the gate).
+    #[test]
+    fn quiet_window_stays_under_threshold() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        write_jsonl(
+            &tmp.path().join("-proj/s.jsonl"),
+            &[turn("r1", 30, "claude-sonnet-4-6", 12.0)],
+        );
+        let s = window_spend(tmp.path(), now(), Duration::minutes(60));
+        assert!(s.usd < 100.0);
+    }
+
+    /// Models are priced per their own table; synthetic/unknown rows skipped.
+    #[test]
+    fn model_pricing_and_synthetic_skip() {
+        assert!(price("claude-opus-4-8").unwrap().0 == 5.0);
+        assert!(price("claude-fable-5").unwrap().1 == 50.0);
+        assert!(price("claude-sonnet-4-6").unwrap().0 == 3.0);
+        assert!(price("<synthetic>").is_none());
+        assert!(price("").is_none());
+        // Unknown future claude model: falls back to top-tier rates, never $0.
+        assert!(price("claude-zephyr-6").unwrap().0 == 10.0);
+    }
+}
