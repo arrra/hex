@@ -40,12 +40,6 @@ maintenance:
     notify_on_failure: "#integrations"
     timeout_seconds: 60
 
-# ─── hex-events policy templates ─────────────────────────────────────────────
-# Remove this section if the integration has no hex-events policies.
-events: []
-# events:
-#   - source: events/my-policy.yaml
-
 # ─── Runtime dependencies ────────────────────────────────────────────────────
 # Declare non-stdlib packages required by probe.sh or lib/ scripts.
 # Remove this section if no extra packages are needed.

@@ -16,7 +16,6 @@ Usage:
     python3 autoresearch.py --budget 10.0        # Cost cap in dollars
     python3 autoresearch.py --model haiku         # Cheaper model for mutations
     python3 autoresearch.py --dry-run             # Show what would happen, no Claude calls
-    python3 autoresearch.py --focus events        # Only target hex-events routing failures
     python3 autoresearch.py --candidates 3        # Tournament: try 3 mutations, keep best
     python3 autoresearch.py --focus boi --candidates 3  # Focused tournament
 """
@@ -49,10 +48,6 @@ COST_PER_MUTATION = 0.05
 
 # Focus categories: map --focus flag to specific eval case names
 FOCUS_CATEGORIES = {
-    "events": [
-        "route_schedule_to_events", "route_monitoring_to_events",
-        "route_reactive_to_events", "hex_events_routing",
-    ],
     "boi": [
         "delegation", "route_research_to_boi", "route_build_to_boi",
     ],
@@ -215,10 +210,6 @@ def _extract_relevant_rules(text: str, failing_cases: list) -> str:
         "delegation": ["7"],
         "route_build_to_boi": ["7"],
         "route_research_to_boi": ["7"],
-        "route_schedule_to_events": ["S4"],
-        "route_monitoring_to_events": ["S4"],
-        "route_reactive_to_events": ["S4"],
-        "hex_events_routing": ["S4"],
         "persistence": ["2", "18"],
         "onboarding": [],
         "memory_search": ["1"],
@@ -579,19 +570,15 @@ def run_loop(
     print("[0] Running baseline eval...")
     if dry_run:
         baseline = EvalResult(
-            total_cases=11, passed=4, failed=7,
+            total_cases=7, passed=4, failed=3,
             per_case={
                 "onboarding": {"passed": True, "checks": "1/1"},
                 "memory_search": {"passed": True, "checks": "1/1"},
                 "startup_loads_context": {"passed": True, "checks": "1/1"},
                 "route_build_to_boi": {"passed": True, "checks": "2/2"},
                 "delegation": {"passed": False, "checks": "0/1"},
-                "hex_events_routing": {"passed": False, "checks": "0/1"},
                 "persistence": {"passed": False, "checks": "0/2"},
-                "route_monitoring_to_events": {"passed": False, "checks": "1/2"},
-                "route_reactive_to_events": {"passed": False, "checks": "1/2"},
                 "route_research_to_boi": {"passed": False, "checks": "1/2"},
-                "route_schedule_to_events": {"passed": False, "checks": "1/2"},
             },
         )
         print(f"  [dry-run] Simulated baseline: {baseline.score_str}")

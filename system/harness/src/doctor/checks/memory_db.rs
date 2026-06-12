@@ -28,6 +28,6 @@ impl DoctorCheck for MemoryDbExists {
                 }
             }
         }
-        CheckResult::warn(".hex/memory.db missing — run `hex memory reindex` to create")
+        CheckResult::warn(".hex/memory.db missing — run `hex memory index --full` to create")
     }
 }

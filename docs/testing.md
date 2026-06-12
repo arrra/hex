@@ -6,7 +6,7 @@ This document describes the test suite, what each test verifies, and how to run 
 
 | Category | Files | Needs API key |
 |----------|-------|:-------------:|
-| Static / unit | `test_skill_frontmatter.sh`, `test_skill_refs.sh`, `test_path_mapping.bats`, `test_hex_doctor_version_sync.bats`, `test_hex_doctor_hex_binary_version_sync.bats`, `test-upgrade-deletion.sh`, `test-upgrade-binary-swap.sh` | No |
+| Static / unit | `test_skill_frontmatter.sh`, `test_skill_refs.sh`, `test_path_mapping.bats`, `test_hex_doctor_version_sync.bats`, `test_hex_doctor_hex_binary_version_sync.bats` | No |
 | Core E2E (containerized) | `tests/core-e2e/run-all.sh` | BOI suites only |
 | Live eval — Claude Code | `test_skill_discovery.sh`, `test_e2e.sh`, `test_fullstack.sh` | Yes |
 | Live eval — Codex | `test_skill_discovery_codex.sh`, `test_codex_onboarding.sh` | Yes |
@@ -36,13 +36,9 @@ Current suites:
 |-------|-----------------|
 | `test-boi-install` | Fresh BOI install: binary builds, `--help`/`--version`, smoke dispatch |
 | `test-boi-upgrade` | Upgrade path: version bump, stale-symlink detection, doctor catches dangling link |
-| `test-assets` | Asset registry CRUD via `hex asset` subcommands |
 | `test-cli` | All `hex` subcommands reachable; version matches `Cargo.toml` |
-| `test-events` | Event emit, policy firing, trace via `hex events` |
 | `test-messaging` | Message send/receive/filter with SQLite verification |
-| `test-sse` | SSE subscribe/publish, topic filtering, heartbeat |
-| `test-telemetry` | Telemetry JSONL written to `.hex/telemetry/` |
-| `test-doctor-events-coverage` | `hex-doctor` fails loudly on broken policies (parse errors named), passes on valid policies |
+| `test-doctor` | `hex-doctor` passes on healthy install, fails loudly on broken config |
 
 ## Tests added in v0.2.4
 
@@ -65,7 +61,7 @@ Installs hex to a temp dir and verifies that every path reference inside SKILL.m
 
 Runs Claude Code in `--print` mode inside a fresh hex install and asserts:
 
-1. All 11 shipped skills appear in Claude's response to a discovery prompt.
+1. All currently shipped skills appear in Claude's response to a discovery prompt (session-lifecycle skills `hex-startup`, `hex-checkpoint`, `hex-shutdown`, `hex-reflect` were demolished and must not be expected here).
 2. At least 3 skills (`/hex-doctor`, `/hex-decide`, `/hex-triage`) can be invoked without crashing.
 
 Requires `~/.hex-test.env` with `ANTHROPIC_API_KEY`.
@@ -92,7 +88,7 @@ bash tests/codex-parity/run-all.sh
 | `test-boi-dispatch-codex.sh` | Minimal spec with `runtime=codex` completes and produces output | Yes |
 | `test-memory-search.sh` | Memory search index and CLI work identically under the Codex runtime | No |
 
-Gate 5 in `system/scripts/release.sh` runs this suite and blocks on failure; structural tests always run, live tests are skipped when no key is present.
+The `codex-parity` gate in the `hex release cut` battery runs this suite and blocks the release on failure; structural tests always run, live tests are skipped when no key is present. The gate is skipped loudly when the directory is absent or `--skip-parity` (or `--skip-e2e`, which implies it) is passed.
 
 ## Running locally
 
@@ -117,8 +113,6 @@ bash tests/migrate/test-migrate.sh
 python3 tests/test_memory.py
 bats tests/test_hex_doctor_version_sync.bats
 bats tests/test_hex_doctor_hex_binary_version_sync.bats
-bash tests/test-upgrade-deletion.sh
-bash tests/test-upgrade-binary-swap.sh
 ```
 
 ### Full Docker eval suite
@@ -142,18 +136,17 @@ bash tests/eval/run_eval_docker.sh --live --case skill-discovery-codex
 bash tests/eval/run_eval_macos.sh
 ```
 
-## Shipped skills (as of v0.2.4)
+## Shipped skills
 
-The 11 skills installed under `.hex/skills/` (verified by `test_skill_discovery.sh`):
+The skills installed under `.hex/skills/` (verified by `test_skill_discovery.sh`).
+Note: `hex-consolidate` was removed in favor of the `hex memory consolidate full|quick`
+binary subcommand (the single consolidate surface — see `architecture.md`).
+The session-lifecycle skills (`hex-startup`, `hex-checkpoint`, `hex-shutdown`,
+`hex-reflect`, `hex-debrief`) were demolished — they are no longer shipped and
+must not be re-added to this test plan.
 
-1. `hex-startup`
-2. `hex-checkpoint`
-3. `hex-shutdown`
-4. `hex-reflect`
-5. `hex-consolidate`
-6. `hex-debrief`
-7. `hex-decide`
-8. `hex-triage`
-9. `hex-doctor`
-10. `landings`
-11. `memory`
+1. `hex-decide`
+2. `hex-triage`
+3. `hex-doctor`
+4. `landings`
+5. `memory`

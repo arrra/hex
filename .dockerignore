@@ -1,3 +1,8 @@
+# Workspace target/ is the REAL build dir (system/harness/target/ is the
+# decoy — workspace-target trap). At ~11GB it was shipping as docker build
+# context on EVERY gate run and getting baked into images (FIX-001 disk
+# blowouts; v0.38.0 attempt-1 VM pressure kill).
+target/
 system/harness/target/
 .git/
 *.tmp

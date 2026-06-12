@@ -1,0 +1,3 @@
+{"kind":"prompt","text":"Move the meeting?","multi":false,"options":[
+  {"id":"yes","label":"yes","description":"move the 3pm to 4pm"},
+  {"id":"no","label":"no","description":"keep the 3pm"}]}

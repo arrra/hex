@@ -1,15 +1,15 @@
 #!/usr/bin/env bash
-# test_env_resolution.sh — E2E tests for env.sh, path resolution, and AGENT_DIR.
+# test_env_resolution.sh — E2E tests for env.sh, path resolution, and native hex commands.
 #
-# Validates the v0.4.0 fixes:
+# Validates the current (post-rustification) installed shape:
 #   1. env.sh exists after install and is executable
 #   2. HEX_DIR / AGENT_DIR are set after sourcing env.sh
-#   3. PATH includes common tool locations after sourcing env.sh
-#   4. hex-agent-spawn.sh has no hardcoded absolute paths
+#   3. PATH composition is delegated to `hex env path` correctly
+#   4. hex binary is installed and functional (replaces hex-agent-spawn.sh)
 #   5. CLAUDE.md template references binaries, not paths
-#   6. verify-agent-infra.sh auto-detects HEX_DIR
-#   7. Metrics scripts don't crash without AGENT_DIR set
-#   8. Install upgrades existing companions (not just skips)
+#   6. hex doctor native command works (replaces verify-agent-infra.sh + doctor.sh)
+#   7. Old shell/Python scripts are absent (replaced by native hex commands)
+#   8. Version is reconciled — Cargo.toml is the canonical source
 #
 # Usage:
 #   bash test_env_resolution.sh                   # Run against local checkout
@@ -29,12 +29,24 @@ bold()  { printf '\033[1m%s\033[0m\n' "$*"; }
 assert_pass() { PASS=$((PASS + 1)); green "$1"; }
 assert_fail() { FAIL=$((FAIL + 1)); red "$1"; }
 
+# Locate the hex binary: prefer the installed copy, fall back to system PATH.
+find_hex() {
+  local install_dir="$1"
+  if [ -x "$install_dir/.hex/bin/hex" ]; then
+    echo "$install_dir/.hex/bin/hex"
+  elif type -P hex &>/dev/null; then
+    type -P hex
+  else
+    echo ""
+  fi
+}
+
 # ── Setup: run install to a temp dir ────────────────────────────────────────
 INSTALL_BASE=$(mktemp -d /tmp/hex-env-test-XXXXXX)
 INSTALL_DIR="$INSTALL_BASE/hex"
 trap 'rm -rf "$INSTALL_BASE"' EXIT
 
-bold "══ hex v0.4.0 Environment Resolution Tests ══"
+bold "══ hex Environment Resolution Tests ══"
 echo "Install dir: $INSTALL_DIR"
 echo ""
 
@@ -46,6 +58,8 @@ else
   assert_fail "install.sh failed"
 fi
 echo ""
+
+HEX_BIN="$(find_hex "$INSTALL_DIR")"
 
 # ── Test 1: env.sh exists and is executable ─────────────────────────────────
 bold "── env.sh ──"
@@ -63,79 +77,112 @@ fi
 
 # ── Test 2: Sourcing env.sh sets HEX_DIR and AGENT_DIR ─────────────────────
 bold "── HEX_DIR / AGENT_DIR ──"
-ENV_OUT=$(HEX_DIR="$INSTALL_DIR" bash -c "source '$INSTALL_DIR/.hex/scripts/env.sh' && echo HEX_DIR=\$HEX_DIR AGENT_DIR=\$AGENT_DIR" 2>&1)
+if [ -n "$HEX_BIN" ]; then
+  # Full source: env.sh bootstrap + hex env path delegation
+  ENV_OUT=$(HEX_DIR="$INSTALL_DIR" PATH="$(dirname "$HEX_BIN"):$PATH" \
+    bash -c "source '$INSTALL_DIR/.hex/scripts/env.sh' && echo HEX_DIR=\$HEX_DIR AGENT_DIR=\$AGENT_DIR" 2>&1)
 
-if echo "$ENV_OUT" | grep -q "HEX_DIR=$INSTALL_DIR"; then
-  assert_pass "HEX_DIR set correctly after sourcing env.sh"
+  if echo "$ENV_OUT" | grep -q "HEX_DIR=$INSTALL_DIR"; then
+    assert_pass "HEX_DIR set correctly after sourcing env.sh"
+  else
+    assert_fail "HEX_DIR not set correctly: $ENV_OUT"
+  fi
+
+  if echo "$ENV_OUT" | grep -q "AGENT_DIR=$INSTALL_DIR"; then
+    assert_pass "AGENT_DIR set correctly (mirrors HEX_DIR)"
+  else
+    assert_fail "AGENT_DIR not set: $ENV_OUT"
+  fi
+
+  # Auto-detection (no env vars pre-set): env.sh detects HEX_DIR from BASH_SOURCE
+  AUTO_OUT=$(PATH="$(dirname "$HEX_BIN"):$PATH" \
+    bash -c "unset HEX_DIR; unset AGENT_DIR; source '$INSTALL_DIR/.hex/scripts/env.sh' && echo HEX_DIR=\$HEX_DIR" 2>&1)
+  if echo "$AUTO_OUT" | grep -q "HEX_DIR="; then
+    if echo "$AUTO_OUT" | grep -q "HEX_DIR=$"; then
+      assert_fail "HEX_DIR auto-detection produced empty value"
+    else
+      assert_pass "HEX_DIR auto-detected from script location"
+    fi
+  else
+    assert_fail "HEX_DIR auto-detection failed: $AUTO_OUT"
+  fi
 else
-  assert_fail "HEX_DIR not set correctly: $ENV_OUT"
+  assert_fail "hex binary not available — cannot test env.sh sourcing"
 fi
 
-if echo "$ENV_OUT" | grep -q "AGENT_DIR=$INSTALL_DIR"; then
-  assert_pass "AGENT_DIR set correctly (mirrors HEX_DIR)"
+# ── Test 3: PATH composition via `hex env path` ─────────────────────────────
+bold "── PATH (hex env path) ──"
+if [ -n "$HEX_BIN" ]; then
+  PATH_OUT=$(HEX_DIR="$INSTALL_DIR" "$HEX_BIN" env path 2>&1)
+
+  if [ -n "$PATH_OUT" ]; then
+    assert_pass "hex env path produces non-empty PATH"
+  else
+    assert_fail "hex env path returned empty string"
+  fi
+
+  # hex bin dir is created by install.sh (mkdir -p) and included by hex env path
+  if echo "$PATH_OUT" | grep -q "$INSTALL_DIR/.hex/bin"; then
+    assert_pass "PATH includes \$INSTALL_DIR/.hex/bin"
+  else
+    assert_fail "PATH missing \$INSTALL_DIR/.hex/bin: $PATH_OUT"
+  fi
+
+  if echo "$PATH_OUT" | grep -q "/usr/local/bin"; then
+    assert_pass "PATH includes /usr/local/bin"
+  else
+    assert_fail "PATH missing /usr/local/bin: $PATH_OUT"
+  fi
+
+  # Platform-specific: /opt/homebrew/bin only on macOS ARM
+  if [ -d "/opt/homebrew/bin" ]; then
+    if echo "$PATH_OUT" | grep -q "/opt/homebrew/bin"; then
+      assert_pass "PATH includes /opt/homebrew/bin (macOS)"
+    else
+      assert_fail "PATH missing /opt/homebrew/bin (macOS)"
+    fi
+  else
+    assert_pass "PATH skips /opt/homebrew/bin (not macOS, dir absent — correct)"
+  fi
 else
-  assert_fail "AGENT_DIR not set: $ENV_OUT"
+  assert_fail "hex binary not available — cannot test hex env path"
 fi
 
-# Test auto-detection (no env vars pre-set)
-AUTO_OUT=$(unset HEX_DIR; unset AGENT_DIR; bash -c "source '$INSTALL_DIR/.hex/scripts/env.sh' && echo HEX_DIR=\$HEX_DIR" 2>&1)
-if echo "$AUTO_OUT" | grep -q "HEX_DIR="; then
-  if echo "$AUTO_OUT" | grep -q "HEX_DIR=$"; then
-    assert_fail "HEX_DIR auto-detection produced empty value"
+# ── Test 4: hex binary installed and functional ──────────────────────────────
+# Replaces the old hex-agent-spawn.sh checks: agent spawning is now native.
+bold "── hex binary ──"
+if [ -n "$HEX_BIN" ]; then
+  assert_pass "hex binary found at $HEX_BIN"
+
+  if "$HEX_BIN" version &>/dev/null; then
+    HEX_VER=$("$HEX_BIN" version 2>/dev/null || echo "unknown")
+    assert_pass "hex version works ($HEX_VER)"
   else
-    assert_pass "HEX_DIR auto-detected from script location"
+    assert_fail "hex version failed"
+  fi
+
+  if "$HEX_BIN" --help 2>&1 | grep -q "doctor"; then
+    assert_pass "hex binary includes doctor subcommand"
+  else
+    assert_fail "hex binary missing doctor subcommand"
+  fi
+
+  # Session-less hex: the `hex session` command group was removed (2026-06-05).
+  # Assert it's correctly absent (startup/shutdown/checkpoint/reflect all gone).
+  if "$HEX_BIN" session --help &>/dev/null; then
+    assert_fail "hex session subcommand still present (should be removed in session-less hex)"
+  else
+    assert_pass "hex session subcommand correctly absent (session-less hex)"
+  fi
+
+  # Fleet/agent teardown: `hex agent` was removed. Assert it's correctly absent.
+  if "$HEX_BIN" agent --help &>/dev/null; then
+    assert_fail "hex agent subcommand still present (should be removed in fleet teardown)"
+  else
+    assert_pass "hex agent subcommand correctly absent (fleet teardown)"
   fi
 else
-  assert_fail "HEX_DIR auto-detection failed: $AUTO_OUT"
-fi
-
-# ── Test 3: PATH includes common tool locations ────────────────────────────
-bold "── PATH ──"
-PATH_OUT=$(HEX_DIR="$INSTALL_DIR" bash -c "source '$INSTALL_DIR/.hex/scripts/env.sh' && echo \$PATH" 2>&1)
-
-# Always expected (created by env.sh even if dir doesn't exist on this platform)
-for loc in ".local/bin" "/usr/local/bin"; do
-  if echo "$PATH_OUT" | grep -q "$loc"; then
-    assert_pass "PATH includes $loc"
-  else
-    assert_fail "PATH missing $loc"
-  fi
-done
-# Platform-specific: /opt/homebrew/bin only exists on macOS ARM
-if [ -d "/opt/homebrew/bin" ]; then
-  if echo "$PATH_OUT" | grep -q "/opt/homebrew/bin"; then
-    assert_pass "PATH includes /opt/homebrew/bin (macOS)"
-  else
-    assert_fail "PATH missing /opt/homebrew/bin (macOS)"
-  fi
-else
-  assert_pass "PATH skips /opt/homebrew/bin (not macOS, dir absent — correct behavior)"
-fi
-
-# ── Test 4: hex-agent-spawn.sh has no hardcoded absolute paths ──────────────
-bold "── hex-agent-spawn.sh ──"
-SPAWN_SCRIPT="$INSTALL_DIR/.hex/scripts/hex-agent-spawn.sh"
-if [ -f "$SPAWN_SCRIPT" ]; then
-  if grep -q "$HOME" "$SPAWN_SCRIPT"; then
-    assert_fail "hex-agent-spawn.sh still contains hardcoded home path ($HOME)"
-    grep "$HOME" "$SPAWN_SCRIPT" | head -3
-  else
-    assert_pass "hex-agent-spawn.sh has no hardcoded user paths"
-  fi
-
-  if grep -q 'HEX_EVENTS_CLI=' "$SPAWN_SCRIPT"; then
-    assert_fail "hex-agent-spawn.sh still has HEX_EVENTS_CLI variable (should use binary)"
-  else
-    assert_pass "hex-agent-spawn.sh uses hex-events binary, not path variable"
-  fi
-
-  if head -10 "$SPAWN_SCRIPT" | grep -q 'SCRIPT_DIR='; then
-    assert_pass "hex-agent-spawn.sh auto-detects HEX_DIR from script location"
-  else
-    assert_fail "hex-agent-spawn.sh doesn't auto-detect HEX_DIR"
-  fi
-else
-  assert_fail "hex-agent-spawn.sh not found in install"
+  assert_fail "hex binary not found — check install or Docker multi-stage build"
 fi
 
 # ── Test 5: CLAUDE.md template references binaries not paths ────────────────
@@ -149,9 +196,9 @@ if [ -f "$CLAUDE_MD" ]; then
   fi
 
   if grep -q 'python3 ~/.hex-events/hex_events_cli.py' "$CLAUDE_MD"; then
-    assert_fail "CLAUDE.md still references 'python3 ~/.hex-events/hex_events_cli.py'"
+    assert_fail "CLAUDE.md still references 'python3 ~/.hex-events/hex_events_cli.py' (should be absent)"
   else
-    assert_pass "CLAUDE.md uses 'hex-events' binary references"
+    assert_pass "CLAUDE.md does not reference old hex-events python CLI (correct — hex-events removed)"
   fi
 
   if grep -q 'env\.sh' "$CLAUDE_MD"; then
@@ -163,59 +210,96 @@ else
   assert_fail "CLAUDE.md not found in install"
 fi
 
-# ── Test 6: verify-agent-infra.sh doesn't hard-require AGENT_DIR ───────────
-bold "── verify-agent-infra.sh ──"
-VERIFY_SCRIPT="$INSTALL_DIR/.hex/scripts/verify-agent-infra.sh"
-if [ -f "$VERIFY_SCRIPT" ]; then
-  if grep -q 'AGENT_DIR:?' "$VERIFY_SCRIPT"; then
-    assert_fail "verify-agent-infra.sh still hard-requires AGENT_DIR with :?"
+# ── Test 6: hex doctor native command works ──────────────────────────────────
+# Replaces: verify-agent-infra.sh (now native hex infra) + doctor.sh (now hex doctor)
+bold "── hex doctor ──"
+if [ -n "$HEX_BIN" ]; then
+  if "$HEX_BIN" doctor --help &>/dev/null; then
+    assert_pass "hex doctor --help works"
   else
-    assert_pass "verify-agent-infra.sh doesn't hard-require AGENT_DIR"
+    assert_fail "hex doctor --help failed"
+  fi
+
+  if HEX_DIR="$INSTALL_DIR" "$HEX_BIN" doctor list &>/dev/null; then
+    assert_pass "hex doctor list works"
+  else
+    assert_fail "hex doctor list failed"
+  fi
+
+  # Old doctor.sh should not be present (replaced by hex doctor)
+  if [ -f "$INSTALL_DIR/.hex/scripts/doctor.sh" ]; then
+    assert_fail "old doctor.sh still installed — should be replaced by hex doctor"
+  else
+    assert_pass "old doctor.sh correctly absent (replaced by hex doctor)"
+  fi
+
+  # Old verify-agent-infra.sh should not be present
+  if [ -f "$INSTALL_DIR/.hex/scripts/verify-agent-infra.sh" ]; then
+    assert_fail "verify-agent-infra.sh still installed — should be replaced by native hex"
+  else
+    assert_pass "verify-agent-infra.sh correctly absent (replaced by native hex)"
   fi
 else
-  assert_fail "verify-agent-infra.sh not found"
+  assert_fail "hex binary not available — cannot test hex doctor"
 fi
 
-# ── Test 7: Metrics scripts don't crash without AGENT_DIR ──────────────────
-bold "── metrics scripts ──"
-for script in context-continuity.py done-claim-verification.py frustration-signals.py loop-waste-detection.py; do
-  SCRIPT_PATH="$INSTALL_DIR/.hex/scripts/metrics/$script"
-  if [ -f "$SCRIPT_PATH" ]; then
-    if grep -q 'os.environ\["AGENT_DIR"\]' "$SCRIPT_PATH"; then
-      assert_fail "$script still uses os.environ[\"AGENT_DIR\"] (hard crash if unset)"
-    else
-      assert_pass "$script uses safe AGENT_DIR resolution"
-    fi
+# ── Test 7: Legacy scripts absent; native hex commands present ───────────────
+bold "── native hex replaces legacy scripts ──"
+# These scripts were removed by rustification; only .legacy.sh variants should remain
+for removed_script in hex-agent-spawn.sh verify-agent-infra.sh doctor.sh; do
+  if [ -f "$INSTALL_DIR/.hex/scripts/$removed_script" ]; then
+    assert_fail "$removed_script still present in install (rustified — use native hex)"
+  else
+    assert_pass "$removed_script correctly absent (replaced by native hex)"
   fi
 done
 
-# Check hex-vitals.py
-VITALS="$INSTALL_DIR/.hex/scripts/hex-vitals.py"
-if [ -f "$VITALS" ]; then
-  if grep -q 'os.environ\["AGENT_DIR"\]' "$VITALS"; then
-    assert_fail "hex-vitals.py still uses os.environ[\"AGENT_DIR\"] (hard crash)"
+# Metrics .py scripts removed (hex metrics subcommand was removed in collapse-to-cc-boi)
+METRICS_DIR="$INSTALL_DIR/.hex/scripts/metrics"
+if [ -d "$METRICS_DIR" ]; then
+  PY_COUNT=$(ls "$METRICS_DIR"/*.py 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$PY_COUNT" -gt 0 ]; then
+    assert_fail "Legacy Python metrics scripts still present: $(ls "$METRICS_DIR"/*.py 2>/dev/null | tr '\n' ' ')"
   else
-    assert_pass "hex-vitals.py uses safe AGENT_DIR resolution"
+    assert_pass "No legacy Python metrics scripts in .hex/scripts/metrics/ (correct)"
   fi
-fi
-
-# ── Test 8: doctor.sh check_21 passes with env.sh present ──────────────────
-bold "── doctor check_21 ──"
-DOCTOR="$INSTALL_DIR/.hex/scripts/doctor.sh"
-if [ -f "$DOCTOR" ]; then
-  if grep -q 'env_file.*\.hex/env\.sh' "$DOCTOR"; then
-    assert_fail "doctor.sh check_21 looks for .hex/env.sh (should be .hex/scripts/env.sh)"
-  fi
-fi
-
-# ── Test 9: Version present ──────────────────────────────────────────────────
-bold "── version ──"
-VERSION=$(cat "$INSTALL_DIR/.hex/version.txt" 2>/dev/null || echo "MISSING")
-EXPECTED_VERSION=$(cat "$REPO_DIR/system/version.txt" 2>/dev/null || echo "v0.4.0")
-if [ "$VERSION" = "$EXPECTED_VERSION" ]; then
-  assert_pass "Version is $VERSION"
 else
-  assert_fail "Version is '$VERSION' (expected $EXPECTED_VERSION)"
+  assert_pass ".hex/scripts/metrics/ absent — metrics scripts removed (correct)"
+fi
+
+# hex metrics was removed in the collapse-to-cc-boi demolition; assert absent.
+if [ -n "$HEX_BIN" ]; then
+  METRICS_OUT=$("$HEX_BIN" metrics --help 2>&1)
+  METRICS_CODE=$?
+  if [ "$METRICS_CODE" -ne 0 ] && echo "$METRICS_OUT" | grep -qi "unrecognized subcommand"; then
+    assert_pass "hex metrics correctly absent (removed in collapse-to-cc-boi)"
+  else
+    assert_fail "hex metrics still recognized (exit $METRICS_CODE) — should be removed"
+  fi
+fi
+
+# ── Test 8: Version reconciled — Cargo.toml is canonical source ─────────────
+bold "── version ──"
+CARGO_VERSION=$(grep -E '^version' "$REPO_DIR/system/harness/Cargo.toml" | head -1 | cut -d'"' -f2)
+INSTALLED_VERSION=$(cat "$INSTALL_DIR/.hex/version.txt" 2>/dev/null || echo "MISSING")
+
+if [ -n "$CARGO_VERSION" ]; then
+  assert_pass "Cargo.toml version readable: $CARGO_VERSION"
+else
+  assert_fail "Could not read version from system/harness/Cargo.toml"
+fi
+
+if [ "$INSTALLED_VERSION" = "$CARGO_VERSION" ]; then
+  assert_pass "Installed version.txt ($INSTALLED_VERSION) matches Cargo.toml canonical version"
+else
+  assert_fail "Version mismatch: installed='$INSTALLED_VERSION', Cargo.toml='$CARGO_VERSION'"
+fi
+
+# Catch the stale pre-rustification version
+if [ "$INSTALLED_VERSION" = "0.12.0" ]; then
+  assert_fail "version.txt is the stale 0.12.0 — T20D1 reconciliation did not apply"
+else
+  assert_pass "version.txt is not the stale 0.12.0 value"
 fi
 
 # ── Summary ─────────────────────────────────────────────────────────────────

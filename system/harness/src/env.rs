@@ -3,8 +3,10 @@ use std::path::{Path, PathBuf};
 
 #[derive(Subcommand)]
 pub enum EnvCommands {
-    /// Detect HEX_DIR using env > AGENT_DIR > parent-of-script precedence
-    #[command(name = "detect-hex-dir")]
+    /// Detect HEX_DIR using env > AGENT_DIR > parent-of-script precedence.
+    /// Internal: diagnostic; env.sh bootstraps HEX_DIR inline (can't call the
+    /// binary before PATH exists).
+    #[command(name = "detect-hex-dir", hide = true)]
     DetectHexDir {
         /// Path to env.sh for auto-detection (env.sh lives at $HEX_DIR/.hex/scripts/env.sh)
         #[arg(long)]
@@ -22,7 +24,9 @@ pub enum EnvCommands {
         #[arg(long)]
         hex_dir: Option<PathBuf>,
     },
-    /// Pretty-print all env values for diagnostics
+    /// Pretty-print all env values for diagnostics.
+    /// Internal: diagnostic only, no scripted callers.
+    #[command(hide = true)]
     Show {
         /// Override HEX_DIR
         #[arg(long)]
@@ -97,10 +101,9 @@ pub fn compose_path_dirs(hex_dir: &Path) -> Vec<PathBuf> {
     add_order.push(home.join(".local/share/uv/python"));
     add_order.push(home.join(".pyenv/shims"));
 
-    // hex binary, BOI, hex-events
+    // hex binary, BOI
     add_order.push(hex_dir.join(".hex/bin"));
     add_order.push(home.join(".boi/bin"));
-    add_order.push(home.join(".hex-events/venv/bin"));
 
     // Filter: existing dirs only; reverse so last-added = highest priority
     let mut seen = std::collections::HashSet::new();
@@ -128,8 +131,9 @@ pub fn compose_path(hex_dir: &Path) -> String {
         .map(|d| d.to_string_lossy().into_owned())
         .collect();
 
+    let mut seen: std::collections::HashSet<String> = new_set;
     for entry in current.split(':') {
-        if !entry.is_empty() && !new_set.contains(entry) {
+        if !entry.is_empty() && seen.insert(entry.to_string()) {
             parts.push(entry.to_string());
         }
     }

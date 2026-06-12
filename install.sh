@@ -5,8 +5,8 @@ set -euo pipefail
 # hex install — Creates a hex instance on the user's machine.
 # Usage: bash install.sh [target_dir]
 #
-# hex is an all-or-nothing package. BOI (parallel workers) and hex-events
-# (reactive automation) are integral — there are no flags to skip them.
+# hex is an all-or-nothing package. BOI (parallel workers) is integral —
+# there are no flags to skip it.
 #
 # The repo is the installer, not the workspace. This script creates a
 # separate instance directory. The repo is disposable after install.
@@ -100,6 +100,13 @@ mkdir -p "$TARGET_DIR"/raw/{transcripts,handoffs}
 mkdir -p "$TARGET_DIR"/specs/_archive
 
 # Copy system files → .hex/   (CORE zone)
+# This bulk cp covers EVERY system/* path including system/telemetry/migrations/
+# (the C3 baseline VIEW migrations) and system/scripts/, system/skills/, etc.
+# If you ever break this bulk cp into per-subdir copies, system/telemetry/migrations
+# MUST remain covered — it carries the C3 metric VIEW DDL applied by
+# telemetry-init.sh. Refactor guard: keep the literal string
+# `system/telemetry/migrations` mentioned here so OBS-025 / Plan A v4-final's
+# install.sh verify-only check stays green across future refactors.
 cp -r "$SCRIPT_DIR/system" "$TARGET_DIR/.hex"
 
 # Create user-space extensions directory (never overwritten by hex upgrade)
@@ -109,8 +116,8 @@ mkdir -p "$TARGET_DIR/.hex/extensions"
 mkdir -p "$TARGET_DIR/.hex/memory"
 
 # Copy root templates
-cp "$SCRIPT_DIR/templates/CLAUDE.md"  "$TARGET_DIR/CLAUDE.md"
 cp "$SCRIPT_DIR/templates/AGENTS.md"  "$TARGET_DIR/AGENTS.md"
+ln -sfn AGENTS.md "$TARGET_DIR/CLAUDE.md"
 cp "$SCRIPT_DIR/templates/todo.md"    "$TARGET_DIR/todo.md"
 
 # Copy user data templates
@@ -120,9 +127,10 @@ cp "$SCRIPT_DIR/templates/observations.md"  "$TARGET_DIR/evolution/observations.
 cp "$SCRIPT_DIR/templates/suggestions.md"   "$TARGET_DIR/evolution/suggestions.md"
 cp "$SCRIPT_DIR/templates/changelog.md"     "$TARGET_DIR/evolution/changelog.md"
 
-# Copy evolution/eval scripts
+# Create evolution/eval dir (session-delta.py was ported to Rust in
+# session_reflect.rs — commit a819261f / BOI S8785 — and the template
+# was deleted. Dir kept for downstream tools that expect it.)
 mkdir -p "$TARGET_DIR/evolution/eval"
-cp "$SCRIPT_DIR/templates/eval/session-delta.py" "$TARGET_DIR/evolution/eval/session-delta.py"
 
 # Copy tests
 if [ -d "$SCRIPT_DIR/tests" ]; then
@@ -313,8 +321,8 @@ if [ -f "$MEMORY_REQS" ]; then
 fi
 
 # Read pinned versions from VERSIONS file (keeps install.sh in lock-step with
-# tested boi/hex-events releases). Fork-friendly: HEX_BOI_REPO and
-# HEX_EVENTS_REPO env vars override the default source.
+# tested boi releases). Fork-friendly: the HEX_BOI_REPO env var overrides the
+# default source.
 VERSIONS_FILE="$SCRIPT_DIR/VERSIONS"
 if [ ! -f "$VERSIONS_FILE" ]; then
     echo "ERROR: $VERSIONS_FILE not found — this hex-foundation checkout is incomplete."
@@ -324,45 +332,18 @@ BOI_VERSION=$(grep "^BOI_VERSION=" "$VERSIONS_FILE" | cut -d= -f2)
 HARNESS_VERSION=$(grep "^HARNESS_VERSION=" "$VERSIONS_FILE" | cut -d= -f2 || true)
 BOI_REPO="${HEX_BOI_REPO:-https://github.com/mrap/boi.git}"
 
-# BOI — parallel worker dispatch
-# Fresh install: clone at pinned version, then run the project's own installer.
-# Existing install: fetch latest tag and upgrade in place.
-install_or_upgrade_boi() {
-    local boi_src="$HOME/github.com/mrap/boi"
-    mkdir -p "$HOME/.boi/bin" "$HOME/.boi/pids" "$HOME/.boi/logs" "$HOME/.boi/worktrees"
+# BOI — parallel worker dispatch (boi-v2: the canonical TOML engine).
+# Builds in a MACHINE-OWNED clone under ~/.boi/src/boi and never touches a
+# developer checkout (e.g. ~/github.com/mrap/boi). The previous version ran
+# `checkout -f $TAG` + `checkout -B main` against the developer repo, which
+# force-reset its main to the pinned tag on every install/upgrade/test run —
+# silently eating merged work 4x (OBS-033, 2026-06-10). The build
+# checkout stays detached at the pinned tag: it is an artifact cache, not a
+# working repo, so there is no branch to leave behind.
 
-    # Clone or update the BOI repo
-    if [ -d "$boi_src/.git" ]; then
-        echo "  BOI repo exists — fetching $BOI_VERSION..."
-        ( cd "$boi_src" && git fetch --tags origin 2>/dev/null && \
-          git checkout "$BOI_VERSION" 2>/dev/null ) || true
-    else
-        echo "  Cloning BOI repo..."
-        mkdir -p "$(dirname "$boi_src")"
-        git clone --branch "$BOI_VERSION" "$BOI_REPO" "$boi_src" 2>/dev/null || {
-            echo "  BOI: failed to clone $BOI_REPO @ $BOI_VERSION"
-            return
-        }
-    fi
-
-    # Build the Rust binary
-    if command -v cargo &>/dev/null; then
-        echo "  Building BOI binary..."
-        ( cd "$boi_src" && cargo build --release 2>/dev/null ) || {
-            echo "  BOI: cargo build failed"
-            return
-        }
-        # Symlink binary
-        ln -sf "$boi_src/target/release/boi" "$HOME/.boi/bin/boi"
-        echo "  BOI $BOI_VERSION built and linked  ✓"
-    else
-        echo "  ⚠️  Rust/cargo not found — cannot build BOI binary"
-        echo "     Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
-        return
-    fi
-
-    # Create boi.sh wrapper for shell alias
-    cat > "$boi_src/boi.sh" << 'BOISH'
+# boi.sh wrapper for shell aliases — lives next to the binary, not in any repo.
+write_boi_wrapper() {
+    cat > "$HOME/.boi/bin/boi.sh" << 'BOISH'
 #!/bin/bash
 if [ -x "$HOME/.boi/bin/boi" ]; then
     exec "$HOME/.boi/bin/boi" "$@"
@@ -370,54 +351,87 @@ fi
 echo "error: BOI binary not found at ~/.boi/bin/boi"
 exit 1
 BOISH
-    chmod +x "$boi_src/boi.sh"
+    chmod +x "$HOME/.boi/bin/boi.sh"
+}
+
+install_or_upgrade_boi() {
+    local boi_build="$HOME/.boi/src/boi"
+    local boi_bin="$HOME/.boi/bin/boi"
+    mkdir -p "$HOME/.boi/bin" "$HOME/.boi/pids" "$HOME/.boi/logs" \
+             "$HOME/.boi/worktrees" "$HOME/.boi/src"
+
+    # TRIPWIRE (2026-06-05): record who triggers the boi rebuild/symlink loop.
+    # Kept: it identified the OBS-033 resetter (codex-parity tests → install.sh).
+    {
+        echo "[$(date '+%F %T')] install_or_upgrade_boi BOI_VERSION=$BOI_VERSION pid=$$ ppid=$PPID"
+        ps -o pid,ppid,command -p "$PPID" 2>/dev/null || true
+        echo "  args: $0 $*"
+    } >> "$HOME/.boi/install-tripwire.log" 2>&1 || true
+
+    # Fast path: the machine-owned build already provides the pinned version.
+    # (Also makes repeated install.sh runs — e.g. from test suites — no-ops.)
+    # `|| true` inside the substitution: a present-but-unrunnable binary (e.g.
+    # interrupted build) must fall through to the rebuild below, not errexit
+    # the whole installer.
+    if [ -x "$boi_bin" ] && \
+       [ "$(readlink "$boi_bin" 2>/dev/null)" = "$boi_build/target/release/boi" ]; then
+        local current
+        current="v$("$boi_bin" --version 2>/dev/null | awk '/^boi /{print $2}' | tail -1 || true)"
+        if [ "$current" = "$BOI_VERSION" ]; then
+            echo "  BOI $BOI_VERSION already installed  ✓"
+            write_boi_wrapper
+            return
+        fi
+    fi
+
+    # Update the machine-owned build checkout (detached at the tag). A repo
+    # that cannot reach the pin (corrupt clone, force-moved tag) self-heals by
+    # re-cloning fresh — never build a stale checkout and call it $BOI_VERSION.
+    # (fetch failure alone is tolerated: the pinned tag may already be local.)
+    if [ -d "$boi_build/.git" ]; then
+        echo "  BOI build repo exists — fetching $BOI_VERSION..."
+        if ! ( cd "$boi_build" && { git fetch --tags origin 2>/dev/null || true; } && \
+               git checkout -f --detach "$BOI_VERSION" 2>/dev/null ); then
+            echo "  BOI: build repo cannot reach $BOI_VERSION — re-cloning fresh" >&2
+            rm -rf "$boi_build"
+        fi
+    fi
+    if [ ! -d "$boi_build/.git" ]; then
+        echo "  Cloning BOI build repo (machine-owned, ~/.boi/src/boi)..."
+        git clone "$BOI_REPO" "$boi_build" 2>/dev/null || {
+            echo "  BOI: failed to clone $BOI_REPO — keeping currently installed binary" >&2
+            return
+        }
+        ( cd "$boi_build" && git checkout -f --detach "$BOI_VERSION" 2>/dev/null ) || {
+            echo "  BOI: tag $BOI_VERSION not found in $BOI_REPO — keeping currently installed binary" >&2
+            return
+        }
+    fi
+
+    # Build the Rust binary (full log kept — a swallowed compiler error makes
+    # failures undiagnosable, S6)
+    if command -v cargo &>/dev/null; then
+        echo "  Building BOI binary..."
+        local build_log="$HOME/.boi/logs/boi-build.log"
+        ( cd "$boi_build" && cargo build --release ) > "$build_log" 2>&1 || {
+            echo "  BOI: cargo build failed — last 20 lines of $build_log:" >&2
+            tail -20 "$build_log" >&2 || true
+            return
+        }
+        # Symlink binary
+        ln -sf "$boi_build/target/release/boi" "$boi_bin"
+        echo "  BOI $BOI_VERSION built and linked  ✓"
+    else
+        echo "  ⚠️  Rust/cargo not found — cannot build BOI binary"
+        echo "     Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
+        return
+    fi
+
+    write_boi_wrapper
 }
 install_or_upgrade_boi
 
-# hex-events — reactive event system (now inline at system/events/)
-install_hex_events_from_source() {
-    local src_dir="$SCRIPT_DIR/system/events"
-    local dst_dir="$HOME/.hex-events"
-    mkdir -p "$dst_dir"
-    # Copy core source files; policies are deployed separately below (non-overwriting)
-    for item in "$src_dir"/*; do
-        name="$(basename "$item")"
-        [ "$name" = "policies" ] && continue
-        dst="$dst_dir/$name"
-        # Remove stale symlinks so cp writes a real file instead of following them
-        [ -L "$dst" ] && rm -f "$dst"
-        cp -R "$item" "$dst_dir/"
-    done
-    echo "  hex-events installed from system/events/  ✓"
-}
-install_hex_events_from_source
-
-# ── Phase 5b: Deploy default policies ─────────────────────────────
-
-POLICIES_SRC="$SCRIPT_DIR/system/events/policies"
-if [ -d "$POLICIES_SRC" ] && ls "$POLICIES_SRC"/*.yaml &>/dev/null; then
-    if [ -d "$HOME/.hex-events" ]; then
-        POLICIES_DST="$HOME/.hex-events/policies"
-        mkdir -p "$POLICIES_DST"
-        copied=0
-        skipped=0
-        for policy_file in "$POLICIES_SRC"/*.yaml; do
-            policy_name="$(basename "$policy_file")"
-            dst="$POLICIES_DST/$policy_name"
-            if [ -f "$dst" ]; then
-                skipped=$((skipped + 1))
-            else
-                cp "$policy_file" "$dst"
-                copied=$((copied + 1))
-            fi
-        done
-        echo "  Default policies    ✓ (copied: $copied, skipped existing: $skipped)"
-    else
-        echo "  hex-events not found, skipping default policy installation."
-    fi
-fi
-
-# ── Phase 6: Register install ──────────────────────────────────────
+# ── Phase 5: Register install ──────────────────────────────────────
 
 python3 -c "
 import json, os
@@ -453,9 +467,61 @@ fi
 _harness_build_from_source() {
     echo "  Building hex from source..."
     ( cd "$SCRIPT_DIR/system/harness" && cargo build --release 2>&1 ) || return 1
-    cp "$SCRIPT_DIR/system/harness/target/release/hex" "$TARGET_DIR/.hex/bin/hex"
+    # When system/harness is a member of a workspace (root Cargo.toml), cargo
+    # emits to the workspace-root target dir, NOT system/harness/target. Probe
+    # both so the cp doesn't silently fail and fall back to a network download.
+    local built=""
+    local candidate
+    for candidate in \
+        "$SCRIPT_DIR/system/harness/target/release/hex" \
+        "$SCRIPT_DIR/target/release/hex"; do
+        if [ -x "$candidate" ]; then built="$candidate"; break; fi
+    done
+    if [ -z "$built" ]; then
+        echo "  hex binary not found after build (checked system/harness/target and workspace target)" >&2
+        return 1
+    fi
+    cp "$built" "$TARGET_DIR/.hex/bin/hex"
     chmod +x "$TARGET_DIR/.hex/bin/hex"
     ln -sf hex "$TARGET_DIR/.hex/bin/hex-agent"
+    _code_intel_build_and_deploy || true
+    return 0
+}
+
+# Build + deploy the code-intel binaries (cq, scipd). system/code-intel is a
+# workspace sibling of system/harness; the harness depends on it via
+# `scipd = { path = "../code-intel" }`, and the bulk `cp -r system → .hex`
+# above already lands its SOURCE at .hex/code-intel so the synced
+# .hex/harness/Cargo.toml resolves. This step deploys the BINARIES alongside
+# hex. Best-effort: a failure here must not fail the hex install (and must not
+# trigger the prebuilt-hex download fallback) — warn loudly and move on.
+_code_intel_build_and_deploy() {
+    if [ ! -f "$SCRIPT_DIR/system/code-intel/Cargo.toml" ]; then
+        return 0
+    fi
+    echo "  Building code-intel binaries (cq, scipd)..."
+    if ! ( cd "$SCRIPT_DIR/system/code-intel" && cargo build --release 2>&1 ); then
+        echo "  WARNING: code-intel build failed — cq/scipd not installed (hex still works)" >&2
+        return 1
+    fi
+    local name ci_bin candidate
+    for name in cq scipd; do
+        ci_bin=""
+        # Same dual probe as the hex binary: workspace builds emit to the
+        # workspace-root target dir, standalone builds to the crate's own.
+        for candidate in \
+            "$SCRIPT_DIR/system/code-intel/target/release/$name" \
+            "$SCRIPT_DIR/target/release/$name"; do
+            if [ -x "$candidate" ]; then ci_bin="$candidate"; break; fi
+        done
+        if [ -n "$ci_bin" ]; then
+            cp "$ci_bin" "$TARGET_DIR/.hex/bin/$name"
+            chmod +x "$TARGET_DIR/.hex/bin/$name"
+            echo "  $name binary           ✓"
+        else
+            echo "  WARNING: $name binary not found after code-intel build" >&2
+        fi
+    done
 }
 
 _harness_download_prebuilt() {
@@ -466,13 +532,15 @@ _harness_download_prebuilt() {
     echo "  Downloading hex from ${harness_url}..."
     curl -fSL "$harness_url" -o "$TARGET_DIR/.hex/bin/hex" && chmod +x "$TARGET_DIR/.hex/bin/hex"
     ln -sf hex "$TARGET_DIR/.hex/bin/hex-agent"
+    # No prebuilt cq/scipd on releases — code-intel binaries require cargo.
+    echo "  NOTE: cq/scipd (code-intel) skipped — install Rust and re-run to build them."
 }
 
 _harness_warn_missing() {
     echo ""
     echo "WARNING: hex binary could not be built or downloaded."
-    echo "  Install Rust (https://rustup.rs) and re-run to enable the agent fleet and server."
-    echo "  Core hex functionality (BOI, hex-events, memory) still works without it."
+    echo "  Install Rust (https://rustup.rs) and re-run to build the hex binary."
+    echo "  Core shell functionality (BOI, memory scripts) still works without it."
     echo ""
 }
 
@@ -555,6 +623,20 @@ RCEOF
         echo "  Run 'source $SHELL_RC' or restart your terminal to activate."
     else
         echo "  HEX_DIR already in $SHELL_RC ✓"
+    fi
+
+    # Shell completions — sourced from the binary so they always match the
+    # installed version. Self-contained (no fpath/compinit ordering deps).
+    if ! grep -q 'hex completions' "$SHELL_RC" 2>/dev/null; then
+        if [[ "$SHELL_RC" == *.bashrc ]]; then COMP_SHELL="bash"; else COMP_SHELL="zsh"; fi
+        cat >> "$SHELL_RC" << RCEOF
+
+# hex shell completions
+command -v hex >/dev/null 2>&1 && source <(hex completions $COMP_SHELL)
+RCEOF
+        echo "  hex completions ($COMP_SHELL) added to $SHELL_RC ✓"
+    else
+        echo "  hex completions already in $SHELL_RC ✓"
     fi
 else
     echo ""

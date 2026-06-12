@@ -13,6 +13,19 @@ fn state_dir(hex_dir: &Path) -> PathBuf {
     hex_dir.join("projects/integrations/_state")
 }
 
+/// Resolve the integration-check harness script, preferring the DEPLOYED layout
+/// (`.hex/scripts/`) and falling back to the foundation source layout
+/// (`system/scripts/`). Hardcoding `system/scripts/` broke every probe/check on
+/// deployed instances, where the script lives under `.hex/scripts/`.
+pub fn harness_script(hex_dir: &Path) -> PathBuf {
+    let deployed = hex_dir.join(".hex/scripts/hex-integration-check.sh");
+    if deployed.exists() {
+        deployed
+    } else {
+        hex_dir.join("system/scripts/hex-integration-check.sh")
+    }
+}
+
 fn bundles_dir(hex_dir: &Path) -> PathBuf {
     hex_dir.join("integrations")
 }
@@ -239,7 +252,7 @@ pub fn probe(hex_dir: &Path, name: &str, json_out: bool, quiet: bool) -> i32 {
         return 1;
     }
 
-    let harness = hex_dir.join("system/scripts/hex-integration-check.sh");
+    let harness = harness_script(hex_dir);
     if !harness.exists() {
         eprintln!("[probe] ERROR: harness not found: {}", harness.display());
         return 1;

@@ -41,6 +41,11 @@ bold "━━━━━━━━━━━━━━━━━━━━━━━━�
 # ── Discover suites ────────────────────────────────────────────────────────────
 # Auto-discover *.sh files in suites/, sorted alphabetically.
 # Filter by --include / --exclude patterns (grep -E regex on suite name).
+# Store FULL paths, not basenames: each suite re-defines SCRIPT_DIR at its top,
+# which clobbers ours when sourced — so reconstructing "$SCRIPT_DIR/suites/x.sh"
+# in the run loop yields a doubled "suites/suites/x.sh" for every suite after
+# the first. Capturing absolute paths here (while SCRIPT_DIR is still ours)
+# makes the loop immune to that collision.
 SUITES=()
 while IFS= read -r suite_file; do
     suite=$(basename "$suite_file" .sh)
@@ -50,7 +55,7 @@ while IFS= read -r suite_file; do
     if [[ -n "$EXCLUDE_PATTERN" ]] && echo "$suite" | grep -qE "$EXCLUDE_PATTERN"; then
         continue
     fi
-    SUITES+=("$suite")
+    SUITES+=("$suite_file")
 done < <(ls "$SCRIPT_DIR/suites/"*.sh 2>/dev/null | sort || true)
 
 if [[ ${#SUITES[@]} -eq 0 ]]; then
@@ -59,8 +64,8 @@ if [[ ${#SUITES[@]} -eq 0 ]]; then
 fi
 
 # ── Run each suite ─────────────────────────────────────────────────────────────
-for suite in "${SUITES[@]}"; do
-    suite_file="$SCRIPT_DIR/suites/${suite}.sh"
+for suite_file in "${SUITES[@]}"; do
+    suite=$(basename "$suite_file" .sh)
     if [ ! -f "$suite_file" ]; then
         red "  MISSING suite file: $suite_file"
         FAIL=$((FAIL + 1))

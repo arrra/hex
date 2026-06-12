@@ -1,0 +1,38 @@
+# hex iii-engine — minimal base config (schema-corrected)
+workers:
+  - name: iii-http
+    config:
+      host: 127.0.0.1
+      port: 3111
+
+  - name: iii-state
+    config:
+      adapter:
+        name: kv
+        config:
+          store_method: file_based
+          file_path: ./data/state_store.db
+
+  - name: iii-stream
+    config:
+      host: 127.0.0.1
+      port: 3112
+      adapter:
+        name: kv
+        config:
+          store_method: file_based
+          file_path: ./data/stream_store
+
+  - name: iii-cron
+    config:
+      adapter:
+        name: kv
+
+  - name: iii-observability
+    config:
+      enabled: true
+      service_name: hex-engine
+      exporter: memory
+      sampling_ratio: 1.0
+      metrics_enabled: true
+      logs_enabled: true

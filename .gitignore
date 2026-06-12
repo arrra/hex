@@ -1,3 +1,4 @@
+target/
 # Python
 __pycache__/
 *.pyc
@@ -14,6 +15,7 @@ Thumbs.db
 # IDE
 .idea/
 .vscode/
+.serena/
 *.swp
 *.swo
 
@@ -27,7 +29,22 @@ system/scripts/health/test*.txt
 .codex/
 todo.md
 
+# Personal data — belongs in mrap-hex, never in the foundation repo (see AGENTS.md S1)
+projects/
+evolution/
+me/
+people/
+landings/
+raw/
+okrs/
+
 # Generated reports and local test artifacts
 AUDIT-REPORT.md
 pytest.ini
 tests/test_integration.py
+
+# Compiled binaries and bytecache
+system/scripts/bin/
+
+# Local embedding model cache (fastembed/nomic) — never commit (538MB+)
+.fastembed_cache/

@@ -50,14 +50,22 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::symlinks::AgentsSkillsSymlink),
         Box::new(checks::symlinks::NoBrokenSymlinks),
         Box::new(checks::memory_db::MemoryDbExists),
+        Box::new(checks::distill_strikes::DistillStrikes),
+        Box::new(checks::vector_search::VectorSearchHealthy),
+        Box::new(checks::reflection_liveness::ReflectionLogFresh),
+        Box::new(checks::nightly_full_liveness::NightlyFullLiveness),
         Box::new(checks::scripts_exec::ScriptsExecutable),
-        Box::new(checks::hex_events::HexEventsReachable),
         Box::new(checks::boi_health::BoiHealth),
+        Box::new(checks::iii_engine_health::IiiEngineHealth),
+        Box::new(checks::telemetry_health::TelemetryHealth),
         Box::new(checks::python::PythonVersion),
         Box::new(checks::hex_binary::HexBinaryOnPath),
         // Config checks
+        Box::new(checks::llm_provider::LlmProviderReachable),
         Box::new(checks::env_sh::EnvSh),
         Box::new(checks::claude_md::ClaudeMdExists),
+        Box::new(checks::charter_drift::CharterDrift),
+        Box::new(checks::claude_runs_config::ClaudeRunsConfig),
         Box::new(checks::codex_config::CodexConfigExists),
         Box::new(checks::codex::CodexCliOnPath),
         Box::new(checks::codex::CodexVersionOk),
@@ -68,11 +76,13 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::todo_md::TodoMdExists),
         Box::new(checks::llm_preference::LlmPreferenceExists),
         Box::new(checks::llm_preference::NoStaleLlmPreference),
+        Box::new(checks::llm_config::LlmConfigCheck),
+        Box::new(checks::llm_config::StaleLlmPreferenceCheck),
         Box::new(checks::settings_json::SettingsJsonValid),
         Box::new(checks::timezone::TimezoneValid),
-        // Fleet checks
-        Box::new(checks::agent_fleet::AgentFleet),
-        Box::new(checks::agent_liveness::AgentLiveness),
+        // Registry health checks
+        Box::new(checks::registry_health::RegistryOrphanedBin),
+        Box::new(checks::registry_health::RegistryStalePolicy),
     ]
 }
 
@@ -174,5 +184,14 @@ mod tests {
     fn test_registry_has_checks() {
         let runner = Runner::all_checks();
         assert!(runner.checks.len() >= 10, "registry must have at least 10 checks");
+    }
+
+    #[test]
+    fn test_registry_includes_telemetry_health() {
+        let runner = Runner::all_checks();
+        assert!(
+            runner.checks.iter().any(|c| c.name() == "telemetry-health"),
+            "registry must include the telemetry-health doctor check"
+        );
     }
 }

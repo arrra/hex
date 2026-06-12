@@ -1,0 +1,42 @@
+# Instance-declared engine workers — copy to `engine-workers.yaml` (same dir)
+# and edit. The harness merges the `workers:` list into its in-process iii
+# engine config at boot (`hex harness serve`); restart the harness to apply.
+#
+# `.hex/iii/` is an ADDITIVE upgrade dir: `engine-workers.yaml` is instance-
+# owned and survives /hex-upgrade. Foundation ships only this .example file —
+# never a file at the real path, which additive sync would overwrite.
+#
+# Schema = the engine config `workers:` list: {name, image?, config?}. Any
+# engine-resolvable worker is valid (builtins like iii-exec, registry workers
+# via iii-worker). This is the no-LaunchAgents path for persistent local
+# processes (see hex docs/iii-hex.md "Instance engine workers").
+#
+# Merge semantics: an entry whose name matches a DEFAULT module/worker
+# (e.g. iii-observability) REPLACES that entry's config in place; any other
+# name appends a new worker.
+#
+# Example: host the iii console UI as an engine-supervised daemon.
+# - iii-exec runs the commands in order; intermediates must exit 0; the LAST
+#   command persists as the daemon (own session, group-killed on shutdown).
+# - iii-exec REQUIRES a `config` block (engine panics on a bare entry).
+# - The pkill intermediate clears a stray console from a previous harness
+#   life (a SIGKILLed harness orphans the setsid'd child, which would hold
+#   the port and make the respawn fail to bind).
+#
+# workers:
+#   - name: iii-exec
+#     config:
+#       exec:
+#         - pkill -f '\.iii/workers/console' 2>/dev/null; true
+#         - $HOME/.iii/workers/console --http-port 3113 --url ws://127.0.0.1:49134
+#
+#   # Override a default module's config (name match = replace in place):
+#   # memory exporter gives the console trace explorer in-engine data.
+#   - name: iii-observability
+#     config:
+#       enabled: true
+#       service_name: hex-engine
+#       exporter: memory
+#       sampling_ratio: 1.0
+#       metrics_enabled: true
+#       logs_enabled: true

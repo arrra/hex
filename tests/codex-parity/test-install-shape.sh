@@ -54,6 +54,10 @@ check ".hex/scripts/ exists"  test -d "$INSTALL_DIR/.hex/scripts"
 check ".hex/skills/ exists"   test -d "$INSTALL_DIR/.hex/skills"
 check ".hex/bin/ exists"      test -d "$INSTALL_DIR/.hex/bin"
 
+echo "[2b] Code-intel crate synced (harness Cargo.toml depends on path = \"../code-intel\")"
+check ".hex/code-intel/Cargo.toml exists"  test -f "$INSTALL_DIR/.hex/code-intel/Cargo.toml"
+check ".hex/harness/Cargo.toml exists"     test -f "$INSTALL_DIR/.hex/harness/Cargo.toml"
+
 echo "[3] Instruction files"
 check "CLAUDE.md exists"  test -f "$INSTALL_DIR/CLAUDE.md"
 check "AGENTS.md exists"  test -f "$INSTALL_DIR/AGENTS.md"

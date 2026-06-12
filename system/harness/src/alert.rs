@@ -1,41 +1,90 @@
-/// Port of .hex/scripts/hex-alert.sh
-/// iMessage alert sender — sets env vars and execs alert/send.sh.
-use std::path::PathBuf;
-use std::process::Command;
+//! Loud alert pathway: stderr + telemetry row + macOS notification.
+//! Deduped per key via a stamp file so a 15-min cron can call this every
+//! tick without producing notification spam. Never fails the caller (S6:
+//! observe loudly, never break the observed job).
 
-pub fn run_send(hex_dir: &PathBuf, severity: &str, agent_id: &str, message: &str) {
-    let send_sh = hex_dir.join(".hex/scripts/alert/send.sh");
-    if !send_sh.exists() {
-        eprintln!("ERROR: alert/send.sh not found at {}", send_sh.display());
-        std::process::exit(1);
+use std::path::Path;
+use std::time::{Duration, SystemTime};
+
+const DEDUPE_WINDOW: Duration = Duration::from_secs(6 * 3600);
+
+/// Returns true if the alert fired (not suppressed by dedupe).
+pub fn notify(key: &str, title: &str, msg: &str) -> bool {
+    let hex_dir = match std::env::var("HEX_DIR") {
+        Ok(d) => std::path::PathBuf::from(d),
+        Err(_) => {
+            eprintln!("ALERT [{key}] {title}: {msg} (HEX_DIR unset — stderr only)");
+            return true;
+        }
+    };
+    notify_at(&hex_dir, key, title, msg)
+}
+
+/// Inner, testable form.
+pub fn notify_at(hex_dir: &Path, key: &str, title: &str, msg: &str) -> bool {
+    if suppressed(hex_dir, key) {
+        return false;
     }
+    eprintln!("ALERT [{key}] {title}: {msg}");
+    let _ = crate::telemetry::record(&crate::telemetry::TelemetryEvent {
+        source: "alert".into(),
+        event: key.into(),
+        status: "alert".into(),
+        duration_ms: None,
+        exit_code: None,
+        detail: Some(format!("{title}: {msg}")),
+    });
+    #[cfg(all(target_os = "macos", not(test)))]
+    {
+        let script = format!(
+            "display notification \"{}\" with title \"{}\"",
+            msg.replace('"', "'"),
+            title.replace('"', "'")
+        );
+        if let Err(e) = std::process::Command::new("osascript")
+            .arg("-e")
+            .arg(&script)
+            .status()
+        {
+            eprintln!("alert [{key}]: osascript failed: {e}");
+        }
+    }
+    stamp(hex_dir, key);
+    true
+}
 
-    let status = Command::new(&send_sh)
-        .env("HEX_ALERT_SEVERITY", severity)
-        .env("HEX_ALERT_AGENT_ID", agent_id)
-        .env("HEX_ALERT_MESSAGE", message)
-        .env("HEX_ALERT_TIER", "tier:direct-ping")
-        .env("HEX_ALERT_REASON_KIND", "watchdog-alert")
-        .status()
-        .unwrap_or_else(|e| {
-            eprintln!("ERROR: failed to exec alert/send.sh: {e}");
-            std::process::exit(1);
-        });
+fn stamp_path(hex_dir: &Path, key: &str) -> std::path::PathBuf {
+    hex_dir.join(".hex/run/alerts").join(format!("{key}.last"))
+}
 
-    std::process::exit(status.code().unwrap_or(if status.success() { 0 } else { 1 }));
+fn suppressed(hex_dir: &Path, key: &str) -> bool {
+    stamp_path(hex_dir, key)
+        .metadata()
+        .and_then(|m| m.modified())
+        .map(|t| SystemTime::now().duration_since(t).unwrap_or(Duration::MAX) < DEDUPE_WINDOW)
+        .unwrap_or(false)
+}
+
+fn stamp(hex_dir: &Path, key: &str) {
+    let p = stamp_path(hex_dir, key);
+    if let Some(parent) = p.parent() {
+        let _ = std::fs::create_dir_all(parent);
+    }
+    if let Err(e) = std::fs::write(&p, b"") {
+        eprintln!("alert [{key}]: stamp write failed: {e}");
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-
     #[test]
-    fn send_sh_path_construction() {
-        let hex_dir = PathBuf::from("/Users/test/hex");
-        let expected = hex_dir.join(".hex/scripts/alert/send.sh");
-        assert_eq!(
-            expected.to_str().unwrap(),
-            "/Users/test/hex/.hex/scripts/alert/send.sh"
-        );
+    fn dedupe_suppresses_within_window() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        // Keep the inner telemetry write hermetic (telemetry resolves
+        // events.db from $HEX_DIR) — same pattern as telemetry/mod.rs tests.
+        std::env::set_var("HEX_DIR", tmp.path());
+        assert!(notify_at(tmp.path(), "test-key", "t", "m"));
+        assert!(!notify_at(tmp.path(), "test-key", "t", "m")); // suppressed
     }
 }

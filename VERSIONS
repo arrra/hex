@@ -2,10 +2,12 @@
 # install.sh reads this file and clones the corresponding tags.
 #
 # To override the source repo (e.g. for forks), set these env vars before install:
-#   HEX_BOI_REPO=https://github.com/youruser/boi.git
+#   HEX_BOI_REPO=https://github.com/youruser/boi-v2.git
 #
-# To bump: tag new releases in boi, then update these values.
-# hex-events is now inline at system/events/ (merged v0.2.0 → v0.8.0)
+# To bump: tag new releases in boi-v2, then update these values.
+# mrap/boi is the canonical BOI engine — migrated from the old V1 (YAML, "boi
+# 2.0.0") to the v2 TOML engine (control-socket daemon, ~/.boi/v2). The v3.0.0
+# release supersedes the old 2.0.0 line (V1 lives only in git history now).
 
-BOI_VERSION=v1.3.0
+BOI_VERSION=v3.3.1
 HARNESS_VERSION=v0.8.0

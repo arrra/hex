@@ -10,8 +10,8 @@ These are the behavioral enforcement mechanisms that make the Standing Orders op
 
 **Decision tree (answer each → act):**
 1. Is this a single-line edit? → Do it inline.
-2. Is this recurring, scheduled, or reactive (fires on an event)? → **Write a hex-events policy** at `~/.hex-events/policies/*.yaml`. NEVER use CronCreate, hooks, or cron.
-3. Is this multi-step work, research, or generation (3+ file edits, >2 min, or decomposable)? → **Write a YAML BOI spec and dispatch** with `bash ~/.boi/boi dispatch <spec.yaml>`. YAML only — markdown specs are rejected. Must include `initiative:` field. NEVER code inline for multi-file projects.
+2. Is this recurring or scheduled? → Configure an OS-level job (launchd/cron) targeting the specific script. NEVER use CronCreate or polling loops.
+3. Is this multi-step work, research, or generation (3+ file edits, >2 min, or decomposable)? → **Write a TOML BOI spec and dispatch** with `~/.boi/bin/boi dispatch <spec.toml>`. NEVER code inline for multi-file projects.
 4. Is it a one-time lookup or simple edit? → Do it inline.
 
 **Additional fail-safes:**
@@ -102,33 +102,6 @@ This is Core Rule #18 (mechanical action) with teeth. The verbal-to-mechanical g
 - Did a BOI spec complete that relates to a landing? → **Update the landing sub-item NOW.**
 
 This is Core Rule #6 (landings update) with teeth. R-033 has recurred 6 times (status: `systemic` since 2026-04-03). **STRUCTURAL FIX:** Before producing any response after tool calls, check: "Did I just complete work tracked in today's landings?" If yes, update landings BEFORE generating the response text.
-
----
-
-## Message-to-Agent Routing Gate
-
-**When this activates:** On EVERY inbound message from Mike. No exceptions.
-
-**Why this exists:** 2026-04-23 — Mike shared a career portfolio. I filed the artifact but didn't route to the career agent. The gap: treating routing as optional judgment, not mandatory mechanics. Delegation is the system multiplier.
-
-**How it works:** Fan-out to all agents via local LLM (Gemma 4 2B on Ollama). Each agent's charter is sent alongside Mike's message. The model makes a semantic relevance judgment — no keyword maintenance needed.
-
-**Mandatory steps:**
-
-1. **Fan-out classify (background).** Run `python3 $HEX_DIR/.hex/scripts/route-message-llm.py "message text"` in background (takes ~60s due to serial Ollama inference). Do NOT block your response on this.
-2. **While waiting, respond to Mike normally.**
-3. **When results arrive, for each matched agent:**
-   - Send `hex agent message hex-main <agent-id> --subject "..." --body "..."` with relevant context.
-   - If an artifact was saved: copy it to the matched agent's project directory.
-   - If strongly actionable: tell Mike — "Routed to {agent}. They'll pick this up on their next wake."
-4. **If no matches:** no action needed.
-5. **Never skip this gate.** Even casual conversation — the model decides, not your judgment.
-
-**The rule:** Mike talks to one surface. Agents activate in parallel. Delegation is the default.
-
-### C1 Router Mode
-
-The C1 Thermal Map Router (zero-LLM heuristic, P50 < 5ms) was removed in the 2026-05-12 scripts prune. LLM-based routing via `route-message-llm.py` remains active.
 
 ---
 

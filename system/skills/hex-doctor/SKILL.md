@@ -19,9 +19,9 @@ Validates and repairs your hex agent installation.
 
 ### Health Check (default)
 
-Run when the user invokes hex-doctor or when hex-startup detects issues.
+Run when the user invokes hex-doctor or when the startup health check detects issues.
 
-1. Run `bash $HEX_DIR/.hex/scripts/doctor.sh --fix` to auto-fix all scriptable issues
+1. Run `hex doctor run --fix` to auto-fix all scriptable issues
 2. Parse the output for any unfixed errors (checks that doctor.sh cannot fix: .hex/, skills/, CLAUDE.md, AGENTS.md)
 3. Handle LLM-fixable issues:
    - **AGENTS.md missing**: Generate from CLAUDE.md (requires understanding format differences between Claude and Codex)
@@ -80,7 +80,7 @@ When migrating user data from backup:
 - **Copy, don't move.** The backup stays intact until the user explicitly deletes it.
 - **Read before writing.** Check if the destination already has content (from a partial previous migration). If so, skip that item and report it.
 - **Verify after each item.** After copying, verify the file exists and is readable at the destination.
-- **Re-index memory.** After migration, run `python3 .hex/skills/memory/scripts/memory_index.py --full` to rebuild the search index with correct paths.
+- **Re-index memory.** After migration, run `hex memory index --full` to rebuild the search index with correct paths.
 
 ## Output Format
 

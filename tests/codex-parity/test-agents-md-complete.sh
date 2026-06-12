@@ -2,8 +2,8 @@
 # test-agents-md-complete.sh — Verify AGENTS.md covers all required sections.
 #
 # Asserts that AGENTS.md contains all the sections present in CLAUDE.md
-# to ensure behavioral parity: standing orders, session lifecycle, BOI,
-# hex-events, memory, improvement engine.
+# to ensure behavioral parity: standing orders, BOI, memory,
+# improvement engine.
 
 set -uo pipefail
 
@@ -68,16 +68,13 @@ check_contains "evolve principle"          "evolve"                           "$
 echo "[3] Standing orders"
 check_contains "standing orders section"   "standing orders"                  "$AGENTS_MD"
 
-echo "[4] Session lifecycle"
-check_contains "session lifecycle section" "session lifecycle\|session"       "$AGENTS_MD"
-check_contains "checkpoint protocol"       "checkpoint\|shutdown"             "$AGENTS_MD"
-
 echo "[5] BOI delegation"
 check_contains "BOI section"               "BOI\|boi"                         "$AGENTS_MD"
 check_contains "dispatch reference"        "dispatch"                         "$AGENTS_MD"
 
-echo "[6] hex-events automation"
-check_contains "hex-events section"        "hex-events\|hex_events"           "$AGENTS_MD"
+echo "[6] Automation section (launchd/OS-level — hex-events removed)"
+check_contains "Automation section present" "## Automation"                   "$AGENTS_MD"
+check_contains "launchd reference"          "launchd"                         "$AGENTS_MD"
 
 echo "[7] Memory system"
 check_contains "memory section"            "memory\|Memory"                   "$AGENTS_MD"

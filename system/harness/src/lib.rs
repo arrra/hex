@@ -1,20 +1,34 @@
-pub mod assets;
-pub mod audit;
-pub mod route;
-pub mod charter_triggers;
-pub mod extensions;
+// Self-alias so module files compiled into this crate via `#[path] mod` (the
+// `*.worker.rs` overlay) can `use hex::…` uniformly, whether they live in-crate
+// (core modules) or out-of-crate (personal modules).
+extern crate self as hex;
+
+pub mod act_evidence;
+pub mod alert;
+pub mod backup;
+pub mod claude_runs;
+pub mod dial;
+pub mod doctor;
+pub mod gatekeeper;
+pub mod harness;
+pub mod ledger;
+pub mod lint_gates;
+pub mod reconciler;
+pub mod capability_exec;
 pub mod charter;
-pub mod claude;
-pub mod cost;
-pub mod events;
-pub mod gate;
-pub mod message;
-pub mod messaging;
-pub mod prompt;
-pub mod queue;
-pub mod server;
-pub mod state;
-pub mod sse;
+pub mod audit;
+pub mod capability_guard;
+pub mod llm_config;
+pub mod memory;
+pub mod messages;
+pub mod module_state;
+pub mod ops;
+pub mod reaper;
+pub mod registry;
+pub mod release;
+pub mod sanitize;
 pub mod telemetry;
 pub mod types;
-pub mod wake;
+pub mod wild;
+pub mod worker;
+pub mod workers;

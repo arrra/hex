@@ -51,20 +51,17 @@ echo "[3/9] Core Files"
 for file in CLAUDE.md AGENTS.md todo.md me/me.md me/learnings.md \
            .hex/memory.db .hex/version.txt \
            .hex/scripts/startup.sh .hex/scripts/doctor.sh .hex/scripts/upgrade.sh .hex/scripts/today.sh \
-           .hex/skills/memory/scripts/memory_search.py \
-           .hex/skills/memory/scripts/memory_save.py \
-           .hex/skills/memory/scripts/memory_index.py \
            .hex/templates/landing-template.md .hex/templates/decision-template.md \
            evolution/observations.md evolution/suggestions.md evolution/changelog.md; do
     check "file: $file" test -f "/tmp/test-hex/$file"
 done
 
 # ═══════════════════════════════════════════════════
-# SECTION 4: Commands (all 10 in .claude/commands/)
+# SECTION 4: Commands (in .claude/commands/)
 # ═══════════════════════════════════════════════════
 echo "[4/9] Commands"
 for cmd in hex-startup hex-checkpoint hex-shutdown hex-consolidate \
-           hex-reflect hex-debrief hex-triage hex-decide hex-doctor hex-upgrade; do
+           hex-reflect hex-decide hex-doctor hex-upgrade; do
     check "command: //$cmd" test -f "/tmp/test-hex/.claude/commands/$cmd.md"
 done
 
@@ -113,12 +110,14 @@ conn.close()
 " && { echo "  PASS: DB schema complete"; PASS=$((PASS + 1)); } || { echo "  FAIL: DB schema"; FAIL=$((FAIL + 1)); }
 TOTAL=$((TOTAL + 1))
 
-# Save
-python3 .hex/skills/memory/scripts/memory_save.py "fullstack test sentinel_abc" --tags "e2e,fullstack" >/dev/null 2>&1
-check "memory save" test $? -eq 0
+# Save = write a workspace file; native `hex memory index` makes it searchable
+mkdir -p me
+echo "fullstack test sentinel_abc indexed for e2e" >> me/learnings.md
+HEX_DIR=/tmp/test-hex hex memory index >/dev/null 2>&1
+check "memory index" test $? -eq 0
 
 # Search saved memory
-OUTPUT=$(python3 .hex/skills/memory/scripts/memory_search.py "sentinel_abc" --compact 2>&1)
+OUTPUT=$(HEX_DIR=/tmp/test-hex hex memory search "sentinel_abc" 2>&1)
 if echo "$OUTPUT" | grep -q "sentinel_abc"; then
     echo "  PASS: Search finds saved memory"
     PASS=$((PASS + 1))
@@ -129,8 +128,8 @@ fi
 TOTAL=$((TOTAL + 1))
 
 # Index
-python3 .hex/skills/memory/scripts/memory_index.py >/dev/null 2>&1
-STATS=$(python3 .hex/skills/memory/scripts/memory_index.py --stats 2>&1)
+HEX_DIR=/tmp/test-hex hex memory index --full >/dev/null 2>&1
+STATS=$(HEX_DIR=/tmp/test-hex hex memory index --stats 2>&1)
 if echo "$STATS" | grep -q "Files indexed:"; then
     echo "  PASS: Index + stats"
     PASS=$((PASS + 1))
@@ -141,7 +140,7 @@ fi
 TOTAL=$((TOTAL + 1))
 
 # Search indexed content
-OUTPUT=$(python3 .hex/skills/memory/scripts/memory_search.py "priorities" --compact 2>&1)
+OUTPUT=$(HEX_DIR=/tmp/test-hex hex memory search "priorities" 2>&1 || true)
 if echo "$OUTPUT" | grep -q "todo.md\|Priorities"; then
     echo "  PASS: Search finds indexed files"
     PASS=$((PASS + 1))
@@ -196,8 +195,9 @@ text = text.replace(
 open('CLAUDE.md', 'w').write(text)
 "
 
-# Save a memory (should survive upgrade)
-python3 .hex/skills/memory/scripts/memory_save.py "pre-upgrade memory persist_check" --tags "upgrade" >/dev/null 2>&1
+# Save a memory (should survive upgrade) — write workspace file, then index natively
+echo "pre-upgrade memory persist_check tag:upgrade" >> me/learnings.md
+HEX_DIR=/tmp/test-hex hex memory index >/dev/null 2>&1
 
 # Create local upgrade source
 mkdir -p /tmp/hex-upgrade-repo
@@ -232,7 +232,7 @@ fi
 TOTAL=$((TOTAL + 1))
 
 # Memory.db survived upgrade?
-PERSIST_OUT=$(python3 .hex/skills/memory/scripts/memory_search.py "persist_check" --compact 2>&1)
+PERSIST_OUT=$(HEX_DIR=/tmp/test-hex hex memory search "persist_check" 2>&1)
 if echo "$PERSIST_OUT" | grep -q "persist_check"; then
     echo "  PASS: Memory survived upgrade"
     PASS=$((PASS + 1))

@@ -4,9 +4,6 @@ use std::path::PathBuf;
 pub enum Category {
     Health,
     Config,
-    Fleet,
-    Security,
-    Performance,
 }
 
 impl std::fmt::Display for Category {
@@ -14,9 +11,6 @@ impl std::fmt::Display for Category {
         match self {
             Category::Health => write!(f, "Health"),
             Category::Config => write!(f, "Config"),
-            Category::Fleet => write!(f, "Fleet"),
-            Category::Security => write!(f, "Security"),
-            Category::Performance => write!(f, "Performance"),
         }
     }
 }
@@ -83,9 +77,6 @@ impl CheckResult {
     pub fn fixed(msg: impl Into<String>) -> Self {
         Self { status: Status::Fixed, message: msg.into(), details: None, elapsed_ms: 0 }
     }
-    pub fn info(msg: impl Into<String>) -> Self {
-        Self { status: Status::Info, message: msg.into(), details: None, elapsed_ms: 0 }
-    }
     pub fn with_details(mut self, details: impl Into<String>) -> Self {
         self.details = Some(details.into());
         self
@@ -118,11 +109,6 @@ fn dirs_home() -> PathBuf {
 pub trait DoctorCheck: Send + Sync {
     /// Short stable identifier (e.g. "hex-dir-set"). Used for --filter and JSON.
     fn name(&self) -> &str;
-
-    /// Human-readable display name (defaults to name()).
-    fn display_name(&self) -> &str {
-        self.name()
-    }
 
     /// Functional category for grouping.
     fn category(&self) -> Category;

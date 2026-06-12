@@ -1,0 +1,79 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  Hex harness launchd template (spec S5yw25n5y; gui LaunchAgent form 2026-06-05).
+
+  This is a per-user gui LaunchAgent (installed to ~/Library/LaunchAgents), NOT a
+  system LaunchDaemon. Reason: per the hex-as-own-harness design the harness runs
+  per-task reasoning INSIDE `claude`, and Claude Code auth lives in the macOS
+  LOGIN keychain — which a system daemon (no login session) cannot reach. A gui
+  LaunchAgent bootstrapped into gui/<uid> runs in the user's Aqua login session
+  and inherits its unlocked login keychain.
+
+  NO login-session-detach key. Empirically verified 2026-06-05
+  (keychain-launchagent-test): a gui agent WITHOUT that key reads the login
+  keychain (rc=0); WITH it the read is BLOCKED (rc=36 errSecAuthFailed). Setting
+  it spawns the job into a NEW audit session, DETACHING from the Aqua session
+  that holds the unlocked login keychain (per `man launchd.plist`). So it HURTS
+  keychain access. Do not re-add it. (macOS 26: spawn `claude` as a DIRECT
+  program, not `bash -> claude`, so the keychain-ACL identity stays clean.)
+
+  Tradeoff vs a daemon: dies on logout. Accepted — FileVault forces a GUI login
+  at every boot on this box, so there's effectively always a login session, and
+  keychain access (which the harness needs for claude) is worth more than
+  surviving an explicit logout.
+
+  `hex harness start` renders this template by substituting:
+    HEXBIN_PLACEHOLDER -> $HEX_DIR/.hex/bin/hex
+    HEXDIR_PLACEHOLDER -> $HEX_DIR
+    PATH_PLACEHOLDER   -> runtime PATH (homebrew prepended)
+    LOG_PLACEHOLDER    -> $HEX_DIR/.hex/logs/com.hex.harness.log
+
+  The harness is a single-process drain-aware host for the typed Rust workers
+  in `hex::workers::registry()`. The hidden `hex harness serve` entry IS the
+  long-running process — launchd invokes it; humans use `start|stop|status`.
+-->
+<plist version="1.0">
+<dict>
+    <key>Label</key>
+    <string>com.hex.harness</string>
+    <key>ProgramArguments</key>
+    <array>
+        <string>HEXBIN_PLACEHOLDER</string>
+        <string>harness</string>
+        <string>serve</string>
+    </array>
+    <key>WorkingDirectory</key>
+    <string>HEXDIR_PLACEHOLDER</string>
+    <!-- Intentionally NO login-session-detach key — it detaches the job from the
+         Aqua login session and BLOCKS login-keychain access (verified: rc=36 with
+         it, rc=0 without). A plain gui/<uid> agent inherits the keychain. -->
+    <key>EnvironmentVariables</key>
+    <dict>
+        <key>HEX_DIR</key>
+        <string>HEXDIR_PLACEHOLDER</string>
+        <key>III_URL</key>
+        <string>ws://127.0.0.1:49134</string>
+        <key>PATH</key>
+        <string>PATH_PLACEHOLDER</string>
+        <!-- gws (Drive backup) keeps the FILE keyring — it's a separate secret
+             from claude's keychain auth and the file backend is robust either
+             way. (Switch to the login keychain later if we want full uniformity.) -->
+        <key>GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND</key>
+        <string>file</string>
+    </dict>
+    <key>RunAtLoad</key>
+    <true/>
+    <key>KeepAlive</key>
+    <dict>
+        <key>SuccessfulExit</key>
+        <false/>
+    </dict>
+    <key>StandardOutPath</key>
+    <string>LOG_PLACEHOLDER</string>
+    <key>StandardErrorPath</key>
+    <string>LOG_PLACEHOLDER</string>
+    <key>ProcessType</key>
+    <string>Background</string>
+</dict>
+</plist>

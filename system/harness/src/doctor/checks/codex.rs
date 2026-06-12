@@ -1,8 +1,7 @@
 use crate::doctor::check::{Category, CheckResult, Context, DoctorCheck};
 use std::process::Command;
 
-const AGENTS_MD_REQUIRED_SECTIONS: &[&str] =
-    &["Standing Orders", "Session Lifecycle", "BOI", "Memory"];
+const AGENTS_MD_REQUIRED_SECTIONS: &[&str] = &["Standing Orders", "BOI", "Memory"];
 
 fn codex_on_path() -> bool {
     Command::new("which")

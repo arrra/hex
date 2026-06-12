@@ -7,29 +7,29 @@ description: Upgrade hex to the latest version from hex
 
 Pull the latest scripts, skills, commands, and hooks from hex.
 
-## Step 1: Run the upgrade script
+## Step 1: Run the upgrade command
 
 ```bash
-bash $HEX_DIR/.hex/scripts/upgrade.sh
+hex upgrade
 ```
 
 If the user passed arguments (e.g., `--dry-run`, `--local PATH`), forward them:
 ```bash
-bash $HEX_DIR/.hex/scripts/upgrade.sh ARGUMENTS
+hex upgrade ARGUMENTS
 ```
 
-## Step 2: Handle CLAUDE.md template changes
+## Step 2: Handle AGENTS.md template changes
 
-If the upgrade script reports that the CLAUDE.md template has changed:
+If the upgrade script reports that the AGENTS.md template has changed:
 
 1. Read the new template from the upgrade cache:
    ```
-   $HEX_DIR/.claude/.upgrade-cache/templates/CLAUDE.md.template
+   $HEX_DIR/.claude/.upgrade-cache/templates/AGENTS.md.template
    ```
 
-2. Read the current `$HEX_DIR/CLAUDE.md`
+2. Read the current `$HEX_DIR/AGENTS.md` (CLAUDE.md is a symlink to it)
 
-3. Detect the user's `{{NAME}}` and `{{AGENT}}` values from the current CLAUDE.md:
+3. Detect the user's `{{NAME}}` and `{{AGENT}}` values from the current AGENTS.md:
    - `{{NAME}}` = the name used throughout (e.g., "Your Name")
    - `{{AGENT}}` = the agent name from the file index section or title
 
@@ -39,23 +39,23 @@ If the upgrade script reports that the CLAUDE.md template has changed:
    - **Preserve** the Environment Paths section if the user customized it
    - Substitute `{{NAME}}`, `{{AGENT}}`, and `{{DATE}}` with the detected values
 
-5. Show the user a summary of what changed in CLAUDE.md and ask for confirmation before writing.
+5. Show the user a summary of what changed in AGENTS.md and ask for confirmation before writing.
 
 ## Step 3: Rebuild memory index
 
 After upgrade, rebuild the memory index to pick up any changes:
 ```bash
-python3 $HEX_DIR/.hex/skills/memory/scripts/memory_index.py
+hex memory index
 ```
 
 ## Step 4: Report
 
 Show a concise summary:
 - What files were updated/added
-- Whether CLAUDE.md was merged
+- Whether AGENTS.md was merged
 - Any new commands or skills that were added
 - Whether VERSIONS was updated (upgrade.sh syncs `HEX_FOUNDATION_VERSION` and `BOI_VERSION` from Cargo.toml automatically)
-- Remind: "Run `/hex-startup` to load the updated configuration."
+- Note: the updated configuration loads automatically on the next hex launch (lean recency prime via `SessionStart`). hex is session-less — there is no startup command to run.
 
 ## First-Time Setup
 

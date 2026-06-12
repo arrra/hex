@@ -89,7 +89,7 @@ echo ""
 # ── 2. Structural: skill directories on disk ────────────────────────────────────
 echo "[2] Skill directories on disk (structural)"
 EXPECTED_SKILLS=(landings hex-reflect hex-decide hex-debrief hex-consolidate
-                 hex-doctor hex-checkpoint hex-shutdown hex-triage hex-startup memory)
+                 hex-doctor hex-checkpoint hex-shutdown hex-startup memory)
 for skill in "${EXPECTED_SKILLS[@]}"; do
     if [ -d "$INSTALL_DIR/.hex/skills/$skill" ]; then
         check_pass "skill dir present: $skill"
@@ -201,9 +201,6 @@ else
         "Use the hex decision framework from .hex/skills/hex-decide/SKILL.md to help decide: 'Should a test fixture use mock data or a temp directory?' Be brief." \
         "option|decision|recommend|consider|choose|trade|mock|temp|fixture"
 
-    invoke_codex "hex-triage" \
-        "Check .hex/raw/captures/ for untriaged markdown files (frontmatter triaged: true not set). Report how many need triage or say there are none." \
-        "triage|capture|untriaged|nothing|empty|no.*capture|found|none|zero"
 fi
 echo ""
 

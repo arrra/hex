@@ -1,0 +1,10 @@
+name: Legacy Rename Guard
+on: [pull_request]
+jobs:
+  guard:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with: { fetch-depth: 2 }
+      - name: Run pre-commit guard against PR diff
+        run: bash .githooks/pre-commit-ci.sh
