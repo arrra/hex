@@ -8,7 +8,16 @@ use std::io::Write;
 use std::path::Path;
 
 const MIN_QUERY_CHARS: usize = 12;
-const MAX_CONTEXT_CHARS: usize = 10_000; // spec §8 hard cap
+/// Hard cap on the injected context block. Was 10_000 (spec §8); cut to 3_000
+/// on 2026-06-11 — every injected char is permanent transcript ballast that
+/// gets cache-re-read on every subsequent turn of the session (measured:
+/// ~1.17B re-read tokens ≈ $1,755/mo at the 10k cap, ~37% of all cache reads).
+const MAX_CONTEXT_CHARS: usize = 3_000;
+/// At most this many chunk snippets are rendered — chunks dominate the block;
+/// facts are cheap and carry most of the value per char.
+const MAX_CHUNKS_RENDERED: usize = 2;
+/// Per-chunk snippet length (chars). Was 600.
+const CHUNK_SNIPPET_CHARS: usize = 400;
 
 pub type Hit = super::search::SearchResult;
 
@@ -185,12 +194,29 @@ fn is_trivial(query: &str) -> bool {
         || matches!(q.as_str(), "ok" | "okay" | "thanks" | "thank you" | "yes" | "no" | "go" | "continue")
 }
 
+/// Machine-generated prompt pre-filter — the UserPromptSubmit hook fires for
+/// harness-injected messages too (background task notifications, slash-command
+/// transcripts), not just typed prompts. Those are not questions about past
+/// context; injecting memory on them is pure transcript ballast.
+fn is_machine(query: &str) -> bool {
+    const MACHINE_PREFIXES: [&str; 6] = [
+        "<task-notification>",
+        "<local-command-",
+        "<command-name>",
+        "<command-message>",
+        "<system-reminder>",
+        "<task-reminder>",
+    ];
+    let q = query.trim_start();
+    MACHINE_PREFIXES.iter().any(|p| q.starts_with(p))
+}
+
 /// Run recall for `query`. `for_agent` = true applies the private filter
 /// (BOI workers get non-private chunks only — spec §7).
 pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
     let t0 = std::time::Instant::now();
 
-    if is_trivial(query) {
+    if is_trivial(query) || is_machine(query) {
         let outcome = RecallOutcome {
             injected: false, gated: true, result_count: 0,
             facts_injected: 0, chunks_injected: 0,
@@ -349,8 +375,8 @@ fn format_context_v2(results: &[super::search::SearchResult], facts: &[FactHit])
 
     if !results.is_empty() {
         out.push_str("### Chunks\n\n");
-        for r in results {
-            let snippet: String = r.content.chars().take(600).collect();
+        for r in results.iter().take(MAX_CHUNKS_RENDERED) {
+            let snippet: String = r.content.chars().take(CHUNK_SNIPPET_CHARS).collect();
             out.push_str(&format!(
                 "#### {} — {}\n{}\n\n",
                 r.source_path,
@@ -691,5 +717,115 @@ mod plan2_tests {
             recall.facts.iter().any(|f| f.subject == "person:alice"),
             "expected person:alice fact in recall results"
         );
+    }
+}
+
+#[cfg(test)]
+mod injection_tax_tests {
+    use super::*;
+    use rusqlite::Connection;
+
+    fn seeded_root() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = crate::memory::db_path(tmp.path());
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open(&db_path).unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        // Many large facts + chunks so an uncapped render would blow past 3k.
+        for i in 0..30 {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+                 VALUES (?1,?2,'decided',?3,0.9,'2026-06-11','2026-06-11',0)",
+                rusqlite::params![
+                    format!("f{i}"),
+                    format!("project:memory-{i}"),
+                    format!("memory pipeline decision number {i} {}", "x".repeat(180)),
+                ],
+            )
+            .unwrap();
+        }
+        c.execute_batch(
+            "CREATE VIRTUAL TABLE chunks USING fts5(
+                file_id UNINDEXED,
+                source_path UNINDEXED,
+                heading,
+                chunk_index UNINDEXED,
+                content,
+                private UNINDEXED,
+                tokenize='unicode61'
+            );",
+        )
+        .unwrap();
+        for i in 0..10 {
+            let body = format!(
+                "memory pipeline architecture notes {} {}",
+                i,
+                "lorem ipsum ".repeat(120)
+            );
+            c.execute(
+                "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private)
+                 VALUES ('1', ?1, ?2, '0', ?3, 0)",
+                rusqlite::params![
+                    format!("me/decisions/memory-{i}.md"),
+                    format!("Decision {i}"),
+                    body,
+                ],
+            )
+            .unwrap();
+        }
+        drop(c);
+        tmp
+    }
+
+    /// The per-prompt injection is permanent transcript ballast re-read on
+    /// every subsequent turn (measured 2026-06-11: ~$1,755/mo at the old
+    /// 10k-char cap). The hot-path budget is 3,000 chars.
+    #[test]
+    fn injection_respects_3k_budget() {
+        let tmp = seeded_root();
+        let o = recall(tmp.path(), "what did we decide about the memory pipeline", false);
+        assert!(o.injected, "seeded DB must produce an injection");
+        assert!(
+            o.context.len() <= 3_000,
+            "injection must fit the 3k-char hot-path budget, got {}",
+            o.context.len()
+        );
+    }
+
+    /// Chunk snippets dominate the tax; at most 2 chunks are rendered.
+    #[test]
+    fn injection_renders_at_most_two_chunks() {
+        let tmp = seeded_root();
+        let o = recall(tmp.path(), "what did we decide about the memory pipeline", false);
+        let chunk_headers = o.context.matches("\n#### ").count()
+            + if o.context.starts_with("#### ") { 1 } else { 0 };
+        assert!(
+            chunk_headers <= 2,
+            "at most 2 chunk snippets may be rendered, got {chunk_headers}\n{}",
+            o.context
+        );
+    }
+
+    /// Machine-generated prompts (background task notifications, command
+    /// transcripts) are not user questions — recall must gate them instead of
+    /// burning an injection on them.
+    #[test]
+    fn machine_prompts_are_gated() {
+        let tmp = seeded_root();
+        for p in [
+            "<task-notification>\n<task-id>abc</task-id>\n<status>completed</status>\n</task-notification>",
+            "<local-command-stdout>some output about the memory pipeline decision</local-command-stdout>",
+            "<command-name>/model</command-name> <command-message>model</command-message>",
+            "<system-reminder>background reminder text mentioning memory pipeline</system-reminder>",
+        ] {
+            let o = recall(tmp.path(), p, false);
+            assert!(o.gated, "machine prompt must be gated: {p}");
+            assert!(!o.injected, "machine prompt must not inject: {p}");
+        }
+        // A real user question still injects.
+        let o = recall(tmp.path(), "what did we decide about the memory pipeline", false);
+        assert!(o.injected, "real user prompts must still inject");
     }
 }
