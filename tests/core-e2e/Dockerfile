@@ -51,10 +51,10 @@ COPY --from=builder /build/target/release/hex $HOME/hex/.hex/bin/hex
 COPY --from=builder /build/compiled-version.txt $HOME/hex/.hex/hex-version.txt
 RUN ln -s $HOME/hex/.hex/bin/hex $HOME/hex/.hex/bin/hex-agent
 
-# Integration and doctor scripts (hex delegates to these via bash)
-# Binary looks for these at $HEX_DIR/.hex/scripts/ (runtime install path)
+# Integration script (hex delegates to this via bash).
+# Binary looks for it at $HEX_DIR/.hex/scripts/ (runtime install path).
+# `hex doctor` is now a native harness subcommand (system/harness/src/doctor) — no script.
 COPY system/scripts/hex-integration $HOME/hex/.hex/scripts/hex-integration
-COPY system/scripts/hex-doctor      $HOME/hex/.hex/scripts/hex-doctor
 
 # Core E2E test suite (helpers.sh, run-all.sh, suites/*.sh written by later tasks)
 COPY tests/core-e2e/ $HOME/hex/tests/core-e2e/
