@@ -13,6 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY system/harness/ ./
+# The harness depends on the sibling system/code-intel crate by path
+# (scipd = { path = "../code-intel" }); with the harness manifest at /build,
+# `../code-intel` resolves to /code-intel. Copy it there or the build can't
+# resolve the dependency. (Fixed in tests/Dockerfile 2026-06-11 for the same
+# reason; core-e2e/harness-e2e/agent-harness were missed → CI RED on all PRs.)
+COPY system/code-intel/ /code-intel/
 RUN cargo build --release 2>&1
 # Stamp the Cargo.toml version for runtime consistency checks (source of truth)
 RUN grep '^version' ./Cargo.toml | head -1 | cut -d'"' -f2 > /build/compiled-version.txt
@@ -51,10 +57,10 @@ COPY --from=builder /build/target/release/hex $HOME/hex/.hex/bin/hex
 COPY --from=builder /build/compiled-version.txt $HOME/hex/.hex/hex-version.txt
 RUN ln -s $HOME/hex/.hex/bin/hex $HOME/hex/.hex/bin/hex-agent
 
-# Integration and doctor scripts (hex delegates to these via bash)
-# Binary looks for these at $HEX_DIR/.hex/scripts/ (runtime install path)
+# Integration script (hex delegates to this via bash).
+# Binary looks for it at $HEX_DIR/.hex/scripts/ (runtime install path).
+# `hex doctor` is now a native harness subcommand (system/harness/src/doctor) — no script.
 COPY system/scripts/hex-integration $HOME/hex/.hex/scripts/hex-integration
-COPY system/scripts/hex-doctor      $HOME/hex/.hex/scripts/hex-doctor
 
 # Core E2E test suite (helpers.sh, run-all.sh, suites/*.sh written by later tasks)
 COPY tests/core-e2e/ $HOME/hex/tests/core-e2e/

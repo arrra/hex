@@ -16,6 +16,7 @@ use hex::telemetry;
 mod path_map;
 mod env;
 mod hook;
+mod usage;
 mod upgrade;
 mod learnings;
 // ops lives in the lib (the in-process worker runtime calls it too); the bin
@@ -67,6 +68,12 @@ enum Commands {
         /// Extra arguments forwarded to the upgrade flow (e.g. --local <path>)
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+    /// Usage metrics + spend guardrails (one namespace for tracking)
+    #[command(display_order = 13)]
+    Usage {
+        #[command(subcommand)]
+        command: usage::UsageCommands,
     },
     /// Claude Code hook runners (port of .hex/hooks/scripts/*.sh)
     #[command(display_order = 13)]
@@ -979,6 +986,7 @@ fn main() {
             std::process::exit(run_messages(command));
         }
         Commands::Hook { command } => hook::run(command),
+        Commands::Usage { command } => std::process::exit(usage::run(command)),
         Commands::Version => {
             println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
         }

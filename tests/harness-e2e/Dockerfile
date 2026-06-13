@@ -21,6 +21,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY system/harness/ ./
+# Sibling path dep: scipd = { path = "../code-intel" } resolves to /code-intel
+# when the harness manifest is at /build. Copy it or the build can't resolve it.
+COPY system/code-intel/ /code-intel/
 # Debug build: the engine is fetched as a git dep (mrap/hex-iii) at build time.
 # Debug (not release) keeps the in-container compile fast; the release profile
 # is verified separately on the host. The binary contains the full engine.

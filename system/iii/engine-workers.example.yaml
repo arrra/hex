@@ -1,0 +1,74 @@
+# Instance-declared engine workers — copy to `engine-workers.yaml` (same dir)
+# and edit. The harness merges the `workers:` list into its in-process iii
+# engine config at boot (`hex harness serve`); restart the harness to apply.
+#
+# `.hex/iii/` is an ADDITIVE upgrade dir: `engine-workers.yaml` is instance-
+# owned and survives /hex-upgrade. Foundation ships only this .example file —
+# never a file at the real path, which additive sync would overwrite.
+#
+# Schema = the engine config `workers:` list: {name, type?, image?, config?}.
+# Any engine-resolvable worker is valid (builtins like iii-exec, registry
+# workers via iii-worker). This is the no-LaunchAgents path for persistent
+# local processes (see hex docs/iii-hex.md "Instance engine workers").
+#
+# `type` (optional) selects the worker factory while `name` stays a unique,
+# semantic identity. This is how you host MORE THAN ONE of the same builtin:
+# `name: headroom-proxy, type: iii-exec` and `name: console, type: iii-exec`
+# are two independent iii-exec daemons, each addressable by its own name
+# (`hex module disable headroom-proxy`, per-daemon doctor/telemetry). With no
+# `type`, the factory is the `name` (the legacy single-daemon form below).
+#
+# Merge semantics: an entry whose name matches a DEFAULT module/worker
+# (e.g. iii-observability) REPLACES that entry's config in place; any other
+# name appends a new worker. Distinct semantic names append side-by-side.
+#
+# Example: host the iii console UI as an engine-supervised daemon.
+# - iii-exec runs the commands in order; intermediates must exit 0; the LAST
+#   command persists as the daemon (own session, group-killed on shutdown).
+# - iii-exec REQUIRES a `config` block (engine panics on a bare entry).
+# - The pkill intermediate clears a stray console from a previous harness
+#   life (a SIGKILLed harness orphans the setsid'd child, which would hold
+#   the port and make the respawn fail to bind).
+#
+# workers:
+#   - name: iii-exec
+#     config:
+#       exec:
+#         - pkill -f '\.iii/workers/console' 2>/dev/null; true
+#         - $HOME/.iii/workers/console --http-port 3113 --url ws://127.0.0.1:49134
+#
+#   # Supervised daemon: semantic name + type selector, with crash-respawn and
+#   # a health probe. `restart`/`health` are optional ExecConfig blocks; with
+#   # neither, the daemon is spawned once and not respawned (legacy behavior).
+#   #   restart.on_crash        — respawn the LAST exec command when it exits
+#   #   restart.backoff_secs    — initial delay before respawn (exponential)
+#   #   restart.max_backoff_secs— cap on the exponential backoff
+#   #   health.url | health.command — liveness probe (HTTP 2xx / exit 0)
+#   #   health.interval_secs    — how often to probe
+#   #   health.failure_threshold— consecutive failures before kill+respawn
+#   - name: headroom-proxy
+#     type: iii-exec
+#     config:
+#       exec:
+#         - pkill -f 'headroom proxy' 2>/dev/null; true
+#         - $HOME/.local/bin/headroom proxy --port 8787 --host 127.0.0.1
+#       restart:
+#         on_crash: true
+#         backoff_secs: 5
+#         max_backoff_secs: 60
+#       health:
+#         url: "http://127.0.0.1:8787/health"
+#         interval_secs: 30
+#         timeout_secs: 5
+#         failure_threshold: 3
+#
+#   # Override a default module's config (name match = replace in place):
+#   # memory exporter gives the console trace explorer in-engine data.
+#   - name: iii-observability
+#     config:
+#       enabled: true
+#       service_name: hex-engine
+#       exporter: memory
+#       sampling_ratio: 1.0
+#       metrics_enabled: true
+#       logs_enabled: true
