@@ -13,6 +13,12 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY system/harness/ ./
+# The harness depends on the sibling system/code-intel crate by path
+# (scipd = { path = "../code-intel" }); with the harness manifest at /build,
+# `../code-intel` resolves to /code-intel. Copy it there or the build can't
+# resolve the dependency. (Fixed in tests/Dockerfile 2026-06-11 for the same
+# reason; core-e2e/harness-e2e/agent-harness were missed → CI RED on all PRs.)
+COPY system/code-intel/ /code-intel/
 RUN cargo build --release 2>&1
 # Stamp the Cargo.toml version for runtime consistency checks (source of truth)
 RUN grep '^version' ./Cargo.toml | head -1 | cut -d'"' -f2 > /build/compiled-version.txt
