@@ -8,6 +8,7 @@
 //! refer to this one as `crate::harness::Event`.
 
 pub mod id;
+pub mod supervise;
 
 use serde::{Deserialize, Serialize};
 

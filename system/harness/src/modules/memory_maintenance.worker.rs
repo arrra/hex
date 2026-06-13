@@ -8,7 +8,7 @@
 //! - id `hex::memory::parse_transcripts`   command `hex memory parse-transcripts`   cron `0 */15 * * * * *`
 //! - id `hex::memory::consolidate_full`    command `hex memory consolidate full`    cron `0 0 3 * * * *`
 //! - id `hex::memory::maintain`            command `hex memory maintain --vacuum --backfill-facts`
-//!                                                                                  cron `0 30 4 * * SUN *`
+//!                                                                                  cron `0 33 4 * * SUN *`
 //!
 //! The YAML file is intentionally left in place (additive migration — a later
 //! spec removes the YAML-host path).
@@ -29,10 +29,19 @@ pub const CRON_PARSE_TRANSCRIPTS: &str = "0 */15 * * * * *";
 /// Cron expression for `hex::memory::consolidate_full` — 03:00 daily.
 pub const CRON_CONSOLIDATE_FULL: &str = "0 0 3 * * * *";
 
-/// Weekly self-repair — Sunday 04:30Z (after the 04:00Z backup).
-/// (cron 0.15, the parser inside the baked-in iii engine, accepts named
-/// day-of-week tokens: "sun"|"sunday" → ordinal 1, case-insensitive.)
-pub const CRON_MAINTAIN: &str = "0 30 4 * * SUN *";
+/// Weekly self-repair — Sunday 04:33Z (after the 04:00Z backup).
+/// Offset off the :00/:15/:30/:45 boundary so maintain does not START the same
+/// second as the 15-minute `hex memory index` tick (CRON_INDEX) — the
+/// deterministic same-second collision that BUSY-failed the unlocked VACUUM.
+/// Same offset rationale as CRON_CONSOLIDATE_QUICK. NOTE this bounds the START
+/// only: VACUUM runs LAST (after sweep/optimize/hygiene/facts-backfill) and can
+/// drift into the :35 quick-consolidate or :45 index tick if facts-backfill is
+/// slow; that residual VACUUM-vs-writer contention is backstopped by
+/// busy_timeout (5s) + a loud failure (S6) + recovery on the next weekly run.
+/// The durable fix (a cross-process DB-quiescence lock around VACUUM) is queued
+/// in evolution/fix-backlog.md. (cron 0.15, the iii engine's parser, parses the
+/// "SUN"|"sunday" day-of-week token → ordinal 1, verified.)
+pub const CRON_MAINTAIN: &str = "0 33 4 * * SUN *";
 
 /// Argv for the index job — mirrors the YAML `command:` array.
 pub const ARGV_INDEX: &[&str] = &["hex", "memory", "index"];

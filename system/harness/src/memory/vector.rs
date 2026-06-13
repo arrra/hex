@@ -40,7 +40,18 @@ pub fn init_vec_table(conn: &Connection) -> rusqlite::Result<()> {
     ))
 }
 
+/// Insert (or replace) the vector for `rowid`. A vec0 INSERT on an existing
+/// rowid ERRORS (UNIQUE primary key) rather than replacing, so we DELETE any
+/// prior row first. This makes the chunk↔vector binding self-correcting: if a
+/// stale orphan vector ever occupies this rowid — legacy pre-sweep residue, or
+/// vec0 rowid reuse after a future global `chunks` rebuild — the chunk binds to
+/// its OWN fresh embedding instead of silently retaining the unrelated stale
+/// vector. That stale-bind is invisible to BOTH the `maintain` orphan sweep and
+/// `backfill_missing_vectors` (each keys on rowid presence, not content), so it
+/// would be a permanent, self-healing-proof retrieval corruption. The DELETE is
+/// almost always a no-op (the rowid is absent in normal insert/backfill flow).
 pub fn insert_vec(conn: &Connection, rowid: i64, embedding: &[f32]) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM vec_chunks WHERE rowid = ?1", params![rowid])?;
     conn.execute(
         "INSERT INTO vec_chunks(rowid, embedding) VALUES (?1, ?2)",
         params![rowid, f32s_to_le_bytes(embedding)],
@@ -50,7 +61,13 @@ pub fn insert_vec(conn: &Connection, rowid: i64, embedding: &[f32]) -> rusqlite:
 
 /// Insert a fact embedding into `facts_vec` (vec0: `fact_id TEXT PRIMARY KEY,
 /// embedding FLOAT[768]`, schema.rs). Same blob serialization as [`insert_vec`].
+/// DELETE-before-insert for the same self-correcting reason as [`insert_vec`]:
+/// a vec0 INSERT on an existing key ERRORs rather than replacing. Currently a
+/// no-op (facts are insert-once — backfill selects only `id NOT IN facts_vec`),
+/// but symmetry keeps a future fact re-embed from silently retaining a stale
+/// vector.
 pub fn insert_fact_vec(conn: &Connection, fact_id: &str, vec: &[f32]) -> rusqlite::Result<()> {
+    conn.execute("DELETE FROM facts_vec WHERE fact_id = ?1", params![fact_id])?;
     conn.execute(
         "INSERT INTO facts_vec(fact_id, embedding) VALUES (?1, ?2)",
         params![fact_id, f32s_to_le_bytes(vec)],
@@ -164,6 +181,39 @@ mod tests {
         delete_vecs(&conn, &[3]).unwrap();
         let hits = knn(&conn, &query, 3).unwrap();
         assert!(!hits.iter().any(|(id, _)| *id == 3), "row 3 was deleted");
+    }
+
+    #[test]
+    fn insert_vec_replaces_stale_vector_at_reused_rowid() {
+        // Orphan-collision guard (adversarial review 2026-06-13): a vec0 INSERT
+        // on an existing rowid ERRORS instead of replacing, so a chunk whose
+        // rowid collides with a pre-existing orphan vector must still bind to
+        // its OWN embedding. insert_vec DELETEs any stale row first.
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        init_vec_table(&conn).unwrap();
+
+        let stale = vec![0.9f32; EMBED_DIM];
+        let fresh = vec![0.1f32; EMBED_DIM];
+        insert_vec(&conn, 42, &stale).unwrap();
+        // Re-insert at the SAME rowid (the collision case): must not error and
+        // must overwrite, leaving exactly one row bound to the fresh vector.
+        insert_vec(&conn, 42, &fresh).unwrap();
+
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM vec_chunks WHERE rowid = 42", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 1, "exactly one vector at the rowid — no duplicate, no error");
+
+        // The stored vector is the FRESH one, not the stale one.
+        let blob: Vec<u8> = conn
+            .query_row("SELECT embedding FROM vec_chunks WHERE rowid = 42", [], |r| r.get(0))
+            .unwrap();
+        let first = f32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
+        assert!(
+            (first - 0.1).abs() < 1e-6,
+            "expected the fresh 0.1 vector, got {first} (stale vector silently retained!)"
+        );
     }
 
     #[test]
