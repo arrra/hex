@@ -7,6 +7,13 @@ LaunchAgents, and **telemetry**.
 
 ## LaunchAgents (launchd)
 
+> **Note:** This section documents hex's **sanctioned** supervised services (the harness
+> bootstrap and the personal BOI daemon). It is **not** a pattern to copy for new scheduled
+> jobs — new recurring/scheduled work is a **hex worker**, and new persistent processes ride
+> the engine via **iii-exec** (see the AGENTS.md "Automation" rule and `docs/iii-hex.md`). Do
+> not add new per-job LaunchAgents (decision:
+> `persistent-processes-via-iii-exec-not-launchagents-2026-06-11`).
+
 hex's supervised long-running services run as **per-user gui LaunchAgents** in
 `~/Library/LaunchAgents/`, bootstrapped into the **`gui/<uid>`** domain, with
 **`SessionCreate=true`** and **no `UserName`**. Examples: `com.hex.harness` (the core
@@ -66,6 +73,9 @@ local store.
 
 - **Path:** `$HEX_DIR/.hex/telemetry/events.db` (HEX_DIR falls back to `.`).
 - **Engine:** SQLite (rusqlite, bundled) with `PRAGMA journal_mode=WAL`.
+- **Readers:** consumers (failures detector, probe) open plain read-only via
+  `telemetry::open_ro`. NEVER open this WAL db with `immutable=1` — immutable
+  readers silently skip un-checkpointed WAL frames, i.e. the freshest rows.
 - **Schema:**
 
 ```sql
@@ -121,12 +131,26 @@ hex telemetry prune    [--keep-days 30]
 - **prune** deletes rows older than `keep-days` (default 30) and prints how
   many it removed.
 
+### `hex failures` — unexpected-failure digest
+
+`hex failures [--window N] [--alert]` evaluates the worker registry's cron
+expectations against the store: MISSED runs (duration-aware slack, downtime
+subtraction), NEVER-RAN fids, modules on disk but not compiled into the
+binary, failure signatures (new vs chronic), and engine double-fires. Exit 1
+when anything is bad; `--alert` routes each condition through
+`hex::alert::notify` (6h dedupe per condition key). `hex failures probe` is
+the out-of-process liveness probe (events.db staleness + harness launchd
+state; template: `system/templates/launchd/com.hex.failures-probe.plist`).
+Detection only — it never remediates. The daily in-harness digest is the
+`hex-failures` cron worker (13:30 UTC ≈ 06:30 PT).
+
 ### Doctor check
 
 `hex doctor` runs a `telemetry-health` check. If the store is missing it
 skips. Otherwise it queries the last 24h: any non-`ok` rows produce a warn
-with a count and the most recent failing event id ("run
-`hex telemetry failures` to inspect"); a clean window passes.
+with a count and the most recent failing event id ("Run `hex failures`
+(digest) or `hex telemetry failures` (raw rows) to inspect"); a clean window
+passes.
 
 ### History
 
@@ -134,6 +158,10 @@ This replaces the old in-memory iii observability (ephemeral, 1000-span cap,
 not queryable) and the previous `.hex/telemetry/events.db` that was removed
 when `hex-events` was deleted on 2026-06-02. The store is now rebuilt
 natively in the Rust harness.
+
+### Resources
+
+`hex resources sample|status` — hourly disk sampler (tier 0) + deterministic floor/trend pressure rules (tier 1) over the same telemetry store; on breach it alerts (6h dedupe) and emits `resource.pressure` level-triggered. Detection only — never cleans anything up.
 
 ---
 

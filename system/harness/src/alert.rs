@@ -80,6 +80,9 @@ mod tests {
     use super::*;
     #[test]
     fn dedupe_suppresses_within_window() {
+        // Mutates the process-global HEX_DIR — hold the crate's single env
+        // lock (telemetry/mod.rs contract) so parallel tests don't race.
+        let _g = crate::telemetry::test_support::lock_env();
         let tmp = tempfile::TempDir::new().unwrap();
         // Keep the inner telemetry write hermetic (telemetry resolves
         // events.db from $HEX_DIR) — same pattern as telemetry/mod.rs tests.

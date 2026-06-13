@@ -1817,13 +1817,14 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hex-harness"
-version = "0.43.0"
+version = "0.44.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
  "chrono",
  "clap",
  "clap_complete",
+ "cron",
  "daemon-green",
  "dirs 5.0.1",
  "fastembed",
