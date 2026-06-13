@@ -164,23 +164,6 @@ pub fn evaluate_rules(
     Ok(out)
 }
 
-/// Per-condition alert keys, sanitized to [A-Za-z0-9._-] — alert::notify
-/// interpolates the key into a stamp-file path (alert.rs) and dedupes 6h per
-/// key, so keys must be path-safe and per-condition.
-///
-/// MERGE NOTE: identical to `failures::alert_key` on the sibling branch
-/// (feature/hex-failures, plan 2026-06-11-hex-failures-detection.md). That
-/// module is not on this branch — dedupe to `crate::failures::alert_key` at
-/// merge and delete this private copy.
-fn alert_key(kind: &str, ident: &str) -> String {
-    let safe: String = ident
-        .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '-' })
-        .collect::<String>()
-        .split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-");
-    format!("failures-{kind}-{safe}")
-}
-
 /// One sampler tick. Policy:
 /// - df every tick (4ms).
 /// - du when none in the last DU_INTERVAL_HOURS OR free fell ≥ DU_DELTA_GB
@@ -242,7 +225,7 @@ pub fn sample_tick(now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Breach>, St
                     "growth_gb": growth_gb, "window_hours": window_hours }),
             ),
         };
-        crate::alert::notify(&alert_key("resource", &key_ident), "resource pressure", &msg);
+        crate::alert::notify(&crate::failures::alert_key("resource", &key_ident), "resource pressure", &msg);
         // Level-triggered emission. ops::emit signature on this branch is
         // emit(event, data, producer: Option<&str>) — adapted from the plan's
         // sketch per its VERIFY note.

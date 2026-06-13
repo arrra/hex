@@ -20,5 +20,5 @@ fn run_sample(_e: Event, ctx: Ctx) -> Result<()> {
 }
 
 pub fn worker() -> Worker {
-    Worker::new("hex-resources").on_cron(CRON_HOURLY, run_sample)
+    Worker::new("hex-resources").on_cron_named("hourly", CRON_HOURLY, run_sample)
 }

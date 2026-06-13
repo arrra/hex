@@ -176,7 +176,7 @@ fn reap_in_background(
 
 /// Build the `oss-releaser` worker.
 pub fn worker() -> Worker {
-    Worker::new("oss-releaser").on_event(EVENT_RELEASE_REQUESTED, run_release)
+    Worker::new("oss-releaser").on_event_named("release-requested", EVENT_RELEASE_REQUESTED, run_release)
 }
 
 #[cfg(test)]

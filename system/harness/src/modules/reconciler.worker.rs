@@ -70,5 +70,5 @@ fn run_reconcile(_e: Event, _ctx: Ctx) -> Result<()> {
 
 /// Build the `hex-reconciler` worker.
 pub fn worker() -> Worker {
-    Worker::new("hex-reconciler").on_cron(CRON_HOURLY, run_reconcile)
+    Worker::new("hex-reconciler").on_cron_named("hourly", CRON_HOURLY, run_reconcile)
 }

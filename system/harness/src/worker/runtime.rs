@@ -120,8 +120,8 @@ async fn run(workers: Vec<Worker>) -> i32 {
     let mut registered = 0usize;
     for worker in workers {
         let wname = worker.name.clone();
-        for (idx, (spec, handler)) in worker.handlers.into_iter().enumerate() {
-            let fid = format!("{wname}::{idx}");
+        for (idx, (tname, spec, handler)) in worker.handlers.into_iter().enumerate() {
+            let fid = crate::worker::fid_for(&wname, idx, tname.as_deref());
             let handler = Arc::new(handler);
             let stopping_h = stopping.clone();
             let outbox_h = outbox.clone();
