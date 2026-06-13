@@ -192,6 +192,13 @@ pub fn run_worker(input: &str) -> Result<WorkerOutput, String> {
     // The schema'd object is the envelope's `.structured_output` (NOT raw stdout).
     let envelope: serde_json::Value = serde_json::from_slice(&out.stdout)
         .map_err(|e| format!("claude envelope not JSON: {e}"))?;
+    // OBS-024: claude envelope usage (same shape as memory/claude_cli.rs).
+    if let Some(usage) = envelope.get("usage") {
+        let in_tok = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let out_tok = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let cost = envelope.get("total_cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        crate::llm_cost::record_llm_cost("worker-run", "question", in_tok, out_tok, cost, None);
+    }
     let so = envelope
         .get("structured_output")
         .ok_or("claude envelope missing structured_output")?;

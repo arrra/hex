@@ -37,7 +37,7 @@ impl DoctorCheck for TelemetryHealth {
             let last = &failures[0];
             return CheckResult::warn(&format!(
                 "{} telemetry failure(s) in last 24h (most recent: {}). \
-                 Run `hex telemetry failures` to inspect",
+                 Run `hex failures` (digest) or `hex telemetry failures` (raw rows) to inspect",
                 failures.len(),
                 last.event
             ));

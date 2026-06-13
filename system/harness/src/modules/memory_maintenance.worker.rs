@@ -95,9 +95,9 @@ fn run_maintain(_e: Event, ctx: Ctx) -> Result<()> {
 /// Build the `hex-memory-maintenance` worker.
 pub fn worker() -> Worker {
     Worker::new("hex-memory-maintenance")
-        .on_cron(CRON_INDEX, run_index)
-        .on_cron(CRON_CONSOLIDATE_QUICK, run_consolidate_quick)
-        .on_cron(CRON_PARSE_TRANSCRIPTS, run_parse_transcripts)
-        .on_cron(CRON_CONSOLIDATE_FULL, run_consolidate_full)
-        .on_cron(CRON_MAINTAIN, run_maintain)
+        .on_cron_named("index", CRON_INDEX, run_index)
+        .on_cron_named("quick", CRON_CONSOLIDATE_QUICK, run_consolidate_quick)
+        .on_cron_named("parse-transcripts", CRON_PARSE_TRANSCRIPTS, run_parse_transcripts)
+        .on_cron_named("consolidate-full", CRON_CONSOLIDATE_FULL, run_consolidate_full)
+        .on_cron_named("maintain-weekly", CRON_MAINTAIN, run_maintain)
 }

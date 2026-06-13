@@ -105,6 +105,25 @@ enum Commands {
         #[command(subcommand)]
         command: TelemetryCommands,
     },
+    /// Resource sampling (tier 0) + pressure rules (tier 1). Detection only.
+    #[command(display_order = 7)]
+    Resources {
+        #[command(subcommand)]
+        command: ResourcesCommands,
+    },
+    /// Unexpected-failure digest: MISSED runs, NEVER-RAN, modules not landed,
+    /// failure signatures, downtime. Detection only — never remediates.
+    #[command(display_order = 8)]
+    Failures {
+        #[command(subcommand)]
+        command: Option<FailuresCommands>,
+        /// Digest window in hours for new-signature flagging
+        #[arg(long, default_value_t = 24)]
+        window: i64,
+        /// Emit alerts (used by the cron worker; plain runs just print)
+        #[arg(long)]
+        alert: bool,
+    },
     /// Questions & replies: ask a structured question, reply to one by id.
     #[command(display_order = 4)]
     Messages {
@@ -218,6 +237,13 @@ enum Commands {
         #[command(subcommand)]
         command: GitGuardCommands,
     },
+}
+
+#[derive(Subcommand)]
+enum FailuresCommands {
+    /// Out-of-process liveness probe: events.db staleness + harness launchd
+    /// state. Run from its OWN launchd job, never from inside the harness.
+    Probe,
 }
 
 #[derive(Subcommand)]
@@ -501,6 +527,14 @@ enum TelemetryCommands {
         #[arg(long = "keep-days", default_value_t = 30)]
         keep_days: i64,
     },
+}
+
+#[derive(Subcommand)]
+enum ResourcesCommands {
+    /// One sampler tick: df (+du when due), evaluate rules, alert+emit on breach.
+    Sample,
+    /// Print the latest df/du samples and any current breaches.
+    Status,
 }
 
 #[derive(Subcommand)]
@@ -949,6 +983,13 @@ fn main() {
         Commands::Telemetry { command } => {
             std::process::exit(run_telemetry(command));
         }
+        Commands::Resources { command } => {
+            std::process::exit(run_resources(command));
+        }
+        Commands::Failures { command, window, alert } => match command {
+            Some(FailuresCommands::Probe) => std::process::exit(run_failures_probe()),
+            None => std::process::exit(run_failures(window, alert)),
+        },
         Commands::Messages { command } => {
             std::process::exit(run_messages(command));
         }
@@ -1487,6 +1528,139 @@ fn run_freshness(ledger: &hex::ledger::Ledger) -> i32 {
     }
 }
 
+/// `hex failures` — unexpected-failure digest over the telemetry store.
+/// Detection only; exit 1 when anything is bad, 2 on store read failure.
+fn run_failures(window: i64, alert: bool) -> i32 {
+    let now = chrono::Utc::now();
+    let hex_dir = std::path::PathBuf::from(
+        std::env::var("HEX_DIR").unwrap_or_else(|_| ".".into()),
+    );
+    let regs = hex::failures::registered_triggers();
+    let disabled = hex::module_state::disabled_set(&hex_dir).unwrap_or_else(|e| {
+        eprintln!("failures: disabled-set unreadable ({e}) — evaluating ALL modules");
+        Default::default()
+    });
+    let exp = hex::failures::cron_expectations(&regs, &disabled);
+    let report = match hex::failures::evaluate(&exp, now, &[]) {
+        Ok(r) => r,
+        Err(e) => { eprintln!("failures: events.db read failed: {e}"); return 2; }
+    };
+    let sigs = hex::failures::failure_signatures(now, window).unwrap_or_default();
+    let dups = hex::failures::duplicate_fires(&exp, now).unwrap_or_default();
+    let compiled = hex::failures::compiled_module_basenames();
+    let not_landed = hex::failures::modules_not_landed(&hex_dir, &compiled);
+
+    let mut bad = false;
+    println!("== hex failures (window {window}h, {} cron fids, {} disabled) ==",
+        exp.len(), disabled.len());
+    if !report.missed.is_empty() {
+        bad = true;
+        println!("\nMISSED ({}):", report.missed.len());
+        for m in &report.missed {
+            println!("  {}  expected {}  last-seen {}", m.fid,
+                m.expected_at.to_rfc3339(), m.last_seen.as_deref().unwrap_or("never"));
+            if alert {
+                hex::alert::notify(&hex::failures::alert_key("missed", &m.fid),
+                    "hex worker missed its scheduled run",
+                    &format!("{} expected at {}", m.fid, m.expected_at.to_rfc3339()));
+            }
+        }
+    }
+    if !not_landed.is_empty() {
+        bad = true;
+        println!("\nMODULE NOT LANDED — on disk, not in this binary ({}):", not_landed.len());
+        for f in &not_landed {
+            println!("  {f}  (rebuild + redeploy the harness to land it)");
+            if alert {
+                hex::alert::notify(&hex::failures::alert_key("notlanded", f),
+                    "hex module on disk but not in the running binary", f);
+            }
+        }
+    }
+    if !report.never_ran.is_empty() {
+        bad = true; // visible during grace by design (proposal: defaults chosen)
+        println!("\nNEVER-RAN cron fids ({}) — loud until first fire (note: core fids were renamed by the named-trigger change; old history lives under positional fids):",
+            report.never_ran.len());
+        for e in &report.never_ran {
+            println!("  {}  cron({})", e.fid, e.expr);
+        }
+    }
+    for d in &report.downtime {
+        bad = true;
+        let msg = format!("no telemetry {} → {} — harness down, box asleep, or restarted; excused: {}",
+            d.from.to_rfc3339(), d.to.to_rfc3339(), d.excused_fids.join(", "));
+        println!("\nDOWNTIME: {msg}");
+        if alert {
+            hex::alert::notify(&hex::failures::alert_key("downtime",
+                &d.from.timestamp().to_string()), "telemetry gap", &msg);
+        }
+    }
+    if !sigs.is_empty() {
+        println!("\nFAILURE SIGNATURES (active in window; NEW first):");
+        for s in &sigs {
+            if s.is_new { bad = true; }
+            println!("  [{}] {:>4}x  {}  {}  first {}  last {}",
+                if s.is_new { "NEW" } else { "old" }, s.count, s.fid, s.head,
+                s.first_seen, s.last_seen);
+        }
+    }
+    if !dups.is_empty() {
+        println!("\nDUPLICATE FIRES (engine anomaly — >1 row per expected window):");
+        for d in &dups {
+            println!("  {}  {} rows at {}", d.fid, d.rows_in_window,
+                d.window_start.to_rfc3339());
+        }
+    }
+    let event_fids: Vec<_> = regs.iter().filter(|t| t.cron.is_none()).collect();
+    if !event_fids.is_empty() {
+        println!("\nEVENT SUBSCRIBERS (informational — no cadence, no MISSED semantics):");
+        for t in &event_fids {
+            println!("  {}", t.fid);
+        }
+    }
+    if bad { 1 } else { println!("\nall clear"); 0 }
+}
+
+/// `hex failures probe` — out-of-process liveness probe. Alerts via osascript
+/// DIRECTLY, never via `alert::notify`, since events.db/the harness may be
+/// the broken thing.
+fn run_failures_probe() -> i32 {
+    // events.db freshness: the 15-min maintenance stream means a healthy
+    // harness writes at least one row per ~20 min.
+    let stale_after_secs: i64 = 45 * 60;
+    let fresh = hex::telemetry::recent(1)
+        .ok()
+        .and_then(|rows| rows.into_iter().next())
+        .and_then(|r| chrono::DateTime::parse_from_rfc3339(&r.ts).ok())
+        .map(|t| (chrono::Utc::now() - t.with_timezone(&chrono::Utc)).num_seconds());
+    let launchd = std::process::Command::new("launchctl")
+        .args(["list", HARNESS_LABEL])
+        .output();
+    let harness_listed = launchd.map(|o| o.status.success()).unwrap_or(false);
+    let mut problems = Vec::new();
+    match fresh {
+        Some(age) if age > stale_after_secs =>
+            problems.push(format!("events.db stale: last row {age}s ago")),
+        None => problems.push("events.db unreadable or empty".to_string()),
+        _ => {}
+    }
+    if !harness_listed {
+        problems.push(format!("{HARNESS_LABEL} not loaded in launchd"));
+    }
+    if problems.is_empty() {
+        println!("probe ok");
+        return 0;
+    }
+    let msg = problems.join("; ");
+    eprintln!("PROBE ALERT: {msg}");
+    let script = format!(
+        "display notification \"{}\" with title \"hex harness liveness probe\"",
+        msg.replace('"', "'")
+    );
+    let _ = std::process::Command::new("osascript").arg("-e").arg(&script).status();
+    1
+}
+
 /// The reverse-DNS label of the harness service. Single source of truth — all
 /// daemon-green calls go through this constant so a rename only touches one
 /// line.
@@ -1815,6 +1989,111 @@ fn run_messages(command: MessagesCommands) -> i32 {
     }
 }
 
+fn format_breach(b: &hex::resources::Breach) -> String {
+    match b {
+        hex::resources::Breach::Floor { free_gb } => format!(
+            "BREACH floor: root free space {free_gb}G < {}G floor",
+            hex::resources::FLOOR_FREE_GB
+        ),
+        hex::resources::Breach::Trend { dir, growth_gb, window_hours } => {
+            format!("BREACH trend: {dir} grew {growth_gb}G in {window_hours}h")
+        }
+    }
+}
+
+fn run_resources(command: ResourcesCommands) -> i32 {
+    match command {
+        // Exit codes: 0 clean, 1 breach(es) — loud for cron/CI, 2 on error.
+        ResourcesCommands::Sample => match hex::resources::sample_tick(chrono::Utc::now()) {
+            Ok(breaches) => {
+                for b in &breaches {
+                    println!("{}", format_breach(b));
+                }
+                if breaches.is_empty() {
+                    0
+                } else {
+                    1
+                }
+            }
+            Err(e) => {
+                eprintln!("hex resources sample: {e}");
+                2
+            }
+        },
+        ResourcesCommands::Status => run_resources_status(),
+    }
+}
+
+/// `hex resources status` — newest df/du samples + current breaches.
+/// Read-only view: exits 0 even when breaches print (sample is the loud one).
+fn run_resources_status() -> i32 {
+    if !telemetry::db_exists() {
+        println!("no samples yet (telemetry store absent)");
+        return 0;
+    }
+    let conn = match telemetry::open_ro() {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("hex resources status: {e}");
+            return 2;
+        }
+    };
+    let latest = |event: &str| -> Option<(String, String)> {
+        conn.query_row(
+            "SELECT ts, COALESCE(detail,'') FROM events
+             WHERE source='hex-resources' AND event=?1
+             ORDER BY ts DESC LIMIT 1",
+            [event],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .ok()
+    };
+    let pretty = |detail: &str| -> String {
+        serde_json::from_str::<serde_json::Value>(detail)
+            .and_then(|v| serde_json::to_string_pretty(&v))
+            .unwrap_or_else(|_| detail.to_string())
+    };
+    let df_row = latest("sample::df");
+    match &df_row {
+        Some((ts, detail)) => println!("df @ {ts}\n{}", pretty(detail)),
+        None => println!("df: no samples yet"),
+    }
+    match latest("sample::du") {
+        Some((ts, detail)) => println!("du @ {ts}\n{}", pretty(&detail)),
+        None => println!("du: no samples yet"),
+    }
+    let Some((_, detail)) = df_row else {
+        return 0;
+    };
+    let v: serde_json::Value = match serde_json::from_str(&detail) {
+        Ok(v) => v,
+        Err(e) => {
+            eprintln!("hex resources status: bad df detail: {e}");
+            return 2;
+        }
+    };
+    let df = hex::resources::DfSample {
+        free_gb: v["free_gb"].as_i64().unwrap_or(0),
+        used_gb: v["used_gb"].as_i64().unwrap_or(0),
+    };
+    match hex::resources::evaluate_rules(&df, chrono::Utc::now()) {
+        Ok(breaches) => {
+            if breaches.is_empty() {
+                println!("breaches: none");
+            } else {
+                for b in &breaches {
+                    println!("{}", format_breach(b));
+                }
+            }
+            0
+        }
+        Err(e) => {
+            eprintln!("hex resources status: {e}");
+            2
+        }
+    }
+}
+
 fn run_telemetry(command: TelemetryCommands) -> i32 {
     match command {
         TelemetryCommands::Recent { limit, json } => match telemetry::recent(limit) {
@@ -1946,7 +2225,7 @@ fn trigger_summary(w: &hex::worker::Worker) -> String {
     use hex::worker::TriggerSpec::*;
     w.handlers
         .iter()
-        .map(|(spec, _)| match spec {
+        .map(|(_name, spec, _)| match spec {
             Cron { expression } => format!("cron({expression})"),
             State { scope, key } => format!("state({scope}/{key})"),
             Queue { queue } => format!("queue({queue})"),

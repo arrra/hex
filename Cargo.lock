@@ -1824,6 +1824,7 @@ dependencies = [
  "chrono",
  "clap",
  "clap_complete",
+ "cron",
  "daemon-green",
  "dirs 5.0.1",
  "fastembed",

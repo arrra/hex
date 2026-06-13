@@ -144,7 +144,7 @@ impl Drop for PidfileGuard {
 
 /// Generate a completion via the `claude -p` headless transport.
 ///
-/// `use_case` flows through to the cost-telemetry log line only.
+/// `use_case` flows through to the cost-telemetry row (events.db) and log line.
 pub fn generate(
     use_case: &str,
     prompt: &str,
@@ -221,8 +221,7 @@ pub fn generate(
         return Err(classify_error(result_text, &stderr, &combined));
     }
 
-    // Cost telemetry seam (OBS-024 will pick this up later — do not build
-    // telemetry plumbing here).
+    // Cost telemetry seam (OBS-024 — recorded to events.db via llm_cost).
     if let Some(usage) = envelope.get("usage") {
         let in_tok = usage
             .get("input_tokens")
@@ -237,6 +236,8 @@ pub fn generate(
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
         eprintln!("claude-cli[{use_case}]: in={in_tok} out={out_tok} cost_usd={cost}");
+        let model_str = envelope.get("model").and_then(|v| v.as_str()).unwrap_or(model);
+        crate::llm_cost::record_llm_cost("claude-cli", use_case, in_tok, out_tok, cost, Some(model_str));
     }
 
     let result = envelope

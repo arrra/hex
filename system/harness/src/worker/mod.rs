@@ -55,7 +55,20 @@ impl TriggerSpec {
 
 pub struct Worker {
     pub name: String,
-    pub handlers: Vec<(TriggerSpec, Handler)>,
+    /// `(name, spec, handler)` — `name` is the optional stable trigger name.
+    /// Named triggers get fid `{worker}::{name}`; unnamed fall back to the
+    /// legacy positional `{worker}::{idx}` (instance overlay modules keep
+    /// working unchanged).
+    pub handlers: Vec<(Option<String>, TriggerSpec, Handler)>,
+}
+
+/// THE single fid derivation — used by the runtime at registration AND by
+/// failures.rs when computing expectations, so they cannot drift.
+pub fn fid_for(worker: &str, idx: usize, name: Option<&str>) -> String {
+    match name {
+        Some(n) => format!("{worker}::{n}"),
+        None => format!("{worker}::{idx}"),
+    }
 }
 
 impl Worker {
@@ -73,6 +86,23 @@ impl Worker {
         F: Fn(event::Event, ctx::Ctx) -> Result<()> + Send + Sync + 'static,
     {
         self.handlers.push((
+            None,
+            TriggerSpec::State {
+                scope: "events".to_string(),
+                key: event.to_string(),
+            },
+            Box::new(f),
+        ));
+        self
+    }
+
+    /// Named variant of `on_event` — fid becomes `{worker}::{name}`.
+    pub fn on_event_named<F>(mut self, name: &str, event: &str, f: F) -> Self
+    where
+        F: Fn(event::Event, ctx::Ctx) -> Result<()> + Send + Sync + 'static,
+    {
+        self.handlers.push((
+            Some(name.to_string()),
             TriggerSpec::State {
                 scope: "events".to_string(),
                 key: event.to_string(),
@@ -87,6 +117,7 @@ impl Worker {
         F: Fn(event::Event, ctx::Ctx) -> Result<()> + Send + Sync + 'static,
     {
         self.handlers.push((
+            None,
             TriggerSpec::State {
                 scope: scope.to_string(),
                 key: key.to_string(),
@@ -101,6 +132,7 @@ impl Worker {
         F: Fn(event::Event, ctx::Ctx) -> Result<()> + Send + Sync + 'static,
     {
         self.handlers.push((
+            None,
             TriggerSpec::Queue {
                 queue: queue.to_string(),
             },
@@ -114,6 +146,22 @@ impl Worker {
         F: Fn(event::Event, ctx::Ctx) -> Result<()> + Send + Sync + 'static,
     {
         self.handlers.push((
+            None,
+            TriggerSpec::Cron {
+                expression: expr.to_string(),
+            },
+            Box::new(f),
+        ));
+        self
+    }
+
+    /// Named variant of `on_cron` — fid becomes `{worker}::{name}`.
+    pub fn on_cron_named<F>(mut self, name: &str, expr: &str, f: F) -> Self
+    where
+        F: Fn(event::Event, ctx::Ctx) -> Result<()> + Send + Sync + 'static,
+    {
+        self.handlers.push((
+            Some(name.to_string()),
             TriggerSpec::Cron {
                 expression: expr.to_string(),
             },
@@ -147,7 +195,7 @@ mod tests {
     #[test]
     fn on_event_maps_to_state_events_scope() {
         let w = Worker::new("hex-test").on_event("boi.spec.complete", noop);
-        let (spec, _h) = w.handlers.into_iter().next().expect("one handler");
+        let (_name, spec, _h) = w.handlers.into_iter().next().expect("one handler");
         assert_eq!(
             spec,
             TriggerSpec::State {
@@ -161,13 +209,29 @@ mod tests {
     #[test]
     fn on_cron_maps_to_cron_trigger() {
         let w = Worker::new("hex-test").on_cron("0 0 3 * * * *", noop);
-        let (spec, _h) = w.handlers.into_iter().next().expect("one handler");
+        let (_name, spec, _h) = w.handlers.into_iter().next().expect("one handler");
         assert_eq!(
             spec,
             TriggerSpec::Cron {
                 expression: "0 0 3 * * * *".to_string(),
             }
         );
+    }
+
+    /// Named cron triggers carry their name; fid derivation uses it.
+    #[test]
+    fn on_cron_named_carries_name() {
+        let w = Worker::new("hex-test").on_cron_named("nightly", "0 0 3 * * * *", noop);
+        let (name, spec, _h) = w.handlers.into_iter().next().expect("one handler");
+        assert_eq!(name.as_deref(), Some("nightly"));
+        assert_eq!(spec, TriggerSpec::Cron { expression: "0 0 3 * * * *".to_string() });
+    }
+
+    /// fid_for: named → worker::name; unnamed → worker::idx (legacy fallback).
+    #[test]
+    fn fid_for_named_and_positional() {
+        assert_eq!(fid_for("hex-x", 0, Some("nightly")), "hex-x::nightly");
+        assert_eq!(fid_for("hex-x", 2, None), "hex-x::2");
     }
 
     /// Event::from_envelope parses the {event,producer,ts,data} envelope and
