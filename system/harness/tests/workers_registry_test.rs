@@ -58,8 +58,10 @@ fn workers_registry_memory_maintenance_cron_matches_yaml() {
 #[test]
 fn workers_registry_memory_maintenance_has_weekly_maintain() {
     // `hex memory maintain --vacuum --backfill-facts` runs weekly — Sunday
-    // 04:30Z, after the 04:00Z backup — so one-off memory.db corruption
-    // (orphan vectors, FTS bloat, foreign transcript_files rows) self-heals.
+    // 04:33Z, after the 04:00Z backup, offset off the :30 boundary so its
+    // unlocked VACUUM doesn't collide with the 15-min index tick — so one-off
+    // memory.db corruption (orphan vectors, FTS bloat, foreign transcript_files
+    // rows) self-heals.
     let reg = workers::registry();
     let mm = reg
         .iter()
@@ -67,8 +69,8 @@ fn workers_registry_memory_maintenance_has_weekly_maintain() {
         .expect("hex-memory-maintenance worker must be registered");
     let exprs = cron_exprs(mm);
     assert!(
-        exprs.iter().any(|e| e == "0 30 4 * * SUN *"),
-        "expected weekly `hex memory maintain` cron '0 30 4 * * SUN *' in {:?}",
+        exprs.iter().any(|e| e == "0 33 4 * * SUN *"),
+        "expected weekly `hex memory maintain` cron '0 33 4 * * SUN *' in {:?}",
         exprs
     );
     assert_eq!(

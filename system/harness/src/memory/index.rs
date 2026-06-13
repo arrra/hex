@@ -423,15 +423,17 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
 // ── Delete helpers ────────────────────────────────────────────────────────────
 
 fn delete_chunks_for_file(conn: &Connection, file_id: i64) -> rusqlite::Result<()> {
-    // Collect chunk rowids for chunk_meta cleanup
+    // Collect chunk rowids for chunk_meta + vec_chunks cleanup. Propagate a
+    // row-read error instead of `.flatten()`-dropping it (S6): a silently
+    // skipped rowid would survive the `delete_vecs` pass below but still be
+    // removed by `DELETE FROM chunks`, stranding its vector — the exact
+    // orphan-vector class this function exists to prevent (V1's 74k-orphan
+    // bug was a missing delete; a silent skip is the same failure by another
+    // route).
     let rowids: Vec<i64> = {
-        let mut stmt =
-            conn.prepare("SELECT rowid FROM chunks WHERE file_id = ?")?;
-        let rows: Vec<i64> = stmt
-            .query_map(params![file_id.to_string()], |r| r.get::<_, i64>(0))?
-            .flatten()
-            .collect();
-        rows
+        let mut stmt = conn.prepare("SELECT rowid FROM chunks WHERE file_id = ?")?;
+        let rows = stmt.query_map(params![file_id.to_string()], |r| r.get::<_, i64>(0))?;
+        rows.collect::<rusqlite::Result<Vec<i64>>>()?
     };
 
     if !rowids.is_empty() {
@@ -1015,6 +1017,27 @@ fn backfill_missing_vectors(
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
+/// Human-readable note for a `vec_chunks` vs `chunks` count mismatch, or `None`
+/// when they match. A *deficit* (fewer vectors than chunks) is chunks awaiting
+/// embed — backfilled on later index ticks. A *surplus* (more vectors than
+/// chunks) is orphan vectors — swept by the weekly `hex memory maintain`.
+/// Surfacing the surplus positively avoids the confusing negative
+/// "N chunk(s) without a vector" the old single-branch message printed (P2/S6).
+fn vec_gap_message(chunk_count: i64, vec_count: i64) -> Option<String> {
+    use std::cmp::Ordering;
+    match vec_count.cmp(&chunk_count) {
+        Ordering::Equal => None,
+        Ordering::Less => Some(format!(
+            "WARNING: {} chunk(s) without a vector (backfilled on later ticks)",
+            chunk_count - vec_count
+        )),
+        Ordering::Greater => Some(format!(
+            "NOTE: {} orphan vector(s) (surplus; swept by weekly maintain)",
+            vec_count - chunk_count
+        )),
+    }
+}
+
 pub fn show_stats(hex_root: &Path) -> i32 {
     let db_path = super::db_path(hex_root);
     if !db_path.exists() {
@@ -1054,8 +1077,8 @@ pub fn show_stats(hex_root: &Path) -> i32 {
         .query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))
         .unwrap_or(0);
     println!("Vector embeddings: {vec_count} (sqlite-vec, nomic 768-d)");
-    if vec_count != chunk_count {
-        println!("  WARNING: {} chunk(s) without a vector", chunk_count - vec_count);
+    if let Some(msg) = vec_gap_message(chunk_count, vec_count) {
+        println!("  {msg}");
     }
 
     let last_run = get_metadata(&conn, "last_run");
@@ -1351,6 +1374,116 @@ mod tests {
         // Active (non-archived) content is still indexed.
         assert!(!should_skip("projects/active-thing/context.md"));
         assert!(!should_skip("me/decisions/x.md"));
+    }
+
+    // ── Orphan-vector invariant lock (Task 1, 2026-06-13) ───────────────────
+    // The ~1834 production orphans (vec_chunks rows with no chunks row) were
+    // LEGACY residue from V1's 74k-orphan era — NOT a live re-index leak. The
+    // count is invariant across re-indexing, and `delete_chunks_for_file`
+    // deletes vec_chunks rows BEFORE the chunks rows, keyed on file_id, so no
+    // re-index / file-deletion ordering can strand a vector (a mid-run kill
+    // yields at worst chunks-WITHOUT-vecs — the H-09 direction, self-healed by
+    // backfill). These tests LOCK that invariant: they pass on current code by
+    // design and fail the day a refactor drops the `delete_vecs` call (the V1
+    // bug) or mis-keys the rowid collection. No ONNX — chunks + matching vecs
+    // are inserted directly, mirroring index_file's on-disk layout.
+
+    fn existing_file_id(conn: &Connection, path: &str) -> Option<i64> {
+        conn.query_row("SELECT id FROM files WHERE path = ?", params![path], |r| {
+            r.get(0)
+        })
+        .ok()
+    }
+
+    fn orphan_vec_count(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM vec_chunks WHERE rowid NOT IN (SELECT rowid FROM chunks)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Mirror `index_file`'s "remove old record + chunks, then insert fresh"
+    /// flow (index.rs ~513-555 + the embed loop), writing a vec per chunk at the
+    /// chunk's own rowid exactly as the real path does — but without ONNX.
+    fn reindex(conn: &Connection, path: &str, n: usize) {
+        if let Some(fid) = existing_file_id(conn, path) {
+            delete_chunks_for_file(conn, fid).unwrap();
+            conn.execute("DELETE FROM files WHERE id = ?", params![fid]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) \
+             VALUES (?, 0.0, 'h', '', ?)",
+            params![path, n as i64],
+        )
+        .unwrap();
+        let fid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap();
+        for i in 0..n {
+            conn.execute(
+                "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
+                 VALUES (?, ?, '', ?, ?, 0)",
+                params![fid.to_string(), path, i.to_string(), format!("chunk {i} of {path}")],
+            )
+            .unwrap();
+            let rowid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap();
+            conn.execute(
+                "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, 1.0)",
+                params![rowid],
+            )
+            .unwrap();
+            super::super::vector::insert_vec(
+                conn,
+                rowid,
+                &vec![0.1f32; super::super::vector::EMBED_DIM],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn reindex_cycles_leave_no_orphan_vectors() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        // Two files; A is inserted last so it owns the highest rowids.
+        reindex(&conn, "b.md", 3);
+        reindex(&conn, "a.md", 5);
+        assert_eq!(vec_count(&conn), 8);
+        assert_eq!(orphan_vec_count(&conn), 0);
+
+        // Re-index A SHRUNK (5 → 2): frees its max rowids; new chunks reuse the
+        // freed rowids. The old vecs must already be gone (delete-before-insert).
+        reindex(&conn, "a.md", 2);
+        assert_eq!(orphan_vec_count(&conn), 0, "reindex-shrink stranded a vector");
+        assert_eq!(vec_count(&conn), 5);
+
+        // Re-index A GROWN (2 → 6).
+        reindex(&conn, "a.md", 6);
+        assert_eq!(orphan_vec_count(&conn), 0, "reindex-grow stranded a vector");
+        assert_eq!(vec_count(&conn), 9);
+
+        // File-removal cleanup path (run_index: delete_chunks_for_file + DELETE
+        // files for a path no longer on disk).
+        let fid_b = existing_file_id(&conn, "b.md").unwrap();
+        delete_chunks_for_file(&conn, fid_b).unwrap();
+        conn.execute("DELETE FROM files WHERE id = ?", params![fid_b]).unwrap();
+        assert_eq!(orphan_vec_count(&conn), 0, "file deletion stranded a vector");
+        assert_eq!(vec_count(&conn), 6, "only A's six vectors remain");
+    }
+
+    #[test]
+    fn vec_gap_message_distinguishes_deficit_surplus_and_match() {
+        assert_eq!(vec_gap_message(10, 10), None, "equal counts → no message");
+
+        let deficit = vec_gap_message(10, 7).expect("deficit must report");
+        assert!(deficit.contains("3 chunk(s) without a vector"), "got: {deficit}");
+
+        // The real production shape: 16688 chunks, 18522 vecs → 1834 orphans.
+        let surplus = vec_gap_message(16688, 18522).expect("surplus must report");
+        assert!(surplus.contains("1834 orphan vector(s)"), "got: {surplus}");
+        assert!(surplus.contains("surplus"), "got: {surplus}");
     }
 
     #[test]
