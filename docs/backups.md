@@ -42,7 +42,7 @@ config change, not a rebuild. The job is a **deliberate no-op until `RESTIC_REPO
 set** — it prints a "not configured" line and exits 0, so it never false-alarms before setup.
 To enable:
 
-**1. Backblaze console:** create a private bucket (e.g. `mrap-hex-restic`) and an Application
+**1. Backblaze console:** create a private bucket (e.g. `your-hex-restic`) and an Application
 Key scoped to it (Read and Write, no expiry). Note the `keyID` and `applicationKey`.
 
 **2. Credentials → `$HEX_DIR/.hex/secrets/b2-backup.env`** (mode `0600`). This is the canonical
@@ -53,7 +53,7 @@ committed. restic reads all four natively:
 
 ```sh
 # .hex/secrets/b2-backup.env   (chmod 600 — the harness refuses looser perms)
-RESTIC_REPOSITORY=b2:mrap-hex-restic:hex-restic   # b2:<bucket>:<path-in-bucket>
+RESTIC_REPOSITORY=b2:your-hex-restic:hex-restic   # b2:<bucket>:<path-in-bucket>
 B2_ACCOUNT_ID=<keyID>
 B2_ACCOUNT_KEY=<applicationKey>
 RESTIC_PASSWORD=<strong passphrase — ALSO save in a password manager>
@@ -101,7 +101,7 @@ A backup you can't restore is theater. To rebuild on a new machine:
 
 ```sh
 brew install restic
-export RESTIC_REPOSITORY="b2:mrap-hex-restic:hex-restic"
+export RESTIC_REPOSITORY="b2:your-hex-restic:hex-restic"
 export B2_ACCOUNT_ID="<keyID>"; export B2_ACCOUNT_KEY="<appKey>"
 export RESTIC_PASSWORD='<from your password manager>'   # the irreplaceable repo password
 

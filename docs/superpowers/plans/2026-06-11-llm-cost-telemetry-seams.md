@@ -181,7 +181,7 @@ pub fn record_llm_cost(
 
 - [ ] **Step 3: Live smoke (one cheap real call)**
 
-Run: `HEX_DIR=/Users/mrap/hex ./target/release/hex memory search "telemetry" >/dev/null 2>&1; sqlite3 /Users/mrap/hex/.hex/telemetry/events.db "SELECT ts,event,detail FROM events WHERE source='llm-cost' ORDER BY id DESC LIMIT 3;"`
+Run: `HEX_DIR=$HEX_DIR ./target/release/hex memory search "telemetry" >/dev/null 2>&1; sqlite3 $HEX_DIR/.hex/telemetry/events.db "SELECT ts,event,detail FROM events WHERE source='llm-cost' ORDER BY id DESC LIMIT 3;"`
 Expected: if that path makes an LLM call, a cost row appears; if it doesn't (pure-index search), note it and instead verify via `cargo test llm_cost` only — do NOT invent an expensive smoke. Either way, record what you observed.
 
 - [ ] **Step 4: Commit + report** — `git commit -am "feat(llm-cost): worker-run seam (OBS-024 complete at all three seams)"`; report branch, test counts, smoke observation, deviations.
