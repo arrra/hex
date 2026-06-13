@@ -21,5 +21,5 @@ fn run_burn_check(_e: Event, ctx: Ctx) -> Result<()> {
 
 /// Build the `hex-burn-guard` worker.
 pub fn worker() -> Worker {
-    Worker::new("hex-burn-guard").on_cron(CRON_EVERY_10M, run_burn_check)
+    Worker::new("hex-burn-guard").on_cron_named("every-10m", CRON_EVERY_10M, run_burn_check)
 }
