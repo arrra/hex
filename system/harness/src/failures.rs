@@ -104,6 +104,12 @@ pub fn evaluate(
     now: DateTime<Utc>,
     extra_excused: &[String],
 ) -> rusqlite::Result<Report> {
+    // Fresh install: no telemetry store yet. open_ro() would error on a missing
+    // file and crash the digest — self-defeating for a health tool. Nothing has
+    // run, so there is nothing to report missed. (Matches resources::evaluate_rules.)
+    if !crate::telemetry::db_exists() {
+        return Ok(Report::default());
+    }
     let conn = crate::telemetry::open_ro()?;
     let mut report = Report::default();
 
@@ -214,6 +220,9 @@ pub fn failure_signatures(
     now: DateTime<Utc>,
     window_hours: i64,
 ) -> rusqlite::Result<Vec<FailureSignature>> {
+    if !crate::telemetry::db_exists() {
+        return Ok(Vec::new());
+    }
     let conn = crate::telemetry::open_ro()?;
     let mut stmt = conn.prepare(
         "SELECT event, status, COALESCE(detail,''), ts FROM events
@@ -258,6 +267,9 @@ pub fn duplicate_fires(
     exp: &[CronExpectation],
     now: DateTime<Utc>,
 ) -> rusqlite::Result<Vec<DuplicateFire>> {
+    if !crate::telemetry::db_exists() {
+        return Ok(Vec::new());
+    }
     let conn = crate::telemetry::open_ro()?;
     let mut out = Vec::new();
     for e in exp {
@@ -446,6 +458,22 @@ mod signature_tests {
             signature_head("`hex` exited 2: slice 12345 failed\nsecond line"),
             "`hex` exited #: slice # failed"
         );
+    }
+
+    #[test]
+    fn fresh_install_no_db_returns_empty_not_crash() {
+        // Regression: on a box where the harness was just deployed and events.db
+        // does not exist yet, open_ro() errors and the whole digest crashed.
+        // A telemetry health tool must degrade to "all clear", never panic/Err.
+        let (_t, _g) = crate::telemetry::test_support::isolate(); // fresh HEX_DIR, no seed → no db
+        assert!(!crate::telemetry::db_exists());
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        let exp = vec![CronExpectation { worker: "a".into(), fid: "a::daily".into(),
+            expr: "0 0 4 * * * *".into() }];
+        let report = evaluate(&exp, now, &[]).expect("evaluate must not Err on fresh install");
+        assert!(report.missed.is_empty() && report.never_ran.is_empty());
+        assert!(failure_signatures(now, 24).expect("signatures must not Err").is_empty());
+        assert!(duplicate_fires(&exp, now).expect("dup_fires must not Err").is_empty());
     }
 }
 

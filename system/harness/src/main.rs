@@ -106,14 +106,14 @@ enum Commands {
         command: TelemetryCommands,
     },
     /// Resource sampling (tier 0) + pressure rules (tier 1). Detection only.
-    #[command(display_order = 6)]
+    #[command(display_order = 7)]
     Resources {
         #[command(subcommand)]
         command: ResourcesCommands,
     },
     /// Unexpected-failure digest: MISSED runs, NEVER-RAN, modules not landed,
     /// failure signatures, downtime. Detection only — never remediates.
-    #[command(display_order = 6)]
+    #[command(display_order = 8)]
     Failures {
         #[command(subcommand)]
         command: Option<FailuresCommands>,
