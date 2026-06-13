@@ -554,61 +554,92 @@ pub fn index_file(
         )?;
     }
 
-    // Vector pass: batch-embed all chunk contents, store one vec row per chunk.
-    // An embed failure is loud but non-fatal — the file keeps its FTS5 rows
-    // (searchable), only the vector arm misses it. `hex memory stats` surfaces
-    // any vec/chunk count gap.
+    // Vector pass: embed + persist chunk vectors in EMBED_BATCH-sized batches,
+    // committing each batch before the next embeds (H-09 / OBS-019). An embed
+    // failure or per-batch count mismatch is loud but non-fatal — the file keeps
+    // its FTS5 rows (searchable) and any un-vectored chunks are repaired by
+    // `backfill_missing_vectors` on a later tick. `hex memory stats` surfaces any
+    // residual vec/chunk gap.
     let contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+    super::embed::log_rss(&format!("pre-embed {} ({} chunks)", rel_path, contents.len()));
+    let stored = embed_and_store(conn, &rel_path, &chunk_rowids, &contents, |batch| {
+        embedder.embed_documents(batch)
+    });
     super::embed::log_rss(&format!(
-        "pre-embed {} ({} chunks)",
+        "post-embed {} ({}/{} vectors)",
         rel_path,
-        contents.len()
+        stored,
+        chunk_rowids.len()
     ));
-    // OBS-019: chunk the embed call to bound peak working set per forward
-    // pass. A single embed_documents(N) call allocates per-layer activation
-    // tensors proportional to N; for nomic-v1.5 (768-dim, transformer), at
-    // N=70 this overflows a 4 GB container (post-load baseline ~1 GB + per-
-    // call working set blows the rest). EMBED_BATCH=8 keeps each call
-    // bounded; verified to survive the 4 GB Docker E2E container.
+
+    Ok(chunks.len())
+}
+
+/// Embed `contents` (aligned 1:1 with `chunk_rowids`, same order) in
+/// `EMBED_BATCH`-sized batches, persisting each batch's vectors *before* the
+/// next batch is embedded. Returns the number of vectors actually stored.
+///
+/// Two reasons for per-batch persistence:
+///   * **Peak working set (OBS-019).** A single `embed_documents(N)` call
+///     allocates per-layer activation tensors proportional to N; for nomic-v1.5
+///     (768-dim transformer) a large N overflows the 4 GB Docker E2E container.
+///     `EMBED_BATCH = 8` bounds each forward pass.
+///   * **Interruption durability (H-09).** Committing each batch immediately
+///     (rusqlite autocommit) means a kill between batches loses at most
+///     `EMBED_BATCH` chunks' vectors; the committed FTS5 chunk rows for any
+///     un-vectored batch are repaired by `backfill_missing_vectors` on a later
+///     tick. Previously the whole file's vectors were accumulated and inserted
+///     only after the last batch, so a mid-file SIGTERM left every chunk of the
+///     file vector-less — the 2026-06-12 wedge-kill signature.
+///
+/// Failures are loud but non-fatal (S6): an embed error stops the loop (the
+/// remaining chunks stay FTS5-only, repaired later); a per-batch count mismatch
+/// is logged and skips only that batch.
+fn embed_and_store<F>(
+    conn: &Connection,
+    rel_path: &str,
+    chunk_rowids: &[i64],
+    contents: &[String],
+    mut embed_batch: F,
+) -> usize
+where
+    F: FnMut(&[String]) -> anyhow::Result<Vec<Vec<f32>>>,
+{
     const EMBED_BATCH: usize = 8;
-    let mut all_vectors: Vec<Vec<f32>> = Vec::with_capacity(contents.len());
-    let mut embed_err: Option<anyhow::Error> = None;
-    for batch in contents.chunks(EMBED_BATCH) {
-        match embedder.embed_documents(batch) {
-            Ok(mut v) => all_vectors.append(&mut v),
+    let mut stored = 0usize;
+    for (rowid_batch, content_batch) in chunk_rowids
+        .chunks(EMBED_BATCH)
+        .zip(contents.chunks(EMBED_BATCH))
+    {
+        match embed_batch(content_batch) {
+            Ok(vecs) if vecs.len() == rowid_batch.len() => {
+                for (rowid, vec) in rowid_batch.iter().zip(vecs.iter()) {
+                    match super::vector::insert_vec(conn, *rowid, vec) {
+                        Ok(()) => stored += 1,
+                        Err(e) => {
+                            eprintln!("  ERROR storing vector for chunk {rowid} of {rel_path}: {e}")
+                        }
+                    }
+                }
+            }
+            Ok(vecs) => {
+                // S6 — never silently drop chunks: a count mismatch is loud. Skip
+                // only this batch; later batches are still embedded.
+                eprintln!(
+                    "  ERROR embedding {rel_path}: batch expected {} vectors, got {} (FTS5-only for these chunks)",
+                    rowid_batch.len(),
+                    vecs.len()
+                );
+            }
             Err(e) => {
-                embed_err = Some(e);
+                // Embed failure — stop; remaining chunks stay FTS5-only and are
+                // repaired by backfill_missing_vectors on a later tick.
+                eprintln!("  ERROR embedding {rel_path} (FTS5-only for remaining chunks): {e}");
                 break;
             }
         }
     }
-    let _embed_result: anyhow::Result<Vec<Vec<f32>>> = match embed_err {
-        Some(e) => Err(e),
-        None => Ok(all_vectors),
-    };
-    super::embed::log_rss(&format!("post-embed {}", rel_path));
-    match _embed_result {
-        Ok(vectors) if vectors.len() == chunk_rowids.len() => {
-            for (rowid, vec) in chunk_rowids.iter().zip(vectors.iter()) {
-                if let Err(e) = super::vector::insert_vec(conn, *rowid, vec) {
-                    eprintln!("  ERROR storing vector for chunk {rowid} of {rel_path}: {e}");
-                }
-            }
-        }
-        Ok(vectors) => {
-            // S6 — never silently drop chunks: a count mismatch is loud.
-            eprintln!(
-                "  ERROR embedding {rel_path}: expected {} vectors, got {} (FTS5-only for this file)",
-                chunk_rowids.len(),
-                vectors.len()
-            );
-        }
-        Err(e) => {
-            eprintln!("  ERROR embedding {rel_path} (FTS5-only for this file): {e}");
-        }
-    }
-
-    Ok(chunks.len())
+    stored
 }
 
 // ── File discovery ────────────────────────────────────────────────────────────
@@ -1162,6 +1193,142 @@ mod tests {
         let _: i64 = conn
             .query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))
             .unwrap();
+    }
+
+    // ── H-09 / OBS-019: per-batch vector persistence ────────────────────────
+    // The 2026-06-12 wedge-kill left a whole transcript's 83 chunks vector-less
+    // because `index_file` accumulated ALL of a file's vectors and inserted them
+    // only after the last batch embedded — a SIGTERM mid-file therefore lost
+    // every vector. `embed_and_store` now persists each EMBED_BATCH-sized batch
+    // BEFORE embedding the next, so an interruption loses at most one batch (the
+    // rest are repaired by `backfill_missing_vectors`). The injected embed
+    // closure lets these run without the ONNX model.
+
+    fn vec_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn embed_and_store_persists_earlier_batches_when_a_later_batch_fails() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        // 20 chunks → batches of 8, 8, 4. Fail on the 2nd batch.
+        let rowids: Vec<i64> = (1..=20).collect();
+        let contents: Vec<String> = (0..20).map(|i| format!("chunk {i}")).collect();
+        let mut calls = 0;
+        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+            calls += 1;
+            if calls == 2 {
+                anyhow::bail!("simulated interruption on batch 2");
+            }
+            Ok(batch
+                .iter()
+                .map(|_| vec![0.1f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+
+        // Batch 1 (8 chunks) committed before batch 2 failed. The pre-fix code
+        // stored 0 here (insert ran only after the whole file embedded).
+        assert_eq!(stored, 8, "only the first batch should be stored");
+        assert_eq!(
+            vec_count(&conn),
+            8,
+            "batch-1 vectors must be durable despite batch-2 failure"
+        );
+    }
+
+    #[test]
+    fn embed_and_store_persists_all_batches_on_success() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        let rowids: Vec<i64> = (1..=20).collect();
+        let contents: Vec<String> = (0..20).map(|i| format!("chunk {i}")).collect();
+        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+            Ok(batch
+                .iter()
+                .map(|_| vec![0.2f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+
+        assert_eq!(stored, 20);
+        assert_eq!(vec_count(&conn), 20);
+    }
+
+    #[test]
+    fn embed_and_store_is_loud_and_skips_only_the_mismatched_batch() {
+        // S6: a per-batch count mismatch must not silently drop chunks, and must
+        // not poison the other batches. Batch 2 returns the wrong vector count.
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        let rowids: Vec<i64> = (1..=20).collect();
+        let contents: Vec<String> = (0..20).map(|i| format!("chunk {i}")).collect();
+        let mut calls = 0;
+        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+            calls += 1;
+            let n = if calls == 2 { batch.len() - 1 } else { batch.len() };
+            Ok((0..n)
+                .map(|_| vec![0.3f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+
+        // Batches 1 (8) and 3 (4) stored; batch 2 skipped loudly → 12 total.
+        assert_eq!(stored, 12, "mismatched batch 2 skipped; batches 1 and 3 stored");
+        assert_eq!(vec_count(&conn), 12);
+    }
+
+    #[test]
+    fn embed_and_store_skips_overcount_batch_without_truncating() {
+        // An embedder returning MORE vectors than the batch must be caught by the
+        // count-equality guard and skipped — NOT silently truncated via zip.
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        let rowids: Vec<i64> = (1..=8).collect();
+        let contents: Vec<String> = (0..8).map(|i| format!("chunk {i}")).collect();
+        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+            Ok((0..batch.len() + 1) // one too many
+                .map(|_| vec![0.4f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+
+        assert_eq!(stored, 0, "over-count batch must be skipped, not truncated");
+        assert_eq!(vec_count(&conn), 0);
+    }
+
+    #[test]
+    fn embed_and_store_handles_empty_and_exact_multiple_boundaries() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        // 0 chunks → no work, no panic (empty slices → zip yields nothing).
+        let s0 = embed_and_store(&conn, "empty.md", &[], &[], |batch| {
+            Ok(batch
+                .iter()
+                .map(|_| vec![0.5f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+        assert_eq!(s0, 0);
+
+        // Exact multiple of 8 (16 → two full batches, no trailing partial).
+        let rowids: Vec<i64> = (1..=16).collect();
+        let contents: Vec<String> = (0..16).map(|i| format!("c{i}")).collect();
+        let s16 = embed_and_store(&conn, "sixteen.md", &rowids, &contents, |batch| {
+            Ok(batch
+                .iter()
+                .map(|_| vec![0.5f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+        assert_eq!(s16, 16);
+        assert_eq!(vec_count(&conn), 16);
     }
 
     #[test]
