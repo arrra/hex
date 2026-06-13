@@ -427,6 +427,12 @@ enum HarnessCommands {
     /// Run the harness lifecycle loop (invoked by launchd; hidden from --help).
     #[command(hide = true)]
     Serve,
+    /// One idempotent supervision pass: re-bootstrap com.hex.harness if it is
+    /// missing/dead (respects an intentional `hex harness stop`). Quiet no-op when healthy.
+    Ensure,
+    /// Run the harness watchdog loop (the com.hex.harness-watchdog daemon; hidden).
+    #[command(hide = true)]
+    Watchdog,
 }
 
 #[derive(Subcommand)]
@@ -690,6 +696,8 @@ fn main() {
             HarnessCommands::Restart => std::process::exit(harness_restart()),
             HarnessCommands::Status => std::process::exit(harness_status()),
             HarnessCommands::Logs { lines } => std::process::exit(harness_logs(lines)),
+            HarnessCommands::Ensure => std::process::exit(harness_ensure()),
+            HarnessCommands::Watchdog => hex::harness::supervise::watchdog_loop(&get_hex_dir()),
             HarnessCommands::Serve => {
                 // Bootstrap secrets before the worker runtime starts (before any
                 // thread is spawned). Reads $HEX_DIR/.hex/secrets/*.env and injects
@@ -1499,35 +1507,11 @@ const HARNESS_LABEL: &str = "com.hex.harness";
 /// detach key (verified 2026-06-05: when present, keychain reads fail rc=36;
 /// when absent, rc=0). We deliberately do NOT — and CANNOT — set it here.
 fn build_harness_spec(hex_dir: &std::path::Path) -> daemon_green::ServiceSpec {
-    let hex_bin = hex_dir.join(".hex").join("bin").join("hex");
-    let log_path = hex_dir
-        .join(".hex")
-        .join("logs")
-        .join("com.hex.harness.log");
-    // launchd hands the agent a minimal env — guarantee homebrew is on PATH so
-    // the folded-in workers (gws, cargo, etc.) resolve.
-    let base_path =
-        std::env::var("PATH").unwrap_or_else(|_| "/usr/bin:/bin".to_string());
-    let path_env = if base_path.split(':').any(|p| p == "/opt/homebrew/bin") {
-        base_path
-    } else {
-        format!("/opt/homebrew/bin:{base_path}")
-    };
-    let spec = daemon_green::ServiceSpec::new(HARNESS_LABEL, hex_bin)
-        .args(["harness", "serve"])
-        .env("HEX_DIR", hex_dir.to_string_lossy().into_owned())
-        .env("III_URL", "ws://127.0.0.1:49134")
-        .env("PATH", path_env)
-        .env("GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND", "file")
-        .working_dir(hex_dir)
-        .keep_alive(true)
-        .run_at_load(true)
-        .log_path(log_path);
-    // Secrets are NOT baked into the plist. The harness reads
-    // $HEX_DIR/.hex/secrets/*.env at serve startup via bootstrap_secrets_env()
-    // (called in main() before the worker runtime starts). The plist carries
-    // only non-secret config: HEX_DIR, PATH, III_URL, log path.
-    spec
+    // Single source of truth lives in the lib (`harness::supervise`) so the watchdog and
+    // `hex harness start` build an identical spec. Secrets are NOT baked into the plist —
+    // the harness reads $HEX_DIR/.hex/secrets/*.env at `serve` startup via
+    // bootstrap_secrets_env(); the plist carries only HEX_DIR, PATH, III_URL, log path.
+    hex::harness::supervise::build_harness_spec(hex_dir)
 }
 
 /// Load every `*.env` file from `$HEX_DIR/.hex/secrets/` into the process
@@ -1605,7 +1589,10 @@ fn harness_start() -> i32 {
         eprintln!("hex harness start: install failed: {e}");
         return 1;
     }
-    match mgr.start(HARNESS_LABEL) {
+    // Starting is an explicit operator intent — clear any prior `stop` sentinel so the
+    // watchdog resumes supervising.
+    hex::harness::supervise::clear_intentionally_down(&hex_dir);
+    let rc = match mgr.start(HARNESS_LABEL) {
         Ok(()) => {
             eprintln!("hex harness start: {HARNESS_LABEL} loaded");
             0
@@ -1614,11 +1601,27 @@ fn harness_start() -> i32 {
             eprintln!("hex harness start: start failed: {e}");
             1
         }
+    };
+    // Install + load the watchdog alongside the harness so the pair is set up together.
+    // The watchdog is a tiny KeepAlive peer that re-bootstraps the harness if it ever goes
+    // missing/dead — it is never bounced by upgrade/release, so it survives to recover it.
+    let wd = hex::harness::supervise::build_watchdog_spec(&hex_dir);
+    if let Err(e) = mgr.install(&wd) {
+        eprintln!("hex harness start: watchdog install failed (non-fatal): {e}");
+    } else if let Err(e) = mgr.start(hex::harness::supervise::WATCHDOG_LABEL) {
+        eprintln!("hex harness start: watchdog start failed (non-fatal): {e}");
+    } else {
+        eprintln!("hex harness start: {} loaded", hex::harness::supervise::WATCHDOG_LABEL);
     }
+    rc
 }
 
 /// `hex harness stop` — stop + unload the per-user service via daemon-green.
 fn harness_stop() -> i32 {
+    let hex_dir = get_hex_dir();
+    // Mark intentionally-down FIRST so the watchdog (which may tick mid-stop) does not race
+    // in and resurrect the harness we are deliberately stopping (review R3).
+    hex::harness::supervise::mark_intentionally_down(&hex_dir);
     let mgr = daemon_green::native();
     match mgr.stop(HARNESS_LABEL) {
         Ok(()) => {
@@ -1632,18 +1635,44 @@ fn harness_stop() -> i32 {
     }
 }
 
-/// `hex harness restart` — restart the per-user service (e.g. to pick up a new
-/// binary) via daemon-green.
+/// `hex harness restart` — restart the per-user service (e.g. to pick up a new binary), then
+/// VERIFY the engine actually serves and escalate loudly (S6) if not. The bare daemon-green
+/// `restart` returns Ok the moment `launchctl kickstart` fires — a new binary that panics on
+/// boot would leave the engine dead while we reported success (the 2026-06-12 failure mode).
 fn harness_restart() -> i32 {
-    let mgr = daemon_green::native();
-    match mgr.restart(HARNESS_LABEL) {
-        Ok(()) => {
-            eprintln!("hex harness restart: {HARNESS_LABEL} restarted");
+    let hex_dir = get_hex_dir();
+    // An explicit restart is operator intent — clear any prior stop sentinel.
+    hex::harness::supervise::clear_intentionally_down(&hex_dir);
+    match hex::harness::supervise::restart_and_verify(&hex_dir, HARNESS_LABEL) {
+        Ok(_) => 0,
+        Err(_) => 1, // already logged [FAIL] + S6 alert inside restart_and_verify
+    }
+}
+
+/// `hex harness ensure` — one idempotent supervision pass (the watchdog body, callable by
+/// hand or from a health gate). Exit 0 when healthy or re-bootstrapped; nonzero only if it
+/// acted and the engine still did not come up.
+fn harness_ensure() -> i32 {
+    use hex::harness::supervise::{ensure_once, engine_listening, EnsureAction, ENGINE_ADDR};
+    let hex_dir = get_hex_dir();
+    match ensure_once(&hex_dir) {
+        EnsureAction::NoOp => {
+            eprintln!("hex harness ensure: {HARNESS_LABEL} healthy");
             0
         }
-        Err(e) => {
-            eprintln!("hex harness restart: {e}");
-            1
+        EnsureAction::SkipIntentionalDown => {
+            eprintln!("hex harness ensure: {HARNESS_LABEL} intentionally stopped — leaving down");
+            0
+        }
+        EnsureAction::Install | EnsureAction::Reboot => {
+            // ensure_once already attempted recovery + alerted; report final engine state.
+            if engine_listening(ENGINE_ADDR) {
+                eprintln!("hex harness ensure: {HARNESS_LABEL} re-bootstrapped — engine serving");
+                0
+            } else {
+                eprintln!("hex harness ensure: {HARNESS_LABEL} still DOWN after re-bootstrap");
+                1
+            }
         }
     }
 }
