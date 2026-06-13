@@ -736,6 +736,25 @@ fn get_metadata(conn: &Connection, key: &str) -> Option<String> {
     .ok()
 }
 
+/// Per-run wall-clock budget for [`run_index`]. Default 600s (10 min). Caps the
+/// dominant 2026-06-12 wedge signature: a throttled crawl over a large multi-file
+/// worklist (e.g. ~945 files post-reboot) burning a core unbounded between the
+/// 15-minute cron ticks. This is a BETWEEN-files gate — it is checked at the top
+/// of each file, so a single in-flight `index_file` is not interrupted mid-embed
+/// (that case is bounded instead by H-09's per-batch commit + the throttle, and
+/// is unlikely to exceed the budget — ~240+ chunks in one file at the throttled
+/// rate; a within-file budget is the queued follow-up, FIX-016).
+/// `HEX_INDEX_BUDGET_SECS` tunes it; `0` disables the cap (returns `None`).
+/// Values below the ~2s cold model-load starve the run (bail at file 0) — keep
+/// it well above that; the default has ample headroom.
+fn run_budget() -> Option<std::time::Duration> {
+    let secs = std::env::var("HEX_INDEX_BUDGET_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(600);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
 pub fn run_index(hex_root: &Path, full: bool) -> i32 {
     let t0 = std::time::Instant::now();
     let db_path = super::db_path(hex_root);
@@ -816,8 +835,29 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
     let mut skipped_mtime = 0usize;
     let mut skipped_hash = 0usize;
     let mut total_chunks = 0usize;
+    let budget = run_budget();
+    let mut over_budget = false;
 
-    for (filepath, strategy) in &file_tuples {
+    for (i, (filepath, strategy)) in file_tuples.iter().enumerate() {
+        // Defense-in-depth (S6): a pathological corpus change or slow file must
+        // not quietly burn a core for an unbounded time between 15-min ticks
+        // (the 2026-06-12 wedge class). Once over budget, bail LOUDLY before
+        // starting another file; the files already indexed are committed
+        // (autocommit) and the rest resume on the next tick.
+        if let Some(b) = budget {
+            if t0.elapsed() > b {
+                eprintln!(
+                    "hex memory index: EXCEEDED {}s wall-clock budget after {indexed} indexed \
+                     ({} of {} files unprocessed) — bailing loudly; remaining resume next tick \
+                     (set HEX_INDEX_BUDGET_SECS to tune, 0 disables)",
+                    b.as_secs(),
+                    file_tuples.len() - i,
+                    file_tuples.len()
+                );
+                over_budget = true;
+                break;
+            }
+        }
         let rel_path = match filepath.strip_prefix(hex_root) {
             Ok(r) => r.to_string_lossy().to_string(),
             Err(_) => continue,
@@ -917,6 +957,21 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
                 }
             }
         }
+    }
+
+    // If we bailed on the wall-clock budget, skip the (potentially slow)
+    // backfill and the cleanup sweep and exit LOUDLY non-zero (S6) — the next
+    // tick resumes the remaining files. Files already indexed are committed.
+    if over_budget {
+        set_metadata(&conn, "last_run", &Local::now().to_rfc3339());
+        set_metadata(&conn, "last_run_mode", if full { "full" } else { "incremental" });
+        let elapsed = t0.elapsed().as_secs_f64();
+        eprintln!(
+            "hex memory index: BAILED after {elapsed:.1}s over budget — {indexed} indexed, \
+             {skipped_mtime} unchanged (mtime), {skipped_hash} unchanged (hash), \
+             {total_chunks} new chunks; cleanup + backfill skipped, resuming next tick"
+        );
+        return 1;
     }
 
     // Cleanup: remove DB records for files no longer on disk
@@ -1484,6 +1539,49 @@ mod tests {
         let surplus = vec_gap_message(16688, 18522).expect("surplus must report");
         assert!(surplus.contains("1834 orphan vector(s)"), "got: {surplus}");
         assert!(surplus.contains("surplus"), "got: {surplus}");
+    }
+
+    #[test]
+    fn run_budget_default_disable_tune_and_garbage_fallback() {
+        // HEX_INDEX_BUDGET_SECS is read by no other test, so this set/remove is
+        // isolated despite cargo's parallel test threads.
+        std::env::remove_var("HEX_INDEX_BUDGET_SECS");
+        assert_eq!(run_budget(), Some(std::time::Duration::from_secs(600)), "default 10min");
+        std::env::set_var("HEX_INDEX_BUDGET_SECS", "0");
+        assert_eq!(run_budget(), None, "0 disables the cap");
+        std::env::set_var("HEX_INDEX_BUDGET_SECS", "30");
+        assert_eq!(run_budget(), Some(std::time::Duration::from_secs(30)), "explicit value honored");
+        std::env::set_var("HEX_INDEX_BUDGET_SECS", "notanumber");
+        assert_eq!(
+            run_budget(),
+            Some(std::time::Duration::from_secs(600)),
+            "garbage falls back to the default, never panics"
+        );
+        std::env::remove_var("HEX_INDEX_BUDGET_SECS");
+    }
+
+    // Codifies the e2e bail contract verified manually against the built binary
+    // (budget=3s on a 25-file --full reindex bailed after 2 files with exit 1).
+    // Model-dependent (run_index loads ONNX) → #[ignore]; run with --ignored.
+    #[test]
+    #[ignore]
+    fn run_index_over_budget_exits_nonzero() {
+        use std::io::Write;
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        std::fs::create_dir_all(hex_root.join("me/decisions")).unwrap();
+        std::fs::write(hex_root.join("CLAUDE.md"), "# ws\n").unwrap();
+        for n in 0..20 {
+            let mut f =
+                std::fs::File::create(hex_root.join(format!("me/decisions/d{n}.md"))).unwrap();
+            writeln!(f, "# Doc {n}\n\nContent about hex memory indexing.\n\n## More\nText.").unwrap();
+        }
+        // A 1s budget is below the cold model-load (~2s), so the very first
+        // top-of-loop check is already over budget → loud bail, non-zero exit.
+        std::env::set_var("HEX_INDEX_BUDGET_SECS", "1");
+        let code = run_index(hex_root, true);
+        std::env::remove_var("HEX_INDEX_BUDGET_SECS");
+        assert_eq!(code, 1, "an over-budget run must exit non-zero (S6 loud bail)");
     }
 
     #[test]
