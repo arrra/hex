@@ -763,6 +763,7 @@ workers:
             &mut config,
             vec![iii_engine::workers::config::WorkerEntry {
                 name: "iii-observability".into(),
+                kind: None,
                 image: None,
                 config: Some(serde_json::json!({"exporter": "memory"})),
             }],
@@ -788,11 +789,66 @@ workers:
             &mut config,
             vec![iii_engine::workers::config::WorkerEntry {
                 name: "iii-exec".into(),
+                kind: None,
                 image: None,
                 config: Some(serde_json::json!({"exec": ["echo x"]})),
             }],
         );
         assert_eq!(config.workers.len(), before + 1);
+    }
+
+    /// Two `type: iii-exec` daemons with distinct semantic names BOTH append
+    /// (multi-daemon hosting — the console + headroom-proxy case). The `type`
+    /// selects the iii-exec factory; the distinct names mean neither replaces
+    /// the other, and restart/health ride along in the opaque config block.
+    #[test]
+    fn two_typed_iii_exec_daemons_coexist() {
+        let tmp = tempdir().unwrap();
+        let path = tmp.path().join("engine-workers.yaml");
+        std::fs::write(
+            &path,
+            r#"
+workers:
+  - name: console
+    type: iii-exec
+    config:
+      exec: ["console --http-port 3113"]
+  - name: headroom-proxy
+    type: iii-exec
+    config:
+      exec: ["headroom proxy --port 8787"]
+      restart: { on_crash: true }
+      health: { url: "http://127.0.0.1:8787/health" }
+"#,
+        )
+        .unwrap();
+
+        let entries = instance_engine_workers(&path);
+        assert_eq!(entries.len(), 2, "both daemon entries parse");
+
+        let mut config = iii_engine::workers::config::EngineConfig::default_config();
+        let before = config.workers.len();
+        merge_instance_workers(&mut config, entries);
+        assert_eq!(
+            config.workers.len(),
+            before + 2,
+            "two distinct-named typed daemons both append, neither replaces"
+        );
+
+        let headroom = config
+            .workers
+            .iter()
+            .find(|e| e.name == "headroom-proxy")
+            .expect("headroom-proxy present");
+        assert_eq!(
+            headroom.worker_type(),
+            "iii-exec",
+            "type selects the iii-exec factory while name stays semantic"
+        );
+        assert!(
+            config.workers.iter().any(|e| e.name == "console"),
+            "console present alongside headroom-proxy"
+        );
     }
 
     /// Non-listener workers are left untouched — no config injected.

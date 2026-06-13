@@ -1579,7 +1579,7 @@ dependencies = [
 [[package]]
 name = "function-macros"
 version = "0.1.0"
-source = "git+https://github.com/mrap/hex-iii?rev=cbc21ca13e163a55071de277693bd43d2e62a35c#cbc21ca13e163a55071de277693bd43d2e62a35c"
+source = "git+https://github.com/mrap/hex-iii?rev=eaa0f33b0871dab724cd6521551090d609f4c7b8#eaa0f33b0871dab724cd6521551090d609f4c7b8"
 dependencies = [
  "proc-macro2",
  "quote",
@@ -1817,7 +1817,7 @@ checksum = "7f24254aa9a54b5c858eaee2f5bccdb46aaf0e486a595ed5fd8f86ba55232a70"
 
 [[package]]
 name = "hex-harness"
-version = "0.41.0"
+version = "0.42.0"
 dependencies = [
  "anyhow",
  "axum 0.7.9",
@@ -2177,7 +2177,7 @@ dependencies = [
 [[package]]
 name = "iii"
 version = "0.19.0-next.2"
-source = "git+https://github.com/mrap/hex-iii?rev=cbc21ca13e163a55071de277693bd43d2e62a35c#cbc21ca13e163a55071de277693bd43d2e62a35c"
+source = "git+https://github.com/mrap/hex-iii?rev=eaa0f33b0871dab724cd6521551090d609f4c7b8#eaa0f33b0871dab724cd6521551090d609f4c7b8"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -2245,7 +2245,7 @@ dependencies = [
 [[package]]
 name = "iii-observability"
 version = "0.19.0-next.2"
-source = "git+https://github.com/mrap/hex-iii?rev=cbc21ca13e163a55071de277693bd43d2e62a35c#cbc21ca13e163a55071de277693bd43d2e62a35c"
+source = "git+https://github.com/mrap/hex-iii?rev=eaa0f33b0871dab724cd6521551090d609f4c7b8#eaa0f33b0871dab724cd6521551090d609f4c7b8"
 dependencies = [
  "futures-util",
  "opentelemetry",
@@ -2263,7 +2263,7 @@ dependencies = [
 [[package]]
 name = "iii-sdk"
 version = "0.19.0-next.2"
-source = "git+https://github.com/mrap/hex-iii?rev=cbc21ca13e163a55071de277693bd43d2e62a35c#cbc21ca13e163a55071de277693bd43d2e62a35c"
+source = "git+https://github.com/mrap/hex-iii?rev=eaa0f33b0871dab724cd6521551090d609f4c7b8#eaa0f33b0871dab724cd6521551090d609f4c7b8"
 dependencies = [
  "async-trait",
  "futures-util",
@@ -4222,7 +4222,7 @@ dependencies = [
 [[package]]
 name = "scaffolder-core"
 version = "0.19.0-next.2"
-source = "git+https://github.com/mrap/hex-iii?rev=cbc21ca13e163a55071de277693bd43d2e62a35c#cbc21ca13e163a55071de277693bd43d2e62a35c"
+source = "git+https://github.com/mrap/hex-iii?rev=eaa0f33b0871dab724cd6521551090d609f4c7b8#eaa0f33b0871dab724cd6521551090d609f4c7b8"
 dependencies = [
  "anyhow",
  "cliclack",
