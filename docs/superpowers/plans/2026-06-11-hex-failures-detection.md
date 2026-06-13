@@ -9,7 +9,7 @@
 **Tech Stack:** Rust (harness crate at `system/harness/`), rusqlite, chrono, `cron = "=0.15.0"` (new direct dep — must match the engine fork's version), clap. Tests follow the crate's existing pattern: `#[cfg(test)]` in-module, `telemetry::test_support::isolate()` for anything touching `HEX_DIR`.
 
 **Context paths (read before starting):**
-- Proposal: `/Users/mrap/hex/projects/hex-ops/proposals/telemetry-consumption-layer-2026-06-11.md` (v2, review-hardened)
+- Proposal: `$HEX_DIR/projects/hex-ops/proposals/telemetry-consumption-layer-2026-06-11.md` (v2, review-hardened)
 - Trigger/fid mechanics: `system/harness/src/worker/mod.rs`, `system/harness/src/worker/runtime.rs:118-213`
 - Telemetry store API: `system/harness/src/telemetry/mod.rs` (events table: ts, source, event, status, duration_ms, exit_code, detail; WAL)
 - Disabled modules: `system/harness/src/module_state.rs` (`disabled_set(hex_dir)`)
@@ -1036,7 +1036,7 @@ fn run_failures_probe() -> i32 {
 - [x] **Step 5: Build + run by hand (read-only against live data)**
 
 Run: `cd system/harness && cargo build 2>&1 | tail -3` → compiles.
-Run: `HEX_DIR=/Users/mrap/hex ./target/debug/hex failures | head -50` → digest prints; eyeball MISSED/NEVER-RAN against `HEX_DIR=/Users/mrap/hex /Users/mrap/hex/.hex/bin/hex module list` reality. Record the output in the task report. (If `CARGO_TARGET_DIR` is set in your environment, the binary is at `$CARGO_TARGET_DIR/debug/hex` instead.)
+Run: `HEX_DIR=$HEX_DIR ./target/debug/hex failures | head -50` → digest prints; eyeball MISSED/NEVER-RAN against `HEX_DIR=$HEX_DIR $HEX_DIR/.hex/bin/hex module list` reality. Record the output in the task report. (If `CARGO_TARGET_DIR` is set in your environment, the binary is at `$CARGO_TARGET_DIR/debug/hex` instead.)
 
 - [x] **Step 6: Run full suite** — `cargo test 2>&1 | tail -5` → PASS.
 - [x] **Step 7: Commit** — `git commit -am "feat(failures): hex failures CLI digest + alerts + out-of-process probe"`
@@ -1091,19 +1091,19 @@ pub fn worker() -> Worker {
   <key>Label</key><string>com.hex.failures-probe</string>
   <key>ProgramArguments</key>
   <array>
-    <string>/Users/mrap/hex/.hex/bin/hex</string>
+    <string>$HEX_DIR/.hex/bin/hex</string>
     <string>failures</string>
     <string>probe</string>
   </array>
   <key>EnvironmentVariables</key>
-  <dict><key>HEX_DIR</key><string>/Users/mrap/hex</string></dict>
+  <dict><key>HEX_DIR</key><string>$HEX_DIR</string></dict>
   <key>StartInterval</key><integer>1800</integer>
-  <key>StandardErrorPath</key><string>/Users/mrap/hex/.hex/logs/failures-probe.log</string>
+  <key>StandardErrorPath</key><string>$HEX_DIR/.hex/logs/failures-probe.log</string>
 </dict>
 </plist>
 ```
 
-Do NOT load the plist (deploy-time op, instance-side). Note in the report: install = copy to `~/Library/LaunchAgents/` + `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hex.failures-probe.plist`. If the repo's sanitize gate (`hex sanitize`) flags the absolute `/Users/mrap` paths, follow whatever convention existing templates use for instance paths (placeholder + install-time substitution) and document it.
+Do NOT load the plist (deploy-time op, instance-side). Note in the report: install = copy to `~/Library/LaunchAgents/` + `launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hex.failures-probe.plist`. If the repo's sanitize gate (`hex sanitize`) flags the absolute instance paths, follow whatever convention existing templates use for instance paths (placeholder + install-time substitution) and document it.
 
 - [x] **Step 4: Suite + commit**
 
@@ -1130,9 +1130,9 @@ Run: `cargo build --release 2>&1 | tail -3` → compiles.
 
 - [x] **Step 3: Exit-gate smoke against live data (read-only)**
 
-Run: `HEX_DIR=/Users/mrap/hex ./target/release/hex failures; echo "exit=$?"`
+Run: `HEX_DIR=$HEX_DIR ./target/release/hex failures; echo "exit=$?"`
 Expected: digest prints; NEVER-RAN lists the renamed core fids (expected post-rename); MODULE NOT LANDED section empty.
-Run: `HEX_DIR=/Users/mrap/hex ./target/release/hex failures probe; echo "exit=$?"` → `probe ok`, exit 0 (harness is up).
+Run: `HEX_DIR=$HEX_DIR ./target/release/hex failures probe; echo "exit=$?"` → `probe ok`, exit 0 (harness is up).
 
 - [x] **Step 4: Commit** — `git commit -am "docs: hex failures surfaces + WAL footgun"`
 

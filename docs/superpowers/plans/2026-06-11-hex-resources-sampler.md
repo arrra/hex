@@ -9,7 +9,7 @@
 **Tech Stack:** Rust (harness crate at `system/harness/`), rusqlite, chrono, serde_json, clap. Tests: `#[cfg(test)]` in-module; `telemetry::test_support::isolate()` for anything touching `HEX_DIR`.
 
 **Context paths (read before starting):**
-- Proposal: `/Users/mrap/hex/projects/hex-ops/proposals/telemetry-consumption-layer-2026-06-11.md` (v2 — C2 section)
+- Proposal: `$HEX_DIR/projects/hex-ops/proposals/telemetry-consumption-layer-2026-06-11.md` (v2 — C2 section)
 - Telemetry store: `system/harness/src/telemetry/mod.rs` (`record_loud`, `TelemetryEvent`, events table)
 - Emit path: `system/harness/src/ops.rs` (~line 33: `emit_target` — scope="events", key=event, envelope `{event,producer,ts,data}`) and `main.rs` `TriggersCommands::Emit` (~line 642) for the CLI form
 - Alert pathway: `system/harness/src/alert.rs` (`notify`, 6h dedupe per key)
@@ -471,8 +471,8 @@ Handlers: `Sample` → `hex::resources::sample_tick(chrono::Utc::now())`, print 
 - [ ] **Step 3: Build + live smoke (read-only emit-free check)**
 
 Run: `cd system/harness && cargo build 2>&1 | tail -3` → compiles.
-Run: `HEX_DIR=/Users/mrap/hex ./target/debug/hex resources sample; echo "exit=$?"` (binary under `$CARGO_TARGET_DIR/debug/` if set)
-Expected: exit 0, no breaches on the freshly-cleaned disk; TWO new rows in events.db (`sample::df` + first-ever `sample::du`). Verify: `HEX_DIR=/Users/mrap/hex ./target/debug/hex resources status`.
+Run: `HEX_DIR=$HEX_DIR ./target/debug/hex resources sample; echo "exit=$?"` (binary under `$CARGO_TARGET_DIR/debug/` if set)
+Expected: exit 0, no breaches on the freshly-cleaned disk; TWO new rows in events.db (`sample::df` + first-ever `sample::du`). Verify: `HEX_DIR=$HEX_DIR ./target/debug/hex resources status`.
 NOTE: this writes 2 telemetry rows + may take ~14s (first du pass) — acceptable; say so in the report.
 
 - [ ] **Step 4: Full suite** — `cargo test 2>&1 | tail -5` → PASS.
