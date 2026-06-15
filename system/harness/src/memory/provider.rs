@@ -86,6 +86,7 @@ pub fn build_request_body(prompt: &str, model: &str, max_tokens: u32) -> serde_j
 
 pub fn generate(prompt: &str, model: &str, max_tokens: u32) -> Result<String, ProviderError> {
     generate_inner(
+        "generate",
         prompt,
         model,
         max_tokens,
@@ -116,6 +117,7 @@ pub fn generate_for(use_case: &str, prompt: &str) -> Result<String, ProviderErro
         );
     }
     generate_inner(
+        use_case,
         prompt,
         &cfg.model,
         cfg.max_tokens,
@@ -125,6 +127,7 @@ pub fn generate_for(use_case: &str, prompt: &str) -> Result<String, ProviderErro
 }
 
 fn generate_inner(
+    use_case: &str,
     prompt: &str,
     model: &str,
     max_tokens: u32,
@@ -164,6 +167,25 @@ fn generate_inner(
     let json: serde_json::Value = resp
         .into_json()
         .map_err(|e| ProviderError::Upstream(format!("response parse: {e}")))?;
+
+    // OBS-024: OpenRouter-shape usage (prompt_tokens/completion_tokens;
+    // `cost` is OpenRouter-specific and absent on other gateways → 0.0).
+    if let Some(usage) = json.get("usage") {
+        let in_tok = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let out_tok = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let cost = usage.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        crate::llm_cost::record_llm_cost("openrouter", use_case, in_tok, out_tok, cost, Some(model));
+    } else {
+        // S6 / OBS-024: a response with no usage block must NOT vanish from the
+        // cost ledger — that's the exact silent under-report this seam exists to
+        // kill. Be loud, and still count the call (0/0/0.0) so the gap is visible
+        // as an anomaly (a real call with zero tokens) rather than absent.
+        eprintln!(
+            "provider: WARNING OpenRouter response for use_case={use_case} model={model} \
+             had no `usage` block — cost unrecordable, logging a zero-token marker row"
+        );
+        crate::llm_cost::record_llm_cost("openrouter", use_case, 0, 0, 0.0, Some(model));
+    }
 
     json["choices"][0]["message"]["content"]
         .as_str()

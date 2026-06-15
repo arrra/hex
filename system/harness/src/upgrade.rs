@@ -809,8 +809,11 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                         // The binary changed, but the long-running harness
                         // (`com.hex.harness`, the gui LaunchAgent) still holds the
                         // OLD binary in memory — engine + every worker run inside
-                        // it. Restart it so the whole stack reloads.
-                        restart_harness();
+                        // it. Restart it so the whole stack reloads — and VERIFY it
+                        // came back (a swallowed restart failure left the harness
+                        // dead ~3h on 2026-06-12).
+                        let ws_root = hex_dot_dir.parent().unwrap_or(hex_dot_dir.as_path());
+                        restart_harness(ws_root);
                         // Refresh the code-intel binaries (cq, scipd) so they
                         // deploy alongside hex. Best-effort + loud (S6): a
                         // failure here never blocks the hex swap above.
@@ -864,10 +867,14 @@ fn build_and_install_code_intel(hex_dot_dir: &Path) {
 }
 
 /// Restart the single `com.hex.harness` gui LaunchAgent so the swapped binary
-/// (engine + all workers, one process) reloads. Kickstarting a gui-domain agent
-/// runs as the user — no root needed. Best-effort + loud (S6). Skipped when the
-/// agent isn't installed (nothing to restart on this box).
-fn restart_harness() {
+/// (engine + all workers, one process) reloads, then VERIFY the engine actually
+/// serves — escalating loudly (S6 alert) if it does not. Routes through
+/// `harness::supervise::restart_and_verify`, which holds the bootstrap lock (so it
+/// cannot race the watchdog) and re-bootstraps once before giving up. Skipped when
+/// the agent isn't installed (nothing to restart on this box).
+///
+/// `hex_dir` is the workspace root (parent of `.hex`).
+fn restart_harness(hex_dir: &Path) {
     let Ok(home) = std::env::var("HOME") else { return };
     if !Path::new(&home)
         .join("Library/LaunchAgents/com.hex.harness.plist")
@@ -875,13 +882,13 @@ fn restart_harness() {
     {
         return; // harness not installed — nothing to restart
     }
-    // Route through daemon-green so the launchctl plumbing (bootstrap retry,
-    // asuser fallback, wait-out-bootout) is owned by one crate.
-    match daemon_green::native().restart("com.hex.harness") {
-        Ok(()) => {
+    match hex::harness::supervise::restart_and_verify(hex_dir, "com.hex.harness") {
+        Ok(_) => {
             println!("  [OK] restarted com.hex.harness — engine + workers on the new binary");
         }
-        Err(e) => eprintln!("  [WARN] could not restart com.hex.harness: {e}"),
+        // restart_and_verify already printed [FAIL] + fired the S6 alert; surface it here too
+        // so the upgrade output makes the dead harness impossible to miss.
+        Err(e) => eprintln!("  [FAIL] com.hex.harness did not come back after upgrade: {e}"),
     }
 }
 

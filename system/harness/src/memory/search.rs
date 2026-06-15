@@ -381,6 +381,23 @@ pub(crate) fn run_query(
             vec![]
         });
 
+    // --file path filter, applied POST-fusion so it covers every arm. The FTS
+    // arm filters in SQL (search_fts), but the vector and facts arms do NOT —
+    // RRF fuses filtered + unfiltered rowids, so vector/facts hits leaked past
+    // `--file` (2026-06-12: `--file me/decisions` returned CLAUDE.md/AGENTS.md).
+    // Retain only results whose source_path matches, case-insensitively to align
+    // with FTS's ASCII-case-insensitive `LIKE '%ff%'`. (Not a full LIKE: `_`/`%`
+    // are matched literally, not as wildcards — a deliberate, safe narrowing.)
+    // Facts carry no path, so a path filter excludes them.
+    // Limitation: each arm fetches top.max(20) BEFORE this filter, so a query
+    // whose in-path hits are only vector-discoverable can return < top results
+    // (acceptable vs. the leak; a tighter future fix filters inside each arm).
+    if let Some(ff) = args.file.as_deref() {
+        let needle = ff.to_ascii_lowercase();
+        results.retain(|r| r.source_path.to_ascii_lowercase().contains(&needle));
+        facts.clear();
+    }
+
     // Privacy filter — the index-time `private` column (spec §7), applied to
     // chunks and facts alike.
     if args.private {
@@ -494,6 +511,10 @@ mod tests {
                 content,
                 private UNINDEXED,
                 tokenize='unicode61'
+            );
+            CREATE TABLE chunk_meta (
+                chunk_rowid INTEGER PRIMARY KEY,
+                source_weight REAL NOT NULL DEFAULT 1.0
             );",
         )
         .unwrap();
@@ -585,6 +606,56 @@ mod tests {
         assert!(
             !facts.iter().any(|f| f.subject == "me:secret"),
             "--private must filter private facts"
+        );
+    }
+
+    /// `--file` must filter results from EVERY arm, not just FTS. The vector
+    /// arm previously bypassed the filter, so a KNN hit outside the path leaked
+    /// (2026-06-12: `--file me/decisions` returned CLAUDE.md/AGENTS.md). Facts
+    /// carry no path, so a path filter excludes them entirely.
+    #[test]
+    fn run_query_file_filter_covers_vector_arm_and_facts() {
+        let conn = setup_full_db();
+
+        // me/decisions doc: FTS-matchable by the query.
+        insert_chunk(&conn, "me/decisions/d.md", "decision", "alpha decision record", 1.0);
+        // CLAUDE.md doc: shares NO query token (FTS won't surface it) but gets
+        // the query vector, so ONLY the vector arm can surface it — the leak.
+        insert_chunk(&conn, "CLAUDE.md", "footguns", "zzqx qqzz unrelated", 1.0);
+        let claude_rowid = conn.last_insert_rowid();
+        let qv = vec![0.1f32; crate::memory::vector::EMBED_DIM];
+        crate::memory::vector::insert_vec(&conn, claude_rowid, &qv).unwrap();
+
+        // A fact that FTS-matches the query — must be excluded once --file is set.
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('fd','project:x','has','alpha decision',0.9,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+
+        let args = SearchArgs {
+            query: "alpha decision".to_string(),
+            top: 10,
+            file: Some("me/decisions".to_string()),
+            compact: false,
+            context: None,
+            private: false,
+        };
+        let (results, facts) = run_query(&conn, &args, Some(&qv));
+
+        assert!(
+            results.iter().all(|r| r.source_path.contains("me/decisions")),
+            "--file must exclude non-matching paths from ALL arms, got {:?}",
+            results.iter().map(|r| &r.source_path).collect::<Vec<_>>()
+        );
+        assert!(
+            !results.iter().any(|r| r.source_path == "CLAUDE.md"),
+            "a vector-arm hit outside the path must not leak past --file"
+        );
+        assert!(
+            facts.is_empty(),
+            "--file (a path filter) must exclude path-less facts"
         );
     }
 

@@ -423,15 +423,17 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
 // ── Delete helpers ────────────────────────────────────────────────────────────
 
 fn delete_chunks_for_file(conn: &Connection, file_id: i64) -> rusqlite::Result<()> {
-    // Collect chunk rowids for chunk_meta cleanup
+    // Collect chunk rowids for chunk_meta + vec_chunks cleanup. Propagate a
+    // row-read error instead of `.flatten()`-dropping it (S6): a silently
+    // skipped rowid would survive the `delete_vecs` pass below but still be
+    // removed by `DELETE FROM chunks`, stranding its vector — the exact
+    // orphan-vector class this function exists to prevent (V1's 74k-orphan
+    // bug was a missing delete; a silent skip is the same failure by another
+    // route).
     let rowids: Vec<i64> = {
-        let mut stmt =
-            conn.prepare("SELECT rowid FROM chunks WHERE file_id = ?")?;
-        let rows: Vec<i64> = stmt
-            .query_map(params![file_id.to_string()], |r| r.get::<_, i64>(0))?
-            .flatten()
-            .collect();
-        rows
+        let mut stmt = conn.prepare("SELECT rowid FROM chunks WHERE file_id = ?")?;
+        let rows = stmt.query_map(params![file_id.to_string()], |r| r.get::<_, i64>(0))?;
+        rows.collect::<rusqlite::Result<Vec<i64>>>()?
     };
 
     if !rowids.is_empty() {
@@ -554,61 +556,92 @@ pub fn index_file(
         )?;
     }
 
-    // Vector pass: batch-embed all chunk contents, store one vec row per chunk.
-    // An embed failure is loud but non-fatal — the file keeps its FTS5 rows
-    // (searchable), only the vector arm misses it. `hex memory stats` surfaces
-    // any vec/chunk count gap.
+    // Vector pass: embed + persist chunk vectors in EMBED_BATCH-sized batches,
+    // committing each batch before the next embeds (H-09 / OBS-019). An embed
+    // failure or per-batch count mismatch is loud but non-fatal — the file keeps
+    // its FTS5 rows (searchable) and any un-vectored chunks are repaired by
+    // `backfill_missing_vectors` on a later tick. `hex memory stats` surfaces any
+    // residual vec/chunk gap.
     let contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
+    super::embed::log_rss(&format!("pre-embed {} ({} chunks)", rel_path, contents.len()));
+    let stored = embed_and_store(conn, &rel_path, &chunk_rowids, &contents, |batch| {
+        embedder.embed_documents(batch)
+    });
     super::embed::log_rss(&format!(
-        "pre-embed {} ({} chunks)",
+        "post-embed {} ({}/{} vectors)",
         rel_path,
-        contents.len()
+        stored,
+        chunk_rowids.len()
     ));
-    // OBS-019: chunk the embed call to bound peak working set per forward
-    // pass. A single embed_documents(N) call allocates per-layer activation
-    // tensors proportional to N; for nomic-v1.5 (768-dim, transformer), at
-    // N=70 this overflows a 4 GB container (post-load baseline ~1 GB + per-
-    // call working set blows the rest). EMBED_BATCH=8 keeps each call
-    // bounded; verified to survive the 4 GB Docker E2E container.
+
+    Ok(chunks.len())
+}
+
+/// Embed `contents` (aligned 1:1 with `chunk_rowids`, same order) in
+/// `EMBED_BATCH`-sized batches, persisting each batch's vectors *before* the
+/// next batch is embedded. Returns the number of vectors actually stored.
+///
+/// Two reasons for per-batch persistence:
+///   * **Peak working set (OBS-019).** A single `embed_documents(N)` call
+///     allocates per-layer activation tensors proportional to N; for nomic-v1.5
+///     (768-dim transformer) a large N overflows the 4 GB Docker E2E container.
+///     `EMBED_BATCH = 8` bounds each forward pass.
+///   * **Interruption durability (H-09).** Committing each batch immediately
+///     (rusqlite autocommit) means a kill between batches loses at most
+///     `EMBED_BATCH` chunks' vectors; the committed FTS5 chunk rows for any
+///     un-vectored batch are repaired by `backfill_missing_vectors` on a later
+///     tick. Previously the whole file's vectors were accumulated and inserted
+///     only after the last batch, so a mid-file SIGTERM left every chunk of the
+///     file vector-less — the 2026-06-12 wedge-kill signature.
+///
+/// Failures are loud but non-fatal (S6): an embed error stops the loop (the
+/// remaining chunks stay FTS5-only, repaired later); a per-batch count mismatch
+/// is logged and skips only that batch.
+fn embed_and_store<F>(
+    conn: &Connection,
+    rel_path: &str,
+    chunk_rowids: &[i64],
+    contents: &[String],
+    mut embed_batch: F,
+) -> usize
+where
+    F: FnMut(&[String]) -> anyhow::Result<Vec<Vec<f32>>>,
+{
     const EMBED_BATCH: usize = 8;
-    let mut all_vectors: Vec<Vec<f32>> = Vec::with_capacity(contents.len());
-    let mut embed_err: Option<anyhow::Error> = None;
-    for batch in contents.chunks(EMBED_BATCH) {
-        match embedder.embed_documents(batch) {
-            Ok(mut v) => all_vectors.append(&mut v),
+    let mut stored = 0usize;
+    for (rowid_batch, content_batch) in chunk_rowids
+        .chunks(EMBED_BATCH)
+        .zip(contents.chunks(EMBED_BATCH))
+    {
+        match embed_batch(content_batch) {
+            Ok(vecs) if vecs.len() == rowid_batch.len() => {
+                for (rowid, vec) in rowid_batch.iter().zip(vecs.iter()) {
+                    match super::vector::insert_vec(conn, *rowid, vec) {
+                        Ok(()) => stored += 1,
+                        Err(e) => {
+                            eprintln!("  ERROR storing vector for chunk {rowid} of {rel_path}: {e}")
+                        }
+                    }
+                }
+            }
+            Ok(vecs) => {
+                // S6 — never silently drop chunks: a count mismatch is loud. Skip
+                // only this batch; later batches are still embedded.
+                eprintln!(
+                    "  ERROR embedding {rel_path}: batch expected {} vectors, got {} (FTS5-only for these chunks)",
+                    rowid_batch.len(),
+                    vecs.len()
+                );
+            }
             Err(e) => {
-                embed_err = Some(e);
+                // Embed failure — stop; remaining chunks stay FTS5-only and are
+                // repaired by backfill_missing_vectors on a later tick.
+                eprintln!("  ERROR embedding {rel_path} (FTS5-only for remaining chunks): {e}");
                 break;
             }
         }
     }
-    let _embed_result: anyhow::Result<Vec<Vec<f32>>> = match embed_err {
-        Some(e) => Err(e),
-        None => Ok(all_vectors),
-    };
-    super::embed::log_rss(&format!("post-embed {}", rel_path));
-    match _embed_result {
-        Ok(vectors) if vectors.len() == chunk_rowids.len() => {
-            for (rowid, vec) in chunk_rowids.iter().zip(vectors.iter()) {
-                if let Err(e) = super::vector::insert_vec(conn, *rowid, vec) {
-                    eprintln!("  ERROR storing vector for chunk {rowid} of {rel_path}: {e}");
-                }
-            }
-        }
-        Ok(vectors) => {
-            // S6 — never silently drop chunks: a count mismatch is loud.
-            eprintln!(
-                "  ERROR embedding {rel_path}: expected {} vectors, got {} (FTS5-only for this file)",
-                chunk_rowids.len(),
-                vectors.len()
-            );
-        }
-        Err(e) => {
-            eprintln!("  ERROR embedding {rel_path} (FTS5-only for this file): {e}");
-        }
-    }
-
-    Ok(chunks.len())
+    stored
 }
 
 // ── File discovery ────────────────────────────────────────────────────────────
@@ -703,6 +736,25 @@ fn get_metadata(conn: &Connection, key: &str) -> Option<String> {
     .ok()
 }
 
+/// Per-run wall-clock budget for [`run_index`]. Default 600s (10 min). Caps the
+/// dominant 2026-06-12 wedge signature: a throttled crawl over a large multi-file
+/// worklist (e.g. ~945 files post-reboot) burning a core unbounded between the
+/// 15-minute cron ticks. This is a BETWEEN-files gate — it is checked at the top
+/// of each file, so a single in-flight `index_file` is not interrupted mid-embed
+/// (that case is bounded instead by H-09's per-batch commit + the throttle, and
+/// is unlikely to exceed the budget — ~240+ chunks in one file at the throttled
+/// rate; a within-file budget is the queued follow-up, FIX-016).
+/// `HEX_INDEX_BUDGET_SECS` tunes it; `0` disables the cap (returns `None`).
+/// Values below the ~2s cold model-load starve the run (bail at file 0) — keep
+/// it well above that; the default has ample headroom.
+fn run_budget() -> Option<std::time::Duration> {
+    let secs = std::env::var("HEX_INDEX_BUDGET_SECS")
+        .ok()
+        .and_then(|v| v.parse::<u64>().ok())
+        .unwrap_or(600);
+    (secs > 0).then(|| std::time::Duration::from_secs(secs))
+}
+
 pub fn run_index(hex_root: &Path, full: bool) -> i32 {
     let t0 = std::time::Instant::now();
     let db_path = super::db_path(hex_root);
@@ -783,8 +835,29 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
     let mut skipped_mtime = 0usize;
     let mut skipped_hash = 0usize;
     let mut total_chunks = 0usize;
+    let budget = run_budget();
+    let mut over_budget = false;
 
-    for (filepath, strategy) in &file_tuples {
+    for (i, (filepath, strategy)) in file_tuples.iter().enumerate() {
+        // Defense-in-depth (S6): a pathological corpus change or slow file must
+        // not quietly burn a core for an unbounded time between 15-min ticks
+        // (the 2026-06-12 wedge class). Once over budget, bail LOUDLY before
+        // starting another file; the files already indexed are committed
+        // (autocommit) and the rest resume on the next tick.
+        if let Some(b) = budget {
+            if t0.elapsed() > b {
+                eprintln!(
+                    "hex memory index: EXCEEDED {}s wall-clock budget after {indexed} indexed \
+                     ({} of {} files unprocessed) — bailing loudly; remaining resume next tick \
+                     (set HEX_INDEX_BUDGET_SECS to tune, 0 disables)",
+                    b.as_secs(),
+                    file_tuples.len() - i,
+                    file_tuples.len()
+                );
+                over_budget = true;
+                break;
+            }
+        }
         let rel_path = match filepath.strip_prefix(hex_root) {
             Ok(r) => r.to_string_lossy().to_string(),
             Err(_) => continue,
@@ -886,6 +959,21 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
         }
     }
 
+    // If we bailed on the wall-clock budget, skip the (potentially slow)
+    // backfill and the cleanup sweep and exit LOUDLY non-zero (S6) — the next
+    // tick resumes the remaining files. Files already indexed are committed.
+    if over_budget {
+        set_metadata(&conn, "last_run", &Local::now().to_rfc3339());
+        set_metadata(&conn, "last_run_mode", if full { "full" } else { "incremental" });
+        let elapsed = t0.elapsed().as_secs_f64();
+        eprintln!(
+            "hex memory index: BAILED after {elapsed:.1}s over budget — {indexed} indexed, \
+             {skipped_mtime} unchanged (mtime), {skipped_hash} unchanged (hash), \
+             {total_chunks} new chunks; cleanup + backfill skipped, resuming next tick"
+        );
+        return 1;
+    }
+
     // Cleanup: remove DB records for files no longer on disk
     let all_paths: HashSet<String> = file_tuples
         .iter()
@@ -984,6 +1072,27 @@ fn backfill_missing_vectors(
 
 // ── Stats ─────────────────────────────────────────────────────────────────────
 
+/// Human-readable note for a `vec_chunks` vs `chunks` count mismatch, or `None`
+/// when they match. A *deficit* (fewer vectors than chunks) is chunks awaiting
+/// embed — backfilled on later index ticks. A *surplus* (more vectors than
+/// chunks) is orphan vectors — swept by the weekly `hex memory maintain`.
+/// Surfacing the surplus positively avoids the confusing negative
+/// "N chunk(s) without a vector" the old single-branch message printed (P2/S6).
+fn vec_gap_message(chunk_count: i64, vec_count: i64) -> Option<String> {
+    use std::cmp::Ordering;
+    match vec_count.cmp(&chunk_count) {
+        Ordering::Equal => None,
+        Ordering::Less => Some(format!(
+            "WARNING: {} chunk(s) without a vector (backfilled on later ticks)",
+            chunk_count - vec_count
+        )),
+        Ordering::Greater => Some(format!(
+            "NOTE: {} orphan vector(s) (surplus; swept by weekly maintain)",
+            vec_count - chunk_count
+        )),
+    }
+}
+
 pub fn show_stats(hex_root: &Path) -> i32 {
     let db_path = super::db_path(hex_root);
     if !db_path.exists() {
@@ -1023,8 +1132,8 @@ pub fn show_stats(hex_root: &Path) -> i32 {
         .query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))
         .unwrap_or(0);
     println!("Vector embeddings: {vec_count} (sqlite-vec, nomic 768-d)");
-    if vec_count != chunk_count {
-        println!("  WARNING: {} chunk(s) without a vector", chunk_count - vec_count);
+    if let Some(msg) = vec_gap_message(chunk_count, vec_count) {
+        println!("  {msg}");
     }
 
     let last_run = get_metadata(&conn, "last_run");
@@ -1164,6 +1273,142 @@ mod tests {
             .unwrap();
     }
 
+    // ── H-09 / OBS-019: per-batch vector persistence ────────────────────────
+    // The 2026-06-12 wedge-kill left a whole transcript's 83 chunks vector-less
+    // because `index_file` accumulated ALL of a file's vectors and inserted them
+    // only after the last batch embedded — a SIGTERM mid-file therefore lost
+    // every vector. `embed_and_store` now persists each EMBED_BATCH-sized batch
+    // BEFORE embedding the next, so an interruption loses at most one batch (the
+    // rest are repaired by `backfill_missing_vectors`). The injected embed
+    // closure lets these run without the ONNX model.
+
+    fn vec_count(conn: &Connection) -> i64 {
+        conn.query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn embed_and_store_persists_earlier_batches_when_a_later_batch_fails() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        // 20 chunks → batches of 8, 8, 4. Fail on the 2nd batch.
+        let rowids: Vec<i64> = (1..=20).collect();
+        let contents: Vec<String> = (0..20).map(|i| format!("chunk {i}")).collect();
+        let mut calls = 0;
+        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+            calls += 1;
+            if calls == 2 {
+                anyhow::bail!("simulated interruption on batch 2");
+            }
+            Ok(batch
+                .iter()
+                .map(|_| vec![0.1f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+
+        // Batch 1 (8 chunks) committed before batch 2 failed. The pre-fix code
+        // stored 0 here (insert ran only after the whole file embedded).
+        assert_eq!(stored, 8, "only the first batch should be stored");
+        assert_eq!(
+            vec_count(&conn),
+            8,
+            "batch-1 vectors must be durable despite batch-2 failure"
+        );
+    }
+
+    #[test]
+    fn embed_and_store_persists_all_batches_on_success() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        let rowids: Vec<i64> = (1..=20).collect();
+        let contents: Vec<String> = (0..20).map(|i| format!("chunk {i}")).collect();
+        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+            Ok(batch
+                .iter()
+                .map(|_| vec![0.2f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+
+        assert_eq!(stored, 20);
+        assert_eq!(vec_count(&conn), 20);
+    }
+
+    #[test]
+    fn embed_and_store_is_loud_and_skips_only_the_mismatched_batch() {
+        // S6: a per-batch count mismatch must not silently drop chunks, and must
+        // not poison the other batches. Batch 2 returns the wrong vector count.
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        let rowids: Vec<i64> = (1..=20).collect();
+        let contents: Vec<String> = (0..20).map(|i| format!("chunk {i}")).collect();
+        let mut calls = 0;
+        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+            calls += 1;
+            let n = if calls == 2 { batch.len() - 1 } else { batch.len() };
+            Ok((0..n)
+                .map(|_| vec![0.3f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+
+        // Batches 1 (8) and 3 (4) stored; batch 2 skipped loudly → 12 total.
+        assert_eq!(stored, 12, "mismatched batch 2 skipped; batches 1 and 3 stored");
+        assert_eq!(vec_count(&conn), 12);
+    }
+
+    #[test]
+    fn embed_and_store_skips_overcount_batch_without_truncating() {
+        // An embedder returning MORE vectors than the batch must be caught by the
+        // count-equality guard and skipped — NOT silently truncated via zip.
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        let rowids: Vec<i64> = (1..=8).collect();
+        let contents: Vec<String> = (0..8).map(|i| format!("chunk {i}")).collect();
+        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+            Ok((0..batch.len() + 1) // one too many
+                .map(|_| vec![0.4f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+
+        assert_eq!(stored, 0, "over-count batch must be skipped, not truncated");
+        assert_eq!(vec_count(&conn), 0);
+    }
+
+    #[test]
+    fn embed_and_store_handles_empty_and_exact_multiple_boundaries() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        // 0 chunks → no work, no panic (empty slices → zip yields nothing).
+        let s0 = embed_and_store(&conn, "empty.md", &[], &[], |batch| {
+            Ok(batch
+                .iter()
+                .map(|_| vec![0.5f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+        assert_eq!(s0, 0);
+
+        // Exact multiple of 8 (16 → two full batches, no trailing partial).
+        let rowids: Vec<i64> = (1..=16).collect();
+        let contents: Vec<String> = (0..16).map(|i| format!("c{i}")).collect();
+        let s16 = embed_and_store(&conn, "sixteen.md", &rowids, &contents, |batch| {
+            Ok(batch
+                .iter()
+                .map(|_| vec![0.5f32; super::super::vector::EMBED_DIM])
+                .collect())
+        });
+        assert_eq!(s16, 16);
+        assert_eq!(vec_count(&conn), 16);
+    }
+
     #[test]
     fn test_is_private_paths() {
         assert!(is_private("me/decisions/foo.md"));
@@ -1184,6 +1429,159 @@ mod tests {
         // Active (non-archived) content is still indexed.
         assert!(!should_skip("projects/active-thing/context.md"));
         assert!(!should_skip("me/decisions/x.md"));
+    }
+
+    // ── Orphan-vector invariant lock (Task 1, 2026-06-13) ───────────────────
+    // The ~1834 production orphans (vec_chunks rows with no chunks row) were
+    // LEGACY residue from V1's 74k-orphan era — NOT a live re-index leak. The
+    // count is invariant across re-indexing, and `delete_chunks_for_file`
+    // deletes vec_chunks rows BEFORE the chunks rows, keyed on file_id, so no
+    // re-index / file-deletion ordering can strand a vector (a mid-run kill
+    // yields at worst chunks-WITHOUT-vecs — the H-09 direction, self-healed by
+    // backfill). These tests LOCK that invariant: they pass on current code by
+    // design and fail the day a refactor drops the `delete_vecs` call (the V1
+    // bug) or mis-keys the rowid collection. No ONNX — chunks + matching vecs
+    // are inserted directly, mirroring index_file's on-disk layout.
+
+    fn existing_file_id(conn: &Connection, path: &str) -> Option<i64> {
+        conn.query_row("SELECT id FROM files WHERE path = ?", params![path], |r| {
+            r.get(0)
+        })
+        .ok()
+    }
+
+    fn orphan_vec_count(conn: &Connection) -> i64 {
+        conn.query_row(
+            "SELECT COUNT(*) FROM vec_chunks WHERE rowid NOT IN (SELECT rowid FROM chunks)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// Mirror `index_file`'s "remove old record + chunks, then insert fresh"
+    /// flow (index.rs ~513-555 + the embed loop), writing a vec per chunk at the
+    /// chunk's own rowid exactly as the real path does — but without ONNX.
+    fn reindex(conn: &Connection, path: &str, n: usize) {
+        if let Some(fid) = existing_file_id(conn, path) {
+            delete_chunks_for_file(conn, fid).unwrap();
+            conn.execute("DELETE FROM files WHERE id = ?", params![fid]).unwrap();
+        }
+        conn.execute(
+            "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) \
+             VALUES (?, 0.0, 'h', '', ?)",
+            params![path, n as i64],
+        )
+        .unwrap();
+        let fid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap();
+        for i in 0..n {
+            conn.execute(
+                "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
+                 VALUES (?, ?, '', ?, ?, 0)",
+                params![fid.to_string(), path, i.to_string(), format!("chunk {i} of {path}")],
+            )
+            .unwrap();
+            let rowid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap();
+            conn.execute(
+                "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, 1.0)",
+                params![rowid],
+            )
+            .unwrap();
+            super::super::vector::insert_vec(
+                conn,
+                rowid,
+                &vec![0.1f32; super::super::vector::EMBED_DIM],
+            )
+            .unwrap();
+        }
+    }
+
+    #[test]
+    fn reindex_cycles_leave_no_orphan_vectors() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        // Two files; A is inserted last so it owns the highest rowids.
+        reindex(&conn, "b.md", 3);
+        reindex(&conn, "a.md", 5);
+        assert_eq!(vec_count(&conn), 8);
+        assert_eq!(orphan_vec_count(&conn), 0);
+
+        // Re-index A SHRUNK (5 → 2): frees its max rowids; new chunks reuse the
+        // freed rowids. The old vecs must already be gone (delete-before-insert).
+        reindex(&conn, "a.md", 2);
+        assert_eq!(orphan_vec_count(&conn), 0, "reindex-shrink stranded a vector");
+        assert_eq!(vec_count(&conn), 5);
+
+        // Re-index A GROWN (2 → 6).
+        reindex(&conn, "a.md", 6);
+        assert_eq!(orphan_vec_count(&conn), 0, "reindex-grow stranded a vector");
+        assert_eq!(vec_count(&conn), 9);
+
+        // File-removal cleanup path (run_index: delete_chunks_for_file + DELETE
+        // files for a path no longer on disk).
+        let fid_b = existing_file_id(&conn, "b.md").unwrap();
+        delete_chunks_for_file(&conn, fid_b).unwrap();
+        conn.execute("DELETE FROM files WHERE id = ?", params![fid_b]).unwrap();
+        assert_eq!(orphan_vec_count(&conn), 0, "file deletion stranded a vector");
+        assert_eq!(vec_count(&conn), 6, "only A's six vectors remain");
+    }
+
+    #[test]
+    fn vec_gap_message_distinguishes_deficit_surplus_and_match() {
+        assert_eq!(vec_gap_message(10, 10), None, "equal counts → no message");
+
+        let deficit = vec_gap_message(10, 7).expect("deficit must report");
+        assert!(deficit.contains("3 chunk(s) without a vector"), "got: {deficit}");
+
+        // The real production shape: 16688 chunks, 18522 vecs → 1834 orphans.
+        let surplus = vec_gap_message(16688, 18522).expect("surplus must report");
+        assert!(surplus.contains("1834 orphan vector(s)"), "got: {surplus}");
+        assert!(surplus.contains("surplus"), "got: {surplus}");
+    }
+
+    #[test]
+    fn run_budget_default_disable_tune_and_garbage_fallback() {
+        // HEX_INDEX_BUDGET_SECS is read by no other test, so this set/remove is
+        // isolated despite cargo's parallel test threads.
+        std::env::remove_var("HEX_INDEX_BUDGET_SECS");
+        assert_eq!(run_budget(), Some(std::time::Duration::from_secs(600)), "default 10min");
+        std::env::set_var("HEX_INDEX_BUDGET_SECS", "0");
+        assert_eq!(run_budget(), None, "0 disables the cap");
+        std::env::set_var("HEX_INDEX_BUDGET_SECS", "30");
+        assert_eq!(run_budget(), Some(std::time::Duration::from_secs(30)), "explicit value honored");
+        std::env::set_var("HEX_INDEX_BUDGET_SECS", "notanumber");
+        assert_eq!(
+            run_budget(),
+            Some(std::time::Duration::from_secs(600)),
+            "garbage falls back to the default, never panics"
+        );
+        std::env::remove_var("HEX_INDEX_BUDGET_SECS");
+    }
+
+    // Codifies the e2e bail contract verified manually against the built binary
+    // (budget=3s on a 25-file --full reindex bailed after 2 files with exit 1).
+    // Model-dependent (run_index loads ONNX) → #[ignore]; run with --ignored.
+    #[test]
+    #[ignore]
+    fn run_index_over_budget_exits_nonzero() {
+        use std::io::Write;
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        std::fs::create_dir_all(hex_root.join("me/decisions")).unwrap();
+        std::fs::write(hex_root.join("CLAUDE.md"), "# ws\n").unwrap();
+        for n in 0..20 {
+            let mut f =
+                std::fs::File::create(hex_root.join(format!("me/decisions/d{n}.md"))).unwrap();
+            writeln!(f, "# Doc {n}\n\nContent about hex memory indexing.\n\n## More\nText.").unwrap();
+        }
+        // A 1s budget is below the cold model-load (~2s), so the very first
+        // top-of-loop check is already over budget → loud bail, non-zero exit.
+        std::env::set_var("HEX_INDEX_BUDGET_SECS", "1");
+        let code = run_index(hex_root, true);
+        std::env::remove_var("HEX_INDEX_BUDGET_SECS");
+        assert_eq!(code, 1, "an over-budget run must exit non-zero (S6 loud bail)");
     }
 
     #[test]

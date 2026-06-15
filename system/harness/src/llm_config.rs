@@ -298,11 +298,14 @@ pub fn resolve(use_case: &str) -> Result<ResolvedLlm> {
 mod tests {
     use super::*;
     use std::io::Write;
-    use std::sync::Mutex;
 
     // Tests mutate process env vars (HEX_DIR, HEX_LLM_MODEL_*,
-    // HEX_CONSOLIDATE_MODEL) and must run serially.
-    static ENV_LOCK: Mutex<()> = Mutex::new(());
+    // HEX_CONSOLIDATE_MODEL) and must run serially — on the crate's ONE
+    // shared HEX_DIR lock (telemetry::test_support), not a module-local
+    // mutex: a local lock still races every other HEX_DIR-mutating test
+    // in the lib target (observed: failures::missed_tests flaking when
+    // these tests swapped HEX_DIR mid-run).
+    use crate::telemetry::test_support::ENV_LOCK;
 
     const ENV_KEYS: &[&str] = &[
         "HEX_DIR",

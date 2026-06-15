@@ -101,6 +101,9 @@ mod tests {
 
     #[test]
     fn fails_when_stamp_missing() {
+        // ctx_with_db mutates the process-global HEX_DIR — hold the crate's
+        // single env lock for the test's duration (telemetry/mod.rs contract).
+        let _g = crate::telemetry::test_support::lock_env();
         let tmp = tempfile::tempdir().unwrap();
         let ctx = ctx_with_db(tmp.path(), None);
         let res = NightlyFullLiveness.run(&ctx);
@@ -109,6 +112,7 @@ mod tests {
 
     #[test]
     fn fails_when_stamp_stale() {
+        let _g = crate::telemetry::test_support::lock_env();
         let tmp = tempfile::tempdir().unwrap();
         // 30h ago — past the 26h threshold.
         let stale = chrono::Local::now() - chrono::Duration::hours(30);
@@ -119,6 +123,7 @@ mod tests {
 
     #[test]
     fn passes_when_stamp_fresh() {
+        let _g = crate::telemetry::test_support::lock_env();
         let tmp = tempfile::tempdir().unwrap();
         let fresh = chrono::Local::now() - chrono::Duration::hours(2);
         let ctx = ctx_with_db(tmp.path(), Some(&fresh.to_rfc3339()));

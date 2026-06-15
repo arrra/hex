@@ -98,7 +98,7 @@ fn index_all(home: &Path) -> Result<()> {
 
 /// Build the `hex-codeintel-indexer` worker.
 pub fn worker() -> Worker {
-    Worker::new("hex-codeintel-indexer").on_cron(CRON_NIGHTLY, run_nightly)
+    Worker::new("hex-codeintel-indexer").on_cron_named("nightly", CRON_NIGHTLY, run_nightly)
 }
 
 #[cfg(test)]
@@ -204,7 +204,7 @@ mod tests {
         assert_eq!(w.name, "hex-codeintel-indexer");
         assert_eq!(w.handlers.len(), 1, "exactly one trigger");
         assert_eq!(
-            w.handlers[0].0,
+            w.handlers[0].1,
             hex::worker::TriggerSpec::Cron {
                 expression: CRON_NIGHTLY.to_string()
             }

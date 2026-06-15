@@ -6,6 +6,9 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /build
 COPY system/harness/ ./
+# Sibling path dep: scipd = { path = "../code-intel" } resolves to /code-intel
+# when the harness manifest is at /build. Copy it or the build can't resolve it.
+COPY system/code-intel/ /code-intel/
 RUN cargo build --release 2>&1
 
 FROM debian:trixie-slim

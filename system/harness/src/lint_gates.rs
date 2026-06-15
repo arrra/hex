@@ -102,12 +102,68 @@ fn rule_deployed_binary(cmd: &str) -> bool {
     cmd.contains(".hex/bin/hex")
 }
 
+/// Split a command line into top-level segments on shell separators
+/// (`&&`, `||`, `;`, `|`, `&`, newline, `(`, `)`). Not a full shell parser —
+/// just enough to tell a token in COMMAND position from one used as an argument.
+/// Returns trimmed, non-empty segments.
+///
+/// Note: treating a lone `&` as a separator also splits a `2>&1` redirection
+/// into `2>` and `1` fragments — benign here, since neither fragment begins with
+/// `hex`, and it lets us catch backgrounded `… & hex <sub>`.
+fn command_segments(cmd: &str) -> Vec<&str> {
+    let bytes = cmd.as_bytes();
+    let mut out = Vec::new();
+    let mut start = 0usize;
+    let mut i = 0usize;
+    while i < bytes.len() {
+        let is_two = i + 1 < bytes.len()
+            && ((bytes[i] == b'&' && bytes[i + 1] == b'&')
+                || (bytes[i] == b'|' && bytes[i + 1] == b'|'));
+        let is_one = matches!(bytes[i], b';' | b'|' | b'&' | b'\n' | b'(' | b')');
+        if is_two || is_one {
+            let seg = cmd[start..i].trim();
+            if !seg.is_empty() {
+                out.push(seg);
+            }
+            i += if is_two { 2 } else { 1 };
+            start = i;
+        } else {
+            i += 1;
+        }
+    }
+    let seg = cmd[start..].trim();
+    if !seg.is_empty() {
+        out.push(seg);
+    }
+    out
+}
+
+/// A `VAR=val` env-assignment token (leading `KEY=` with an identifier key),
+/// e.g. `HEX_DIR=/tmp/x`. Used to skip env prefixes before the real command.
+fn is_env_assignment(tok: &str) -> bool {
+    match tok.split_once('=') {
+        Some((key, _)) => {
+            !key.is_empty() && key.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
+        }
+        None => false,
+    }
+}
+
 fn rule_hex_from_worker(cmd: &str) -> bool {
-    // A `hex <subcommand>` invocation inside a verify-gate reads $HEX_DIR
-    // from the main workspace and ignores worktree edits. The worker should
-    // check artifacts it produced, not derived state via `hex`.
-    let t = cmd.trim_start();
-    t.starts_with("hex ") || cmd.contains(" hex ") || cmd.contains(" && hex ")
+    // A `hex <subcommand>` invocation inside a verify-gate reads $HEX_DIR from
+    // the main workspace and ignores worktree edits. The worker should check
+    // artifacts it produced, not derived state via `hex`.
+    //
+    // Fire only when `hex` is the COMMAND of a segment, NOT when it appears as an
+    // argument — `cargo run --bin hex -- backup` builds and runs the hex binary,
+    // it does not verify state via a `hex` subcommand. The old ` hex ` substring
+    // match false-positived on exactly that (2026-06-12 shadow ledger: the only
+    // `fail` prediction in 245 was this FP). Skip leading `VAR=val` env prefixes
+    // so `HEX_DIR=x hex doctor` still fires (that IS the footgun).
+    command_segments(cmd).iter().any(|seg| {
+        let first_cmd = seg.split_whitespace().find(|t| !is_env_assignment(t));
+        matches!(first_cmd, Some("hex"))
+    })
 }
 
 fn rule_inverted_grep_v(cmd: &str) -> bool {
@@ -354,8 +410,25 @@ mod tests {
 
     #[test]
     fn lint_hex_from_worker_positive_and_negative() {
+        // command-position hex (start, or after a separator) → fires
         assert!(rule_hex_from_worker("hex doctor && echo ok"));
+        assert!(rule_hex_from_worker("echo start && hex backup --check"));
+        assert!(rule_hex_from_worker("ls; hex stats"));
+        assert!(rule_hex_from_worker("echo $(hex recent)"));
+        // env-prefixed hex still reads $HEX_DIR → must still fire (review fix)
+        assert!(rule_hex_from_worker("HEX_DIR=/tmp/x hex doctor"));
+        assert!(rule_hex_from_worker("PATH=/opt/homebrew/bin:$PATH A=1 hex stats"));
+        // backgrounded hex after a lone & (review fix)
+        assert!(rule_hex_from_worker("echo done & hex backup"));
+        // not a hex subcommand → does not fire
         assert!(!rule_hex_from_worker("test -f system/harness/Cargo.toml"));
+        // regression: `hex` as an argument, not a command (2026-06-12 shadow FP).
+        // `cargo run --bin hex` builds+runs the binary; it is not state-via-hex.
+        assert!(!rule_hex_from_worker("cargo run --bin hex -- doctor"));
+        assert!(!rule_hex_from_worker(
+            "export PATH=\"/opt/homebrew/bin:$PATH\" && cargo run -p hex-harness --bin hex -- \
+             backup --help > /tmp/l 2>&1 && grep -qi 'backup' /tmp/l"
+        ));
     }
 
     #[test]

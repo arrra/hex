@@ -43,7 +43,7 @@ mod tests {
     fn cron_exprs(w: &Worker) -> Vec<String> {
         w.handlers
             .iter()
-            .filter_map(|(spec, _)| match spec {
+            .filter_map(|(_name, spec, _)| match spec {
                 TriggerSpec::Cron { expression } => Some(expression.clone()),
                 _ => None,
             })
@@ -126,6 +126,25 @@ mod tests {
             .find(|w| w.name == "hex-backup")
             .expect("hex-backup present");
         assert!(!cron_exprs(bk).is_empty());
+    }
+
+    #[test]
+    fn backup_offsite_registered_at_0430() {
+        let reg = registry();
+        let off = reg
+            .iter()
+            .find(|w| w.name == "hex-backup-offsite")
+            .expect("hex-backup-offsite present");
+        let exprs = cron_exprs(off);
+        assert!(
+            exprs.iter().any(|e| e == hex_modules::backup_offsite::CRON_OFFSITE),
+            "offsite worker must register its 04:30 cron, got: {:?}",
+            exprs
+        );
+        assert_eq!(
+            hex_modules::backup_offsite::ARGV_OFFSITE,
+            &["hex", "backup", "offsite"],
+        );
     }
 
     #[test]

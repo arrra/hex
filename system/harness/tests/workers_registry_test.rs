@@ -12,7 +12,7 @@ use hex::workers;
 fn cron_exprs(w: &hex::worker::Worker) -> Vec<String> {
     w.handlers
         .iter()
-        .filter_map(|(spec, _)| match spec {
+        .filter_map(|(_name, spec, _)| match spec {
             TriggerSpec::Cron { expression } => Some(expression.clone()),
             _ => None,
         })
@@ -58,8 +58,10 @@ fn workers_registry_memory_maintenance_cron_matches_yaml() {
 #[test]
 fn workers_registry_memory_maintenance_has_weekly_maintain() {
     // `hex memory maintain --vacuum --backfill-facts` runs weekly — Sunday
-    // 04:30Z, after the 04:00Z backup — so one-off memory.db corruption
-    // (orphan vectors, FTS bloat, foreign transcript_files rows) self-heals.
+    // 04:33Z, after the 04:00Z backup, offset off the :30 boundary so its
+    // unlocked VACUUM doesn't collide with the 15-min index tick — so one-off
+    // memory.db corruption (orphan vectors, FTS bloat, foreign transcript_files
+    // rows) self-heals.
     let reg = workers::registry();
     let mm = reg
         .iter()
@@ -67,8 +69,8 @@ fn workers_registry_memory_maintenance_has_weekly_maintain() {
         .expect("hex-memory-maintenance worker must be registered");
     let exprs = cron_exprs(mm);
     assert!(
-        exprs.iter().any(|e| e == "0 30 4 * * SUN *"),
-        "expected weekly `hex memory maintain` cron '0 30 4 * * SUN *' in {:?}",
+        exprs.iter().any(|e| e == "0 33 4 * * SUN *"),
+        "expected weekly `hex memory maintain` cron '0 33 4 * * SUN *' in {:?}",
         exprs
     );
     assert_eq!(
@@ -98,6 +100,8 @@ fn workers_registry_quick_consolidate_offset_from_full_run() {
 #[test]
 fn workers_registry_freshness_daily_0900() {
     // hex-freshness: daily ledger freshness alerting (agent-infra P0, E0 step 4).
+    // 09:00 PT = 16:00 UTC — engine crons evaluate UTC (telemetry-consumption
+    // proposal: the original "0 0 9" fired at 02:00 PT, while Mike slept).
     let reg = workers::registry();
     let fr = reg
         .iter()
@@ -105,8 +109,8 @@ fn workers_registry_freshness_daily_0900() {
         .expect("hex-freshness worker must be registered");
     let exprs = cron_exprs(fr);
     assert!(
-        exprs.iter().any(|e| e == "0 0 9 * * * *"),
-        "expected hex-freshness cron '0 0 9 * * * *' (09:00 daily) in {:?}",
+        exprs.iter().any(|e| e == "0 0 16 * * * *"),
+        "expected hex-freshness cron '0 0 16 * * * *' (09:00 PT / 16:00 UTC) in {:?}",
         exprs
     );
 }
@@ -139,7 +143,7 @@ fn workers_registry_oss_releaser_release_requested_event() {
         1,
         "oss-releaser must register exactly one handler"
     );
-    let (spec, _h) = &w.handlers[0];
+    let (_name, spec, _h) = &w.handlers[0];
     assert_eq!(
         *spec,
         TriggerSpec::State {
