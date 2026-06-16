@@ -8,7 +8,7 @@
 
 Ship a **generic, event-driven log-tail capability** in hex-foundation whose first consumer is capturing headroom proxy overhead (`STAGE_TIMINGS.total_pre_upstream`) into hex's unified telemetry + event bus — headroom treated as an opaque, swappable upstream. The reusable core is a `LineObserver` trait; headroom is one compiled impl. New upstreams = new impl, never a config DSL.
 
-Origin: `me/decisions/headroom-overhead-telemetry-architecture-2026-06-13.md` (mrap-hex) + `docs/ideation/2026-06-13-headroom-overhead-telemetry-ideation.md`.
+Origin (hex instance): `me/decisions/headroom-overhead-telemetry-architecture-2026-06-13.md` + `docs/ideation/2026-06-13-headroom-overhead-telemetry-ideation.md`.
 
 ## Key design decision (forced by SDK reality)
 
