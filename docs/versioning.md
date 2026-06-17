@@ -24,16 +24,43 @@ system/harness/Cargo.toml (source of truth)
 
 Releases follow **GitFlow**: feature branches merge to `develop`; a release is cut
 from `develop`, merged `--no-ff` to `main`, tagged, and back-merged to `develop`.
-Hotfixes cut from `main` directly. The whole ceremony is one command (or one event):
+Hotfixes cut from `main` directly.
+
+**Releases are owned by the `oss-releaser` agent.** Pushing a `release/X.Y.Z`
+(or `hotfix/X.Y.Z`) branch to origin IS the release request — the watcher picks
+it up and finishes it. The releaser also owns pushing `develop`: contributors
+merge to `develop` locally and STOP; develop-sync pushes it on the next watch
+tick. Running `hex release cut` by hand is the exception, not the rule, and
+requires a stated reason (watcher down, `--dry-run`, deliberate override).
+
+The whole ceremony is one command (or one trigger):
 
 ```sh
-hex release cut --level patch        # or minor | major, or --version X.Y.Z
-hex release cut --hotfix             # hotfix/X.Y.Z from main instead of develop
-hex release cut --dry-run            # run the gate battery and stop
+hex release cut --level patch            # or minor | major, or --version X.Y.Z
+hex release cut --hotfix                 # hotfix/X.Y.Z from main instead of develop
+hex release cut --finish release/X.Y.Z   # complete a pre-existing release/hotfix branch
+hex release cut --dry-run                # run the gate battery and stop
 ```
 
-The agent surface is the `release.requested` event, handled by the `oss-releaser`
-worker, which spawns the same ceremony as a detached child.
+Both agent surfaces are handled by the `oss-releaser` worker, which spawns the
+ceremony as a detached child:
+
+- **Branch watch** (the default path) — a 5-minute cron `git ls-remote`s the
+  `release/*` and `hotfix/*` heads of every watched releases.toml profile
+  (`watch = true` + `repo_dir`) and runs `hex release cut --finish <branch>`
+  for any head it has not seen before. Last-seen SHAs persist per
+  (profile, branch) in the harness state db, so one observed head spawns at
+  most one ceremony across ticks and restarts; while a repo's ceremony lock is
+  held its poll is deferred entirely, so the watch never races a running cut.
+- **`release.requested` event** — the manual escape hatch for cutting a fresh
+  release by event instead of by hand.
+
+**Develop-sync:** every watch tick also compares each watched repo's local
+`develop` against origin. Strictly ahead → fast-forward push through the same
+audited git-guard path as the ceremony (`HEX_RELEASE_PIPELINE=1` + post-push
+SHA verify). Diverged (or origin branch missing) → loud operator alert, NEVER
+auto-resolved (no pull/rebase/reset/force-push). In sync or behind-only →
+nothing.
 
 `hex release cut` will:
 1. Take an exclusive lock and pin the `develop` SHA (`main` for `--hotfix`)

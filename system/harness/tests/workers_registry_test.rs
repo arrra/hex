@@ -129,10 +129,11 @@ fn workers_registry_backup_is_cron_worker() {
 }
 
 #[test]
-fn workers_registry_oss_releaser_release_requested_event() {
-    // oss-releaser (oss-releaser spec, scope item 6): exactly one trigger —
-    // the `release.requested` event, i.e. a State trigger scope="events",
-    // key="release.requested" (the `.on_event` convention).
+fn workers_registry_oss_releaser_release_requested_event_and_watch_cron() {
+    // oss-releaser (oss-releaser spec, scope item 6): exactly two triggers —
+    // the `release.requested` event (a State trigger scope="events",
+    // key="release.requested", the `.on_event` convention — the manual
+    // escape hatch) and the every-5-minutes branch-watch cron.
     let reg = workers::registry();
     let w = reg
         .iter()
@@ -140,16 +141,21 @@ fn workers_registry_oss_releaser_release_requested_event() {
         .expect("oss-releaser worker must be registered");
     assert_eq!(
         w.handlers.len(),
-        1,
-        "oss-releaser must register exactly one handler"
+        2,
+        "oss-releaser must register exactly two handlers (event + watch cron)"
     );
-    let (_name, spec, _h) = &w.handlers[0];
-    assert_eq!(
-        *spec,
-        TriggerSpec::State {
+    let specs: Vec<&TriggerSpec> = w.handlers.iter().map(|(_name, s, _h)| s).collect();
+    assert!(
+        specs.contains(&&TriggerSpec::State {
             scope: "events".to_string(),
             key: "release.requested".to_string(),
-        },
+        }),
         "oss-releaser must trigger on events/release.requested"
+    );
+    assert!(
+        specs.contains(&&TriggerSpec::Cron {
+            expression: "0 */5 * * * * *".to_string(),
+        }),
+        "oss-releaser must poll watched repos every 5 minutes"
     );
 }
