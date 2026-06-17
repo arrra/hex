@@ -34,11 +34,29 @@
 //! gh_release     = false                    # default false
 //! main_branch    = "main"                   # default "main"
 //! develop_branch = "develop"                # default "develop"
+//! # Watcher fields — consumed by the oss-releaser branch watcher. repo_dir
+//! # is the absolute path to the local clone the watcher polls and the
+//! # ceremony runs in; it is instance config (set it only in the deployed
+//! # $HEX_DIR/.hex/config/releases.toml, never in foundation source) and is
+//! # REQUIRED when watch = true. watch opts the profile in to the branch
+//! # watch (default false — strictly opt-in; the manual `release.requested`
+//! # event path ignores it). A watched profile's develop branch is also
+//! # kept pushed: each tick fast-forwards origin when the local clone is
+//! # strictly ahead ([`sync_develop_to_origin`], same audited push path as
+//! # the ceremony) and alerts loudly on divergence — never auto-resolved.
+//! repo_dir = "/absolute/path/to/local/clone"
+//! watch    = true
 //! ```
 //!
+//! The built-in `hex-foundation` profile is configurable the same way: a
+//! `[[profiles]]` entry named `hex-foundation` sets ONLY the watcher fields
+//! (`repo_dir`, `watch`) on the builtin — every other field is pinned in
+//! code, and an entry that sets one is refused loudly.
+//!
 //! Missing file ⇒ built-in profile only. Malformed file or an invalid
-//! profile (no match rule, unknown version-file kind) ⇒ LOUD error (S6 —
-//! no quiet failures).
+//! profile (no match rule, unknown version-file kind, `watch = true`
+//! without an absolute `repo_dir`, a pinned-field override of the builtin)
+//! ⇒ LOUD error (S6 — no quiet failures).
 //!
 //! ## Gate battery
 //!
@@ -66,6 +84,21 @@
 //! back-merge to develop → race guard → hardened pushes (every push carries
 //! `HEX_RELEASE_PIPELINE=1`) → optional GitHub release → cleanup → summary.
 //! Fully non-interactive; exit 0 only on full success.
+//!
+//! ### Finish mode (`--finish release/X.Y.Z` | `--finish hotfix/X.Y.Z`)
+//!
+//! Completes a PRE-EXISTING release/hotfix branch — the shape a branch-watch
+//! trigger produces (some actor pushes the branch as the release request).
+//! The branch name owns the version (no bump computation; `--version` and
+//! `--level` are refused) and the mode (hotfix inferred from the prefix).
+//! The pin moves to the existing branch tip: the battery tests THAT tip, an
+//! origin-only branch is fetched, a strictly-behind local branch is
+//! fast-forwarded, and divergence refuses loudly. A branch already carrying
+//! the version bump skips the bump commit (loudly); otherwise the bump is
+//! committed onto the branch as usual. Steps (g)–(m) — notes, merge, tag,
+//! back-merge, pushes, cleanup — run unchanged, except the develop race
+//! guard (develop legitimately moves ahead while a release branch
+//! stabilizes; the back-merge reconciles). The fresh-cut path is untouched.
 //!
 //! ## git-guard
 //!
@@ -271,6 +304,19 @@ pub struct ReleaseProfile {
     pub main_branch: String,
     /// The GitFlow integration branch.
     pub develop_branch: String,
+    /// Absolute path to the local clone the oss-releaser branch watcher
+    /// polls and runs the ceremony from. `None` ⇒ no local checkout is
+    /// configured: the profile cannot be watched (the loader refuses
+    /// `watch = true` without it), and the manual `release.requested`
+    /// path — which carries its own repo_dir — is unaffected. The real
+    /// path lives only in the deployed instance config
+    /// (`$HEX_DIR/.hex/config/releases.toml`), never in foundation source.
+    pub repo_dir: Option<PathBuf>,
+    /// Opt this profile in to the oss-releaser cron branch watch. Default
+    /// `false` — watching is strictly opt-in; a profile with a configured
+    /// `repo_dir` opts back out with `watch = false`. The manual
+    /// `release.requested` event handler ignores this flag.
+    pub watch: bool,
 }
 
 impl ReleaseProfile {
@@ -285,11 +331,16 @@ impl ReleaseProfile {
     }
 }
 
+/// Name of the built-in profile. A releases.toml `[[profiles]]` entry with
+/// this name configures the builtin's watcher fields (`repo_dir`, `watch`)
+/// instead of adding a separate profile — see [`ProfileToml::into_foundation_override`].
+const FOUNDATION_PROFILE_NAME: &str = "hex-foundation";
+
 /// The built-in hex-foundation profile. Matches both the canonical checkout
 /// dir and any worktree of it (worktree dirs differ, the remote does not).
 pub fn builtin_foundation() -> ReleaseProfile {
     ReleaseProfile {
-        name: "hex-foundation".to_string(),
+        name: FOUNDATION_PROFILE_NAME.to_string(),
         match_remote: Some("hex-foundation".to_string()),
         match_dir: Some("hex-foundation".to_string()),
         gates: vec![
@@ -314,6 +365,11 @@ pub fn builtin_foundation() -> ReleaseProfile {
         gh_release: true,
         main_branch: "main".to_string(),
         develop_branch: "develop".to_string(),
+        // Watcher fields are instance config, never code: a deployed
+        // releases.toml opts in via a `[[profiles]] name = "hex-foundation"`
+        // entry (see `into_foundation_override`).
+        repo_dir: None,
+        watch: false,
     }
 }
 
@@ -347,6 +403,10 @@ struct ProfileToml {
     main_branch: Option<String>,
     #[serde(default)]
     develop_branch: Option<String>,
+    #[serde(default)]
+    repo_dir: Option<String>,
+    #[serde(default)]
+    watch: Option<bool>,
 }
 
 #[derive(Debug, Deserialize)]
@@ -362,6 +422,59 @@ struct VersionFileToml {
     path: String,
     #[serde(default)]
     kind: Option<String>,
+}
+
+/// Everything one releases.toml provides: extra repo profiles, plus the
+/// optional watcher-field configuration for the built-in hex-foundation
+/// profile (from a restricted `[[profiles]] name = "hex-foundation"` entry).
+#[derive(Debug, Default)]
+struct ReleasesConfig {
+    /// Watcher fields for the builtin. Everything else about that profile
+    /// is pinned in code ([`builtin_foundation`]).
+    foundation: Option<FoundationOverride>,
+    /// Non-builtin profiles, in file order.
+    profiles: Vec<ReleaseProfile>,
+}
+
+/// The instance-configurable watcher fields of the built-in profile.
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct FoundationOverride {
+    repo_dir: Option<PathBuf>,
+    watch: bool,
+}
+
+/// Validate + convert the watcher fields of one releases.toml entry.
+/// `watch = true` requires an absolute `repo_dir` — the branch watcher polls
+/// and runs the ceremony from that local clone, so a missing or relative
+/// path is a config error refused at load time (S6 — no silent skips).
+fn watcher_fields(
+    profile_name: &str,
+    repo_dir: Option<String>,
+    watch: Option<bool>,
+) -> Result<(Option<PathBuf>, bool)> {
+    let repo_dir = match repo_dir {
+        Some(raw) => {
+            let path = PathBuf::from(&raw);
+            if !path.is_absolute() {
+                bail!(
+                    "profile `{profile_name}`: repo_dir `{raw}` must be an \
+                     absolute path — a relative path would resolve against \
+                     the harness's working directory"
+                );
+            }
+            Some(path)
+        }
+        None => None,
+    };
+    let watch = watch.unwrap_or(false);
+    if watch && repo_dir.is_none() {
+        bail!(
+            "profile `{profile_name}` sets watch = true without a repo_dir — \
+             the branch watcher needs a local clone to poll and run the \
+             ceremony from"
+        );
+    }
+    Ok((repo_dir, watch))
 }
 
 impl ProfileToml {
@@ -390,6 +503,7 @@ impl ProfileToml {
                 Ok(VersionFile { path: vf.path, kind })
             })
             .collect::<Result<Vec<_>>>()?;
+        let (repo_dir, watch) = watcher_fields(&self.name, self.repo_dir, self.watch)?;
         Ok(ReleaseProfile {
             name: self.name,
             match_remote: self.match_remote,
@@ -405,7 +519,69 @@ impl ProfileToml {
             gh_release: self.gh_release.unwrap_or(false),
             main_branch: self.main_branch.unwrap_or_else(|| "main".to_string()),
             develop_branch: self.develop_branch.unwrap_or_else(|| "develop".to_string()),
+            repo_dir,
+            watch,
         })
+    }
+
+    /// Convert a `[[profiles]] name = "hex-foundation"` entry into the
+    /// builtin override. Only the watcher fields (`repo_dir`, `watch`) are
+    /// instance-configurable — everything else is pinned in code
+    /// ([`builtin_foundation`]), and an entry that sets a pinned field is
+    /// refused loudly rather than half-applied (S6).
+    fn into_foundation_override(self) -> Result<FoundationOverride> {
+        let ProfileToml {
+            name,
+            match_remote,
+            match_dir,
+            gates,
+            version_files,
+            build_command,
+            tag_prefix,
+            gh_release,
+            main_branch,
+            develop_branch,
+            repo_dir,
+            watch,
+        } = self;
+        let mut illegal: Vec<&str> = Vec::new();
+        if match_remote.is_some() {
+            illegal.push("match_remote");
+        }
+        if match_dir.is_some() {
+            illegal.push("match_dir");
+        }
+        if !gates.is_empty() {
+            illegal.push("gates");
+        }
+        if !version_files.is_empty() {
+            illegal.push("version_files");
+        }
+        if build_command.is_some() {
+            illegal.push("build_command");
+        }
+        if tag_prefix.is_some() {
+            illegal.push("tag_prefix");
+        }
+        if gh_release.is_some() {
+            illegal.push("gh_release");
+        }
+        if main_branch.is_some() {
+            illegal.push("main_branch");
+        }
+        if develop_branch.is_some() {
+            illegal.push("develop_branch");
+        }
+        if !illegal.is_empty() {
+            bail!(
+                "profile `{name}` is built-in — only the watcher fields \
+                 (`repo_dir`, `watch`) are configurable from releases.toml; \
+                 refusing to override pinned field(s): {}",
+                illegal.join(", ")
+            );
+        }
+        let (repo_dir, watch) = watcher_fields(&name, repo_dir, watch)?;
+        Ok(FoundationOverride { repo_dir, watch })
     }
 }
 
@@ -421,30 +597,55 @@ fn config_path() -> PathBuf {
     hex_dir.join(".hex/config/releases.toml")
 }
 
-/// Load profiles from an explicit releases.toml path. Missing file ⇒ empty
-/// (built-ins only); malformed file or invalid profile ⇒ loud error.
-fn load_profiles_file(path: &Path) -> Result<Vec<ReleaseProfile>> {
+/// Load the config from an explicit releases.toml path. Missing file ⇒
+/// empty config (built-ins only); malformed file or invalid profile ⇒ loud
+/// error. A `[[profiles]]` entry named `hex-foundation` configures the
+/// builtin's watcher fields instead of adding a profile.
+fn load_profiles_file(path: &Path) -> Result<ReleasesConfig> {
     if !path.exists() {
-        return Ok(Vec::new());
+        return Ok(ReleasesConfig::default());
     }
     let body = std::fs::read_to_string(path)
         .with_context(|| format!("reading releases.toml at {}", path.display()))?;
     let parsed: ReleasesTomlFile = toml::from_str(&body)
         .with_context(|| format!("parsing releases.toml at {}", path.display()))?;
-    parsed
-        .profiles
-        .into_iter()
-        .map(|p| p.into_profile())
-        .collect::<Result<Vec<_>>>()
-        .with_context(|| format!("loading releases.toml at {}", path.display()))
+    let loading = || format!("loading releases.toml at {}", path.display());
+    let mut cfg = ReleasesConfig::default();
+    for p in parsed.profiles {
+        if p.name == FOUNDATION_PROFILE_NAME {
+            if cfg.foundation.is_some() {
+                return Err(anyhow::anyhow!(
+                    "duplicate `{FOUNDATION_PROFILE_NAME}` entries — at most \
+                     one override of the built-in profile"
+                ))
+                .with_context(loading);
+            }
+            cfg.foundation = Some(p.into_foundation_override().with_context(loading)?);
+        } else {
+            cfg.profiles.push(p.into_profile().with_context(loading)?);
+        }
+    }
+    Ok(cfg)
+}
+
+/// Assemble the known-profiles list from a loaded config: the built-in
+/// hex-foundation profile first (with any instance-configured watcher
+/// fields applied), then the file's profiles in order.
+fn assemble_known_profiles(cfg: ReleasesConfig) -> Vec<ReleaseProfile> {
+    let mut foundation = builtin_foundation();
+    if let Some(o) = cfg.foundation {
+        foundation.repo_dir = o.repo_dir;
+        foundation.watch = o.watch;
+    }
+    let mut profiles = vec![foundation];
+    profiles.extend(cfg.profiles);
+    profiles
 }
 
 /// All known profiles: built-in hex-foundation first, then releases.toml in
 /// file order. First match wins in [`resolve_profile`].
 pub fn known_profiles() -> Result<Vec<ReleaseProfile>> {
-    let mut profiles = vec![builtin_foundation()];
-    profiles.extend(load_profiles_file(&config_path())?);
-    Ok(profiles)
+    Ok(assemble_known_profiles(load_profiles_file(&config_path())?))
 }
 
 fn match_profile<'a>(
@@ -1087,7 +1288,11 @@ fn git_common_dir(repo_root: &Path) -> Result<PathBuf> {
     }
 }
 
-fn lock_file_path(repo_root: &Path) -> Result<PathBuf> {
+/// The ceremony's exclusive lock file. Public so the oss-releaser branch
+/// watcher can defer polling a repo while a ceremony is in flight — it only
+/// checks existence; TAKING the lock stays the ceremony's job
+/// ([`ReleaseLock::acquire`]).
+pub fn lock_file_path(repo_root: &Path) -> Result<PathBuf> {
     Ok(git_common_dir(repo_root)?.join("hex-release.lock"))
 }
 
@@ -1168,6 +1373,36 @@ fn parse_ls_remote(out: &str, refname: &str) -> Option<String> {
     unpeeled
 }
 
+/// All `release/*` and `hotfix/*` branch heads on origin as `(branch, sha)`
+/// pairs — the poll primitive of the oss-releaser branch watcher. A failing
+/// `ls-remote` is a hard error: "cannot list" must never read as "no
+/// branches" (S6).
+pub fn ls_remote_watch_heads(repo_root: &Path) -> Result<Vec<(String, String)>> {
+    let out = git_stdout(
+        repo_root,
+        &["ls-remote", "origin", "refs/heads/release/*", "refs/heads/hotfix/*"],
+    )
+    .context("listing origin release/* and hotfix/* heads")?;
+    Ok(parse_ls_remote_heads(&out))
+}
+
+/// Parse multi-ref `git ls-remote` output into `(branch, sha)` pairs sorted
+/// by branch name. Only `refs/heads/*` lines count (branch heads are never
+/// peeled, so no `^{}` handling); malformed lines are skipped.
+pub fn parse_ls_remote_heads(out: &str) -> Vec<(String, String)> {
+    let mut heads: Vec<(String, String)> = out
+        .lines()
+        .filter_map(|line| {
+            let mut cols = line.split_whitespace();
+            let (sha, refname) = (cols.next()?, cols.next()?);
+            let branch = refname.strip_prefix("refs/heads/")?;
+            Some((branch.to_string(), sha.to_string()))
+        })
+        .collect();
+    heads.sort();
+    heads
+}
+
 /// `git merge --no-ff` of `branch` into the current branch. `Err` carries
 /// the failure output; the caller owns the abort semantics.
 fn merge_no_ff(repo_root: &Path, branch: &str, message: &str) -> Result<(), String> {
@@ -1224,6 +1459,120 @@ fn verify_pushed(repo_root: &Path, branch: &str, expected_sha: &str) -> Result<(
              {expected_sha} — release ABORTED",
             other.unwrap_or("<absent>")
         ),
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Base-branch sync (oss-releaser develop-sync) — the only push path outside
+// the cut ceremony. Strictly-ahead fast-forwards ONLY; divergence is an
+// operator problem and is reported as data, never auto-resolved.
+// ---------------------------------------------------------------------------
+
+/// Pure ahead/behind/diverged classification of one local base branch
+/// against its origin counterpart, from the two SHAs and the two ancestry
+/// answers. Pure so the matrix is unit-testable without a repo.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DevelopSyncClass {
+    InSync,
+    Ahead,
+    Behind,
+    Diverged,
+    RemoteMissing,
+}
+
+fn classify_develop_sync(
+    local_sha: &str,
+    origin_sha: Option<&str>,
+    origin_is_ancestor_of_local: bool,
+    local_is_ancestor_of_origin: bool,
+) -> DevelopSyncClass {
+    match origin_sha {
+        None => DevelopSyncClass::RemoteMissing,
+        Some(o) if o == local_sha => DevelopSyncClass::InSync,
+        Some(_) => match (origin_is_ancestor_of_local, local_is_ancestor_of_origin) {
+            (true, false) => DevelopSyncClass::Ahead,
+            (false, true) => DevelopSyncClass::Behind,
+            (false, false) => DevelopSyncClass::Diverged,
+            // Two DISTINCT commits cannot each be the other's ancestor.
+            // Inconsistent evidence means the repo lied — never conclude
+            // "safe to push" from it; treat as diverged (operator problem).
+            (true, true) => DevelopSyncClass::Diverged,
+        },
+    }
+}
+
+/// What one develop-sync pass did (or refused to do).
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum DevelopSyncOutcome {
+    /// origin already equals the local head — nothing to do.
+    InSync,
+    /// Local was strictly ahead: origin was fast-forwarded `from → to`
+    /// through the ceremony's audited push path and the result verified.
+    Pushed { from: String, to: String },
+    /// Origin is strictly ahead of local — nothing to push; catching the
+    /// local clone up is not the sync's job (it never touches local refs).
+    Behind { local: String, origin: String },
+    /// Each side has commits the other lacks. The sync NEVER resolves this
+    /// (no push, no pull/rebase/reset) — the caller alerts the operator.
+    Diverged { local: String, origin: String },
+    /// Origin has no such branch. The sync never CREATES base branches on
+    /// origin — an absent base branch on a watched repo is an operator
+    /// problem, not a fast-forward.
+    RemoteMissing { local: String },
+}
+
+/// Compare the local `develop` branch against `origin/<develop>` and
+/// fast-forward origin when — and only when — local is strictly ahead.
+/// The push goes through the SAME audited path as the cut ceremony:
+/// [`push_ref`] (carries `HEX_RELEASE_PIPELINE=1` for the git-guard) plus
+/// the independent [`verify_pushed`] SHA check. Every other state is
+/// returned as data for the caller to act on; local refs are NEVER
+/// modified (the ancestry fetch downloads objects only).
+pub fn sync_develop_to_origin(repo_root: &Path, develop: &str) -> Result<DevelopSyncOutcome> {
+    let branch_ref = format!("refs/heads/{develop}");
+    let local = rev_parse(repo_root, &branch_ref)
+        .with_context(|| format!("resolving local {develop} — does the branch exist?"))?;
+    let origin = ls_remote_sha(repo_root, &branch_ref)
+        .with_context(|| format!("checking origin for {develop}"))?;
+
+    // The two classifications that need no ancestry (and no objects).
+    if origin.as_deref() == Some(local.as_str()) {
+        return Ok(DevelopSyncOutcome::InSync);
+    }
+    let Some(origin) = origin else {
+        return Ok(DevelopSyncOutcome::RemoteMissing { local });
+    };
+
+    // Ancestry needs origin's head in the local object db. When origin is
+    // ahead or diverged that commit may be unknown locally — fetch the
+    // branch (objects + remote-tracking ref only; never a local branch).
+    if !ref_exists(repo_root, &format!("{origin}^{{commit}}")) {
+        git_stdout(repo_root, &["fetch", "--quiet", "origin", develop])
+            .with_context(|| format!("fetching origin/{develop} for the ancestry check"))?;
+        if !ref_exists(repo_root, &format!("{origin}^{{commit}}")) {
+            bail!(
+                "origin/{develop} head {} is still unknown locally after \
+                 `git fetch origin {develop}` — origin moved mid-sync; retrying \
+                 next tick",
+                short_sha(&origin)
+            );
+        }
+    }
+
+    let origin_anc = is_ancestor(repo_root, &origin, &local)?;
+    let local_anc = is_ancestor(repo_root, &local, &origin)?;
+    match classify_develop_sync(&local, Some(&origin), origin_anc, local_anc) {
+        DevelopSyncClass::Ahead => {
+            push_ref(repo_root, develop)?;
+            verify_pushed(repo_root, develop, &local)?;
+            Ok(DevelopSyncOutcome::Pushed { from: origin, to: local })
+        }
+        DevelopSyncClass::Behind => Ok(DevelopSyncOutcome::Behind { local, origin }),
+        DevelopSyncClass::Diverged => Ok(DevelopSyncOutcome::Diverged { local, origin }),
+        // Unreachable here (equal/absent SHAs returned above), but answer
+        // consistently rather than panic if the impossible happens.
+        DevelopSyncClass::InSync => Ok(DevelopSyncOutcome::InSync),
+        DevelopSyncClass::RemoteMissing => Ok(DevelopSyncOutcome::RemoteMissing { local }),
     }
 }
 
@@ -1322,7 +1671,10 @@ fn refuse_existing_tag(repo_root: &Path, tag: &str) -> Result<()> {
 // ---------------------------------------------------------------------------
 
 /// Flags for `hex release cut`. `version` wins over `level`; `level`
-/// defaults to patch.
+/// defaults to patch. `finish` switches to finish mode: complete a
+/// pre-existing `release/X.Y.Z` or `hotfix/X.Y.Z` branch instead of cutting
+/// a new one (the branch name owns the version AND the mode, so `version`,
+/// `level`, and a contradicting `hotfix` are refused loudly).
 #[derive(Debug, Clone, Default)]
 pub struct CutOptions {
     pub level: Option<BumpLevel>,
@@ -1330,6 +1682,86 @@ pub struct CutOptions {
     pub hotfix: bool,
     pub dry_run: bool,
     pub skip: SkipFlags,
+    pub finish: Option<String>,
+}
+
+/// A parsed `--finish` request: the pre-existing GitFlow finishing branch.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct FinishSpec {
+    /// The branch name as given (`release/X.Y.Z` or `hotfix/X.Y.Z`).
+    pub branch: String,
+    /// True for `hotfix/*` — inferred from the prefix, never from a flag.
+    pub hotfix: bool,
+    /// The bare semver version carried by the branch name.
+    pub version: String,
+}
+
+/// Parse a finish-mode branch name. Only `release/X.Y.Z` and `hotfix/X.Y.Z`
+/// are finishable — anything else is a loud refusal, never a guess.
+pub fn parse_finish_branch(branch: &str) -> Result<FinishSpec> {
+    let (hotfix, version) =
+        match (branch.strip_prefix("release/"), branch.strip_prefix("hotfix/")) {
+            (Some(v), _) => (false, v),
+            (_, Some(v)) => (true, v),
+            _ => bail!(
+                "--finish branch `{branch}` is not finishable — expected \
+                 release/X.Y.Z or hotfix/X.Y.Z"
+            ),
+        };
+    if !semver_valid(version) {
+        bail!(
+            "--finish branch `{branch}` does not carry a semver version \
+             (`{version}` is not X.Y.Z)"
+        );
+    }
+    Ok(FinishSpec {
+        branch: branch.to_string(),
+        hotfix,
+        version: version.to_string(),
+    })
+}
+
+/// Finish mode: resolve the tip of the pre-existing branch, reconciling
+/// local and origin. Origin-only ⇒ fetched into a local branch; local
+/// strictly behind origin ⇒ fast-forwarded; identical ⇒ used as-is; local
+/// ahead or diverged ⇒ LOUD refusal — the engine never guesses which tip is
+/// the release request.
+fn resolve_finish_branch_tip(repo_root: &Path, branch: &str) -> Result<String> {
+    let local_ref = format!("refs/heads/{branch}");
+    let local = if ref_exists(repo_root, &local_ref) {
+        Some(rev_parse(repo_root, &local_ref)?)
+    } else {
+        None
+    };
+    let remote = ls_remote_sha(repo_root, &local_ref)?;
+    let fetch = || -> Result<String> {
+        git_stdout(repo_root, &["fetch", "-q", "origin", &format!("{branch}:{branch}")])
+            .with_context(|| format!("fetching origin {branch} into local {branch}"))?;
+        rev_parse(repo_root, &local_ref)
+    };
+    match (local, remote) {
+        (None, None) => bail!(
+            "--finish branch `{branch}` exists neither locally nor on origin — \
+             nothing to finish"
+        ),
+        (Some(local), None) => Ok(local),
+        (None, Some(_)) => fetch(),
+        (Some(local), Some(remote)) if local == remote => Ok(local),
+        (Some(local), Some(remote)) => {
+            if is_ancestor(repo_root, &local, &remote)? {
+                // Strictly behind the request on origin — fast-forward.
+                fetch()
+            } else {
+                bail!(
+                    "local `{branch}` ({}) and origin ({}) disagree and local is \
+                     not strictly behind — reconcile manually (push or delete the \
+                     local branch), then re-run",
+                    short_sha(&local),
+                    short_sha(&remote)
+                );
+            }
+        }
+    }
 }
 
 /// Cut a release from the repo containing the current directory. Resolves
@@ -1396,6 +1828,30 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
     let main = profile.main_branch.as_str();
     let develop = profile.develop_branch.as_str();
 
+    // Finish mode: `--finish` names a pre-existing release/hotfix branch.
+    // The branch name owns the version AND the mode, so the bump flags are
+    // contradictions, not extras (S6 — refuse loudly, never guess).
+    let finish: Option<FinishSpec> = match opts.finish.as_deref() {
+        Some(branch) => {
+            if opts.version.is_some() || opts.level.is_some() {
+                bail!(
+                    "--finish derives the version from `{branch}` — drop \
+                     --version/--level"
+                );
+            }
+            let spec = parse_finish_branch(branch)?;
+            if opts.hotfix && !spec.hotfix {
+                bail!(
+                    "--hotfix contradicts --finish {branch} — the branch prefix \
+                     names the mode"
+                );
+            }
+            Some(spec)
+        }
+        None => None,
+    };
+    let hotfix = opts.hotfix || finish.as_ref().is_some_and(|f| f.hotfix);
+
     // (a) Exclusive lock — Drop releases it on every exit path.
     let _lock = ReleaseLock::acquire(repo_root)?;
     phases.push(("lock", "acquired".to_string()));
@@ -1418,8 +1874,17 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
              git branch {develop} {main} && git push origin {develop}"
         );
     }
-    let pinned_branch = if opts.hotfix { main } else { develop };
-    let pinned_sha = rev_parse(repo_root, &format!("refs/heads/{pinned_branch}"))?;
+    // The pin: finish mode pins the EXISTING branch tip (that is what was
+    // requested and what the battery must test); a fresh cut pins the
+    // GitFlow source branch.
+    let (pinned_branch, pinned_sha) = match &finish {
+        Some(f) => (f.branch.as_str(), resolve_finish_branch_tip(repo_root, &f.branch)?),
+        None => {
+            let pb = if hotfix { main } else { develop };
+            let sha = rev_parse(repo_root, &format!("refs/heads/{pb}"))?;
+            (pb, sha)
+        }
+    };
     if !is_ancestor(
         repo_root,
         &format!("refs/heads/{main}"),
@@ -1430,6 +1895,24 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
              broken (did someone commit to {main} without a back-merge?). Merge {main} \
              into {develop} first, then re-run."
         );
+    }
+    // Finish-mode fail-fast: the version is knowable before the battery, so
+    // a doomed finish (tag taken, version not above the latest tag) refuses
+    // here instead of after minutes of gates.
+    if let Some(f) = &finish {
+        let tags: Vec<String> =
+            git_stdout(repo_root, &["tag"])?.lines().map(str::to_string).collect();
+        if let Some(latest) = highest_semver_tag(&tags, &profile.tag_prefix) {
+            if !semver_gt(&f.version, &latest) {
+                bail!(
+                    "--finish {}: version {} is not greater than the latest tag \
+                     {latest} — was this branch already released?",
+                    f.branch,
+                    f.version
+                );
+            }
+        }
+        refuse_existing_tag(repo_root, &format!("{}{}", profile.tag_prefix, f.version))?;
     }
     phases.push((
         "preconditions",
@@ -1483,20 +1966,27 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
         return Ok("dry-run: battery green".to_string());
     }
 
-    // (d) Version: --version, or --level bump of the latest semver tag.
+    // (d) Version: the --finish branch name, --version, or --level bump of
+    // the latest semver tag.
     let tags: Vec<String> = git_stdout(repo_root, &["tag"])?
         .lines()
         .map(str::to_string)
         .collect();
     let latest = highest_semver_tag(&tags, &profile.tag_prefix);
-    let version =
-        match compute_next_version(opts.version.as_deref(), opts.level, latest.as_deref()) {
-            Ok(v) => v,
-            Err(e) => {
-                restore();
-                return Err(e);
+    let version = match &finish {
+        // Pre-validated before the battery; the tag is re-refused below in
+        // case a gate created it mid-battery.
+        Some(f) => f.version.clone(),
+        None => {
+            match compute_next_version(opts.version.as_deref(), opts.level, latest.as_deref()) {
+                Ok(v) => v,
+                Err(e) => {
+                    restore();
+                    return Err(e);
+                }
             }
-        };
+        }
+    };
     let tag = format!("{}{version}", profile.tag_prefix);
     if let Err(e) = refuse_existing_tag(repo_root, &tag) {
         restore();
@@ -1504,25 +1994,65 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
     }
     phases.push((
         "version",
-        format!("{} → {version}", latest.as_deref().unwrap_or("<none>")),
+        match &finish {
+            Some(f) => format!("{version} (from {})", f.branch),
+            None => format!("{} → {version}", latest.as_deref().unwrap_or("<none>")),
+        },
     ));
 
-    // (e) The release/hotfix branch, from the pinned SHA.
-    let rel_branch = format!(
-        "{}/{version}",
-        if opts.hotfix { "hotfix" } else { "release" }
-    );
-    git_stdout(repo_root, &["checkout", "-q", "-b", &rel_branch, &pinned_sha])
-        .with_context(|| format!("creating branch {rel_branch}"))?;
-    phases.push(("branch", rel_branch.clone()));
+    // (e) The release/hotfix branch: finish mode re-attaches to the existing
+    // branch and proves its tip is still exactly what the battery tested
+    // (a gate or a concurrent actor could have moved it — releasing an
+    // untested tip is forbidden); a fresh cut creates it at the pin.
+    let rel_branch = match &finish {
+        Some(f) => f.branch.clone(),
+        None => format!("{}/{version}", if hotfix { "hotfix" } else { "release" }),
+    };
+    if finish.is_some() {
+        git_stdout(repo_root, &["checkout", "-q", &rel_branch])
+            .with_context(|| format!("checking out existing branch {rel_branch}"))?;
+        let tip_now = rev_parse(repo_root, "HEAD")?;
+        if let Err(e) = check_pinned_unmoved(&rel_branch, &pinned_sha, &tip_now) {
+            restore();
+            return Err(e);
+        }
+        phases.push(("branch", format!("{rel_branch} (existing — finish mode)")));
+    } else {
+        git_stdout(repo_root, &["checkout", "-q", "-b", &rel_branch, &pinned_sha])
+            .with_context(|| format!("creating branch {rel_branch}"))?;
+        phases.push(("branch", rel_branch.clone()));
+    }
 
-    // (f) Bump version files; a failing build reverts them and aborts.
+    // Recovery hint for failures past this point — finish mode preserves the
+    // request branch (it IS the request), a fresh cut deletes its own.
+    let cleanup_hint = match &finish {
+        Some(_) => format!(
+            "The branch {rel_branch} is preserved — fix it and re-run \
+             `hex release cut --finish {rel_branch}`."
+        ),
+        None => format!("Clean up with: git checkout {pinned_branch} && git branch -D {rel_branch}"),
+    };
+
+    // (f) Bump version files; a failing build reverts them and aborts. A
+    // finish branch may already carry the bump (the requesting actor bumped
+    // before pushing) — detect and skip, loudly (an empty bump commit would
+    // otherwise abort the ceremony).
     if profile.version_files.is_empty() {
         println!("No version files configured — skipping bump commit.");
         phases.push(("bump", "skipped (no version files)".to_string()));
     } else {
-        bump_and_commit(repo_root, profile, &version, &tag, &rel_branch, pinned_branch)?;
-        phases.push(("bump", format!("bump: {tag}")));
+        let already_bumped = finish.is_some()
+            && profile
+                .version_files
+                .iter()
+                .all(|vf| matches!(vf.read_version(repo_root), Ok(v) if v == version));
+        if already_bumped {
+            println!("Version files already at {version} on {rel_branch} — skipping bump commit.");
+            phases.push(("bump", format!("already at {version} — skipped")));
+        } else {
+            bump_and_commit(repo_root, profile, &version, &tag, &cleanup_hint)?;
+            phases.push(("bump", format!("bump: {tag}")));
+        }
     }
 
     // (g) Release notes — failures downgrade to loud WARN, never an abort.
@@ -1546,8 +2076,11 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
 
     // (h) --no-ff merge to main; tag the merge commit.
     let main_before = rev_parse(repo_root, &format!("refs/heads/{main}"))?;
-    if opts.hotfix {
-        // A hotfix pins main: it must not have moved between pin and merge.
+    if hotfix && finish.is_none() {
+        // A fresh hotfix cut pins main: it must not have moved between pin
+        // and merge. Finish mode pins the existing branch tip instead (its
+        // own unmoved check ran at step e) — a moved main surfaces as a
+        // normal merge below, conflicting loudly if incompatible.
         if let Err(e) = check_pinned_unmoved(main, &pinned_sha, &main_before) {
             bail!(
                 "{e:#}\nClean up the abandoned hotfix branch with: \
@@ -1561,8 +2094,7 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
         bail!(
             "merge of {rel_branch} into {main} failed ({why}) — merge aborted, nothing \
              pushed. `{main}` moved during the cut or conflicts with the release; \
-             inspect, then clean up with: git checkout {pinned_branch} && \
-             git branch -D {rel_branch}"
+             inspect. {cleanup_hint}"
         );
     }
     let main_sha = rev_parse(repo_root, "HEAD")?;
@@ -1575,8 +2107,11 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
 
     // (i)+(j) Race guard, then --no-ff back-merge to develop. The guard runs
     // BEFORE the back-merge (the only moment develop's tip is still
-    // comparable to the pin) and before any push, per step (j).
-    if !opts.hotfix {
+    // comparable to the pin) and before any push, per step (j). Finish mode
+    // skips it: the pin is the finish branch tip, not develop — develop
+    // legitimately moves ahead while a release branch stabilizes, and the
+    // back-merge below reconciles (conflicting loudly if incompatible).
+    if !hotfix && finish.is_none() {
         let develop_now = rev_parse(repo_root, &format!("refs/heads/{develop}"))?;
         if let Err(e) = check_pinned_unmoved(develop, &pinned_sha, &develop_now) {
             bail!(
@@ -1715,8 +2250,7 @@ fn bump_and_commit(
     profile: &ReleaseProfile,
     version: &str,
     tag: &str,
-    rel_branch: &str,
-    pinned_branch: &str,
+    cleanup_hint: &str,
 ) -> Result<()> {
     let saved: Vec<(PathBuf, String)> = profile
         .version_files
@@ -1749,10 +2283,7 @@ fn bump_and_commit(
                     eprintln!("WARN: reverting {} failed: {e}", path.display());
                 }
             }
-            bail!(
-                "bump build failed: {why} — version files reverted. Clean up with: \
-                 git checkout {pinned_branch} && git branch -D {rel_branch}"
-            );
+            bail!("bump build failed: {why} — version files reverted. {cleanup_hint}");
         }
     }
     let mut add = vec!["add".to_string(), "--".to_string()];
@@ -2204,6 +2735,25 @@ mod tests {
     }
 
     #[test]
+    fn parse_ls_remote_heads_extracts_sorted_branch_heads() {
+        // Multi-head listing, deliberately out of order; only refs/heads/*
+        // lines count, malformed lines are skipped.
+        let out = "bbb222\trefs/heads/release/0.2.0\n\
+                   aaa111\trefs/heads/hotfix/0.1.1\n\
+                   garbage-line-without-ref\n\
+                   ccc333\trefs/tags/v0.1.0\n";
+        assert_eq!(
+            parse_ls_remote_heads(out),
+            vec![
+                ("hotfix/0.1.1".to_string(), "aaa111".to_string()),
+                ("release/0.2.0".to_string(), "bbb222".to_string()),
+            ]
+        );
+        // No heads at all.
+        assert!(parse_ls_remote_heads("").is_empty());
+    }
+
+    #[test]
     fn command_gate_pass_fail_and_tool_not_found() {
         let td = tempfile::tempdir().unwrap();
         assert_eq!(gate_command("true", td.path()), GateResult::Pass);
@@ -2289,6 +2839,8 @@ mod tests {
             gh_release: false,
             main_branch: "main".to_string(),
             develop_branch: "develop".to_string(),
+            repo_dir: None,
+            watch: false,
         }
     }
 
@@ -2354,6 +2906,10 @@ mod tests {
         assert_eq!(p.tag_prefix, "v");
         assert_eq!(p.main_branch, "main");
         assert_eq!(p.develop_branch, "develop");
+        // Watcher fields: no local clone in code — the deployed instance
+        // opts in via a `[[profiles]] name = "hex-foundation"` entry.
+        assert!(p.repo_dir.is_none());
+        assert!(!p.watch);
     }
 
     #[test]
@@ -2375,9 +2931,10 @@ build_command = "cargo build --release"
 "#,
         )
         .unwrap();
-        let profiles = load_profiles_file(&path).unwrap();
-        assert_eq!(profiles.len(), 1);
-        let p = &profiles[0];
+        let cfg = load_profiles_file(&path).unwrap();
+        assert!(cfg.foundation.is_none());
+        assert_eq!(cfg.profiles.len(), 1);
+        let p = &cfg.profiles[0];
         assert_eq!(p.name, "boi");
         assert_eq!(p.gates.len(), 2);
         assert_eq!(
@@ -2390,11 +2947,154 @@ build_command = "cargo build --release"
         assert!(!p.gh_release);
         assert_eq!(p.main_branch, "main");
         assert_eq!(p.develop_branch, "develop");
+        // Watcher fields default to "not watchable": no clone, no watch.
+        assert!(p.repo_dir.is_none());
+        assert!(!p.watch);
 
         // Missing file ⇒ no extra profiles, no error.
-        assert!(load_profiles_file(&td.path().join("absent.toml"))
-            .unwrap()
-            .is_empty());
+        let absent = load_profiles_file(&td.path().join("absent.toml")).unwrap();
+        assert!(absent.profiles.is_empty());
+        assert!(absent.foundation.is_none());
+    }
+
+    #[test]
+    fn releases_toml_loads_watcher_fields() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("releases.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[profiles]]
+name = "boi"
+match_dir = "boi"
+repo_dir = "/srv/clones/boi"
+watch = true
+"#,
+        )
+        .unwrap();
+        let cfg = load_profiles_file(&path).unwrap();
+        let p = &cfg.profiles[0];
+        assert_eq!(p.repo_dir.as_deref(), Some(Path::new("/srv/clones/boi")));
+        assert!(p.watch);
+
+        // repo_dir with watch = false: a profile with a configured local
+        // clone explicitly opted OUT of the branch watch.
+        std::fs::write(
+            &path,
+            "[[profiles]]\nname = \"boi\"\nmatch_dir = \"boi\"\nrepo_dir = \"/srv/clones/boi\"\nwatch = false\n",
+        )
+        .unwrap();
+        let cfg = load_profiles_file(&path).unwrap();
+        assert!(!cfg.profiles[0].watch);
+        assert!(cfg.profiles[0].repo_dir.is_some());
+    }
+
+    #[test]
+    fn releases_toml_rejects_bad_watcher_fields_loudly() {
+        let td = tempfile::tempdir().unwrap();
+
+        // watch = true without a repo_dir: the watcher would have nowhere
+        // to poll from — refused at load, never silently skipped (S6).
+        let no_dir = td.path().join("no-dir.toml");
+        std::fs::write(
+            &no_dir,
+            "[[profiles]]\nname = \"x\"\nmatch_dir = \"x\"\nwatch = true\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load_profiles_file(&no_dir).unwrap_err());
+        assert!(err.contains("watch"), "got: {err}");
+        assert!(err.contains("repo_dir"), "got: {err}");
+
+        // A relative repo_dir would resolve against the harness's cwd.
+        let rel = td.path().join("rel.toml");
+        std::fs::write(
+            &rel,
+            "[[profiles]]\nname = \"x\"\nmatch_dir = \"x\"\nrepo_dir = \"clones/x\"\nwatch = true\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load_profiles_file(&rel).unwrap_err());
+        assert!(err.contains("absolute"), "got: {err}");
+    }
+
+    #[test]
+    fn releases_toml_foundation_entry_configures_builtin_watcher_fields() {
+        let td = tempfile::tempdir().unwrap();
+        let path = td.path().join("releases.toml");
+        std::fs::write(
+            &path,
+            r#"
+[[profiles]]
+name = "hex-foundation"
+repo_dir = "/srv/clones/hex-foundation"
+watch = true
+
+[[profiles]]
+name = "boi"
+match_dir = "boi"
+"#,
+        )
+        .unwrap();
+        let cfg = load_profiles_file(&path).unwrap();
+        // The hex-foundation entry configures the builtin — it is NOT an
+        // extra profile.
+        assert_eq!(cfg.profiles.len(), 1);
+        assert_eq!(cfg.profiles[0].name, "boi");
+        let profiles = assemble_known_profiles(cfg);
+        assert_eq!(profiles.len(), 2);
+        let f = &profiles[0];
+        assert_eq!(f.name, "hex-foundation");
+        // Pinned fields intact…
+        assert_eq!(f.gates.len(), 5);
+        assert!(f.gh_release);
+        // …watcher fields applied.
+        assert_eq!(
+            f.repo_dir.as_deref(),
+            Some(Path::new("/srv/clones/hex-foundation"))
+        );
+        assert!(f.watch);
+
+        // No override entry ⇒ builtin watcher fields stay off.
+        let plain = assemble_known_profiles(ReleasesConfig::default());
+        assert_eq!(plain.len(), 1);
+        assert!(plain[0].repo_dir.is_none());
+        assert!(!plain[0].watch);
+    }
+
+    #[test]
+    fn releases_toml_rejects_foundation_override_of_pinned_fields() {
+        let td = tempfile::tempdir().unwrap();
+
+        // Pinned fields (gates, version_files, …) live in code; an entry
+        // that tries to override one is refused loudly, never half-applied.
+        let pinned = td.path().join("pinned.toml");
+        std::fs::write(
+            &pinned,
+            "[[profiles]]\nname = \"hex-foundation\"\nrepo_dir = \"/srv/x\"\nwatch = true\ngates = [{ name = \"g\", command = \"true\" }]\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load_profiles_file(&pinned).unwrap_err());
+        assert!(err.contains("built-in"), "got: {err}");
+        assert!(err.contains("gates"), "got: {err}");
+
+        // The watcher-field validation applies to the override too.
+        let no_dir = td.path().join("no-dir.toml");
+        std::fs::write(
+            &no_dir,
+            "[[profiles]]\nname = \"hex-foundation\"\nwatch = true\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load_profiles_file(&no_dir).unwrap_err());
+        assert!(err.contains("repo_dir"), "got: {err}");
+
+        // At most one override entry.
+        let dup = td.path().join("dup.toml");
+        std::fs::write(
+            &dup,
+            "[[profiles]]\nname = \"hex-foundation\"\nrepo_dir = \"/srv/x\"\nwatch = true\n\n[[profiles]]\nname = \"hex-foundation\"\nrepo_dir = \"/srv/y\"\nwatch = false\n",
+        )
+        .unwrap();
+        let err = format!("{:#}", load_profiles_file(&dup).unwrap_err());
+        assert!(err.contains("duplicate"), "got: {err}");
     }
 
     #[test]
@@ -2879,6 +3579,462 @@ build_command = "cargo build --release"
             git_stdout(&origin, &["rev-parse", "refs/heads/develop"]).unwrap(),
             origin_dev
         );
+    }
+
+    // -- finish mode (pre-existing release/hotfix branch) --------------------------
+
+    /// On top of the GitFlow fixture: a `release/0.2.0` branch cut from
+    /// develop carrying one feature commit, pushed to origin, repo left on
+    /// develop. The standing release-request state the finish mode consumes.
+    fn finish_fixture(td: &Path) -> PathBuf {
+        let repo = gitflow_fixture(td);
+        git(&repo, &["checkout", "-q", "-b", "release/0.2.0", "develop"]);
+        std::fs::write(repo.join("feature.txt"), "shipped\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        commit(&repo, "feat: release-bound work");
+        git(&repo, &["push", "-q", "origin", "release/0.2.0"]);
+        git(&repo, &["checkout", "-q", "develop"]);
+        repo
+    }
+
+    fn finish_opts(branch: &str) -> CutOptions {
+        CutOptions { finish: Some(branch.to_string()), ..Default::default() }
+    }
+
+    #[test]
+    fn parse_finish_branch_accepts_gitflow_names_only() {
+        let f = parse_finish_branch("release/1.2.3").unwrap();
+        assert_eq!((f.hotfix, f.version.as_str()), (false, "1.2.3"));
+        let f = parse_finish_branch("hotfix/0.0.9").unwrap();
+        assert_eq!((f.hotfix, f.version.as_str()), (true, "0.0.9"));
+
+        for bad in ["main", "feature/x", "release/abc", "release/1.2", "hotfix/", "release/1.2.3.4"]
+        {
+            let err = format!("{:#}", parse_finish_branch(bad).unwrap_err());
+            assert!(err.contains(bad), "got: {err}");
+        }
+    }
+
+    #[test]
+    fn cut_finish_completes_existing_release_branch() {
+        let (_hex, _guard) = crate::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let repo = finish_fixture(td.path());
+        let origin = td.path().join("origin.git");
+
+        cut_with_profile(&repo, &ceremony_profile(), &finish_opts("release/0.2.0")).unwrap();
+
+        // Tag on the main merge commit, locally and on origin.
+        let main_sha = git_stdout(&repo, &["rev-parse", "refs/heads/main"]).unwrap();
+        assert_eq!(git_stdout(&repo, &["rev-parse", "v0.2.0^{commit}"]).unwrap(), main_sha);
+        assert_eq!(git_stdout(&origin, &["rev-parse", "v0.2.0^{commit}"]).unwrap(), main_sha);
+        // The branch's work and the bump both landed on main AND develop.
+        assert_eq!(git_stdout(&repo, &["show", "main:feature.txt"]).unwrap(), "shipped\n");
+        assert_eq!(git_stdout(&repo, &["show", "main:version.txt"]).unwrap(), "0.2.0\n");
+        assert_eq!(git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(), "0.2.0\n");
+        // The ceremony added the bump commit itself (branch carried none).
+        assert!(!git_stdout(&repo, &["log", "--grep=bump: v0.2.0", "--oneline", "main"])
+            .unwrap()
+            .trim()
+            .is_empty());
+        // The request branch is consumed: gone locally and on origin.
+        assert!(!ref_exists(&repo, "refs/heads/release/0.2.0"));
+        assert!(ls_remote_sha(&repo, "refs/heads/release/0.2.0").unwrap().is_none());
+        // Both branch tips pushed.
+        assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap(), main_sha);
+        assert_eq!(
+            git_stdout(&origin, &["rev-parse", "refs/heads/develop"]).unwrap(),
+            git_stdout(&repo, &["rev-parse", "refs/heads/develop"]).unwrap()
+        );
+    }
+
+    #[test]
+    fn cut_finish_skips_bump_when_branch_already_carries_it() {
+        let (_hex, _guard) = crate::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let repo = finish_fixture(td.path());
+        // The requesting actor already bumped the version file on the branch.
+        git(&repo, &["checkout", "-q", "release/0.2.0"]);
+        std::fs::write(repo.join("version.txt"), "0.2.0\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        commit(&repo, "chore: prepare 0.2.0");
+        git(&repo, &["push", "-q", "origin", "release/0.2.0"]);
+        git(&repo, &["checkout", "-q", "develop"]);
+
+        cut_with_profile(&repo, &ceremony_profile(), &finish_opts("release/0.2.0")).unwrap();
+
+        assert_eq!(git_stdout(&repo, &["show", "main:version.txt"]).unwrap(), "0.2.0\n");
+        // No duplicate ceremony bump commit (it would fail as an empty commit).
+        assert!(git_stdout(&repo, &["log", "--grep=bump: v0.2.0", "--oneline", "main"])
+            .unwrap()
+            .trim()
+            .is_empty());
+    }
+
+    #[test]
+    fn cut_finish_fetches_origin_only_branch() {
+        let (_hex, _guard) = crate::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let repo = finish_fixture(td.path());
+        // The request exists only on origin — the watcher-trigger shape.
+        git(&repo, &["branch", "-D", "release/0.2.0"]);
+        assert!(!ref_exists(&repo, "refs/heads/release/0.2.0"));
+
+        cut_with_profile(&repo, &ceremony_profile(), &finish_opts("release/0.2.0")).unwrap();
+
+        let main_sha = git_stdout(&repo, &["rev-parse", "refs/heads/main"]).unwrap();
+        assert_eq!(git_stdout(&repo, &["rev-parse", "v0.2.0^{commit}"]).unwrap(), main_sha);
+        assert_eq!(git_stdout(&repo, &["show", "main:feature.txt"]).unwrap(), "shipped\n");
+        assert!(!ref_exists(&repo, "refs/heads/release/0.2.0"));
+    }
+
+    #[test]
+    fn cut_finish_fast_forwards_stale_local_branch() {
+        let (_hex, _guard) = crate::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let repo = finish_fixture(td.path());
+        // Local copy of the branch is strictly behind the origin request.
+        let origin_tip =
+            git_stdout(&repo, &["rev-parse", "refs/heads/release/0.2.0"]).unwrap().trim().to_string();
+        git(&repo, &["update-ref", "refs/heads/release/0.2.0", "refs/heads/develop"]);
+
+        cut_with_profile(&repo, &ceremony_profile(), &finish_opts("release/0.2.0")).unwrap();
+
+        // The origin tip (with feature.txt) is what got released.
+        assert_eq!(git_stdout(&repo, &["show", "main:feature.txt"]).unwrap(), "shipped\n");
+        assert!(is_ancestor(&repo, &origin_tip, "refs/heads/main").unwrap());
+    }
+
+    #[test]
+    fn cut_finish_tolerates_develop_moving_ahead() {
+        let (_hex, _guard) = crate::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let repo = finish_fixture(td.path());
+        // Work continued on develop after the release branch was cut — the
+        // normal GitFlow stabilization state; the fresh-cut develop pin must
+        // NOT apply to finish mode.
+        std::fs::write(repo.join("next.txt"), "wip\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        commit(&repo, "feat: next-cycle work");
+        git(&repo, &["push", "-q", "origin", "develop"]);
+
+        cut_with_profile(&repo, &ceremony_profile(), &finish_opts("release/0.2.0")).unwrap();
+
+        // develop kept its in-flight work AND received the back-merge.
+        assert_eq!(git_stdout(&repo, &["show", "develop:next.txt"]).unwrap(), "wip\n");
+        assert_eq!(git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(), "0.2.0\n");
+        // main got the release but NOT the in-flight develop work.
+        assert!(git_stdout(&repo, &["show", "main:next.txt"]).is_err());
+    }
+
+    #[test]
+    fn cut_finish_completes_existing_hotfix_branch() {
+        let (_hex, _guard) = crate::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        // Hotfix branch cut from main; develop already ahead (normal state).
+        git(&repo, &["checkout", "-q", "develop"]);
+        std::fs::write(repo.join("dev.txt"), "wip").unwrap();
+        git(&repo, &["add", "-A"]);
+        commit(&repo, "feat: in-flight work");
+        git(&repo, &["push", "-q", "origin", "develop"]);
+        git(&repo, &["checkout", "-q", "-b", "hotfix/0.1.1", "main"]);
+        std::fs::write(repo.join("fix.txt"), "patched\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        commit(&repo, "fix: urgent");
+        git(&repo, &["push", "-q", "origin", "hotfix/0.1.1"]);
+        git(&repo, &["checkout", "-q", "develop"]);
+
+        cut_with_profile(&repo, &ceremony_profile(), &finish_opts("hotfix/0.1.1")).unwrap();
+
+        let main_sha = git_stdout(&repo, &["rev-parse", "refs/heads/main"]).unwrap();
+        assert_eq!(git_stdout(&repo, &["rev-parse", "v0.1.1^{commit}"]).unwrap(), main_sha);
+        assert_eq!(git_stdout(&repo, &["show", "main:fix.txt"]).unwrap(), "patched\n");
+        // develop kept its work and got the fix + bump via the back-merge.
+        assert_eq!(git_stdout(&repo, &["show", "develop:dev.txt"]).unwrap(), "wip");
+        assert_eq!(git_stdout(&repo, &["show", "develop:fix.txt"]).unwrap(), "patched\n");
+        assert_eq!(git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(), "0.1.1\n");
+        assert!(!ref_exists(&repo, "refs/heads/hotfix/0.1.1"));
+    }
+
+    #[test]
+    fn cut_finish_refusals_are_loud_and_mutate_nothing() {
+        let (_hex, _guard) = crate::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let repo = finish_fixture(td.path());
+        let origin = td.path().join("origin.git");
+        let profile = ceremony_profile();
+
+        // Non-GitFlow branch name.
+        let err =
+            format!("{:#}", cut_with_profile(&repo, &profile, &finish_opts("main")).unwrap_err());
+        assert!(err.contains("release/X.Y.Z or hotfix/X.Y.Z"), "got: {err}");
+
+        // Branch that exists nowhere.
+        let err = format!(
+            "{:#}",
+            cut_with_profile(&repo, &profile, &finish_opts("release/0.9.9")).unwrap_err()
+        );
+        assert!(err.contains("neither locally nor on origin"), "got: {err}");
+
+        // --version / --level contradict --finish (the branch owns the version).
+        let opts = CutOptions {
+            finish: Some("release/0.2.0".to_string()),
+            version: Some("0.3.0".to_string()),
+            ..Default::default()
+        };
+        let err = format!("{:#}", cut_with_profile(&repo, &profile, &opts).unwrap_err());
+        assert!(err.contains("--version"), "got: {err}");
+
+        // --hotfix contradicts a release/* finish branch.
+        let opts = CutOptions {
+            finish: Some("release/0.2.0".to_string()),
+            hotfix: true,
+            ..Default::default()
+        };
+        let err = format!("{:#}", cut_with_profile(&repo, &profile, &opts).unwrap_err());
+        assert!(err.contains("--hotfix"), "got: {err}");
+
+        // Version not greater than the latest tag — pre-battery refusal.
+        git(&repo, &["tag", "v0.3.0"]);
+        let err = format!(
+            "{:#}",
+            cut_with_profile(&repo, &profile, &finish_opts("release/0.2.0")).unwrap_err()
+        );
+        assert!(err.contains("not greater"), "got: {err}");
+        git(&repo, &["tag", "-d", "v0.3.0"]);
+
+        // Tag already exists on origin only — invisible to the local
+        // latest-tag scan, so refuse_existing_tag is the line of defense.
+        git(&origin, &["tag", "v0.2.0", "main"]);
+        let err = format!(
+            "{:#}",
+            cut_with_profile(&repo, &profile, &finish_opts("release/0.2.0")).unwrap_err()
+        );
+        assert!(err.contains("already exists"), "got: {err}");
+        git(&origin, &["tag", "-d", "v0.2.0"]);
+
+        // Divergent local vs origin branch — never guess which is the request.
+        git(&repo, &["checkout", "-q", "release/0.2.0"]);
+        git(&repo, &["reset", "-q", "--hard", "HEAD~1"]);
+        std::fs::write(repo.join("other.txt"), "divergent\n").unwrap();
+        git(&repo, &["add", "-A"]);
+        commit(&repo, "feat: divergent local work");
+        git(&repo, &["checkout", "-q", "develop"]);
+        let err = format!(
+            "{:#}",
+            cut_with_profile(&repo, &profile, &finish_opts("release/0.2.0")).unwrap_err()
+        );
+        assert!(err.contains("disagree"), "got: {err}");
+
+        // Nothing was tagged or pushed by any refusal.
+        assert!(git_stdout(&repo, &["tag"]).unwrap().trim().is_empty());
+        assert!(git_stdout(&origin, &["rev-parse", "--verify", "-q", "refs/tags/v0.2.0"]).is_err());
+        // The lock never leaks.
+        assert!(!repo.join(".git/hex-release.lock").exists());
+    }
+
+    #[test]
+    fn cut_finish_aborts_when_branch_moves_during_battery() {
+        let (_hex, _guard) = crate::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let repo = finish_fixture(td.path());
+        let origin = td.path().join("origin.git");
+        let origin_main = git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap();
+
+        // The battery runs detached, so a gate CAN move the finish branch —
+        // releasing a tip the battery never tested is forbidden.
+        let mut profile = ceremony_profile();
+        profile.gates = vec![GateSpec {
+            name: "mover".to_string(),
+            kind: GateKind::Command(
+                "git update-ref refs/heads/release/0.2.0 refs/heads/develop".to_string(),
+            ),
+        }];
+        let err = format!(
+            "{:#}",
+            cut_with_profile(&repo, &profile, &finish_opts("release/0.2.0")).unwrap_err()
+        );
+        assert!(err.contains("moved during the cut"), "got: {err}");
+        // Nothing reached origin; no tag was created.
+        assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap(), origin_main);
+        assert!(git_stdout(&repo, &["tag"]).unwrap().trim().is_empty());
+    }
+
+    #[test]
+    fn cut_finish_dry_run_batteries_branch_tip_and_stops() {
+        let (_hex, _guard) = crate::telemetry::test_support::isolate();
+        let td = tempfile::tempdir().unwrap();
+        let repo = finish_fixture(td.path());
+        let opts = CutOptions {
+            finish: Some("release/0.2.0".to_string()),
+            dry_run: true,
+            ..Default::default()
+        };
+        cut_with_profile(&repo, &ceremony_profile(), &opts).unwrap();
+        // Nothing mutated: no tag, branch intact, operator back on develop.
+        assert!(git_stdout(&repo, &["tag"]).unwrap().trim().is_empty());
+        assert!(ref_exists(&repo, "refs/heads/release/0.2.0"));
+        assert_eq!(
+            git_stdout(&repo, &["symbolic-ref", "--short", "HEAD"]).unwrap().trim(),
+            "develop"
+        );
+    }
+
+    // -- develop sync --------------------------------------------------------------
+
+    /// A second working clone of the fixture origin — the "someone else
+    /// pushed" actor whose commits the first clone does NOT have in its
+    /// local object db (exercises the sync's fetch path).
+    fn second_clone(td: &Path, name: &str) -> PathBuf {
+        let origin = td.join("origin.git");
+        let dest = td.join(name);
+        git(td, &["clone", "-q", origin.to_str().unwrap(), dest.to_str().unwrap()]);
+        git(&dest, &["config", "commit.gpgsign", "false"]);
+        let nohooks = td.join("nohooks");
+        git(&dest, &["config", "core.hooksPath", nohooks.to_str().unwrap()]);
+        dest
+    }
+
+    fn add_commit(repo: &Path, file: &str, subject: &str) {
+        std::fs::write(repo.join(file), format!("{subject}\n")).unwrap();
+        git(repo, &["add", "-A"]);
+        commit(repo, subject);
+    }
+
+    #[test]
+    fn classify_develop_sync_covers_the_full_matrix() {
+        use DevelopSyncClass as C;
+        // No origin branch at all.
+        assert_eq!(classify_develop_sync("aaa", None, false, false), C::RemoteMissing);
+        // Identical SHAs are in sync regardless of the ancestry answers.
+        assert_eq!(classify_develop_sync("aaa", Some("aaa"), false, false), C::InSync);
+        assert_eq!(classify_develop_sync("aaa", Some("aaa"), true, true), C::InSync);
+        // origin is an ancestor of local (and not vice versa): strictly ahead.
+        assert_eq!(classify_develop_sync("bbb", Some("aaa"), true, false), C::Ahead);
+        // local is an ancestor of origin: strictly behind.
+        assert_eq!(classify_develop_sync("aaa", Some("bbb"), false, true), C::Behind);
+        // Neither is an ancestor of the other: diverged.
+        assert_eq!(classify_develop_sync("aaa", Some("bbb"), false, false), C::Diverged);
+        // Two DISTINCT commits cannot each be the other's ancestor; on
+        // inconsistent evidence the classifier must never say "push".
+        assert_eq!(classify_develop_sync("aaa", Some("bbb"), true, true), C::Diverged);
+    }
+
+    #[test]
+    fn develop_sync_in_sync_is_a_noop() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        assert_eq!(
+            sync_develop_to_origin(&repo, "develop").unwrap(),
+            DevelopSyncOutcome::InSync
+        );
+    }
+
+    #[test]
+    fn develop_sync_pushes_when_local_is_strictly_ahead() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        let origin = td.path().join("origin.git");
+        let before = rev_parse(&origin, "refs/heads/develop").unwrap();
+        git(&repo, &["checkout", "-q", "develop"]);
+        add_commit(&repo, "ahead.txt", "feat: local ahead");
+        let local = rev_parse(&repo, "refs/heads/develop").unwrap();
+
+        let out = sync_develop_to_origin(&repo, "develop").unwrap();
+        assert_eq!(out, DevelopSyncOutcome::Pushed { from: before, to: local.clone() });
+        // Origin was fast-forwarded to the local head — and verified.
+        assert_eq!(rev_parse(&origin, "refs/heads/develop").unwrap(), local);
+        // Idempotent: the next pass is quiet.
+        assert_eq!(
+            sync_develop_to_origin(&repo, "develop").unwrap(),
+            DevelopSyncOutcome::InSync
+        );
+    }
+
+    #[test]
+    fn develop_sync_behind_only_touches_nothing_even_with_unknown_objects() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        let origin = td.path().join("origin.git");
+        let other = second_clone(td.path(), "other");
+        git(&other, &["checkout", "-q", "develop"]);
+        add_commit(&other, "theirs.txt", "feat: theirs");
+        git(&other, &["push", "-q", "origin", "develop"]);
+
+        let origin_sha = rev_parse(&origin, "refs/heads/develop").unwrap();
+        let local = rev_parse(&repo, "refs/heads/develop").unwrap();
+        // The first clone does NOT have origin's new commit — the sync must
+        // fetch objects (never local refs) to answer the ancestry question.
+        assert!(!ref_exists(&repo, &format!("{origin_sha}^{{commit}}")));
+
+        let out = sync_develop_to_origin(&repo, "develop").unwrap();
+        assert_eq!(
+            out,
+            DevelopSyncOutcome::Behind { local: local.clone(), origin: origin_sha.clone() }
+        );
+        // Nothing moved on either side.
+        assert_eq!(rev_parse(&repo, "refs/heads/develop").unwrap(), local);
+        assert_eq!(rev_parse(&origin, "refs/heads/develop").unwrap(), origin_sha);
+    }
+
+    #[test]
+    fn develop_sync_diverged_refuses_and_touches_nothing() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        let origin = td.path().join("origin.git");
+        let other = second_clone(td.path(), "other");
+        git(&other, &["checkout", "-q", "develop"]);
+        add_commit(&other, "theirs.txt", "feat: theirs");
+        git(&other, &["push", "-q", "origin", "develop"]);
+        git(&repo, &["checkout", "-q", "develop"]);
+        add_commit(&repo, "ours.txt", "feat: ours");
+
+        let origin_sha = rev_parse(&origin, "refs/heads/develop").unwrap();
+        let local = rev_parse(&repo, "refs/heads/develop").unwrap();
+        let out = sync_develop_to_origin(&repo, "develop").unwrap();
+        assert_eq!(
+            out,
+            DevelopSyncOutcome::Diverged { local: local.clone(), origin: origin_sha.clone() }
+        );
+        // NEVER auto-resolved: no push, no pull/rebase/reset on either side.
+        assert_eq!(rev_parse(&repo, "refs/heads/develop").unwrap(), local);
+        assert_eq!(rev_parse(&origin, "refs/heads/develop").unwrap(), origin_sha);
+    }
+
+    #[test]
+    fn develop_sync_remote_missing_is_reported_never_created() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        let origin = td.path().join("origin.git");
+        git(&repo, &["push", "-q", "origin", ":refs/heads/develop"]);
+        let local = rev_parse(&repo, "refs/heads/develop").unwrap();
+        assert_eq!(
+            sync_develop_to_origin(&repo, "develop").unwrap(),
+            DevelopSyncOutcome::RemoteMissing { local }
+        );
+        // The sync never creates base branches on origin.
+        assert!(!ref_exists(&origin, "refs/heads/develop"));
+    }
+
+    #[test]
+    fn develop_sync_missing_local_branch_is_loud_err() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        git(&repo, &["branch", "-D", "develop"]);
+        let err = format!("{:#}", sync_develop_to_origin(&repo, "develop").unwrap_err());
+        assert!(err.contains("develop"), "got: {err}");
+    }
+
+    #[test]
+    fn develop_sync_ls_remote_failure_is_loud_err() {
+        let td = tempfile::tempdir().unwrap();
+        let repo = gitflow_fixture(td.path());
+        let gone = td.path().join("gone.git");
+        git(&repo, &["remote", "set-url", "origin", gone.to_str().unwrap()]);
+        // "Cannot check origin" must be a hard error, never read as absent.
+        let err = format!("{:#}", sync_develop_to_origin(&repo, "develop").unwrap_err());
+        assert!(err.contains("origin"), "got: {err}");
     }
 
     // -- test helpers ------------------------------------------------------------
