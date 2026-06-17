@@ -38,3 +38,38 @@ tag_prefix = "v"               # default "v"
 gh_release = false             # default false — no `gh release create`
 main_branch = "main"           # default
 develop_branch = "develop"     # default
+
+# -----------------------------------------------------------------------------
+# Watcher fields — consumed by the oss-releaser worker's branch watch.
+#
+# repo_dir — absolute path to a local clone of this repo on the host running
+#            the harness. The watcher polls origin and runs the release
+#            ceremony from this checkout. REQUIRED when watch = true and must
+#            be absolute — the loader refuses the file otherwise (S6, no
+#            silent skips). The real path is instance config: set it only in
+#            the deployed $HEX_DIR/.hex/config/releases.toml; never embed
+#            personal home paths in foundation source.
+# watch    — opt this profile in (true) or out (false, the default) of the
+#            branch watch. Watching is strictly opt-in; a profile with a
+#            configured repo_dir opts back out with watch = false. The manual
+#            `release.requested` event path is unaffected by this flag.
+#            A watched repo also gets develop-sync on every tick: the
+#            releaser owns pushing base branches, so when the local develop
+#            is strictly ahead of origin it is pushed (same guarded push
+#            path as the ceremony); a diverged develop is alerted loudly and
+#            NEVER auto-resolved (no pull/rebase/reset/force-push); in-sync
+#            or behind-only does nothing.
+# -----------------------------------------------------------------------------
+repo_dir = "/absolute/path/to/local/clone"   # REQUIRED when watch = true
+watch = true                                 # default false — opt-in
+
+# -----------------------------------------------------------------------------
+# The built-in hex-foundation profile is configured the same way: an entry
+# named "hex-foundation" may set ONLY the watcher fields. Its gates, version
+# files, and branches are pinned in code — overriding one of those here is
+# refused loudly at load.
+# -----------------------------------------------------------------------------
+# [[profiles]]
+# name = "hex-foundation"
+# repo_dir = "/absolute/path/to/local/clone/of/hex-foundation"
+# watch = true
