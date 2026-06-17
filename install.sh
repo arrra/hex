@@ -370,11 +370,16 @@ install_or_upgrade_boi() {
 
     # Fast path: the machine-owned build already provides the pinned version.
     # (Also makes repeated install.sh runs — e.g. from test suites — no-ops.)
+    # `boi_bin` must be a REAL FILE, not a symlink (FIX-017, 2026-06-17): the old
+    # layout symlinked `boi_bin` → the cargo build output and rebuilt it in place,
+    # so a rebuild overwrote the very Mach-O the running daemon was mapped from →
+    # macOS AMFI invalidated the live process's code signature and SIGKILLed it
+    # ("Code Signature Invalid"). We now deploy a real-file copy via atomic
+    # rename. `[ ! -L ]` forces a one-time migration off any pre-existing symlink.
     # `|| true` inside the substitution: a present-but-unrunnable binary (e.g.
     # interrupted build) must fall through to the rebuild below, not errexit
     # the whole installer.
-    if [ -x "$boi_bin" ] && \
-       [ "$(readlink "$boi_bin" 2>/dev/null)" = "$boi_build/target/release/boi" ]; then
+    if [ -x "$boi_bin" ] && [ ! -L "$boi_bin" ]; then
         local current
         current="v$("$boi_bin" --version 2>/dev/null | awk '/^boi /{print $2}' | tail -1 || true)"
         if [ "$current" = "$BOI_VERSION" ]; then
@@ -418,9 +423,19 @@ install_or_upgrade_boi() {
             tail -20 "$build_log" >&2 || true
             return
         }
-        # Symlink binary
-        ln -sf "$boi_build/target/release/boi" "$boi_bin"
-        echo "  BOI $BOI_VERSION built and linked  ✓"
+        # Deploy as a STABLE real file via atomic rename — never symlink to (or
+        # overwrite in place) the build output the running daemon is mapped from
+        # (FIX-017). The copy gets boi_bin a fresh inode; rename(2) is atomic, so
+        # a live daemon keeps its old inode alive until its next restart instead
+        # of being AMFI-SIGKILLed ("Code Signature Invalid"). Temp on the SAME
+        # filesystem (sibling path) so the rename cannot fall back to a copy.
+        local boi_tmp="$boi_bin.new.$$"
+        cp -f "$boi_build/target/release/boi" "$boi_tmp" && chmod +x "$boi_tmp" && mv -f "$boi_tmp" "$boi_bin" || {
+            echo "  BOI: failed to install built binary to $boi_bin" >&2
+            rm -f "$boi_tmp" 2>/dev/null || true
+            return
+        }
+        echo "  BOI $BOI_VERSION built and installed (atomic)  ✓"
     else
         echo "  ⚠️  Rust/cargo not found — cannot build BOI binary"
         echo "     Install Rust: curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh"
