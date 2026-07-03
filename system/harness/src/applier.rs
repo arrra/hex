@@ -277,12 +277,75 @@ impl From<crate::ledger::LedgerError> for ApplyError {
     }
 }
 
+// ---------------------------------------------------------------------------
+// Concurrency control (review finding CRITICAL-2)
+//
+// `run()`, `revert()`, and `watch()` each do a check-then-write over the
+// SAME registry + ledger: scan/read → classify → land/flip → save → ledger
+// append. Two concurrent invocations racing that sequence corrupt the
+// registry (lost updates, entries present in the ledger but absent from the
+// final registry) and inflate the ledger with duplicate rows. An OS
+// advisory exclusive lock (fs2 — the crate's established pattern; see
+// `memory::index::run_index`'s `memory-index.lock` and
+// `harness::supervise::acquire_bootstrap_lock`) held for the FULL sequence
+// serializes every apply-mutating command against one registry file.
+// Blocking acquire is fine — these are short, bounded operations.
+// ---------------------------------------------------------------------------
+
+/// Path of the advisory lock file guarding `registry_path` — sits next to
+/// the registry itself (`<registry>.lock`), independent of ledger/store/
+/// escalations paths, since the registry is the resource every mutating
+/// apply command reads-then-writes.
+fn registry_lock_path(registry_path: &Path) -> PathBuf {
+    let mut name = registry_path
+        .file_name()
+        .and_then(|n| n.to_str())
+        .unwrap_or("landed-rules.json")
+        .to_string();
+    name.push_str(".lock");
+    registry_path.with_file_name(name)
+}
+
+/// Acquire the exclusive registry lock (blocking). Held for the lifetime of
+/// the returned file handle — drop it (end of the caller's scope) to
+/// release. Callers hold this across their ENTIRE mutating sequence
+/// (scan/read → classify → land/flip → save → ledger append), not just the
+/// final write, so two concurrent `hex apply run|revert|watch` invocations
+/// against the same registry are fully serialized rather than racing a
+/// check-then-write window.
+fn acquire_registry_lock(registry_path: &Path) -> Result<std::fs::File, ApplyError> {
+    use fs2::FileExt;
+    let lock_path = registry_lock_path(registry_path);
+    if let Some(parent) = lock_path.parent() {
+        if !parent.as_os_str().is_empty() {
+            std::fs::create_dir_all(parent)?;
+        }
+    }
+    let f = std::fs::OpenOptions::new()
+        .create(true)
+        .write(true)
+        .truncate(false)
+        .open(&lock_path)?;
+    f.lock_exclusive().map_err(|e| {
+        ApplyError::Msg(format!(
+            "failed to acquire registry lock {}: {e}",
+            lock_path.display()
+        ))
+    })?;
+    Ok(f)
+}
+
 /// Result of one `hex apply run` invocation. Every field lists proposal ids.
 #[derive(Debug, Default, Clone, serde::Serialize)]
 pub struct RunReport {
     pub landed: Vec<String>,
     pub escalated: Vec<String>,
     pub skipped: Vec<String>,
+    /// Verdict entries whose `proposal_id` failed slug validation (path-
+    /// traversal / absolute-path defense, review finding CRITICAL-1) —
+    /// never landed, never escalated, never used to build a path. Counted
+    /// and reported loudly (S6), not silently dropped.
+    pub rejected: Vec<String>,
 }
 
 impl RunReport {
@@ -321,6 +384,27 @@ pub struct StatusReport {
     pub pending: Vec<String>,
     /// Proposal ids with an escalation evidence file on disk.
     pub escalations: Vec<String>,
+    /// Verdict entries whose `proposal_id` failed slug validation — see
+    /// [`RunReport::rejected`].
+    pub rejected: Vec<String>,
+}
+
+/// Strict slug validation for `proposal_id` — the value comes straight from
+/// attacker/upstream-controlled verdict JSON (the gatekeeper verdict store)
+/// and is later joined into filesystem paths (`proposals.join`,
+/// `escalations.join`). `Path::join` REPLACES the base entirely when the
+/// joined segment is itself absolute, so an unsanitized `proposal_id` is a
+/// path-traversal / arbitrary-file-write-and-read primitive (review finding
+/// CRITICAL-1). Only a conservative charset is allowed — non-empty,
+/// `^[A-Za-z0-9._-]+$`, and not starting with `.` (which also rejects `.`
+/// and `..` themselves, since both start with `.`). The charset excludes
+/// `/` by construction, so no separate traversal check is needed.
+fn is_valid_proposal_id_slug(id: &str) -> bool {
+    !id.is_empty()
+        && !id.starts_with('.')
+        && id
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '.' | '_' | '-'))
 }
 
 /// One ACCEPT_FLAGGED verdict pulled from the store, plus its raw JSON (kept
@@ -335,10 +419,18 @@ struct Survivor {
 /// Scan `store` for `*.verdict.json` files whose `verdict` field is
 /// `ACCEPT_FLAGGED`. Missing store dir => empty (day one: nothing judged
 /// yet). Sorted by filename for deterministic processing order.
-fn scan_accept_flagged(store: &Path) -> Result<Vec<Survivor>, ApplyError> {
+///
+/// Returns `(survivors, rejected_proposal_ids)` — `rejected` holds every
+/// `proposal_id` that failed [`is_valid_proposal_id_slug`] (review finding
+/// CRITICAL-1, path traversal). A rejected verdict is never turned into a
+/// `Survivor`: it is never landed, never escalated, and never used to build
+/// a path. The rejection is loud (stderr) at the call site so it is never a
+/// silent drop (S6).
+fn scan_accept_flagged(store: &Path) -> Result<(Vec<Survivor>, Vec<String>), ApplyError> {
     let mut out = Vec::new();
+    let mut rejected = Vec::new();
     if !store.exists() {
-        return Ok(out);
+        return Ok((out, rejected));
     }
     let mut paths: Vec<PathBuf> = std::fs::read_dir(store)?
         .filter_map(|e| e.ok())
@@ -367,6 +459,19 @@ fn scan_accept_flagged(store: &Path) -> Result<Vec<Survivor>, ApplyError> {
                 ApplyError::Msg(format!("verdict {}: missing proposal_id", path.display()))
             })?
             .to_string();
+
+        if !is_valid_proposal_id_slug(&proposal_id) {
+            eprintln!(
+                "hex apply: REJECTED verdict {}: proposal_id {:?} fails slug validation \
+                 (path-traversal / absolute-path defense, CRITICAL-1) — skipping, not \
+                 landed, not escalated, no path built from it",
+                path.display(),
+                proposal_id
+            );
+            rejected.push(proposal_id);
+            continue;
+        }
+
         let rule_id = v
             .get("rule_id")
             .and_then(|x| x.as_str())
@@ -384,7 +489,7 @@ fn scan_accept_flagged(store: &Path) -> Result<Vec<Survivor>, ApplyError> {
             raw_json: raw,
         });
     }
-    Ok(out)
+    Ok((out, rejected))
 }
 
 /// Proposal ids with an escalation evidence file already on disk. Missing
@@ -398,7 +503,15 @@ fn escalated_ids(escalations_dir: &Path) -> Result<HashSet<String>, ApplyError> 
         let path = entry?.path();
         if path.extension().and_then(|e| e.to_str()) == Some("md") {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                out.insert(stem.to_string());
+                // Defense in depth (CRITICAL-1): a legitimate escalation
+                // file is always named `{valid-slug}.md` by `escalate()`
+                // below. A stem that fails slug validation cannot have been
+                // written by this code post-fix; ignore it rather than
+                // feeding it into proposal-id-equality comparisons used to
+                // decide "already escalated" for real, current proposals.
+                if is_valid_proposal_id_slug(stem) {
+                    out.insert(stem.to_string());
+                }
             }
         }
     }
@@ -509,6 +622,51 @@ fn watch_success_already_recorded(ledger_path: &Path, rule_id: &str) -> Result<b
     Ok(false)
 }
 
+/// True if the ledger already carries an auto-revert outcome row
+/// (`success=false`, `auto_revert=true`) for `rule_id` — crash-consistency
+/// convergence check (review finding MEDIUM-3). `watch()`'s auto-revert path
+/// writes the ledger outcome row BEFORE flipping+saving the registry
+/// (ledger-first ordering: the ledger is the source of truth on crash). If a
+/// crash lands between those two writes, the registry still shows the rule
+/// ACTIVE, so the next `hex apply watch` would re-evaluate it and — without
+/// this check — append a SECOND outcome row for the same auto-revert. This
+/// lets a re-run detect the already-recorded row and just complete the
+/// registry flip, converging without duplicating the ledger row.
+fn watch_auto_revert_already_recorded(
+    ledger_path: &Path,
+    rule_id: &str,
+) -> Result<bool, ApplyError> {
+    if !ledger_path.exists() {
+        return Ok(false);
+    }
+    let conn = rusqlite::Connection::open(ledger_path)
+        .map_err(|e| ApplyError::Msg(format!("open ledger for auto-revert scan: {e}")))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT payload FROM ledger \
+             WHERE kind='outcome' AND agent=?1 AND action_class=?2",
+        )
+        .map_err(|e| ApplyError::Msg(format!("prepare auto-revert scan: {e}")))?;
+    let rows = stmt
+        .query_map([DIAL_AGENT, DIAL_ACTION_CLASS], |r| r.get::<_, String>(0))
+        .map_err(|e| ApplyError::Msg(format!("query auto-revert scan: {e}")))?;
+    for row in rows {
+        let payload =
+            row.map_err(|e| ApplyError::Msg(format!("auto-revert scan row read: {e}")))?;
+        let v: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|e| ApplyError::Msg(format!("auto-revert scan payload parse: {e}")))?;
+        let matches_rule = v.get("rule_id").and_then(|x| x.as_str()) == Some(rule_id);
+        let is_auto_revert = v
+            .get("auto_revert")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        if matches_rule && is_auto_revert {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
 /// Constants disclosed in every land/escalate ledger payload — makes the
 /// decision replayable from the ledger alone, without cross-referencing
 /// source at the time of read.
@@ -530,12 +688,18 @@ fn constants_json() -> serde_json::Value {
 /// `RunReport::skipped` — no new I/O happens for it, so a second run against
 /// unchanged input is a true no-op (`RunReport::is_noop()`).
 pub fn run(paths: &ApplyPaths) -> Result<RunReport, ApplyError> {
+    // Serialize the ENTIRE scan → classify → land → save → ledger-append
+    // sequence against the registry (review finding CRITICAL-2). Held for
+    // the whole function via RAII drop of `_lock` at function exit.
+    let _lock = acquire_registry_lock(&paths.registry)?;
+
     let mut report = RunReport::default();
 
     let mut registry = crate::rule_registry::load(&paths.registry)?;
     let escalated_already = escalated_ids(&paths.escalations)?;
     let ledger_ids = ledger_recorded_proposal_ids(&paths.ledger)?;
-    let survivors = scan_accept_flagged(&paths.store)?;
+    let (survivors, rejected) = scan_accept_flagged(&paths.store)?;
+    report.rejected = rejected;
 
     for s in survivors {
         let already = registry
@@ -546,6 +710,21 @@ pub fn run(paths: &ApplyPaths) -> Result<RunReport, ApplyError> {
             || ledger_ids.contains(&s.proposal_id);
         if already {
             report.skipped.push(s.proposal_id.clone());
+            continue;
+        }
+
+        // Defense in depth: re-validate before building any path from
+        // `s.proposal_id`, even though `scan_accept_flagged` already
+        // filtered — mirrors the existing belt-and-suspenders pattern for
+        // CONSTITUTION_CLASS below (checked in `classify()`, again here,
+        // again in `land()`).
+        if !is_valid_proposal_id_slug(&s.proposal_id) {
+            eprintln!(
+                "hex apply: REJECTED (defense-in-depth) proposal_id {:?} — should have been \
+                 filtered by scan_accept_flagged; skipping",
+                s.proposal_id
+            );
+            report.rejected.push(s.proposal_id.clone());
             continue;
         }
 
@@ -735,10 +914,21 @@ fn land(
         reverted_ts: None,
         revert_reason: None,
     });
-    crate::rule_registry::save(&paths.registry, registry)?;
 
-    let registry_bytes = std::fs::read(&paths.registry)?;
-    let registry_sha256 = crate::gatekeeper::sha256_hex(&String::from_utf8_lossy(&registry_bytes));
+    // Crash-consistency ordering (review finding MEDIUM-3): the ledger is
+    // the append-only source of truth, so its row must exist BEFORE the
+    // registry mutation is persisted — a crash between the two writes then
+    // leaves a complete ledger row and an as-yet-unflipped registry, which
+    // `run()`'s existing `ledger_recorded_proposal_ids` dedup check (used in
+    // the `already` test above) detects and skips on the next invocation,
+    // rather than a flipped registry with no record of why (the previous,
+    // registry-first order). `registry_sha256` is computed by replicating
+    // `rule_registry::save`'s exact serialization in-memory — identical to
+    // what will land on disk once `save()` runs — so the ledger row is
+    // accurate even though it's written first.
+    let registry_json = serde_json::to_string_pretty(&*registry)
+        .map_err(|e| ApplyError::Msg(format!("land: serialize registry for hash: {e}")))?;
+    let registry_sha256 = crate::gatekeeper::sha256_hex(&registry_json);
 
     let ledger = crate::ledger::Ledger::open(&paths.ledger)?;
     let payload = serde_json::json!({
@@ -752,6 +942,8 @@ fn land(
         "registry_sha256": registry_sha256,
     });
     ledger.append("applier", "rule.land", "action", &payload)?;
+
+    crate::rule_registry::save(&paths.registry, registry)?;
 
     Ok(())
 }
@@ -767,6 +959,18 @@ fn escalate(
     risk_label: &str,
     reasons: Vec<String>,
 ) -> Result<(), ApplyError> {
+    // Defense in depth (CRITICAL-1): this is the actual filesystem write
+    // site. `Path::join` replaces the base entirely when given an absolute
+    // segment, so an unsanitized `s.proposal_id` here is a write-anywhere
+    // primitive regardless of what already validated it upstream (belt-
+    // and-suspenders against a future caller that forgets to check).
+    if !is_valid_proposal_id_slug(&s.proposal_id) {
+        return Err(ApplyError::Msg(format!(
+            "escalate: refusing malformed proposal_id {:?} — fails slug validation \
+             (path-traversal defense, CRITICAL-1)",
+            s.proposal_id
+        )));
+    }
     std::fs::create_dir_all(&paths.escalations)?;
     let evidence_path = paths.escalations.join(format!("{}.md", s.proposal_id));
 
@@ -858,6 +1062,9 @@ the rule registry directly) and record the decision; if not, reject the proposal
 /// the shadow linter directly — the next `lint-gates` invocation reloads the
 /// registry and picks up the status flip.
 pub fn revert(paths: &ApplyPaths, rule_id: &str, why: &str) -> Result<(), ApplyError> {
+    // Serialize against concurrent run()/revert()/watch() (CRITICAL-2).
+    let _lock = acquire_registry_lock(&paths.registry)?;
+
     let mut registry = crate::rule_registry::load(&paths.registry)?;
     let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
 
@@ -868,19 +1075,37 @@ pub fn revert(paths: &ApplyPaths, rule_id: &str, why: &str) -> Result<(), ApplyE
         .find(|e| e.rule_id == rule_id && e.status == RuleStatus::Active)
         .map(|e| e.proposal_id.clone());
 
-    registry.revert(rule_id, why, &now)?;
-    crate::rule_registry::save(&paths.registry, &registry)?;
+    // Crash-consistency convergence (MEDIUM-3): if a prior call already got
+    // as far as appending the ledger outcome row but crashed before the
+    // registry save, the registry here still shows the entry Active. Detect
+    // that already-recorded row and skip re-appending it — only complete
+    // the registry flip. Matched on (rule_id, proposal_id, manual_revert) —
+    // the same identity the row below is written with.
+    let already_recorded =
+        manual_revert_already_recorded(&paths.ledger, rule_id, proposal_id.as_deref())?;
 
-    let ledger = crate::ledger::Ledger::open(&paths.ledger)?;
-    let payload = serde_json::json!({
-        "success": false,
-        "rule_id": rule_id,
-        "proposal_id": proposal_id,
-        "manual_revert": true,
-        "why": why,
-        "reverted_ts": now,
-    });
-    ledger.append("proposer", "proposal.land", "outcome", &payload)?;
+    registry.revert(rule_id, why, &now)?;
+
+    if !already_recorded {
+        // Ledger-first ordering: append the durable outcome row BEFORE
+        // persisting the registry flip, so a crash in between leaves a
+        // complete ledger row (source of truth) and a registry a future
+        // call can converge on via `already_recorded` above, rather than a
+        // silently-flipped registry with no record of why (the previous,
+        // registry-first order).
+        let ledger = crate::ledger::Ledger::open(&paths.ledger)?;
+        let payload = serde_json::json!({
+            "success": false,
+            "rule_id": rule_id,
+            "proposal_id": proposal_id,
+            "manual_revert": true,
+            "why": why,
+            "reverted_ts": now,
+        });
+        ledger.append("proposer", "proposal.land", "outcome", &payload)?;
+    }
+
+    crate::rule_registry::save(&paths.registry, &registry)?;
 
     crate::alert::notify_at(
         &paths.hex_dir,
@@ -890,6 +1115,48 @@ pub fn revert(paths: &ApplyPaths, rule_id: &str, why: &str) -> Result<(), ApplyE
     );
 
     Ok(())
+}
+
+/// True if the ledger already carries a manual-revert outcome row
+/// (`manual_revert=true`) for this exact `(rule_id, proposal_id)` pair —
+/// crash-consistency convergence check for [`revert`] (review finding
+/// MEDIUM-3), mirroring [`watch_auto_revert_already_recorded`] for the
+/// watchdog's auto-revert path.
+fn manual_revert_already_recorded(
+    ledger_path: &Path,
+    rule_id: &str,
+    proposal_id: Option<&str>,
+) -> Result<bool, ApplyError> {
+    if !ledger_path.exists() {
+        return Ok(false);
+    }
+    let conn = rusqlite::Connection::open(ledger_path)
+        .map_err(|e| ApplyError::Msg(format!("open ledger for manual-revert scan: {e}")))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT payload FROM ledger \
+             WHERE kind='outcome' AND agent=?1 AND action_class=?2",
+        )
+        .map_err(|e| ApplyError::Msg(format!("prepare manual-revert scan: {e}")))?;
+    let rows = stmt
+        .query_map([DIAL_AGENT, DIAL_ACTION_CLASS], |r| r.get::<_, String>(0))
+        .map_err(|e| ApplyError::Msg(format!("query manual-revert scan: {e}")))?;
+    for row in rows {
+        let payload =
+            row.map_err(|e| ApplyError::Msg(format!("manual-revert scan row read: {e}")))?;
+        let v: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|e| ApplyError::Msg(format!("manual-revert scan payload parse: {e}")))?;
+        let matches_rule = v.get("rule_id").and_then(|x| x.as_str()) == Some(rule_id);
+        let is_manual_revert = v
+            .get("manual_revert")
+            .and_then(|x| x.as_bool())
+            .unwrap_or(false);
+        let matches_proposal = v.get("proposal_id").and_then(|x| x.as_str()) == proposal_id;
+        if matches_rule && is_manual_revert && matches_proposal {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// The outcome watchdog (`hex apply watch`, deliverable 6): for each ACTIVE
@@ -911,6 +1178,9 @@ pub fn revert(paths: &ApplyPaths, rule_id: &str, why: &str) -> Result<(), ApplyE
 /// already consumes, so R1 `modify-rule` dial-gating benefits from watchdog
 /// evidence with ZERO gatekeeper changes.
 pub fn watch(paths: &ApplyPaths) -> Result<WatchReport, ApplyError> {
+    // Serialize against concurrent run()/revert()/watch() (CRITICAL-2).
+    let _lock = acquire_registry_lock(&paths.registry)?;
+
     let mut report = WatchReport::default();
     let mut registry = crate::rule_registry::load(&paths.registry)?;
 
@@ -948,25 +1218,42 @@ pub fn watch(paths: &ApplyPaths) -> Result<WatchReport, ApplyError> {
                 stats.tp,
                 stats.fp,
             );
-            registry.revert(&rule_id, &reason, &now)?;
-            crate::rule_registry::save(&paths.registry, &registry)?;
 
-            let ledger = crate::ledger::Ledger::open(&paths.ledger)?;
-            let payload = serde_json::json!({
-                "success": false,
-                "rule_id": rule_id,
-                "auto_revert": true,
-                "why": reason,
-                "fires": stats.fires,
-                "joined": stats.joined,
-                "tp": stats.tp,
-                "fp": stats.fp,
-                "precision": stats.precision,
-                "threshold_min_fires": WATCH_REVERT_MIN_FIRES,
-                "threshold_max_precision": WATCH_REVERT_MAX_PRECISION,
-                "ts": now,
-            });
-            ledger.append("proposer", "proposal.land", "outcome", &payload)?;
+            // Crash-consistency convergence (MEDIUM-3): a prior `watch` may
+            // have appended the ledger outcome row and then crashed before
+            // the registry save — the entry would still show Active here.
+            // Detect that and skip re-appending; just complete the flip.
+            let already_recorded = watch_auto_revert_already_recorded(&paths.ledger, &rule_id)?;
+
+            registry.revert(&rule_id, &reason, &now)?;
+
+            if !already_recorded {
+                // Ledger-first ordering: append the durable outcome row
+                // BEFORE persisting the registry flip. A crash in between
+                // leaves a complete ledger row (source of truth) that the
+                // `already_recorded` check above converges on next run,
+                // rather than a silently-flipped registry with the
+                // negative outcome permanently lost (the previous,
+                // registry-first order — review finding MEDIUM-3).
+                let ledger = crate::ledger::Ledger::open(&paths.ledger)?;
+                let payload = serde_json::json!({
+                    "success": false,
+                    "rule_id": rule_id,
+                    "auto_revert": true,
+                    "why": reason,
+                    "fires": stats.fires,
+                    "joined": stats.joined,
+                    "tp": stats.tp,
+                    "fp": stats.fp,
+                    "precision": stats.precision,
+                    "threshold_min_fires": WATCH_REVERT_MIN_FIRES,
+                    "threshold_max_precision": WATCH_REVERT_MAX_PRECISION,
+                    "ts": now,
+                });
+                ledger.append("proposer", "proposal.land", "outcome", &payload)?;
+            }
+
+            crate::rule_registry::save(&paths.registry, &registry)?;
 
             crate::alert::notify_at(
                 &paths.hex_dir,
@@ -1018,7 +1305,7 @@ pub fn status(paths: &ApplyPaths) -> Result<StatusReport, ApplyError> {
     let registry = crate::rule_registry::load(&paths.registry)?;
     let escalated_already = escalated_ids(&paths.escalations)?;
     let ledger_ids = ledger_recorded_proposal_ids(&paths.ledger)?;
-    let survivors = scan_accept_flagged(&paths.store)?;
+    let (survivors, rejected) = scan_accept_flagged(&paths.store)?;
 
     let mut pending = Vec::new();
     for s in &survivors {
@@ -1040,6 +1327,7 @@ pub fn status(paths: &ApplyPaths) -> Result<StatusReport, ApplyError> {
         registry_entries: registry.entries,
         pending,
         escalations,
+        rejected,
     })
 }
 
@@ -1308,6 +1596,37 @@ mod tests {
         let conn = rusqlite::Connection::open(&paths.ledger).unwrap();
         conn.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
             .unwrap()
+    }
+
+    /// Like `write_verdict`, but the on-disk filename is independent of the
+    /// JSON's `proposal_id` field — needed to test malicious `proposal_id`
+    /// values (containing `/`, `..`, leading `.`, etc.) without a malicious
+    /// id corrupting the test's OWN filesystem via filename construction
+    /// (that's exactly the bug under test: `write_verdict` would build
+    /// `store.join(format!("{proposal_id}.verdict.json"))`, which is fine
+    /// for a filename but not for arbitrary attacker-controlled bytes).
+    fn write_verdict_content(paths: &ApplyPaths, filename: &str, proposal_id: &str, rule_id: &str) {
+        std::fs::create_dir_all(&paths.store).unwrap();
+        let json = serde_json::json!({
+            "verdict": "ACCEPT_FLAGGED",
+            "proposal_id": proposal_id,
+            "rule_id": rule_id,
+            "kind": "add-rule",
+            "reasons": ["synthetic test fixture — malicious proposal_id"],
+            "precision": 0.9,
+            "tp": 9,
+            "fp": 1,
+            "fn_": 0,
+            "floor": 0.5,
+            "dial": "UNAVAILABLE",
+            "now": "2026-06-12T00:00:00Z",
+            "meta": {},
+        });
+        std::fs::write(
+            paths.store.join(filename),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
     }
 
     // -- run: R0 lands -----------------------------------------------------
@@ -1969,5 +2288,363 @@ mod tests {
             }
             other => panic!("expected Score, got {other:?}"),
         }
+    }
+
+    // =========================================================================
+    // Review fixes: CRITICAL-1 path-traversal via unsanitized proposal_id
+    // =========================================================================
+
+    #[test]
+    fn applier_slug_validator_rejects_traversal_and_absolute_and_hidden() {
+        // Rejected: absolute paths (Path::join REPLACES the base with these),
+        // parent-traversal, hidden/dotfiles, embedded separators, empty.
+        assert!(!is_valid_proposal_id_slug("/tmp/evil"));
+        assert!(!is_valid_proposal_id_slug("../evil"));
+        assert!(!is_valid_proposal_id_slug(".hidden"));
+        assert!(!is_valid_proposal_id_slug("."));
+        assert!(!is_valid_proposal_id_slug(".."));
+        assert!(!is_valid_proposal_id_slug("a/b"));
+        assert!(!is_valid_proposal_id_slug(""));
+        // Accepted: the conservative slug charset.
+        assert!(is_valid_proposal_id_slug("p-r0-add-rule"));
+        assert!(is_valid_proposal_id_slug("proposal_123.v2"));
+        assert!(is_valid_proposal_id_slug("ABC-123_xyz.9"));
+    }
+
+    #[test]
+    fn applier_run_rejects_absolute_and_traversal_proposal_ids_no_escape() {
+        let f = fixture();
+        // A path outside the tempdir root that would prove an escape if the
+        // vulnerability existed. We never actually expect this to be
+        // written — this is the assertion target, not seed data.
+        let escape_marker = f.paths.hex_dir.join("escape-marker.md");
+
+        write_verdict_content(&f.paths, "evil1.verdict.json", "/tmp/evil", "add-rule-x");
+        write_verdict_content(
+            &f.paths,
+            "evil2.verdict.json",
+            "../../../etc/evil",
+            "add-rule-x",
+        );
+        write_verdict_content(&f.paths, "evil3.verdict.json", ".hidden", "add-rule-x");
+        write_verdict_content(&f.paths, "evil4.verdict.json", "a/b", "add-rule-x");
+
+        let report = run(&f.paths).expect("run");
+
+        assert!(
+            report.landed.is_empty(),
+            "no malicious verdict may land: {:?}",
+            report.landed
+        );
+        assert!(
+            report.escalated.is_empty(),
+            "no malicious verdict may reach escalate(): {:?}",
+            report.escalated
+        );
+        let mut rejected = report.rejected.clone();
+        rejected.sort();
+        assert_eq!(
+            rejected,
+            vec![
+                "../../../etc/evil".to_string(),
+                ".hidden".to_string(),
+                "/tmp/evil".to_string(),
+                "a/b".to_string(),
+            ]
+        );
+
+        assert!(
+            !escape_marker.exists(),
+            "path-traversal must never write outside the escalations dir"
+        );
+        // Nothing was written under escalations/ at all for these verdicts.
+        if f.paths.escalations.exists() {
+            let n = std::fs::read_dir(&f.paths.escalations).unwrap().count();
+            assert_eq!(n, 0, "no escalation evidence file for any rejected verdict");
+        }
+        // A malformed proposal_id must never make it into the registry
+        // either (belt-and-suspenders — same invariant as landed/escalated).
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        assert!(reg.entries.is_empty());
+    }
+
+    #[test]
+    fn applier_run_still_lands_valid_proposals_alongside_rejected_ones() {
+        // Rejection of malicious entries must not affect processing of
+        // legitimate ones in the same run (no early-return/short-circuit).
+        let f = fixture();
+        write_verdict_content(&f.paths, "evil.verdict.json", "/tmp/evil", "add-rule-x");
+        write_verdict(
+            &f.paths,
+            "p-good",
+            "add-rule-good",
+            "add-rule",
+            "ACCEPT_FLAGGED",
+        );
+        write_proposal_md(&f.paths, "p-good", "add-rule", "add-rule-good", "danger");
+
+        let report = run(&f.paths).expect("run");
+        assert_eq!(report.landed, vec!["p-good".to_string()]);
+        assert_eq!(report.rejected, vec!["/tmp/evil".to_string()]);
+    }
+
+    #[test]
+    fn applier_status_reports_rejected_malformed_proposal_ids() {
+        let f = fixture();
+        write_verdict_content(&f.paths, "evil.verdict.json", "../evil", "add-rule-x");
+
+        let status = status(&f.paths).expect("status");
+        assert_eq!(status.rejected, vec!["../evil".to_string()]);
+        assert!(status.pending.is_empty());
+    }
+
+    // =========================================================================
+    // Review fixes: CRITICAL-2 concurrency control (flock serialization)
+    // =========================================================================
+
+    #[test]
+    fn applier_registry_lock_serializes_concurrent_run_calls() {
+        // In-process concurrency check: N threads each supply their own
+        // distinct ACCEPT_FLAGGED proposal against the SAME shared paths and
+        // call run() concurrently. Without the lock this races the
+        // scan->classify->land->save->ledger-append sequence; with the lock,
+        // every proposal lands exactly once and the registry ends up with
+        // exactly N entries / N ledger rows for N distinct rule_ids.
+        let f = fixture();
+        const N: usize = 8;
+        for i in 0..N {
+            let id = format!("p-conc-{i}");
+            let rule_id = format!("conc-rule-{i}");
+            write_verdict(&f.paths, &id, &rule_id, "add-rule", "ACCEPT_FLAGGED");
+            write_proposal_md(&f.paths, &id, "add-rule", &rule_id, &format!("pattern-{i}"));
+        }
+
+        let paths = std::sync::Arc::new(f.paths.clone());
+        let mut handles = Vec::new();
+        for _ in 0..N {
+            let paths = std::sync::Arc::clone(&paths);
+            handles.push(std::thread::spawn(move || run(&paths)));
+        }
+        let mut total_landed = 0usize;
+        for h in handles {
+            let report = h.join().unwrap().expect("run");
+            total_landed += report.landed.len();
+        }
+
+        // Every proposal is landed by exactly one of the N racing run()
+        // calls combined (others see it already-registered and skip it) —
+        // total landed across all N calls must equal N, not N*N or some
+        // other multiple from a lost-update race.
+        assert_eq!(
+            total_landed, N,
+            "each distinct proposal lands exactly once total"
+        );
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        assert_eq!(
+            reg.entries.len(),
+            N,
+            "registry has exactly N entries, no lost updates"
+        );
+
+        let ledger_land_rows = {
+            let conn = rusqlite::Connection::open(&f.paths.ledger).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT COUNT(*) FROM ledger WHERE action_class='rule.land'")
+                .unwrap();
+            stmt.query_row([], |r| r.get::<_, i64>(0)).unwrap()
+        };
+        assert_eq!(
+            ledger_land_rows, N as i64,
+            "exactly N rule.land ledger rows, no duplicate/divergent writes"
+        );
+    }
+
+    // =========================================================================
+    // Review fixes: MEDIUM-3 crash-consistency ordering (ledger-first writes)
+    // =========================================================================
+
+    #[test]
+    fn applier_watch_converges_after_crash_between_ledger_write_and_registry_flip() {
+        // Simulate a crash exactly between watch()'s ledger.append and its
+        // registry save: pre-insert the auto-revert outcome row directly
+        // (as if a prior watch() process got that far and then died) while
+        // leaving the registry entry ACTIVE (as if the save never happened).
+        // A subsequent watch() call must converge — complete the registry
+        // flip — WITHOUT appending a second outcome row.
+        let f = fixture();
+        seed_active_rule(&f.paths, "watch-crash");
+        seed_wild_evidence(&f.paths, "watch-crash", 5, 1, 4); // fires=5, precision=0.2 -> revert_hit
+
+        let ledger = crate::ledger::Ledger::open(&f.paths.ledger).unwrap();
+        ledger
+            .append(
+                "proposer",
+                "proposal.land",
+                "outcome",
+                &serde_json::json!({
+                    "success": false,
+                    "rule_id": "watch-crash",
+                    "auto_revert": true,
+                    "why": "pre-existing row simulating a crash before registry save",
+                    "fires": 5,
+                    "joined": 5,
+                    "tp": 1,
+                    "fp": 4,
+                    "precision": 0.2,
+                    "threshold_min_fires": WATCH_REVERT_MIN_FIRES,
+                    "threshold_max_precision": WATCH_REVERT_MAX_PRECISION,
+                    "ts": "2026-06-12T00:00:00Z",
+                }),
+            )
+            .unwrap();
+        let rows_before = count_outcome_rows_for_rule(&f.paths, "watch-crash");
+        assert_eq!(rows_before, 1);
+
+        // Registry still shows Active — pre-crash state.
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        assert!(reg.has_active_rule_id("watch-crash"));
+
+        let report = watch(&f.paths).expect("watch converges post-crash");
+        assert_eq!(report.reverted, vec!["watch-crash".to_string()]);
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        let entry = reg
+            .entries
+            .iter()
+            .find(|e| e.rule_id == "watch-crash")
+            .unwrap();
+        assert_eq!(
+            entry.status,
+            RuleStatus::Reverted,
+            "registry flip completed"
+        );
+
+        assert_eq!(
+            count_outcome_rows_for_rule(&f.paths, "watch-crash"),
+            1,
+            "convergence must not duplicate the outcome row"
+        );
+    }
+
+    #[test]
+    fn applier_revert_converges_after_crash_between_ledger_write_and_registry_flip() {
+        // Same crash window for manual `revert()`: pre-insert the
+        // manual_revert outcome row, leave the registry entry Active, then
+        // call revert() again — it must complete the flip without a
+        // duplicate ledger row.
+        let f = fixture();
+        seed_active_rule(&f.paths, "revert-crash");
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        let proposal_id = reg
+            .entries
+            .iter()
+            .find(|e| e.rule_id == "revert-crash")
+            .map(|e| e.proposal_id.clone());
+
+        let ledger = crate::ledger::Ledger::open(&f.paths.ledger).unwrap();
+        ledger
+            .append(
+                "proposer",
+                "proposal.land",
+                "outcome",
+                &serde_json::json!({
+                    "success": false,
+                    "rule_id": "revert-crash",
+                    "proposal_id": proposal_id,
+                    "manual_revert": true,
+                    "why": "pre-existing row simulating a crash before registry save",
+                    "reverted_ts": "2026-06-12T00:00:00Z",
+                }),
+            )
+            .unwrap();
+        assert_eq!(count_outcome_rows_for_rule(&f.paths, "revert-crash"), 1);
+
+        revert(&f.paths, "revert-crash", "converge after crash").expect("revert converges");
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        let entry = reg
+            .entries
+            .iter()
+            .find(|e| e.rule_id == "revert-crash")
+            .unwrap();
+        assert_eq!(
+            entry.status,
+            RuleStatus::Reverted,
+            "registry flip completed"
+        );
+        assert_eq!(
+            count_outcome_rows_for_rule(&f.paths, "revert-crash"),
+            1,
+            "convergence must not duplicate the manual-revert outcome row"
+        );
+    }
+
+    #[test]
+    fn applier_land_ledger_row_precedes_registry_save_dedup_on_replay() {
+        // Documents/verifies land()'s crash-consistency contract: if the
+        // ledger already carries a `rule.land` row for a proposal_id (as it
+        // would after a crash between the ledger-first append and the
+        // registry save that now follows it), re-running `run()` must treat
+        // that proposal as already-recorded and skip it — never re-land or
+        // duplicate the ledger row — relying on the existing
+        // `ledger_recorded_proposal_ids` dedup check.
+        let f = fixture();
+        write_verdict(
+            &f.paths,
+            "p-crash-land",
+            "add-rule-crash",
+            "add-rule",
+            "ACCEPT_FLAGGED",
+        );
+        write_proposal_md(
+            &f.paths,
+            "p-crash-land",
+            "add-rule",
+            "add-rule-crash",
+            "danger",
+        );
+
+        // Simulate: ledger row exists (crash happened right after the
+        // ledger-first append), registry does NOT yet have the entry.
+        let ledger = crate::ledger::Ledger::open(&f.paths.ledger).unwrap();
+        ledger
+            .append(
+                "applier",
+                "rule.land",
+                "action",
+                &serde_json::json!({
+                    "proposal_id": "p-crash-land",
+                    "rule_id": "add-rule-crash",
+                    "kind": "add-rule",
+                    "risk": "R0",
+                    "reasons": ["pre-existing row simulating a crash before registry save"],
+                    "constants": constants_json(),
+                    "verdict_sha256": "deadbeef",
+                    "registry_sha256": "deadbeef",
+                }),
+            )
+            .unwrap();
+        let reg_before = crate::rule_registry::load(&f.paths.registry).unwrap();
+        assert!(
+            reg_before.entries.is_empty(),
+            "registry not yet flipped — pre-crash state"
+        );
+
+        let report = run(&f.paths).expect("run");
+        assert!(
+            report.landed.is_empty(),
+            "already-ledger-recorded proposal must not be landed again"
+        );
+        assert_eq!(report.skipped, vec!["p-crash-land".to_string()]);
+
+        let ledger_land_rows = {
+            let conn = rusqlite::Connection::open(&f.paths.ledger).unwrap();
+            let mut stmt = conn
+                .prepare("SELECT COUNT(*) FROM ledger WHERE action_class='rule.land'")
+                .unwrap();
+            stmt.query_row([], |r| r.get::<_, i64>(0)).unwrap()
+        };
+        assert_eq!(ledger_land_rows, 1, "no duplicate rule.land row on replay");
     }
 }
