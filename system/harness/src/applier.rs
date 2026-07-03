@@ -182,6 +182,23 @@ pub const DIAL_LAND_THRESHOLD: f64 = 0.5;
 pub const DIAL_AGENT: &str = "proposer";
 pub const DIAL_ACTION_CLASS: &str = "proposal.land";
 
+/// Watchdog thresholds (`hex apply watch`, deliverable 6) — disclosed in
+/// every watchdog outcome-row payload so the decision is replayable from the
+/// ledger alone, exactly like the [`DIAL_*`] constants above.
+///
+/// - `WATCH_REVERT_MIN_FIRES` / `WATCH_REVERT_MAX_PRECISION`: a landed rule
+///   with at least this many raw fires AND a joined precision strictly below
+///   this bar is auto-reverted — cheap, fast-acting harm containment.
+/// - `WATCH_SUCCESS_MIN_JOINED` / `WATCH_SUCCESS_MIN_PRECISION`: a landed
+///   rule with at least this many JOINED gates (a much higher bar than the
+///   revert side — precision is only trustworthy with real volume) AND
+///   precision at/above this floor earns a one-time `success=true` outcome
+///   row, feeding the dial for future R1 `modify-rule` proposals.
+pub const WATCH_REVERT_MIN_FIRES: usize = 5;
+pub const WATCH_REVERT_MAX_PRECISION: f64 = 0.5;
+pub const WATCH_SUCCESS_MIN_JOINED: usize = 30;
+pub const WATCH_SUCCESS_MIN_PRECISION: f64 = 0.8;
+
 /// Every path `hex apply` touches, resolved once per invocation. Every field
 /// is independently overridable (CLI flags) so tests never read or write the
 /// real workspace. Defaults mirror the hex-dir-relative convention already
@@ -276,6 +293,23 @@ impl RunReport {
     pub fn is_noop(&self) -> bool {
         self.landed.is_empty() && self.escalated.is_empty()
     }
+}
+
+/// Result of one `hex apply watch` invocation — every field lists rule ids.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct WatchReport {
+    /// Auto-reverted this run (>= WATCH_REVERT_MIN_FIRES fires, precision <
+    /// WATCH_REVERT_MAX_PRECISION).
+    pub reverted: Vec<String>,
+    /// Scored `success=true` this run (>= WATCH_SUCCESS_MIN_JOINED joined,
+    /// precision >= WATCH_SUCCESS_MIN_PRECISION, not previously scored).
+    pub scored_success: Vec<String>,
+    /// Neither threshold met — no outcome row written (insufficient
+    /// evidence is not an outcome).
+    pub insufficient_evidence: Vec<String>,
+    /// Met the success bar but a `success=true` row already exists for this
+    /// rule_id — refused to double-score.
+    pub already_scored: Vec<String>,
 }
 
 /// Read-only summary for `hex apply status`.
@@ -439,6 +473,40 @@ fn load_outcome_rows(ledger_path: &Path) -> Result<Vec<crate::dial::OutcomeRow>,
         });
     }
     Ok(out)
+}
+
+/// True if the ledger already carries a `(proposer, proposal.land)` OUTCOME
+/// row with `success=true` for `rule_id` — the watchdog's double-score
+/// refusal check. Scans every outcome row (cheap: outcome volume is bounded
+/// by rule count, not command volume) rather than trusting an in-memory
+/// per-run set, so double-scoring is refused even across separate `hex apply
+/// watch` process invocations (the actual repeated-cron scenario).
+fn watch_success_already_recorded(ledger_path: &Path, rule_id: &str) -> Result<bool, ApplyError> {
+    if !ledger_path.exists() {
+        return Ok(false);
+    }
+    let conn = rusqlite::Connection::open(ledger_path)
+        .map_err(|e| ApplyError::Msg(format!("open ledger for watch scan: {e}")))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT payload FROM ledger \
+             WHERE kind='outcome' AND agent=?1 AND action_class=?2",
+        )
+        .map_err(|e| ApplyError::Msg(format!("prepare watch scan: {e}")))?;
+    let rows = stmt
+        .query_map([DIAL_AGENT, DIAL_ACTION_CLASS], |r| r.get::<_, String>(0))
+        .map_err(|e| ApplyError::Msg(format!("query watch scan: {e}")))?;
+    for row in rows {
+        let payload = row.map_err(|e| ApplyError::Msg(format!("watch scan row read: {e}")))?;
+        let v: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|e| ApplyError::Msg(format!("watch scan payload parse: {e}")))?;
+        let matches_rule = v.get("rule_id").and_then(|x| x.as_str()) == Some(rule_id);
+        let is_success = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
+        if matches_rule && is_success {
+            return Ok(true);
+        }
+    }
+    Ok(false)
 }
 
 /// Constants disclosed in every land/escalate ledger payload — makes the
@@ -822,6 +890,125 @@ pub fn revert(paths: &ApplyPaths, rule_id: &str, why: &str) -> Result<(), ApplyE
     );
 
     Ok(())
+}
+
+/// The outcome watchdog (`hex apply watch`, deliverable 6): for each ACTIVE
+/// landed rule, compute wild stats via [`crate::wild::rule_wild_stats`] (the
+/// SAME join `hex ledger wild` uses — extracted/shared, not duplicated) and:
+///
+/// - `fires >= WATCH_REVERT_MIN_FIRES && precision < WATCH_REVERT_MAX_PRECISION`
+///   => AUTO-REVERT: registry status flip + `success=false` outcome row +
+///   loud alert.
+/// - `joined >= WATCH_SUCCESS_MIN_JOINED && precision >= WATCH_SUCCESS_MIN_PRECISION`
+///   => `success=true` outcome row, EXACTLY ONCE per rule_id (checked against
+///   the ledger, not just this run's in-memory state, so repeated `hex apply
+///   watch` invocations — the real cron scenario — never double-score).
+/// - Otherwise: no row. Insufficient evidence is not an outcome.
+///
+/// Both outcome-row kinds go to `(DIAL_AGENT, DIAL_ACTION_CLASS)` =
+/// `("proposer", "proposal.land")` — the exact pair the existing gatekeeper
+/// dial glue (`main.rs`'s `load_outcome_rows` + `hex::dial::compute`)
+/// already consumes, so R1 `modify-rule` dial-gating benefits from watchdog
+/// evidence with ZERO gatekeeper changes.
+pub fn watch(paths: &ApplyPaths) -> Result<WatchReport, ApplyError> {
+    let mut report = WatchReport::default();
+    let mut registry = crate::rule_registry::load(&paths.registry)?;
+
+    // Snapshot BEFORE mutating — reverting rule N must not skip/reprocess
+    // rule N+1 in the same pass, and a rule reverted this run is still
+    // scored/reported exactly once (as reverted, not re-evaluated).
+    let active_rule_ids: Vec<String> = registry
+        .active_entries()
+        .map(|e| e.rule_id.clone())
+        .collect();
+
+    for rule_id in active_rule_ids {
+        let stats =
+            crate::wild::rule_wild_stats(&paths.ledger, &rule_id).map_err(ApplyError::Msg)?;
+
+        let revert_hit = stats.fires >= WATCH_REVERT_MIN_FIRES
+            && stats
+                .precision
+                .map(|p| p < WATCH_REVERT_MAX_PRECISION)
+                .unwrap_or(false);
+        let success_hit = stats.joined >= WATCH_SUCCESS_MIN_JOINED
+            && stats
+                .precision
+                .map(|p| p >= WATCH_SUCCESS_MIN_PRECISION)
+                .unwrap_or(false);
+
+        if revert_hit {
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let reason = format!(
+                "auto-revert: fires={} joined={} precision={:.4} < {} (tp={}, fp={})",
+                stats.fires,
+                stats.joined,
+                stats.precision.unwrap_or(0.0),
+                WATCH_REVERT_MAX_PRECISION,
+                stats.tp,
+                stats.fp,
+            );
+            registry.revert(&rule_id, &reason, &now)?;
+            crate::rule_registry::save(&paths.registry, &registry)?;
+
+            let ledger = crate::ledger::Ledger::open(&paths.ledger)?;
+            let payload = serde_json::json!({
+                "success": false,
+                "rule_id": rule_id,
+                "auto_revert": true,
+                "why": reason,
+                "fires": stats.fires,
+                "joined": stats.joined,
+                "tp": stats.tp,
+                "fp": stats.fp,
+                "precision": stats.precision,
+                "threshold_min_fires": WATCH_REVERT_MIN_FIRES,
+                "threshold_max_precision": WATCH_REVERT_MAX_PRECISION,
+                "ts": now,
+            });
+            ledger.append("proposer", "proposal.land", "outcome", &payload)?;
+
+            crate::alert::notify_at(
+                &paths.hex_dir,
+                &format!("apply-watch-revert-{rule_id}"),
+                "hex apply watch: rule auto-reverted",
+                &format!("rule_id '{rule_id}' auto-reverted: {reason}"),
+            );
+
+            report.reverted.push(rule_id);
+            continue;
+        }
+
+        if success_hit {
+            if watch_success_already_recorded(&paths.ledger, &rule_id)? {
+                report.already_scored.push(rule_id);
+                continue;
+            }
+            let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+            let ledger = crate::ledger::Ledger::open(&paths.ledger)?;
+            let payload = serde_json::json!({
+                "success": true,
+                "rule_id": rule_id,
+                "watchdog_scored": true,
+                "fires": stats.fires,
+                "joined": stats.joined,
+                "tp": stats.tp,
+                "fp": stats.fp,
+                "precision": stats.precision,
+                "threshold_min_joined": WATCH_SUCCESS_MIN_JOINED,
+                "threshold_min_precision": WATCH_SUCCESS_MIN_PRECISION,
+                "ts": now,
+            });
+            ledger.append("proposer", "proposal.land", "outcome", &payload)?;
+
+            report.scored_success.push(rule_id);
+            continue;
+        }
+
+        report.insufficient_evidence.push(rule_id);
+    }
+
+    Ok(report)
 }
 
 /// Read-only summary: registry entries + pending ACCEPT_FLAGGED verdicts
@@ -1473,5 +1660,314 @@ mod tests {
         assert_eq!(st.registry_entries[0].proposal_id, "p-status-land");
         assert_eq!(st.pending, vec!["p-status-pending".to_string()]);
         assert_eq!(st.escalations, vec!["p-status-esc".to_string()]);
+    }
+
+    // =======================================================================
+    // `hex apply watch` — the outcome watchdog (deliverable 6)
+    // =======================================================================
+
+    /// Land an ACTIVE rule directly into the registry (bypassing a full
+    /// `run()` — watch() only cares that the rule is active, not how it got
+    /// there).
+    fn seed_active_rule(paths: &ApplyPaths, rule_id: &str) {
+        let mut reg = crate::rule_registry::load(&paths.registry).unwrap();
+        reg.append(RuleEntry {
+            rule_id: rule_id.to_string(),
+            pattern: "x.*y".to_string(),
+            proposal_id: format!("p-{rule_id}"),
+            verdict_sha256: "a".repeat(64),
+            landed_ts: "2026-06-12T00:00:00Z".to_string(),
+            status: RuleStatus::Active,
+            reverted_ts: None,
+            revert_reason: None,
+        });
+        crate::rule_registry::save(&paths.registry, &reg).unwrap();
+    }
+
+    /// Seed `joined` gates for `rule_id`: each gate gets a `lint-gates`
+    /// intent (`predicted="fail"`, `rules_fired=[rule_id]`) AND a matching
+    /// `reconciler` outcome — the first `tp` gates fail in the wild
+    /// (linter correct), the remaining `fp` succeed (linter false-positive).
+    /// `tp + fp` must equal `joined`.
+    fn seed_wild_evidence(paths: &ApplyPaths, rule_id: &str, joined: usize, tp: usize, fp: usize) {
+        assert_eq!(
+            tp + fp,
+            joined,
+            "seed_wild_evidence: tp + fp must equal joined"
+        );
+        let ledger = crate::ledger::Ledger::open(&paths.ledger).unwrap();
+        for i in 0..joined {
+            let gate_hash = format!("g-{rule_id}-{i}");
+            let outcome_success = i >= tp; // first `tp` gates fail in the wild (tp), rest succeed (fp)
+            ledger
+                .append(
+                    "lint-gates",
+                    "verify-gate",
+                    "intent",
+                    &serde_json::json!({
+                        "gate_hash": gate_hash, "predicted": "fail", "rules_fired": [rule_id],
+                        "shadow": true, "command": format!("cmd-{gate_hash}"),
+                    }),
+                )
+                .unwrap();
+            ledger
+                .append(
+                    "reconciler",
+                    "verify-gate",
+                    "outcome",
+                    &serde_json::json!({
+                        "gate_hash": gate_hash, "command": format!("cmd-{gate_hash}"),
+                        "success": outcome_success,
+                        "final_exit_code": if outcome_success {0} else {1},
+                        "spec_id": "S00000000", "task_id": "T0", "attempts": 1,
+                        "first_started_at": "2026-06-10T01:00:00+00:00",
+                    }),
+                )
+                .unwrap();
+        }
+    }
+
+    /// Seed extra `lint-gates` intents for `rule_id` with NO matching
+    /// reconciler outcome — raises `fires` without raising `joined`.
+    fn seed_wild_fires_only(paths: &ApplyPaths, rule_id: &str, count: usize) {
+        let ledger = crate::ledger::Ledger::open(&paths.ledger).unwrap();
+        for i in 0..count {
+            let gate_hash = format!("g-{rule_id}-unjoined-{i}");
+            ledger
+                .append(
+                    "lint-gates",
+                    "verify-gate",
+                    "intent",
+                    &serde_json::json!({
+                        "gate_hash": gate_hash, "predicted": "fail", "rules_fired": [rule_id],
+                        "shadow": true, "command": format!("cmd-{gate_hash}"),
+                    }),
+                )
+                .unwrap();
+        }
+    }
+
+    fn count_outcome_rows_for_rule(paths: &ApplyPaths, rule_id: &str) -> usize {
+        let conn = rusqlite::Connection::open(&paths.ledger).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT payload FROM ledger WHERE kind='outcome'")
+            .unwrap();
+        let rows: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(0))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        rows.iter()
+            .filter(|payload| {
+                let v: serde_json::Value = serde_json::from_str(payload).unwrap();
+                v.get("rule_id").and_then(|x| x.as_str()) == Some(rule_id)
+            })
+            .count()
+    }
+
+    // -- auto-revert: fires >= 5 AND precision < 0.5 -------------------------
+
+    #[test]
+    fn applier_watch_auto_reverts_high_fires_low_precision() {
+        let f = fixture();
+        seed_active_rule(&f.paths, "watch-bad");
+        // 5 joined gates, tp=1 fp=4 => precision 0.2 < 0.5, fires=5 >= 5.
+        seed_wild_evidence(&f.paths, "watch-bad", 5, 1, 4);
+
+        let report = watch(&f.paths).expect("watch");
+        assert_eq!(report.reverted, vec!["watch-bad".to_string()]);
+        assert!(report.scored_success.is_empty());
+        assert!(report.insufficient_evidence.is_empty());
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        let entry = reg
+            .entries
+            .iter()
+            .find(|e| e.rule_id == "watch-bad")
+            .unwrap();
+        assert_eq!(
+            entry.status,
+            RuleStatus::Reverted,
+            "entry preserved, status flipped"
+        );
+
+        // Note: seed_wild_evidence itself writes `reconciler`/outcome rows
+        // (the wild-join evidence) — filter to the applier's own dial-facing
+        // outcome rows (agent='proposer') to isolate watch()'s output.
+        let conn = rusqlite::Connection::open(&f.paths.ledger).unwrap();
+        let mut stmt = conn
+            .prepare(
+                "SELECT agent, action_class, kind, payload FROM ledger \
+                 WHERE kind='outcome' AND agent='proposer'",
+            )
+            .unwrap();
+        let rows: Vec<(String, String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(
+            rows.len(),
+            1,
+            "exactly one dial-facing outcome row from the auto-revert"
+        );
+        let (agent, action_class, kind, payload) = &rows[0];
+        assert_eq!(agent, "proposer");
+        assert_eq!(action_class, "proposal.land");
+        assert_eq!(kind, "outcome");
+        let v: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(v["success"], serde_json::json!(false));
+        assert_eq!(v["rule_id"], serde_json::json!("watch-bad"));
+    }
+
+    #[test]
+    fn applier_watch_below_min_fires_never_reverts_even_at_zero_precision() {
+        let f = fixture();
+        seed_active_rule(&f.paths, "watch-too-new");
+        // 4 joined gates, all fp (precision 0.0) — but fires=4 < WATCH_REVERT_MIN_FIRES(5).
+        seed_wild_evidence(&f.paths, "watch-too-new", 4, 0, 4);
+
+        let report = watch(&f.paths).expect("watch");
+        assert!(report.reverted.is_empty());
+        assert_eq!(
+            report.insufficient_evidence,
+            vec!["watch-too-new".to_string()]
+        );
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        let entry = reg
+            .entries
+            .iter()
+            .find(|e| e.rule_id == "watch-too-new")
+            .unwrap();
+        assert_eq!(
+            entry.status,
+            RuleStatus::Active,
+            "must not revert below the fires floor"
+        );
+    }
+
+    // -- one-time success scoring: joined >= 30 AND precision >= 0.8 ---------
+
+    #[test]
+    fn applier_watch_scores_success_once_and_refuses_to_double_score() {
+        let f = fixture();
+        seed_active_rule(&f.paths, "watch-good");
+        // 30 joined gates, tp=27 fp=3 => precision 0.9 >= 0.8, joined=30 >= 30.
+        seed_wild_evidence(&f.paths, "watch-good", 30, 27, 3);
+
+        let first = watch(&f.paths).expect("first watch");
+        assert_eq!(first.scored_success, vec!["watch-good".to_string()]);
+        assert!(first.already_scored.is_empty());
+        assert_eq!(count_outcome_rows_for_rule(&f.paths, "watch-good"), 1);
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        assert_eq!(
+            reg.entries
+                .iter()
+                .find(|e| e.rule_id == "watch-good")
+                .unwrap()
+                .status,
+            RuleStatus::Active,
+            "scoring success never reverts"
+        );
+
+        // Repeated watch run against UNCHANGED wild evidence must not
+        // double-score — this is the real cron scenario (05:10 UTC daily).
+        let second = watch(&f.paths).expect("second watch");
+        assert!(
+            second.scored_success.is_empty(),
+            "must not score a second time"
+        );
+        assert_eq!(second.already_scored, vec!["watch-good".to_string()]);
+        assert_eq!(
+            count_outcome_rows_for_rule(&f.paths, "watch-good"),
+            1,
+            "no new outcome row on the second run"
+        );
+    }
+
+    #[test]
+    fn applier_watch_below_min_joined_never_scores_even_at_high_precision() {
+        let f = fixture();
+        seed_active_rule(&f.paths, "watch-promising");
+        // 10 joined gates, all tp (precision 1.0) — but joined=10 < WATCH_SUCCESS_MIN_JOINED(30).
+        seed_wild_evidence(&f.paths, "watch-promising", 10, 10, 0);
+
+        let report = watch(&f.paths).expect("watch");
+        assert!(report.scored_success.is_empty());
+        assert_eq!(
+            report.insufficient_evidence,
+            vec!["watch-promising".to_string()]
+        );
+        assert_eq!(count_outcome_rows_for_rule(&f.paths, "watch-promising"), 0);
+    }
+
+    // -- insufficient evidence is not an outcome (no row at all) -------------
+
+    #[test]
+    fn applier_watch_no_row_when_precision_is_none() {
+        let f = fixture();
+        seed_active_rule(&f.paths, "watch-unjoined");
+        // Plenty of raw fires, but NONE joined to a reconciler outcome —
+        // precision is None, not comparable to either threshold.
+        seed_wild_fires_only(&f.paths, "watch-unjoined", 6);
+
+        let report = watch(&f.paths).expect("watch");
+        assert!(report.reverted.is_empty());
+        assert!(report.scored_success.is_empty());
+        assert_eq!(
+            report.insufficient_evidence,
+            vec!["watch-unjoined".to_string()]
+        );
+        assert_eq!(count_outcome_rows_for_rule(&f.paths, "watch-unjoined"), 0);
+    }
+
+    #[test]
+    fn applier_watch_skips_already_reverted_rules() {
+        let f = fixture();
+        let mut reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        reg.append(landed("watch-dead", RuleStatus::Reverted));
+        crate::rule_registry::save(&f.paths.registry, &reg).unwrap();
+        // Evidence that WOULD trigger auto-revert if the rule were active.
+        seed_wild_evidence(&f.paths, "watch-dead", 5, 0, 5);
+
+        let report = watch(&f.paths).expect("watch");
+        assert!(report.reverted.is_empty());
+        assert!(report.insufficient_evidence.is_empty());
+        assert!(report.scored_success.is_empty());
+        assert_eq!(count_outcome_rows_for_rule(&f.paths, "watch-dead"), 0);
+    }
+
+    // -- round-trip through the existing dial loader -------------------------
+
+    #[test]
+    fn applier_watch_outcome_rows_round_trip_through_dial_loader() {
+        let f = fixture();
+        seed_active_rule(&f.paths, "watch-dial");
+        seed_wild_evidence(&f.paths, "watch-dial", 30, 27, 3);
+
+        let report = watch(&f.paths).expect("watch");
+        assert_eq!(report.scored_success, vec!["watch-dial".to_string()]);
+
+        let rows = load_outcome_rows(&f.paths.ledger).expect("load_outcome_rows");
+        let matched: Vec<_> = rows
+            .iter()
+            .filter(|r| r.agent == DIAL_AGENT && r.action_class == DIAL_ACTION_CLASS)
+            .collect();
+        assert_eq!(
+            matched.len(),
+            1,
+            "the watchdog row must round-trip through load_outcome_rows"
+        );
+        assert!(matched[0].success);
+
+        // hex::dial::compute must actually consume it (not reject/ignore it).
+        match crate::dial::compute(&rows, DIAL_AGENT, DIAL_ACTION_CLASS, 1, false) {
+            crate::dial::DialOutcome::Score(s) => {
+                assert!(s > 0.0, "success row must raise the score")
+            }
+            other => panic!("expected Score, got {other:?}"),
+        }
     }
 }

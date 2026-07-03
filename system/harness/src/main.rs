@@ -395,6 +395,20 @@ enum ApplyCommands {
         #[arg(long)]
         escalations: Option<std::path::PathBuf>,
     },
+    /// The outcome watchdog: for each ACTIVE landed rule, compute wild stats
+    /// (the same `hex ledger wild` join, reused not duplicated) and
+    /// auto-revert on strong evidence of harm, or score a one-time success
+    /// outcome on strong evidence of benefit. Insufficient evidence writes
+    /// no row. Idempotent across repeated invocations (e.g. the daily cron).
+    Watch {
+        /// Rule registry JSON. Defaults to
+        /// `$HEX_DIR/projects/agent-infra/gates/landed-rules.json`.
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+        /// Ledger sqlite db. Defaults to `$HEX_DIR/.hex/ledger/ledger.db`.
+        #[arg(long)]
+        ledger: Option<std::path::PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1747,6 +1761,43 @@ fn main() {
                         }
                         Err(e) => {
                             eprintln!("hex apply status: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                ApplyCommands::Watch { registry, ledger } => {
+                    let mut paths = hex::applier::ApplyPaths::defaults(&hex_dir);
+                    if let Some(p) = registry {
+                        paths.registry = p;
+                    }
+                    if let Some(p) = ledger {
+                        paths.ledger = p;
+                    }
+                    match hex::applier::watch(&paths) {
+                        Ok(report) => {
+                            for id in &report.reverted {
+                                println!("auto-reverted: {id}");
+                            }
+                            for id in &report.scored_success {
+                                println!("scored success: {id}");
+                            }
+                            for id in &report.already_scored {
+                                println!("already scored (skipped): {id}");
+                            }
+                            for id in &report.insufficient_evidence {
+                                println!("insufficient evidence: {id}");
+                            }
+                            println!(
+                                "hex apply watch: {} reverted, {} scored, {} already-scored, {} insufficient",
+                                report.reverted.len(),
+                                report.scored_success.len(),
+                                report.already_scored.len(),
+                                report.insufficient_evidence.len()
+                            );
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("hex apply watch: {e}");
                             std::process::exit(1);
                         }
                     }
