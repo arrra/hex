@@ -18,8 +18,10 @@
 
 use crate::gatekeeper::CONSTITUTION_CLASS;
 use crate::lint_gates::footgun_rules;
-use crate::rule_registry::RuleRegistry;
+use crate::rule_registry::{RuleEntry, RuleRegistry, RuleStatus};
 use regex::Regex;
+use std::collections::HashSet;
+use std::path::{Path, PathBuf};
 
 /// Risk class assigned by [`classify`].
 #[derive(Debug, Clone, Copy, PartialEq, Eq, serde::Serialize)]
@@ -161,6 +163,697 @@ fn builtin_rule_id_collision(rule_id: &str) -> Option<&'static str> {
         .into_iter()
         .map(|(id, _)| id)
         .find(|id| *id == rule_id)
+}
+
+// ============================================================================
+// Stage B — `hex apply run|revert|status`: the I/O shell around `classify`.
+//
+// Pure deterministic classification stays above this line, untouched. Below
+// is every side effect: reading the verdict store + proposal files, writing
+// the registry, appending ledger rows, writing escalation evidence packages,
+// and firing alerts. No LLM calls anywhere in this path.
+// ============================================================================
+
+/// Dial gate constants for R1 (`modify-rule`) proposals — disclosed verbatim
+/// in every R1 ledger payload (land or escalate) so the decision is
+/// replayable from the ledger alone.
+pub const DIAL_MIN_N: usize = 3;
+pub const DIAL_LAND_THRESHOLD: f64 = 0.5;
+pub const DIAL_AGENT: &str = "proposer";
+pub const DIAL_ACTION_CLASS: &str = "proposal.land";
+
+/// Every path `hex apply` touches, resolved once per invocation. Every field
+/// is independently overridable (CLI flags) so tests never read or write the
+/// real workspace. Defaults mirror the hex-dir-relative convention already
+/// established by `rule_registry::default_path` / `ledger::default_path`.
+#[derive(Debug, Clone)]
+pub struct ApplyPaths {
+    pub hex_dir: PathBuf,
+    pub store: PathBuf,
+    pub registry: PathBuf,
+    pub ledger: PathBuf,
+    pub escalations: PathBuf,
+    /// Proposal markdown directory. NOT part of the spec's literal CLI
+    /// signature (`hex apply run [--store] [--registry] [--ledger]
+    /// [--escalations]`) — added because the verdict store JSON has no
+    /// `pattern` field (only the proposal file's `toml proposal` block
+    /// does), so classification requires reading the proposal file too.
+    /// Documented deviation; defaults resolve from hex_dir like every other
+    /// path here.
+    pub proposals: PathBuf,
+}
+
+impl ApplyPaths {
+    pub fn defaults(hex_dir: &Path) -> Self {
+        ApplyPaths {
+            hex_dir: hex_dir.to_path_buf(),
+            store: hex_dir.join("projects/agent-infra/gates/verdicts"),
+            registry: crate::rule_registry::default_path(hex_dir),
+            ledger: crate::ledger::default_path(hex_dir),
+            escalations: hex_dir.join("projects/agent-infra/escalations"),
+            proposals: hex_dir.join("projects/agent-infra/proposals"),
+        }
+    }
+}
+
+/// Errors surfaced by the apply shell. Every variant carries enough context
+/// to log loudly (S6) — nothing here is ever silently swallowed.
+#[derive(Debug)]
+pub enum ApplyError {
+    Io(std::io::Error),
+    Json(serde_json::Error),
+    Registry(crate::rule_registry::RegistryError),
+    Ledger(crate::ledger::LedgerError),
+    Msg(String),
+}
+
+impl std::fmt::Display for ApplyError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            ApplyError::Io(e) => write!(f, "apply: io error: {e}"),
+            ApplyError::Json(e) => write!(f, "apply: json error: {e}"),
+            ApplyError::Registry(e) => write!(f, "apply: registry error: {e}"),
+            ApplyError::Ledger(e) => write!(f, "apply: ledger error: {e}"),
+            ApplyError::Msg(m) => write!(f, "apply: {m}"),
+        }
+    }
+}
+impl std::error::Error for ApplyError {}
+impl From<std::io::Error> for ApplyError {
+    fn from(e: std::io::Error) -> Self {
+        ApplyError::Io(e)
+    }
+}
+impl From<serde_json::Error> for ApplyError {
+    fn from(e: serde_json::Error) -> Self {
+        ApplyError::Json(e)
+    }
+}
+impl From<crate::rule_registry::RegistryError> for ApplyError {
+    fn from(e: crate::rule_registry::RegistryError) -> Self {
+        ApplyError::Registry(e)
+    }
+}
+impl From<crate::ledger::LedgerError> for ApplyError {
+    fn from(e: crate::ledger::LedgerError) -> Self {
+        ApplyError::Ledger(e)
+    }
+}
+
+/// Result of one `hex apply run` invocation. Every field lists proposal ids.
+#[derive(Debug, Default, Clone, serde::Serialize)]
+pub struct RunReport {
+    pub landed: Vec<String>,
+    pub escalated: Vec<String>,
+    pub skipped: Vec<String>,
+}
+
+impl RunReport {
+    /// True when this run landed or escalated nothing — i.e. every survivor
+    /// was already accounted for (registry / escalations / ledger). This is
+    /// the idempotency contract: a second run against unchanged input must
+    /// report `is_noop() == true` and must not have written anything new.
+    pub fn is_noop(&self) -> bool {
+        self.landed.is_empty() && self.escalated.is_empty()
+    }
+}
+
+/// Read-only summary for `hex apply status`.
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct StatusReport {
+    pub registry_entries: Vec<RuleEntry>,
+    /// ACCEPT_FLAGGED proposal ids in the store not yet landed, escalated, or
+    /// recorded in the ledger — i.e. what the next `hex apply run` would act on.
+    pub pending: Vec<String>,
+    /// Proposal ids with an escalation evidence file on disk.
+    pub escalations: Vec<String>,
+}
+
+/// One ACCEPT_FLAGGED verdict pulled from the store, plus its raw JSON (kept
+/// verbatim for `verdict_sha256` and for embedding in escalation evidence).
+struct Survivor {
+    proposal_id: String,
+    rule_id: String,
+    kind: String,
+    raw_json: String,
+}
+
+/// Scan `store` for `*.verdict.json` files whose `verdict` field is
+/// `ACCEPT_FLAGGED`. Missing store dir => empty (day one: nothing judged
+/// yet). Sorted by filename for deterministic processing order.
+fn scan_accept_flagged(store: &Path) -> Result<Vec<Survivor>, ApplyError> {
+    let mut out = Vec::new();
+    if !store.exists() {
+        return Ok(out);
+    }
+    let mut paths: Vec<PathBuf> = std::fs::read_dir(store)?
+        .filter_map(|e| e.ok())
+        .map(|e| e.path())
+        .filter(|p| {
+            p.file_name()
+                .and_then(|n| n.to_str())
+                .map(|n| n.ends_with(".verdict.json"))
+                .unwrap_or(false)
+        })
+        .collect();
+    paths.sort();
+
+    for path in paths {
+        let raw = std::fs::read_to_string(&path)?;
+        let v: serde_json::Value = serde_json::from_str(&raw).map_err(|e| {
+            ApplyError::Msg(format!("verdict {}: malformed JSON: {e}", path.display()))
+        })?;
+        if v.get("verdict").and_then(|x| x.as_str()) != Some("ACCEPT_FLAGGED") {
+            continue;
+        }
+        let proposal_id = v
+            .get("proposal_id")
+            .and_then(|x| x.as_str())
+            .ok_or_else(|| {
+                ApplyError::Msg(format!("verdict {}: missing proposal_id", path.display()))
+            })?
+            .to_string();
+        let rule_id = v
+            .get("rule_id")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        let kind = v
+            .get("kind")
+            .and_then(|x| x.as_str())
+            .unwrap_or_default()
+            .to_string();
+        out.push(Survivor {
+            proposal_id,
+            rule_id,
+            kind,
+            raw_json: raw,
+        });
+    }
+    Ok(out)
+}
+
+/// Proposal ids with an escalation evidence file already on disk. Missing
+/// dir => empty set (not an error — nothing escalated yet).
+fn escalated_ids(escalations_dir: &Path) -> Result<HashSet<String>, ApplyError> {
+    let mut out = HashSet::new();
+    if !escalations_dir.exists() {
+        return Ok(out);
+    }
+    for entry in std::fs::read_dir(escalations_dir)? {
+        let path = entry?.path();
+        if path.extension().and_then(|e| e.to_str()) == Some("md") {
+            if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
+                out.insert(stem.to_string());
+            }
+        }
+    }
+    Ok(out)
+}
+
+/// Proposal ids already recorded as `rule.land` / `rule.escalate` action rows
+/// in the ledger. Reads the ledger directly with its own connection (mirrors
+/// `main.rs`'s own outcome-row loader below — `applier.rs` lives in the LIB
+/// crate and cannot call the BINARY crate's private `load_outcome_rows`).
+fn ledger_recorded_proposal_ids(ledger_path: &Path) -> Result<HashSet<String>, ApplyError> {
+    if !ledger_path.exists() {
+        return Ok(HashSet::new());
+    }
+    let conn = rusqlite::Connection::open(ledger_path)
+        .map_err(|e| ApplyError::Msg(format!("open ledger for scan: {e}")))?;
+    let mut stmt = conn
+        .prepare(
+            "SELECT payload FROM ledger WHERE kind='action' AND action_class IN ('rule.land','rule.escalate')",
+        )
+        .map_err(|e| ApplyError::Msg(format!("prepare ledger scan: {e}")))?;
+    let rows = stmt
+        .query_map([], |r| r.get::<_, String>(0))
+        .map_err(|e| ApplyError::Msg(format!("query ledger scan: {e}")))?;
+    let mut out = HashSet::new();
+    for row in rows {
+        let payload = row.map_err(|e| ApplyError::Msg(format!("ledger row read: {e}")))?;
+        let v: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|e| ApplyError::Msg(format!("ledger payload parse: {e}")))?;
+        if let Some(id) = v.get("proposal_id").and_then(|x| x.as_str()) {
+            out.insert(id.to_string());
+        }
+    }
+    Ok(out)
+}
+
+/// Load every `outcome`-kind row from the ledger into [`crate::dial::OutcomeRow`]s
+/// for the dial gate. Deliberately duplicates `main.rs`'s private
+/// `load_outcome_rows` (SQL + parsing contract confirmed identical: `agent`/
+/// `action_class` are ledger table columns, `success` is `payload["success"]`
+/// as a JSON bool, default `false`) — the binary crate's helper is `fn`-private
+/// and this module lives in the lib crate, so it cannot be called directly.
+/// Errors loudly per S6 — no silent skip on a malformed row.
+fn load_outcome_rows(ledger_path: &Path) -> Result<Vec<crate::dial::OutcomeRow>, ApplyError> {
+    let conn = rusqlite::Connection::open(ledger_path)
+        .map_err(|e| ApplyError::Msg(format!("open ledger for dial: {e}")))?;
+    let mut stmt = conn
+        .prepare("SELECT ts, agent, action_class, payload FROM ledger WHERE kind='outcome'")
+        .map_err(|e| ApplyError::Msg(format!("prepare dial scan: {e}")))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, String>(1)?,
+                r.get::<_, String>(2)?,
+                r.get::<_, String>(3)?,
+            ))
+        })
+        .map_err(|e| ApplyError::Msg(format!("query dial scan: {e}")))?;
+    let mut out = Vec::new();
+    for row in rows {
+        let (ts, agent, action_class, payload) =
+            row.map_err(|e| ApplyError::Msg(format!("dial row read: {e}")))?;
+        let v: serde_json::Value = serde_json::from_str(&payload)
+            .map_err(|e| ApplyError::Msg(format!("dial payload parse (ts={ts}): {e}")))?;
+        let success = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
+        out.push(crate::dial::OutcomeRow {
+            agent,
+            action_class,
+            success,
+            ts,
+        });
+    }
+    Ok(out)
+}
+
+/// Constants disclosed in every land/escalate ledger payload — makes the
+/// decision replayable from the ledger alone, without cross-referencing
+/// source at the time of read.
+fn constants_json() -> serde_json::Value {
+    serde_json::json!({
+        "constitution_class": CONSTITUTION_CLASS,
+        "dial_min_n": DIAL_MIN_N,
+        "dial_land_threshold": DIAL_LAND_THRESHOLD,
+        "dial_agent": DIAL_AGENT,
+        "dial_action_class": DIAL_ACTION_CLASS,
+    })
+}
+
+/// Scan the verdict store for new ACCEPT_FLAGGED survivors and land (R0) or
+/// escalate (R1 below dial threshold, R2, constitution-class refusal,
+/// missing/unparseable proposal file) each one. Idempotent: a proposal id
+/// already landed (registry), already escalated (escalations dir), or
+/// already recorded in the ledger is skipped and counted in
+/// `RunReport::skipped` — no new I/O happens for it, so a second run against
+/// unchanged input is a true no-op (`RunReport::is_noop()`).
+pub fn run(paths: &ApplyPaths) -> Result<RunReport, ApplyError> {
+    let mut report = RunReport::default();
+
+    let mut registry = crate::rule_registry::load(&paths.registry)?;
+    let escalated_already = escalated_ids(&paths.escalations)?;
+    let ledger_ids = ledger_recorded_proposal_ids(&paths.ledger)?;
+    let survivors = scan_accept_flagged(&paths.store)?;
+
+    for s in survivors {
+        let already = registry
+            .entries
+            .iter()
+            .any(|e| e.proposal_id == s.proposal_id)
+            || escalated_already.contains(&s.proposal_id)
+            || ledger_ids.contains(&s.proposal_id);
+        if already {
+            report.skipped.push(s.proposal_id.clone());
+            continue;
+        }
+
+        // Apply-time defense in depth: refuse CONSTITUTION_CLASS rule_ids
+        // regardless of verdict or classification — checked here, before we
+        // even open the proposal file, and again at the actual land site in
+        // `land()` below (belt-and-suspenders against a future classify()
+        // regression).
+        if CONSTITUTION_CLASS.iter().any(|c| s.rule_id.trim() == *c) {
+            let reasons = vec![format!(
+                "apply-time defense-in-depth: rule_id '{}' is constitution-class ({:?}) — refused regardless of verdict",
+                s.rule_id, CONSTITUTION_CLASS
+            )];
+            escalate(paths, &s, None, "R2(constitution-class)", reasons)?;
+            report.escalated.push(s.proposal_id.clone());
+            continue;
+        }
+
+        let proposal_path = paths.proposals.join(format!("{}.md", s.proposal_id));
+        let proposal_md = match std::fs::read_to_string(&proposal_path) {
+            Ok(md) => md,
+            Err(e) => {
+                let reasons = vec![format!(
+                    "proposal file {} missing/unreadable: {e} — escalate for manual review",
+                    proposal_path.display()
+                )];
+                escalate(paths, &s, None, "R2(missing-proposal-file)", reasons)?;
+                report.escalated.push(s.proposal_id.clone());
+                continue;
+            }
+        };
+        let parsed = match crate::gatekeeper::parse_proposal(&proposal_md) {
+            Ok(p) => p,
+            Err(e) => {
+                let reasons = vec![format!(
+                    "proposal file {} failed to parse: {e} — escalate for manual review",
+                    proposal_path.display()
+                )];
+                escalate(
+                    paths,
+                    &s,
+                    Some(proposal_md.clone()),
+                    "R2(unparseable-proposal)",
+                    reasons,
+                )?;
+                report.escalated.push(s.proposal_id.clone());
+                continue;
+            }
+        };
+
+        let for_classify = ProposalForClassify {
+            kind: parsed.proposal.kind.clone(),
+            rule_id: parsed.proposal.rule_id.clone(),
+            pattern: parsed.proposal.pattern.clone(),
+        };
+        let class = classify(&for_classify, &registry);
+
+        match class.risk {
+            RiskClass::R0 => {
+                land(
+                    paths,
+                    &mut registry,
+                    &s,
+                    &for_classify,
+                    &class.reasons,
+                    "R0",
+                )?;
+                report.landed.push(s.proposal_id.clone());
+            }
+            RiskClass::R1 => {
+                let dial_rows = load_outcome_rows(&paths.ledger)?;
+                let dial = crate::dial::compute(
+                    &dial_rows,
+                    DIAL_AGENT,
+                    DIAL_ACTION_CLASS,
+                    DIAL_MIN_N,
+                    false,
+                );
+                let mut reasons = class.reasons.clone();
+                let should_land = match dial {
+                    crate::dial::DialOutcome::Score(sc) if sc >= DIAL_LAND_THRESHOLD => {
+                        reasons.push(format!(
+                            "dial({DIAL_AGENT},{DIAL_ACTION_CLASS}) = Score({sc:.4}) >= {DIAL_LAND_THRESHOLD} — land as R0 (dial-lifted)"
+                        ));
+                        true
+                    }
+                    crate::dial::DialOutcome::Score(sc) => {
+                        reasons.push(format!(
+                            "dial({DIAL_AGENT},{DIAL_ACTION_CLASS}) = Score({sc:.4}) < {DIAL_LAND_THRESHOLD} — escalate"
+                        ));
+                        false
+                    }
+                    crate::dial::DialOutcome::Insufficient { n, min_n } => {
+                        reasons.push(format!(
+                            "dial({DIAL_AGENT},{DIAL_ACTION_CLASS}) = INSUFFICIENT (n={n} < min_n={min_n}) — escalate"
+                        ));
+                        false
+                    }
+                    crate::dial::DialOutcome::Ask => {
+                        reasons.push(format!(
+                            "dial({DIAL_AGENT},{DIAL_ACTION_CLASS}) = ASK (irreversible) — escalate"
+                        ));
+                        false
+                    }
+                };
+                if should_land {
+                    land(
+                        paths,
+                        &mut registry,
+                        &s,
+                        &for_classify,
+                        &reasons,
+                        "R1(dial-lifted)",
+                    )?;
+                    report.landed.push(s.proposal_id.clone());
+                } else {
+                    escalate(paths, &s, Some(proposal_md.clone()), "R1", reasons)?;
+                    report.escalated.push(s.proposal_id.clone());
+                }
+            }
+            RiskClass::R2 => {
+                escalate(
+                    paths,
+                    &s,
+                    Some(proposal_md.clone()),
+                    "R2",
+                    class.reasons.clone(),
+                )?;
+                report.escalated.push(s.proposal_id.clone());
+            }
+        }
+    }
+
+    Ok(report)
+}
+
+/// Land one survivor: write the registry entry, then the `rule.land` ledger
+/// action row. `modify-rule` (R1) supersedes the existing active entry for
+/// the same `rule_id` (registry `revert()` + append new) rather than
+/// appending a second active row — the one-active-per-`rule_id` invariant
+/// must hold, since `lint_gates::analyze_command_with` compiles every ACTIVE
+/// entry. This internal supersede is NOT a user revert (`hex apply revert`):
+/// it writes no `proposal.land` outcome row, only the `rule.land` action row.
+fn land(
+    paths: &ApplyPaths,
+    registry: &mut RuleRegistry,
+    s: &Survivor,
+    for_classify: &ProposalForClassify,
+    reasons: &[String],
+    risk_label: &str,
+) -> Result<(), ApplyError> {
+    // Belt-and-suspenders: this should be unreachable (classify() already
+    // refuses constitution-class rule_ids, and `run()` checks again before
+    // calling `land`), but the actual write path re-checks once more so a
+    // future regression upstream can never land one.
+    if CONSTITUTION_CLASS
+        .iter()
+        .any(|c| for_classify.rule_id.trim() == *c)
+    {
+        return Err(ApplyError::Msg(format!(
+            "refusing to land constitution-class rule_id '{}' — unreachable via classify(), refused again at the write path",
+            for_classify.rule_id
+        )));
+    }
+
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+    let verdict_sha256 = crate::gatekeeper::sha256_hex(&s.raw_json);
+
+    if registry.has_active_rule_id(&for_classify.rule_id) {
+        registry.revert(
+            &for_classify.rule_id,
+            &format!(
+                "superseded by {} (applier auto-land, modify-rule)",
+                s.proposal_id
+            ),
+            &now,
+        )?;
+    }
+
+    registry.append(RuleEntry {
+        rule_id: for_classify.rule_id.clone(),
+        pattern: for_classify.pattern.clone(),
+        proposal_id: s.proposal_id.clone(),
+        verdict_sha256: verdict_sha256.clone(),
+        landed_ts: now.clone(),
+        status: RuleStatus::Active,
+        reverted_ts: None,
+        revert_reason: None,
+    });
+    crate::rule_registry::save(&paths.registry, registry)?;
+
+    let registry_bytes = std::fs::read(&paths.registry)?;
+    let registry_sha256 = crate::gatekeeper::sha256_hex(&String::from_utf8_lossy(&registry_bytes));
+
+    let ledger = crate::ledger::Ledger::open(&paths.ledger)?;
+    let payload = serde_json::json!({
+        "proposal_id": s.proposal_id,
+        "rule_id": for_classify.rule_id,
+        "kind": for_classify.kind,
+        "risk": risk_label,
+        "reasons": reasons,
+        "constants": constants_json(),
+        "verdict_sha256": verdict_sha256,
+        "registry_sha256": registry_sha256,
+    });
+    ledger.append("applier", "rule.land", "action", &payload)?;
+
+    Ok(())
+}
+
+/// Write an evidence-package escalation for one survivor: markdown to
+/// `escalations/<proposal-id>.md` (proposal body when available, the raw
+/// verdict JSON, risk reasons, suggested next action), a `rule.escalate`
+/// ledger action row, and an alert.
+fn escalate(
+    paths: &ApplyPaths,
+    s: &Survivor,
+    proposal_md: Option<String>,
+    risk_label: &str,
+    reasons: Vec<String>,
+) -> Result<(), ApplyError> {
+    std::fs::create_dir_all(&paths.escalations)?;
+    let evidence_path = paths.escalations.join(format!("{}.md", s.proposal_id));
+
+    let body = proposal_md.unwrap_or_else(|| {
+        "_(proposal markdown file was missing or unreadable at escalation time — see reasons below)_"
+            .to_string()
+    });
+    let reasons_md = reasons
+        .iter()
+        .map(|r| format!("- {r}"))
+        .collect::<Vec<_>>()
+        .join("\n");
+    let suggested = suggested_next_action(&s.kind, risk_label);
+
+    let doc = format!(
+        "# Escalation: {id}\n\n\
+- **rule_id:** `{rule_id}`\n\
+- **kind:** `{kind}`\n\
+- **risk:** {risk_label}\n\n\
+## Risk classification reasons\n\n{reasons_md}\n\n\
+## Proposal body\n\n{body}\n\n\
+## Verdict (store copy)\n\n```json\n{verdict_json}\n```\n\n\
+## Suggested next action\n\n{suggested}\n",
+        id = s.proposal_id,
+        rule_id = s.rule_id,
+        kind = s.kind,
+        risk_label = risk_label,
+        reasons_md = reasons_md,
+        body = body,
+        verdict_json = s.raw_json,
+        suggested = suggested,
+    );
+    std::fs::write(&evidence_path, doc)?;
+
+    let ledger = crate::ledger::Ledger::open(&paths.ledger)?;
+    let payload = serde_json::json!({
+        "proposal_id": s.proposal_id,
+        "rule_id": s.rule_id,
+        "kind": s.kind,
+        "risk": risk_label,
+        "reasons": reasons,
+        "constants": constants_json(),
+        "escalation_path": evidence_path.to_string_lossy(),
+    });
+    ledger.append("applier", "rule.escalate", "action", &payload)?;
+
+    crate::alert::notify_at(
+        &paths.hex_dir,
+        &format!("apply-escalate-{}", s.proposal_id),
+        "hex apply: proposal escalated",
+        &format!(
+            "{} (rule_id={}) risk={} — see {}",
+            s.proposal_id,
+            s.rule_id,
+            risk_label,
+            evidence_path.display()
+        ),
+    );
+
+    Ok(())
+}
+
+fn suggested_next_action(kind: &str, risk_label: &str) -> &'static str {
+    if kind == "kill-rule" {
+        "kill-rule always requires a human decision — review the proposal and either apply the \
+kill manually or reject the proposal upstream. The applier never auto-executes kill-rule."
+    } else if risk_label == "R1" {
+        "Dial-gated modify-rule below the land threshold — either wait for more successful \
+`proposal.land` outcomes to accumulate (raises the dial score), or have a human review and land \
+it manually."
+    } else if risk_label.starts_with("R2(constitution-class)") {
+        "This rule_id is constitution-class — it must never be auto-landed regardless of verdict. \
+Manual review required; if the change is legitimate it must go through the charter/constitution \
+amendment path, not the applier."
+    } else if risk_label.contains("missing-proposal-file")
+        || risk_label.contains("unparseable-proposal")
+    {
+        "The proposal markdown file could not be read/parsed — investigate why it's missing or \
+malformed before deciding whether to land or reject."
+    } else {
+        "Review the proposal and verdict manually. If it should land, apply it by hand (e.g. edit \
+the rule registry directly) and record the decision; if not, reject the proposal upstream."
+    }
+}
+
+/// Flip a landed rule's registry status to `reverted` (entry preserved,
+/// never deleted) and append exactly one `proposal.land` outcome row with
+/// `success=false` recording the manual revert. Data-only: does not touch
+/// the shadow linter directly — the next `lint-gates` invocation reloads the
+/// registry and picks up the status flip.
+pub fn revert(paths: &ApplyPaths, rule_id: &str, why: &str) -> Result<(), ApplyError> {
+    let mut registry = crate::rule_registry::load(&paths.registry)?;
+    let now = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Secs, true);
+
+    let proposal_id = registry
+        .entries
+        .iter()
+        .rev()
+        .find(|e| e.rule_id == rule_id && e.status == RuleStatus::Active)
+        .map(|e| e.proposal_id.clone());
+
+    registry.revert(rule_id, why, &now)?;
+    crate::rule_registry::save(&paths.registry, &registry)?;
+
+    let ledger = crate::ledger::Ledger::open(&paths.ledger)?;
+    let payload = serde_json::json!({
+        "success": false,
+        "rule_id": rule_id,
+        "proposal_id": proposal_id,
+        "manual_revert": true,
+        "why": why,
+        "reverted_ts": now,
+    });
+    ledger.append("proposer", "proposal.land", "outcome", &payload)?;
+
+    crate::alert::notify_at(
+        &paths.hex_dir,
+        &format!("apply-revert-{rule_id}"),
+        "hex apply: rule reverted",
+        &format!("rule_id '{rule_id}' manually reverted: {why}"),
+    );
+
+    Ok(())
+}
+
+/// Read-only summary: registry entries + pending ACCEPT_FLAGGED verdicts
+/// (what the next `run` would act on) + escalations on disk. Never mutates
+/// anything; callers should treat this as always-exit-0.
+pub fn status(paths: &ApplyPaths) -> Result<StatusReport, ApplyError> {
+    let registry = crate::rule_registry::load(&paths.registry)?;
+    let escalated_already = escalated_ids(&paths.escalations)?;
+    let ledger_ids = ledger_recorded_proposal_ids(&paths.ledger)?;
+    let survivors = scan_accept_flagged(&paths.store)?;
+
+    let mut pending = Vec::new();
+    for s in &survivors {
+        let already = registry
+            .entries
+            .iter()
+            .any(|e| e.proposal_id == s.proposal_id)
+            || escalated_already.contains(&s.proposal_id)
+            || ledger_ids.contains(&s.proposal_id);
+        if !already {
+            pending.push(s.proposal_id.clone());
+        }
+    }
+
+    let mut escalations: Vec<String> = escalated_already.into_iter().collect();
+    escalations.sort();
+
+    Ok(StatusReport {
+        registry_entries: registry.entries,
+        pending,
+        escalations,
+    })
 }
 
 #[cfg(test)]
@@ -347,5 +1040,438 @@ mod tests {
         let c2 = classify(&p, &reg);
         assert_eq!(c1.risk, c2.risk);
         assert_eq!(c1.reasons, c2.reasons);
+    }
+
+    // =======================================================================
+    // Stage B — `hex apply run|revert|status` (I/O, ledger trail, escalations)
+    // =======================================================================
+
+    use tempfile::TempDir;
+
+    /// Keeps the tempdir alive for the fixture's lifetime (paths point inside it).
+    struct Fixture {
+        _dir: TempDir,
+        paths: ApplyPaths,
+    }
+
+    fn fixture() -> Fixture {
+        let dir = TempDir::new().expect("tempdir");
+        let paths = ApplyPaths::defaults(dir.path());
+        Fixture { _dir: dir, paths }
+    }
+
+    fn write_verdict(
+        paths: &ApplyPaths,
+        proposal_id: &str,
+        rule_id: &str,
+        kind: &str,
+        verdict: &str,
+    ) {
+        std::fs::create_dir_all(&paths.store).unwrap();
+        let json = serde_json::json!({
+            "verdict": verdict,
+            "proposal_id": proposal_id,
+            "rule_id": rule_id,
+            "kind": kind,
+            "reasons": ["synthetic test fixture"],
+            "precision": 0.9,
+            "tp": 9,
+            "fp": 1,
+            "fn_": 0,
+            "floor": 0.5,
+            "dial": "UNAVAILABLE",
+            "now": "2026-06-12T00:00:00Z",
+            "meta": {},
+        });
+        std::fs::write(
+            paths.store.join(format!("{proposal_id}.verdict.json")),
+            serde_json::to_string_pretty(&json).unwrap(),
+        )
+        .unwrap();
+    }
+
+    /// Mirrors the fenced-block format `gatekeeper::parse_proposal` expects
+    /// (same shape as gatekeeper.rs's own `proposal_md` test fixture).
+    fn write_proposal_md(paths: &ApplyPaths, id: &str, kind: &str, rule_id: &str, pattern: &str) {
+        std::fs::create_dir_all(&paths.proposals).unwrap();
+        let md = format!(
+            "# proposal\n\n```toml proposal\nid = \"{id}\"\nagent = \"proposer\"\ncreated = \"2026-06-10T00:00:00Z\"\ntype = \"{kind}\"\nrule_id = \"{rule_id}\"\npattern = {pattern:?}\nrationale = \"synthetic test fixture\"\n```\n\n```toml selftest\nfire = []\nclean = []\n```\n"
+        );
+        std::fs::write(paths.proposals.join(format!("{id}.md")), md).unwrap();
+    }
+
+    /// Seed `successes` consecutive `(proposer, proposal.land)` outcome rows
+    /// with success=true. Per dial.rs (EARN_ALPHA=0.20): 3 wins -> 0.488
+    /// (< 0.5 threshold), 4 wins -> 0.5904 (>= 0.5 threshold).
+    fn seed_dial_outcomes(paths: &ApplyPaths, successes: usize) {
+        let ledger = crate::ledger::Ledger::open(&paths.ledger).unwrap();
+        for _ in 0..successes {
+            ledger
+                .append(
+                    DIAL_AGENT,
+                    DIAL_ACTION_CLASS,
+                    "outcome",
+                    &serde_json::json!({"success": true}),
+                )
+                .unwrap();
+        }
+    }
+
+    fn count_ledger_rows(paths: &ApplyPaths) -> i64 {
+        let conn = rusqlite::Connection::open(&paths.ledger).unwrap();
+        conn.query_row("SELECT COUNT(*) FROM ledger", [], |r| r.get(0))
+            .unwrap()
+    }
+
+    // -- run: R0 lands -----------------------------------------------------
+
+    #[test]
+    fn applier_run_lands_r0_add_rule() {
+        let f = fixture();
+        write_verdict(
+            &f.paths,
+            "p-r0",
+            "new-footgun-r0",
+            "add-rule",
+            "ACCEPT_FLAGGED",
+        );
+        write_proposal_md(&f.paths, "p-r0", "add-rule", "new-footgun-r0", "foo.*bar");
+
+        let report = run(&f.paths).expect("run");
+        assert_eq!(report.landed, vec!["p-r0".to_string()]);
+        assert!(report.escalated.is_empty());
+        assert!(report.skipped.is_empty());
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        assert_eq!(reg.entries.len(), 1);
+        assert_eq!(reg.entries[0].rule_id, "new-footgun-r0");
+        assert_eq!(reg.entries[0].proposal_id, "p-r0");
+        assert_eq!(reg.entries[0].status, RuleStatus::Active);
+
+        assert_eq!(count_ledger_rows(&f.paths), 1);
+    }
+
+    // -- run: idempotency ----------------------------------------------------
+
+    #[test]
+    fn applier_run_idempotent_second_run_is_noop() {
+        let f = fixture();
+        write_verdict(
+            &f.paths,
+            "p-idem",
+            "idem-footgun",
+            "add-rule",
+            "ACCEPT_FLAGGED",
+        );
+        write_proposal_md(
+            &f.paths,
+            "p-idem",
+            "add-rule",
+            "idem-footgun",
+            "idempotent.*pattern",
+        );
+
+        let first = run(&f.paths).expect("first run");
+        assert_eq!(first.landed, vec!["p-idem".to_string()]);
+
+        let registry_before = std::fs::read_to_string(&f.paths.registry).unwrap();
+        let ledger_rows_before = count_ledger_rows(&f.paths);
+
+        let second = run(&f.paths).expect("second run");
+        assert!(second.is_noop(), "second run must be a no-op: {second:?}");
+        assert_eq!(second.skipped, vec!["p-idem".to_string()]);
+
+        let registry_after = std::fs::read_to_string(&f.paths.registry).unwrap();
+        let ledger_rows_after = count_ledger_rows(&f.paths);
+        assert_eq!(
+            registry_before, registry_after,
+            "registry must be byte-identical after a no-op rerun"
+        );
+        assert_eq!(
+            ledger_rows_before, ledger_rows_after,
+            "no new ledger rows may be written on a no-op rerun"
+        );
+    }
+
+    // -- run: R1 dial gating, both sides of 0.5 ------------------------------
+
+    #[test]
+    fn applier_run_r1_lands_when_dial_score_at_or_above_threshold() {
+        let f = fixture();
+        let mut reg = RuleRegistry::default();
+        reg.append(landed("modify-me", RuleStatus::Active));
+        crate::rule_registry::save(&f.paths.registry, &reg).unwrap();
+
+        seed_dial_outcomes(&f.paths, 4); // score 0.5904 >= 0.5
+
+        write_verdict(
+            &f.paths,
+            "p-r1-land",
+            "modify-me",
+            "modify-rule",
+            "ACCEPT_FLAGGED",
+        );
+        write_proposal_md(
+            &f.paths,
+            "p-r1-land",
+            "modify-rule",
+            "modify-me",
+            "new.*pattern",
+        );
+
+        let report = run(&f.paths).expect("run");
+        assert_eq!(report.landed, vec!["p-r1-land".to_string()]);
+        assert!(report.escalated.is_empty());
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        assert_eq!(
+            reg.entries.len(),
+            2,
+            "old entry superseded, new one appended"
+        );
+        assert_eq!(
+            reg.active_entries().count(),
+            1,
+            "exactly one active entry per rule_id"
+        );
+        let active = reg.active_entries().next().unwrap();
+        assert_eq!(active.proposal_id, "p-r1-land");
+        assert_eq!(active.pattern, "new.*pattern");
+        assert_eq!(reg.entries[0].status, RuleStatus::Reverted);
+    }
+
+    #[test]
+    fn applier_run_r1_escalates_when_dial_score_below_threshold() {
+        let f = fixture();
+        let mut reg = RuleRegistry::default();
+        reg.append(landed("modify-me-2", RuleStatus::Active));
+        crate::rule_registry::save(&f.paths.registry, &reg).unwrap();
+
+        seed_dial_outcomes(&f.paths, 3); // score 0.488 < 0.5
+
+        write_verdict(
+            &f.paths,
+            "p-r1-esc",
+            "modify-me-2",
+            "modify-rule",
+            "ACCEPT_FLAGGED",
+        );
+        write_proposal_md(
+            &f.paths,
+            "p-r1-esc",
+            "modify-rule",
+            "modify-me-2",
+            "new.*pattern",
+        );
+
+        let report = run(&f.paths).expect("run");
+        assert_eq!(report.escalated, vec!["p-r1-esc".to_string()]);
+        assert!(report.landed.is_empty());
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        assert_eq!(
+            reg.entries.len(),
+            1,
+            "nothing landed — original entry untouched"
+        );
+        assert_eq!(reg.entries[0].status, RuleStatus::Active);
+
+        let evidence = std::fs::read_to_string(f.paths.escalations.join("p-r1-esc.md")).unwrap();
+        assert!(
+            evidence.contains("dial"),
+            "evidence should disclose the dial reasoning: {evidence}"
+        );
+    }
+
+    // -- run: R2 + constitution-class refusal --------------------------------
+
+    #[test]
+    fn applier_run_r2_kill_rule_escalates_with_evidence() {
+        let f = fixture();
+        write_verdict(
+            &f.paths,
+            "p-kill",
+            "footgun-y",
+            "kill-rule",
+            "ACCEPT_FLAGGED",
+        );
+        write_proposal_md(&f.paths, "p-kill", "kill-rule", "footgun-y", "");
+
+        let report = run(&f.paths).expect("run");
+        assert_eq!(report.escalated, vec!["p-kill".to_string()]);
+
+        let evidence = std::fs::read_to_string(f.paths.escalations.join("p-kill.md")).unwrap();
+        assert!(evidence.contains("kill-rule"));
+        assert!(evidence.contains("human decision"));
+
+        assert_eq!(count_ledger_rows(&f.paths), 1);
+    }
+
+    #[test]
+    fn applier_run_refuses_constitution_class_regardless_of_verdict() {
+        let f = fixture();
+        // add-rule would otherwise classify R0 — constitution-class refusal
+        // must override that at apply time, regardless of verdict/classify.
+        write_verdict(
+            &f.paths,
+            "p-const",
+            "kill-gates",
+            "add-rule",
+            "ACCEPT_FLAGGED",
+        );
+        write_proposal_md(
+            &f.paths,
+            "p-const",
+            "add-rule",
+            "kill-gates",
+            "valid.*regex",
+        );
+
+        let report = run(&f.paths).expect("run");
+        assert_eq!(report.escalated, vec!["p-const".to_string()]);
+        assert!(report.landed.is_empty());
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        assert!(
+            reg.entries.is_empty(),
+            "constitution-class rule_id must never land"
+        );
+
+        let evidence = std::fs::read_to_string(f.paths.escalations.join("p-const.md")).unwrap();
+        assert!(evidence.contains("constitution-class"));
+    }
+
+    #[test]
+    fn applier_run_escalates_loudly_on_missing_proposal_file() {
+        let f = fixture();
+        write_verdict(
+            &f.paths,
+            "p-nofile",
+            "footgun-z",
+            "add-rule",
+            "ACCEPT_FLAGGED",
+        );
+        // deliberately do NOT write a matching proposal .md file
+
+        let report = run(&f.paths).expect("run");
+        assert_eq!(report.escalated, vec!["p-nofile".to_string()]);
+
+        let evidence = std::fs::read_to_string(f.paths.escalations.join("p-nofile.md")).unwrap();
+        assert!(
+            evidence.contains("missing/unreadable"),
+            "must surface the missing-file reason loudly: {evidence}"
+        );
+    }
+
+    // -- revert ---------------------------------------------------------------
+
+    #[test]
+    fn applier_revert_flips_status_and_appends_one_outcome_row() {
+        let f = fixture();
+        let mut reg = RuleRegistry::default();
+        let mut entry = landed("revert-me", RuleStatus::Active);
+        entry.proposal_id = "p-revert-src".to_string();
+        reg.append(entry);
+        crate::rule_registry::save(&f.paths.registry, &reg).unwrap();
+
+        revert(&f.paths, "revert-me", "manual revert: caused wild fires").expect("revert");
+
+        let reg = crate::rule_registry::load(&f.paths.registry).unwrap();
+        assert_eq!(reg.entries.len(), 1, "entry preserved, never deleted");
+        assert_eq!(reg.entries[0].status, RuleStatus::Reverted);
+        assert_eq!(
+            reg.entries[0].revert_reason.as_deref(),
+            Some("manual revert: caused wild fires")
+        );
+
+        let conn = rusqlite::Connection::open(&f.paths.ledger).unwrap();
+        let mut stmt = conn
+            .prepare("SELECT agent, action_class, kind, payload FROM ledger")
+            .unwrap();
+        let rows: Vec<(String, String, String, String)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        assert_eq!(rows.len(), 1, "exactly one ledger row from a revert");
+        let (agent, action_class, kind, payload) = &rows[0];
+        assert_eq!(agent, "proposer");
+        assert_eq!(action_class, "proposal.land");
+        assert_eq!(kind, "outcome");
+        let v: serde_json::Value = serde_json::from_str(payload).unwrap();
+        assert_eq!(v["success"], serde_json::json!(false));
+        assert_eq!(v["proposal_id"], serde_json::json!("p-revert-src"));
+    }
+
+    #[test]
+    fn applier_revert_errors_loudly_when_no_active_entry() {
+        let f = fixture();
+        let err = revert(&f.paths, "nonexistent-rule", "why").unwrap_err();
+        assert!(
+            format!("{err}").contains("no active entry"),
+            "revert of a non-landed rule_id must error loudly: {err}"
+        );
+    }
+
+    // -- status -----------------------------------------------------------------
+
+    #[test]
+    fn applier_status_reports_registry_pending_and_escalations_read_only() {
+        let f = fixture();
+        write_verdict(
+            &f.paths,
+            "p-status-land",
+            "status-footgun",
+            "add-rule",
+            "ACCEPT_FLAGGED",
+        );
+        write_proposal_md(
+            &f.paths,
+            "p-status-land",
+            "add-rule",
+            "status-footgun",
+            "abc.*",
+        );
+        write_verdict(
+            &f.paths,
+            "p-status-esc",
+            "status-footgun-2",
+            "kill-rule",
+            "ACCEPT_FLAGGED",
+        );
+        write_proposal_md(
+            &f.paths,
+            "p-status-esc",
+            "kill-rule",
+            "status-footgun-2",
+            "",
+        );
+
+        let first = run(&f.paths).expect("run");
+        assert_eq!(first.landed, vec!["p-status-land".to_string()]);
+        assert_eq!(first.escalated, vec!["p-status-esc".to_string()]);
+
+        // A third survivor that `run` has never seen — this is what `status`
+        // must report as pending.
+        write_verdict(
+            &f.paths,
+            "p-status-pending",
+            "status-footgun-3",
+            "add-rule",
+            "ACCEPT_FLAGGED",
+        );
+
+        let registry_bytes_before = std::fs::read(&f.paths.registry).unwrap();
+        let st = status(&f.paths).expect("status");
+        let registry_bytes_after = std::fs::read(&f.paths.registry).unwrap();
+        assert_eq!(
+            registry_bytes_before, registry_bytes_after,
+            "status() must never mutate the registry"
+        );
+
+        assert_eq!(st.registry_entries.len(), 1);
+        assert_eq!(st.registry_entries[0].proposal_id, "p-status-land");
+        assert_eq!(st.pending, vec!["p-status-pending".to_string()]);
+        assert_eq!(st.escalations, vec!["p-status-esc".to_string()]);
     }
 }
