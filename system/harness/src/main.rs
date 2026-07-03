@@ -1328,8 +1328,34 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            // Merge in the runtime rule registry (P2 applier deliverable 2):
+            // missing file => no extra rules (registry defaults empty); a
+            // malformed registry or an invalid regex inside it is a loud
+            // hard error — never silently skipped (S6).
+            let registry_path = hex::rule_registry::default_path(&hex_dir);
+            let registry = match hex::rule_registry::load(&registry_path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("hex lint-gates: rule registry load failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let mut extra_rules = Vec::new();
+            for entry in registry.active_entries() {
+                match hex::lint_gates::CompiledRule::compile(&entry.rule_id, &entry.pattern) {
+                    Ok(rule) => extra_rules.push(rule),
+                    Err(e) => {
+                        eprintln!("hex lint-gates: rule registry {}: {e}", registry_path.display());
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let mut flagged = 0usize;
             for gate in &gates {
-                let v = hex::lint_gates::analyze_command(gate);
+                let v = hex::lint_gates::analyze_command_with(&extra_rules, gate);
+                if matches!(v.predicted, hex::lint_gates::Prediction::Fail) {
+                    flagged += 1;
+                }
                 let predicted = match v.predicted {
                     hex::lint_gates::Prediction::Pass => "pass",
                     hex::lint_gates::Prediction::Fail => "fail",
@@ -1349,7 +1375,15 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-            println!("{}", hex::lint_gates::shadow_summary(&gates));
+            // Summary line reflects the SAME merged analysis used for the
+            // ledger rows above (builtin 8 + active registry rules), not
+            // `hex::lint_gates::shadow_summary`'s builtin-only count — the
+            // two must never disagree on what fired.
+            println!(
+                "{} gates, {} flagged, shadow mode — predictions logged silently",
+                gates.len(),
+                flagged
+            );
             std::process::exit(0);
         }
         Commands::Dial { agent, action_class, min_n, irreversible } => {

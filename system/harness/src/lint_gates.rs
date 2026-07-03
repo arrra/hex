@@ -22,6 +22,7 @@
 //! with payload `{predicted, rules_fired, shadow:true, command, spec_id?}`.
 //! `--spec-id <id>` is supported as an amend hook for after dispatch.
 
+use regex::Regex;
 use serde::Serialize;
 use sha2::{Digest, Sha256};
 
@@ -243,11 +244,52 @@ pub fn footgun_rules() -> Vec<(&'static str, fn(&str) -> bool)> {
 }
 
 /// Run every footgun rule against `cmd`. Any hit ⇒ `Prediction::Fail`.
+///
+/// Implemented in terms of [`analyze_command_with`] with an empty `extra`
+/// slice — behavior is byte-for-byte unchanged (P2 applier deliverable 2:
+/// "existing `analyze_command()` behavior UNCHANGED").
 pub fn analyze_command(cmd: &str) -> Verdict {
+    analyze_command_with(&[], cmd)
+}
+
+/// One runtime-landed rule ready for matching: a stable `rule_id` (as
+/// recorded in the rule registry) plus its already-compiled `Regex`.
+/// Compiling up front means a malformed pattern in the registry is caught
+/// once, loudly, by the caller building this list — never silently at
+/// match time.
+#[derive(Debug)]
+pub struct CompiledRule {
+    pub rule_id: String,
+    pub regex: Regex,
+}
+
+impl CompiledRule {
+    /// Compile a `(rule_id, pattern)` pair. Errs with the rule_id in the
+    /// message so a malformed registry entry can be pinpointed (S6 — loud).
+    pub fn compile(rule_id: &str, pattern: &str) -> Result<Self, String> {
+        Regex::new(pattern)
+            .map(|regex| CompiledRule { rule_id: rule_id.to_string(), regex })
+            .map_err(|e| format!("rule '{rule_id}': pattern '{pattern}' does not compile as regex: {e}"))
+    }
+}
+
+/// Run the builtin 8 footgun rules PLUS every rule in `extra` (runtime-landed
+/// rules from the rule registry) against `cmd`. `extra` rules match via
+/// `Regex::is_match` on the RAW command — same substrate the builtin rules
+/// see. A landed rule's id lands in `rules_fired` exactly like a builtin id.
+///
+/// `analyze_command(cmd)` is `analyze_command_with(&[], cmd)` — passing an
+/// empty slice reproduces the original, unchanged behavior exactly.
+pub fn analyze_command_with(extra: &[CompiledRule], cmd: &str) -> Verdict {
     let mut fired = Vec::new();
     for (id, pred) in footgun_rules() {
         if pred(cmd) {
             fired.push(id.to_string());
+        }
+    }
+    for rule in extra {
+        if rule.regex.is_match(cmd) {
+            fired.push(rule.rule_id.clone());
         }
     }
     let predicted = if fired.is_empty() {
@@ -609,6 +651,55 @@ verifications = [{ intent = "it really works" }]
 "#;
         let gates = extract_gates_from_spec(src).unwrap();
         assert!(gates.is_empty());
+    }
+
+    // -- rule_registry merge (P2 applier deliverable 2) ----------------------
+
+    #[test]
+    fn rule_registry_analyze_command_with_empty_extra_matches_analyze_command() {
+        // Byte-for-byte unchanged builtin behavior when extra is empty.
+        let cmds = [
+            "cargo test 2>/dev/null && grep -q -v ERROR /tmp/log",
+            "test -f Cargo.toml",
+            "ls | wc -l | grep -q \"^14$\"",
+        ];
+        for cmd in cmds {
+            let a = analyze_command(cmd);
+            let b = analyze_command_with(&[], cmd);
+            assert_eq!(a.predicted, b.predicted);
+            assert_eq!(a.rules_fired, b.rules_fired);
+            assert_eq!(a.content_hash, b.content_hash);
+        }
+    }
+
+    #[test]
+    fn rule_registry_analyze_command_with_fires_landed_rule() {
+        let rule = CompiledRule::compile("wc-l-grep-no-tr", r"wc -l[^|]*\|\s*grep").unwrap();
+        let cmd = "results=$(ls -1 | wc -l | grep '^14$')";
+        // Builtin 8 alone: does not fire (this exact footgun isn't builtin).
+        let builtin_only = analyze_command(cmd);
+        assert!(!builtin_only.rules_fired.contains(&"wc-l-grep-no-tr".to_string()));
+        // Merged: the landed rule fires and is named in rules_fired.
+        let merged = analyze_command_with(&[rule], cmd);
+        assert!(matches!(merged.predicted, Prediction::Fail));
+        assert!(merged.rules_fired.contains(&"wc-l-grep-no-tr".to_string()));
+    }
+
+    #[test]
+    fn rule_registry_analyze_command_with_preserves_builtin_fires_alongside_landed() {
+        let rule = CompiledRule::compile("landed-extra", "never-matches-anything-zzz").unwrap();
+        let cmd = "cargo test 2>/dev/null";
+        let merged = analyze_command_with(&[rule], cmd);
+        assert!(merged.rules_fired.contains(&"stderr-swallow".to_string()));
+        assert!(merged.rules_fired.contains(&"path-127".to_string()));
+        assert!(!merged.rules_fired.contains(&"landed-extra".to_string()));
+    }
+
+    #[test]
+    fn rule_registry_compiled_rule_invalid_regex_is_loud_error() {
+        let err = CompiledRule::compile("bad-rule", "(unclosed[").unwrap_err();
+        assert!(err.contains("bad-rule"));
+        assert!(err.contains("does not compile as regex"));
     }
 
     #[test]
