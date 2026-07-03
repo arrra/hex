@@ -243,6 +243,17 @@ enum Commands {
         #[command(subcommand)]
         command: GatekeeperCommands,
     },
+    /// Deterministic applier — lands/escalates gatekeeper ACCEPT_FLAGGED
+    /// proposals (no LLM calls; see `hex::applier`). `run` scans the verdict
+    /// store and lands (R0) or escalates (R1 dial-gated, R2, constitution-
+    /// class) each new survivor, idempotently. `revert` flips a landed
+    /// rule's registry status (data-only, ledger outcome row). `status` is
+    /// read-only and always exits 0.
+    #[command(display_order = 14)]
+    Apply {
+        #[command(subcommand)]
+        command: ApplyCommands,
+    },
     /// Backups. Bare `hex backup` = daily sqlite snapshots (memory/telemetry/
     /// ledger DBs) with 7-day rotation under $HEX_DIR/.hex/backups/YYYY-MM-DD/
     /// (hex-backup cron, 04:00). `hex backup offsite` = encrypted off-site
@@ -325,6 +336,80 @@ enum GitGuardCommands {
         /// Hook args the shim forwards (remote name, remote URL) — unused.
         #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
         args: Vec<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum ApplyCommands {
+    /// Scan the verdict store for ACCEPT_FLAGGED survivors and land (R0) or
+    /// escalate (R1 below dial threshold, R2, constitution-class refusal,
+    /// missing/unparseable proposal file) each new one. Idempotent: a
+    /// proposal id already landed (registry), already escalated
+    /// (escalations dir), or already recorded in the ledger is skipped —
+    /// reruns against unchanged input are no-ops.
+    Run {
+        /// Verdict store dir. Defaults to
+        /// `$HEX_DIR/projects/agent-infra/gates/verdicts`.
+        #[arg(long)]
+        store: Option<std::path::PathBuf>,
+        /// Rule registry JSON. Defaults to
+        /// `$HEX_DIR/projects/agent-infra/gates/landed-rules.json`.
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+        /// Ledger sqlite db. Defaults to `$HEX_DIR/.hex/ledger/ledger.db`.
+        #[arg(long)]
+        ledger: Option<std::path::PathBuf>,
+        /// Escalation evidence markdown dir. Defaults to
+        /// `$HEX_DIR/projects/agent-infra/escalations`.
+        #[arg(long)]
+        escalations: Option<std::path::PathBuf>,
+        /// Proposal markdown dir. Not in the spec's literal CLI signature —
+        /// added because the verdict store JSON carries no `pattern` field
+        /// (only the proposal file's `toml proposal` block does). Defaults
+        /// to `$HEX_DIR/projects/agent-infra/proposals`.
+        #[arg(long)]
+        proposals: Option<std::path::PathBuf>,
+    },
+    /// Flip a landed rule's registry status to reverted (entry preserved,
+    /// never deleted) and append a `proposal.land` outcome row with
+    /// `success=false`. Data-only — does not touch the shadow linter
+    /// directly; the next `lint-gates` invocation reloads the registry.
+    Revert {
+        /// The `rule_id` to revert.
+        rule_id: String,
+        /// Why this rule is being reverted (recorded in the registry + ledger).
+        #[arg(long)]
+        why: String,
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+        #[arg(long)]
+        ledger: Option<std::path::PathBuf>,
+    },
+    /// Read-only: registry entries + pending ACCEPT_FLAGGED verdicts +
+    /// escalations on disk. Always exits 0.
+    Status {
+        #[arg(long)]
+        store: Option<std::path::PathBuf>,
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+        #[arg(long)]
+        ledger: Option<std::path::PathBuf>,
+        #[arg(long)]
+        escalations: Option<std::path::PathBuf>,
+    },
+    /// The outcome watchdog: for each ACTIVE landed rule, compute wild stats
+    /// (the same `hex ledger wild` join, reused not duplicated) and
+    /// auto-revert on strong evidence of harm, or score a one-time success
+    /// outcome on strong evidence of benefit. Insufficient evidence writes
+    /// no row. Idempotent across repeated invocations (e.g. the daily cron).
+    Watch {
+        /// Rule registry JSON. Defaults to
+        /// `$HEX_DIR/projects/agent-infra/gates/landed-rules.json`.
+        #[arg(long)]
+        registry: Option<std::path::PathBuf>,
+        /// Ledger sqlite db. Defaults to `$HEX_DIR/.hex/ledger/ledger.db`.
+        #[arg(long)]
+        ledger: Option<std::path::PathBuf>,
     },
 }
 
@@ -1328,8 +1413,37 @@ fn main() {
                     std::process::exit(1);
                 }
             };
+            // Merge in the runtime rule registry (P2 applier deliverable 2):
+            // missing file => no extra rules (registry defaults empty); a
+            // malformed registry or an invalid regex inside it is a loud
+            // hard error — never silently skipped (S6).
+            let registry_path = hex::rule_registry::default_path(&hex_dir);
+            let registry = match hex::rule_registry::load(&registry_path) {
+                Ok(r) => r,
+                Err(e) => {
+                    eprintln!("hex lint-gates: rule registry load failed: {e}");
+                    std::process::exit(1);
+                }
+            };
+            let mut extra_rules = Vec::new();
+            for entry in registry.active_entries() {
+                match hex::lint_gates::CompiledRule::compile(&entry.rule_id, &entry.pattern) {
+                    Ok(rule) => extra_rules.push(rule),
+                    Err(e) => {
+                        eprintln!(
+                            "hex lint-gates: rule registry {}: {e}",
+                            registry_path.display()
+                        );
+                        std::process::exit(1);
+                    }
+                }
+            }
+            let mut flagged = 0usize;
             for gate in &gates {
-                let v = hex::lint_gates::analyze_command(gate);
+                let v = hex::lint_gates::analyze_command_with(&extra_rules, gate);
+                if matches!(v.predicted, hex::lint_gates::Prediction::Fail) {
+                    flagged += 1;
+                }
                 let predicted = match v.predicted {
                     hex::lint_gates::Prediction::Pass => "pass",
                     hex::lint_gates::Prediction::Fail => "fail",
@@ -1349,7 +1463,15 @@ fn main() {
                     std::process::exit(1);
                 }
             }
-            println!("{}", hex::lint_gates::shadow_summary(&gates));
+            // Summary line reflects the SAME merged analysis used for the
+            // ledger rows above (builtin 8 + active registry rules), not
+            // `hex::lint_gates::shadow_summary`'s builtin-only count — the
+            // two must never disagree on what fired.
+            println!(
+                "{} gates, {} flagged, shadow mode — predictions logged silently",
+                gates.len(),
+                flagged
+            );
             std::process::exit(0);
         }
         Commands::Dial { agent, action_class, min_n, irreversible } => {
@@ -1415,6 +1537,181 @@ fn main() {
                 std::process::exit(hex::gatekeeper::cli_probe(&store, &hex_dir));
             }
         },
+        Commands::Apply { command } => {
+            let hex_dir = get_hex_dir();
+            match command {
+                ApplyCommands::Run {
+                    store,
+                    registry,
+                    ledger,
+                    escalations,
+                    proposals,
+                } => {
+                    let mut paths = hex::applier::ApplyPaths::defaults(&hex_dir);
+                    if let Some(p) = store {
+                        paths.store = p;
+                    }
+                    if let Some(p) = registry {
+                        paths.registry = p;
+                    }
+                    if let Some(p) = ledger {
+                        paths.ledger = p;
+                    }
+                    if let Some(p) = escalations {
+                        paths.escalations = p;
+                    }
+                    if let Some(p) = proposals {
+                        paths.proposals = p;
+                    }
+                    match hex::applier::run(&paths) {
+                        Ok(report) => {
+                            for id in &report.landed {
+                                println!("landed: {id}");
+                            }
+                            for id in &report.escalated {
+                                println!("escalated: {id}");
+                            }
+                            for id in &report.skipped {
+                                println!("skipped (already processed): {id}");
+                            }
+                            for id in &report.rejected {
+                                eprintln!(
+                                    "REJECTED (malformed proposal_id — path-traversal defense): {id}"
+                                );
+                            }
+                            if report.is_noop() {
+                                println!(
+                                    "hex apply run: no-op — {} skipped, nothing new to land or escalate",
+                                    report.skipped.len()
+                                );
+                            } else {
+                                println!(
+                                    "hex apply run: {} landed, {} escalated, {} skipped, {} rejected",
+                                    report.landed.len(),
+                                    report.escalated.len(),
+                                    report.skipped.len(),
+                                    report.rejected.len()
+                                );
+                            }
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("hex apply run: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                ApplyCommands::Revert {
+                    rule_id,
+                    why,
+                    registry,
+                    ledger,
+                } => {
+                    let mut paths = hex::applier::ApplyPaths::defaults(&hex_dir);
+                    if let Some(p) = registry {
+                        paths.registry = p;
+                    }
+                    if let Some(p) = ledger {
+                        paths.ledger = p;
+                    }
+                    match hex::applier::revert(&paths, &rule_id, &why) {
+                        Ok(()) => {
+                            println!("reverted: {rule_id} ({why})");
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("hex apply revert: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                ApplyCommands::Status {
+                    store,
+                    registry,
+                    ledger,
+                    escalations,
+                } => {
+                    let mut paths = hex::applier::ApplyPaths::defaults(&hex_dir);
+                    if let Some(p) = store {
+                        paths.store = p;
+                    }
+                    if let Some(p) = registry {
+                        paths.registry = p;
+                    }
+                    if let Some(p) = ledger {
+                        paths.ledger = p;
+                    }
+                    if let Some(p) = escalations {
+                        paths.escalations = p;
+                    }
+                    match hex::applier::status(&paths) {
+                        Ok(st) => {
+                            println!("Registry entries ({}):", st.registry_entries.len());
+                            for e in &st.registry_entries {
+                                println!(
+                                    "  {:<10} {:<24} proposal={:<20} landed={}",
+                                    format!("{:?}", e.status).to_lowercase(),
+                                    e.rule_id,
+                                    e.proposal_id,
+                                    e.landed_ts
+                                );
+                            }
+                            println!("Pending ACCEPT_FLAGGED ({}):", st.pending.len());
+                            for id in &st.pending {
+                                println!("  {id}");
+                            }
+                            println!("Escalations ({}):", st.escalations.len());
+                            for id in &st.escalations {
+                                println!("  {id}");
+                            }
+                            // Read-only; always exit 0 per contract.
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("hex apply status: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+                ApplyCommands::Watch { registry, ledger } => {
+                    let mut paths = hex::applier::ApplyPaths::defaults(&hex_dir);
+                    if let Some(p) = registry {
+                        paths.registry = p;
+                    }
+                    if let Some(p) = ledger {
+                        paths.ledger = p;
+                    }
+                    match hex::applier::watch(&paths) {
+                        Ok(report) => {
+                            for id in &report.reverted {
+                                println!("auto-reverted: {id}");
+                            }
+                            for id in &report.scored_success {
+                                println!("scored success: {id}");
+                            }
+                            for id in &report.already_scored {
+                                println!("already scored (skipped): {id}");
+                            }
+                            for id in &report.insufficient_evidence {
+                                println!("insufficient evidence: {id}");
+                            }
+                            println!(
+                                "hex apply watch: {} reverted, {} scored, {} already-scored, {} insufficient",
+                                report.reverted.len(),
+                                report.scored_success.len(),
+                                report.already_scored.len(),
+                                report.insufficient_evidence.len()
+                            );
+                            std::process::exit(0);
+                        }
+                        Err(e) => {
+                            eprintln!("hex apply watch: {e}");
+                            std::process::exit(1);
+                        }
+                    }
+                }
+            }
+        }
         Commands::Release { command } => match command {
             ReleaseCommands::Cut {
                 level,
