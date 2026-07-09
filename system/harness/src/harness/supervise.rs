@@ -1,13 +1,13 @@
 //! harness::supervise — keep `com.hex.harness` alive across release/upgrade bounces.
 //!
 //! Background. The harness is a single launchd gui-agent (`com.hex.harness`) hosting the
-//! in-process iii engine plus every worker (headroom proxy :8787, console :3113, …). A
+//! in-process iii engine plus every worker (console :3113, writing-app :7777, …). A
 //! `hex upgrade` / `hex harness restart` bounces it; if the restart does not complete, the
 //! launchd job is left BOOTED OUT of the domain and nothing brings it back — launchd
 //! `KeepAlive` cannot act on a job that is not in the domain, and an in-harness worker is
 //! dead too. Incident 2026-06-12: the v0.42.0 upgrade bounced it, the restart did not
-//! finish, and the harness sat dead ~3h → every `hex-new` session got connection-refused
-//! (the headroom proxy is a child of the dead harness). See
+//! finish, and the harness sat dead ~3h → every session that depended on a supervised
+//! daemon got connection-refused (those daemons are children of the dead harness). See
 //! `me/decisions/harness-down-after-release-incident-2026-06-12.md`.
 //!
 //! Two mechanisms live here:

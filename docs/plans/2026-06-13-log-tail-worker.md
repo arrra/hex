@@ -1,3 +1,8 @@
+> **SUPERSEDED 2026-07-09 — `hex log-tail` and the headroom observer were deleted along with
+> headroom itself (0 measured token savings over 26 days; the observer registry had exactly one
+> entry, so nothing remained to tail). Retained for history.** See
+> `me/decisions/headroom-removal-2026-07-08.md` in the hex instance.
+
 # Plan: Reusable event-driven log-tail worker (`hex log-tail`)
 
 **Date:** 2026-06-13
