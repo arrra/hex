@@ -78,6 +78,129 @@ struct OutcomeRec {
     event_ts: i64,
 }
 
+/// Load every `reconciler`/`outcome` ledger row, keeping — per `gate_hash` —
+/// the record with the LATEST wild event time (`first_started_at`, falling
+/// back to row `ts` with a loud stderr warning when unparseable). Shared by
+/// [`wild_report`] (the `hex ledger wild` join) AND [`rule_wild_stats`] (the
+/// P2 applier watchdog's per-rule join) — ONE join implementation, per the
+/// P2 applier spec's "reuse/extract, don't duplicate" instruction. Returns
+/// the map plus a count of malformed rows skipped (loud via eprintln, never
+/// silent — S6).
+fn load_outcomes(conn: &Connection) -> Result<(BTreeMap<String, OutcomeRec>, usize), String> {
+    let mut malformed = 0usize;
+    let mut outcomes: BTreeMap<String, OutcomeRec> = BTreeMap::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, ts, payload FROM ledger \
+             WHERE agent='reconciler' AND kind='outcome' ORDER BY id ASC",
+        )
+        .map_err(|e| format!("prepare outcomes: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, i64>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, String>(2)?,
+            ))
+        })
+        .map_err(|e| format!("query outcomes: {e}"))?;
+    for row in rows {
+        let (id, row_ts, payload) = row.map_err(|e| format!("outcome row: {e}"))?;
+        let v: serde_json::Value = match serde_json::from_str(&payload) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "hex ledger wild: outcome row id={id} unparseable payload ({e}) — skipped"
+                );
+                malformed += 1;
+                continue;
+            }
+        };
+        let (Some(gate_hash), Some(success)) = (v["gate_hash"].as_str(), v["success"].as_bool())
+        else {
+            eprintln!("hex ledger wild: outcome row id={id} missing gate_hash/success — skipped");
+            malformed += 1;
+            continue;
+        };
+        let event_ts = match v["first_started_at"]
+            .as_str()
+            .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
+        {
+            Some(dt) => dt.timestamp(),
+            None => {
+                eprintln!(
+                    "hex ledger wild: outcome row id={id} has no parseable first_started_at — using row ts"
+                );
+                row_ts
+            }
+        };
+        let rec = OutcomeRec {
+            command: v["command"].as_str().unwrap_or("").to_string(),
+            success,
+            final_exit_code: v["final_exit_code"].as_i64().unwrap_or(-1),
+            spec_id: v["spec_id"].as_str().unwrap_or("").to_string(),
+            event_ts,
+        };
+        match outcomes.get(gate_hash) {
+            Some(prev) if prev.event_ts >= rec.event_ts => {}
+            _ => {
+                outcomes.insert(gate_hash.to_string(), rec);
+            }
+        }
+    }
+    Ok((outcomes, malformed))
+}
+
+/// Load every `lint-gates`/`intent` ledger row, keeping — per `gate_hash` —
+/// the LATEST prediction (`ORDER BY id ASC` + plain insert ⇒ last write
+/// wins). Shared by [`wild_report`] and [`rule_wild_stats`] — see
+/// [`load_outcomes`] doc for why this is extracted rather than duplicated.
+fn load_intents(
+    conn: &Connection,
+) -> Result<(BTreeMap<String, (String, Vec<String>)>, usize), String> {
+    let mut malformed = 0usize;
+    let mut intents: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+    let mut stmt = conn
+        .prepare(
+            "SELECT id, payload FROM ledger \
+             WHERE agent='lint-gates' AND kind='intent' ORDER BY id ASC",
+        )
+        .map_err(|e| format!("prepare intents: {e}"))?;
+    let rows = stmt
+        .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
+        .map_err(|e| format!("query intents: {e}"))?;
+    for row in rows {
+        let (id, payload) = row.map_err(|e| format!("intent row: {e}"))?;
+        let v: serde_json::Value = match serde_json::from_str(&payload) {
+            Ok(v) => v,
+            Err(e) => {
+                eprintln!(
+                    "hex ledger wild: intent row id={id} unparseable payload ({e}) — skipped"
+                );
+                malformed += 1;
+                continue;
+            }
+        };
+        let (Some(gate_hash), Some(predicted)) = (v["gate_hash"].as_str(), v["predicted"].as_str())
+        else {
+            eprintln!("hex ledger wild: intent row id={id} missing gate_hash/predicted — skipped");
+            malformed += 1;
+            continue;
+        };
+        let rules = v["rules_fired"]
+            .as_array()
+            .map(|a| {
+                a.iter()
+                    .filter_map(|x| x.as_str().map(String::from))
+                    .collect::<Vec<_>>()
+            })
+            .unwrap_or_default();
+        // ORDER BY id ASC + plain insert ⇒ the latest row wins.
+        intents.insert(gate_hash.to_string(), (predicted.to_string(), rules));
+    }
+    Ok((intents, malformed))
+}
+
 /// Build the wild report. `since_epoch` (already parsed by the CLI) filters
 /// on outcome EVENT time; intents are never filtered — an old prediction
 /// still pairs with a newer outcome of the same gate.
@@ -89,68 +212,8 @@ pub fn wild_report(
     let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
         .map_err(|e| format!("open {} read-only: {e}", db.display()))?;
 
-    let mut malformed = 0usize;
-
     // --- outcomes: per gate_hash keep the latest wild event -----------------
-    let mut outcomes: BTreeMap<String, OutcomeRec> = BTreeMap::new();
-    {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, ts, payload FROM ledger \
-                 WHERE agent='reconciler' AND kind='outcome' ORDER BY id ASC",
-            )
-            .map_err(|e| format!("prepare outcomes: {e}"))?;
-        let rows = stmt
-            .query_map([], |r| {
-                Ok((r.get::<_, i64>(0)?, r.get::<_, i64>(1)?, r.get::<_, String>(2)?))
-            })
-            .map_err(|e| format!("query outcomes: {e}"))?;
-        for row in rows {
-            let (id, row_ts, payload) = row.map_err(|e| format!("outcome row: {e}"))?;
-            let v: serde_json::Value = match serde_json::from_str(&payload) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("hex ledger wild: outcome row id={id} unparseable payload ({e}) — skipped");
-                    malformed += 1;
-                    continue;
-                }
-            };
-            let (Some(gate_hash), Some(success)) =
-                (v["gate_hash"].as_str(), v["success"].as_bool())
-            else {
-                eprintln!(
-                    "hex ledger wild: outcome row id={id} missing gate_hash/success — skipped"
-                );
-                malformed += 1;
-                continue;
-            };
-            let event_ts = match v["first_started_at"]
-                .as_str()
-                .and_then(|s| chrono::DateTime::parse_from_rfc3339(s).ok())
-            {
-                Some(dt) => dt.timestamp(),
-                None => {
-                    eprintln!(
-                        "hex ledger wild: outcome row id={id} has no parseable first_started_at — using row ts"
-                    );
-                    row_ts
-                }
-            };
-            let rec = OutcomeRec {
-                command: v["command"].as_str().unwrap_or("").to_string(),
-                success,
-                final_exit_code: v["final_exit_code"].as_i64().unwrap_or(-1),
-                spec_id: v["spec_id"].as_str().unwrap_or("").to_string(),
-                event_ts,
-            };
-            match outcomes.get(gate_hash) {
-                Some(prev) if prev.event_ts >= rec.event_ts => {}
-                _ => {
-                    outcomes.insert(gate_hash.to_string(), rec);
-                }
-            }
-        }
-    }
+    let (mut outcomes, outcomes_malformed) = load_outcomes(&conn)?;
 
     // --- since filter on the kept (latest) event per gate -------------------
     if let Some(since) = since_epoch {
@@ -158,48 +221,8 @@ pub fn wild_report(
     }
 
     // --- intents: per gate_hash keep the latest prediction ------------------
-    let mut intents: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
-    {
-        let mut stmt = conn
-            .prepare(
-                "SELECT id, payload FROM ledger \
-                 WHERE agent='lint-gates' AND kind='intent' ORDER BY id ASC",
-            )
-            .map_err(|e| format!("prepare intents: {e}"))?;
-        let rows = stmt
-            .query_map([], |r| Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?)))
-            .map_err(|e| format!("query intents: {e}"))?;
-        for row in rows {
-            let (id, payload) = row.map_err(|e| format!("intent row: {e}"))?;
-            let v: serde_json::Value = match serde_json::from_str(&payload) {
-                Ok(v) => v,
-                Err(e) => {
-                    eprintln!("hex ledger wild: intent row id={id} unparseable payload ({e}) — skipped");
-                    malformed += 1;
-                    continue;
-                }
-            };
-            let (Some(gate_hash), Some(predicted)) =
-                (v["gate_hash"].as_str(), v["predicted"].as_str())
-            else {
-                eprintln!(
-                    "hex ledger wild: intent row id={id} missing gate_hash/predicted — skipped"
-                );
-                malformed += 1;
-                continue;
-            };
-            let rules = v["rules_fired"]
-                .as_array()
-                .map(|a| {
-                    a.iter()
-                        .filter_map(|x| x.as_str().map(String::from))
-                        .collect::<Vec<_>>()
-                })
-                .unwrap_or_default();
-            // ORDER BY id ASC + plain insert ⇒ the latest row wins.
-            intents.insert(gate_hash.to_string(), (predicted.to_string(), rules));
-        }
-    }
+    let (intents, intents_malformed) = load_intents(&conn)?;
+    let malformed = outcomes_malformed + intents_malformed;
 
     // --- join + classify -----------------------------------------------------
     let (mut tp, mut fp, mut fn_, mut tn) = (0i64, 0i64, 0i64, 0i64);
@@ -268,6 +291,79 @@ pub fn wild_report(
     })
 }
 
+/// Per-rule wild stats for the P2 applier watchdog (`hex apply watch`) —
+/// reuses [`load_outcomes`]/[`load_intents`], the exact join primitives
+/// behind [`wild_report`], filtered to gates whose linter intent
+/// `rules_fired` names `rule_id`.
+///
+/// - `fires`: intents (regardless of whether they joined a reconciler
+///   outcome) whose `rules_fired` contains `rule_id` — raw activity.
+/// - `joined`: the subset of `fires` with a matching reconciler outcome.
+/// - `tp`/`fp`: confusion-matrix cells over `joined` gates. Since a rule
+///   only appears in `rules_fired` when it fired, every joined gate here has
+///   `predicted == "fail"` — so only tp (fail, actually failed) and fp
+///   (fail, actually succeeded) are possible; anything else is a contract
+///   break, logged loudly and excluded (mirrors `wild_report`'s stance on
+///   unknown `predicted` vocabulary).
+/// - `precision`: `tp / (tp + fp)`; `None` when `joined == 0` (no evidence
+///   yet — the watchdog treats `None` as "insufficient", never as 0.0).
+#[derive(Debug, Clone, serde::Serialize)]
+pub struct RuleWildStats {
+    pub rule_id: String,
+    pub fires: usize,
+    pub joined: usize,
+    pub tp: i64,
+    pub fp: i64,
+    pub precision: Option<f64>,
+}
+
+/// Compute [`RuleWildStats`] for `rule_id` from the ledger at `db`.
+pub fn rule_wild_stats(db: &Path, rule_id: &str) -> Result<RuleWildStats, String> {
+    let conn = Connection::open_with_flags(db, OpenFlags::SQLITE_OPEN_READ_ONLY)
+        .map_err(|e| format!("open {} read-only: {e}", db.display()))?;
+
+    let (outcomes, _) = load_outcomes(&conn)?;
+    let (intents, _) = load_intents(&conn)?;
+
+    let mut fires = 0usize;
+    let mut joined = 0usize;
+    let (mut tp, mut fp) = (0i64, 0i64);
+    for (gate_hash, (predicted, rules_fired)) in &intents {
+        if !rules_fired.iter().any(|r| r == rule_id) {
+            continue;
+        }
+        fires += 1;
+        if let Some(rec) = outcomes.get(gate_hash) {
+            joined += 1;
+            match (predicted.as_str(), rec.success) {
+                ("fail", false) => tp += 1,
+                ("fail", true) => fp += 1,
+                (other, _) => {
+                    eprintln!(
+                        "hex apply watch: rule '{rule_id}' gate {gate_hash} has unexpected \
+                         predicted value '{other}' (expected 'fail' since the rule fired) — excluded"
+                    );
+                }
+            }
+        }
+    }
+
+    let precision = if tp + fp > 0 {
+        Some(tp as f64 / (tp + fp) as f64)
+    } else {
+        None
+    };
+
+    Ok(RuleWildStats {
+        rule_id: rule_id.to_string(),
+        fires,
+        joined,
+        tp,
+        fp,
+        precision,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -294,6 +390,15 @@ mod tests {
     fn intent(hash: &str, predicted: &str) -> serde_json::Value {
         json!({
             "gate_hash": hash, "predicted": predicted, "rules_fired": ["r1"],
+            "shadow": true, "command": format!("cmd-{hash}"),
+        })
+    }
+
+    /// Like [`intent`] but with an explicit `rules_fired` list — needed for
+    /// [`rule_wild_stats`] tests, which filter by rule id.
+    fn intent_with_rules(hash: &str, predicted: &str, rules_fired: &[&str]) -> serde_json::Value {
+        json!({
+            "gate_hash": hash, "predicted": predicted, "rules_fired": rules_fired,
             "shadow": true, "command": format!("cmd-{hash}"),
         })
     }
@@ -399,5 +504,175 @@ mod tests {
         let r = wild_report(&p, None, None).unwrap();
         assert_eq!(r.summary.distinct_gates, 1);
         assert_eq!(r.summary.malformed_skipped, 1);
+    }
+
+    // =======================================================================
+    // rule_wild_stats — the P2 applier watchdog's per-rule join (reuses the
+    // same load_outcomes/load_intents primitives as wild_report above).
+    // =======================================================================
+
+    #[test]
+    fn applier_rule_wild_stats_counts_fires_joined_and_precision() {
+        let (_d, p) = tmpdb();
+        let l = Ledger::open(&p).unwrap();
+        // Two gates fire rule "r-x": one tp, one fp. A third gate fires a
+        // DIFFERENT rule and must not be counted.
+        seed(
+            &l,
+            "lint-gates",
+            "intent",
+            intent_with_rules("g-tp", "fail", &["r-x"]),
+        );
+        seed(
+            &l,
+            "lint-gates",
+            "intent",
+            intent_with_rules("g-fp", "fail", &["r-x"]),
+        );
+        seed(
+            &l,
+            "lint-gates",
+            "intent",
+            intent_with_rules("g-other", "fail", &["r-y"]),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-tp", false, "2026-06-10T01:00:00+00:00"),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-fp", true, "2026-06-10T01:00:00+00:00"),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-other", false, "2026-06-10T01:00:00+00:00"),
+        );
+
+        let stats = rule_wild_stats(&p, "r-x").unwrap();
+        assert_eq!(stats.rule_id, "r-x");
+        assert_eq!(stats.fires, 2);
+        assert_eq!(stats.joined, 2);
+        assert_eq!(stats.tp, 1);
+        assert_eq!(stats.fp, 1);
+        assert_eq!(stats.precision, Some(0.5));
+    }
+
+    #[test]
+    fn applier_rule_wild_stats_fires_can_exceed_joined() {
+        let (_d, p) = tmpdb();
+        let l = Ledger::open(&p).unwrap();
+        // Rule fires on 3 gates but only 1 has a reconciler outcome.
+        seed(
+            &l,
+            "lint-gates",
+            "intent",
+            intent_with_rules("g-1", "fail", &["r-z"]),
+        );
+        seed(
+            &l,
+            "lint-gates",
+            "intent",
+            intent_with_rules("g-2", "fail", &["r-z"]),
+        );
+        seed(
+            &l,
+            "lint-gates",
+            "intent",
+            intent_with_rules("g-3", "fail", &["r-z"]),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-1", false, "2026-06-10T01:00:00+00:00"),
+        );
+
+        let stats = rule_wild_stats(&p, "r-z").unwrap();
+        assert_eq!(stats.fires, 3);
+        assert_eq!(stats.joined, 1);
+        assert_eq!(stats.tp, 1);
+        assert_eq!(stats.fp, 0);
+        assert_eq!(stats.precision, Some(1.0));
+    }
+
+    #[test]
+    fn applier_rule_wild_stats_precision_none_when_unjoined() {
+        let (_d, p) = tmpdb();
+        let l = Ledger::open(&p).unwrap();
+        seed(
+            &l,
+            "lint-gates",
+            "intent",
+            intent_with_rules("g-1", "fail", &["r-nofires"]),
+        );
+        // no reconciler outcome at all
+
+        let stats = rule_wild_stats(&p, "r-nofires").unwrap();
+        assert_eq!(stats.fires, 1);
+        assert_eq!(stats.joined, 0);
+        assert_eq!(stats.precision, None);
+    }
+
+    #[test]
+    fn applier_rule_wild_stats_unknown_rule_id_is_all_zero() {
+        let (_d, p) = tmpdb();
+        let l = Ledger::open(&p).unwrap();
+        seed(
+            &l,
+            "lint-gates",
+            "intent",
+            intent_with_rules("g-1", "fail", &["r-a"]),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-1", false, "2026-06-10T01:00:00+00:00"),
+        );
+
+        let stats = rule_wild_stats(&p, "r-never-landed").unwrap();
+        assert_eq!(stats.fires, 0);
+        assert_eq!(stats.joined, 0);
+        assert_eq!(stats.precision, None);
+    }
+
+    #[test]
+    fn applier_rule_wild_stats_reuses_latest_event_wins_dedup() {
+        let (_d, p) = tmpdb();
+        let l = Ledger::open(&p).unwrap();
+        seed(
+            &l,
+            "lint-gates",
+            "intent",
+            intent_with_rules("g-re", "fail", &["r-dedup"]),
+        );
+        // Same reconciler re-append pattern the base wild join dedups.
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-re", false, "2026-06-10T01:00:00+00:00"),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-re", true, "2026-06-10T05:00:00+00:00"),
+        );
+
+        let stats = rule_wild_stats(&p, "r-dedup").unwrap();
+        assert_eq!(stats.fires, 1);
+        assert_eq!(stats.joined, 1, "must dedup by gate_hash, not double count");
+        assert_eq!(stats.tp, 0);
+        assert_eq!(
+            stats.fp, 1,
+            "latest event (success=true) must win — a fp, not a tp"
+        );
     }
 }

@@ -798,7 +798,7 @@ workers:
     }
 
     /// Two `type: iii-exec` daemons with distinct semantic names BOTH append
-    /// (multi-daemon hosting — the console + headroom-proxy case). The `type`
+    /// (multi-daemon hosting — the console + example-proxy case). The `type`
     /// selects the iii-exec factory; the distinct names mean neither replaces
     /// the other, and restart/health ride along in the opaque config block.
     #[test]
@@ -813,12 +813,12 @@ workers:
     type: iii-exec
     config:
       exec: ["console --http-port 3113"]
-  - name: headroom-proxy
+  - name: example-proxy
     type: iii-exec
     config:
-      exec: ["headroom proxy --port 8787"]
+      exec: ["example-proxy --port 9999"]
       restart: { on_crash: true }
-      health: { url: "http://127.0.0.1:8787/health" }
+      health: { url: "http://127.0.0.1:9999/health" }
 "#,
         )
         .unwrap();
@@ -835,19 +835,19 @@ workers:
             "two distinct-named typed daemons both append, neither replaces"
         );
 
-        let headroom = config
+        let example = config
             .workers
             .iter()
-            .find(|e| e.name == "headroom-proxy")
-            .expect("headroom-proxy present");
+            .find(|e| e.name == "example-proxy")
+            .expect("example-proxy present");
         assert_eq!(
-            headroom.worker_type(),
+            example.worker_type(),
             "iii-exec",
             "type selects the iii-exec factory while name stays semantic"
         );
         assert!(
             config.workers.iter().any(|e| e.name == "console"),
-            "console present alongside headroom-proxy"
+            "console present alongside example-proxy"
         );
     }
 

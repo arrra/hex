@@ -7,7 +7,7 @@
 name = "hex-harness"
 # Source of truth for hex version. Bumped by `hex release cut`; build.rs
 # injects this via env!("CARGO_PKG_VERSION") at compile time.
-version = "0.46.0"
+version = "0.47.0"
 edition = "2021"
 
 # Keep the lib + bin named `hex` even though the package is `hex-harness`.
@@ -35,10 +35,6 @@ sha2 = "0.10"
 fs2 = "0.4"
 rusqlite = { version = "0.31", features = ["bundled-full"] }
 regex = "1"
-# Cross-platform filesystem watcher (FSEvents/inotify/kqueue) for the event-driven
-# `hex log-tail` daemon — already present transitively (8.x via the iii engine), so
-# promoting it to a direct dep pulls no new version.
-notify = "8"
 sqlite-vec = "0.1"
 # Tree-trim attempted (2026-05-21): `default-features = false, features = ["ort-download-binaries"]`
 # broke the build — `TextEmbedding::try_new` is only available with default features enabled
@@ -65,13 +61,13 @@ tower = "0.4"
 # rev (0.19.0-next.2). The engine crate `iii` (added in a later step) path-depends
 # on this same iii-sdk inside the fork, so cargo unifies them to ONE version — no
 # 0.18/0.19 split. Bump all iii deps together (see iii-versions-in-lockstep decision).
-iii-sdk = { git = "https://github.com/mrap/hex-iii", rev = "eaa0f33b0871dab724cd6521551090d609f4c7b8" }
+iii-sdk = { git = "https://github.com/mrap/hex-iii", rev = "893e3614b78ec17e0469700afd8ff7e271d6234a" }
 # The iii engine, baked in. Crate is named `iii` in the fork (engine/); imported
 # as `iii_engine` for clarity at the callsite. default-features=false drops the
 # rabbitmq/lapin queue adapter (the file-based builtin queue path doesn't need
 # it). Same rev as iii-sdk above — lockstep, so the engine's path-dep iii-sdk and
 # ours resolve to ONE version. Provides EngineBuilder for the in-process harness.
-iii_engine = { package = "iii", git = "https://github.com/mrap/hex-iii", rev = "eaa0f33b0871dab724cd6521551090d609f4c7b8", default-features = false }
+iii_engine = { package = "iii", git = "https://github.com/mrap/hex-iii", rev = "893e3614b78ec17e0469700afd8ff7e271d6234a", default-features = false }
 libc = "0.2"
 # Cross-platform per-user background service manager (launchd gui-domain
 # LaunchAgent on macOS, systemd --user on Linux). Owns the install/start/stop/

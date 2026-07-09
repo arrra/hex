@@ -148,6 +148,28 @@ mod tests {
     }
 
     #[test]
+    fn applier_worker_registers_daily_run_and_watch_crons() {
+        let reg = registry();
+        let ap = reg
+            .iter()
+            .find(|w| w.name == "hex-applier")
+            .expect("hex-applier present");
+        let exprs = cron_exprs(ap);
+        assert!(
+            exprs.iter().any(|e| e == hex_modules::applier::CRON_RUN),
+            "hex-applier must register its 05:00 UTC run cron, got: {:?}",
+            exprs
+        );
+        assert!(
+            exprs.iter().any(|e| e == hex_modules::applier::CRON_WATCH),
+            "hex-applier must register its 05:10 UTC watch cron, got: {:?}",
+            exprs
+        );
+        assert_eq!(hex_modules::applier::ARGV_RUN, &["hex", "apply", "run"]);
+        assert_eq!(hex_modules::applier::ARGV_WATCH, &["hex", "apply", "watch"]);
+    }
+
+    #[test]
     fn registry_includes_generated_module_registry() {
         // The generated module_registry() is a source of workers in registry().
         let gen = hex_modules::module_registry();
