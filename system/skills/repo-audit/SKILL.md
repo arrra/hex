@@ -82,6 +82,16 @@ This separates a useful audit from a plausible-sounding one. For every Critical 
 
 Report attrition: "N candidates → M confirmed, K downgraded, J retracted."
 
+Two attack classes to check explicitly:
+- **By-design is not a finding.** Standard platform conventions reported as bugs or
+  vulnerabilities (honoring `https_proxy`, reading `~/.netrc`, a local dev tool shelling out
+  to configured package managers) — flag only when the *implementation* adds risk beyond the
+  convention itself.
+- **Already rejected.** If a prior audit report exists for this repo, read its rejected/
+  retracted ledger FIRST and don't re-litigate entries unless the code changed. Likewise,
+  record this audit's retractions and do-NOT-fix entries with one-line reasons so the next
+  audit (human or agent) doesn't re-discover them.
+
 ### Phase 3 — Strategy
 
 1. Name the 2–4 root themes explaining most confirmed findings (repos have a few systemic causes, not 30 independent problems).
@@ -93,6 +103,14 @@ Report attrition: "N candidates → M confirmed, K downgraded, J retracted."
 
 Tasks an engineer or coding agent could pick up cold:
 - Each task: title, one-paragraph description, files affected, acceptance criteria (verifiable, ideally a command), effort (S <2h / M half-day / L 1–2 days / XL needs breakdown), risk of the change itself, dependencies.
+- **Order by leverage** = impact ÷ effort, discounted by confidence (FACT > JUDGMENT) and by
+  the fix's own risk. Tiebreakers: anything that unblocks other tasks floats up (verification
+  baseline, characterization tests — M0 encodes this); HIGH-confidence security floats above
+  equivalent-leverage non-security; prefer tasks whose fix has a clean verification story —
+  executors (human or agent) succeed at those.
+- **Unverified findings get investigate-tasks, not fix-tasks.** A JUDGMENT or smell that
+  survived Phase 2 without empirical confirmation becomes "investigate X, confirm or retract"
+  — never a speculative code change.
 - Milestones: M0 safety net (tests/CI needed before refactoring safely) → M1 correctness & security → M2 leverage (makes future work cheaper) → M3 polish.
 - Quick wins (high impact, S effort) listed separately.
 - Top 3 tasks: brief implementation sketch (approach, key steps, gotchas).

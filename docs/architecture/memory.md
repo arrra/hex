@@ -1,5 +1,5 @@
 <!--
-verified-against: 3c8f6b14 (2026-06-11)
+verified-against: 2c3250d1 (2026-06-11)
 source-paths: system/harness/src/memory/, system/harness/src/consolidate.rs, system/harness/src/hook/capture.rs, system/harness/src/hook/user_prompt_submit.rs, system/harness/src/modules/memory_maintenance.worker.rs, system/harness/src/modules/backup.worker.rs
 -->
 # Memory Pipeline Architecture
@@ -128,7 +128,7 @@ persisting until the file changes.
 | Layer | Runs in | What it does |
 |---|---|---|
 | L1 structural | quick + full | Deterministic workspace lint (`doctor/consolidate.rs`): broken links, orphan projects, evolution files, **audit-artifact freshness** (48h window on `evolution/consolidation-audit-*.md` — an L1 check, *not* a registered `hex doctor` check). Writes `evolution/consolidation-latest.log`. |
-| L2 memory DB | quick + full | Transcript backstop (above) first, then the standard op list — incl. catch-up distill (files untouched >1 day re-scanned via `last_distilled_at`) and **prune**: facts with `access_count = 0` older than 60 days are tombstoned. ⚠️ Nothing currently increments `access_count`, so 60-day expiry is effectively universal for non-exempt facts — factor this into any retention reasoning. Stamps `metadata.last_consolidated` on completion. |
+| L2 memory DB | quick + full | Transcript backstop (above) first, then the standard op list — incl. catch-up distill (files untouched >1 day re-scanned via `last_distilled_at`). **prune is PAUSED** (Mike, 2026-06-11): it tombstoned facts with `access_count = 0` older than 60 days (exempting `subject='user'` and `predicate='decided'`), but nothing increments `access_count`, so expiry was effectively universal for non-exempt facts. Re-enables only after recall/search bump the counter (FIX-013). Stamps `metadata.last_consolidated` on completion. |
 | L2.5 learnings promotion | quick + full | Scans `me/learnings.md` + `raw/reflections/` for recurring clusters → writes promotion candidates to `evolution/suggestions.md`. State in `evolution/.pending-promotions.json` (deleting it causes duplicate re-suggestions). |
 | L3 operating-model audit | **full only** | LLM audit of CLAUDE.md + learnings (provider profile `consolidate_audit`); writes `evolution/consolidation-audit-YYYY-MM-DD.md` + appends `consolidation-log-YYYY-MM-DD.md`. Findings-only — never edits sources. Failure exits 1 without undoing L1/L2. |
 
