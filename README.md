@@ -62,7 +62,7 @@ Companion systems installed alongside:
 ### Auto-configured by install.sh
 
 - **Claude Code hooks** — `install.sh` writes `PreToolUse`, `PostToolUse`, `Stop`, and `SessionStart` hooks into `.claude/settings.json` automatically. No manual hook setup required.
-- **Shell completions** — `install.sh` and `upgrade.sh` automatically install shell completions for your current shell (zsh, bash, or fish) after the binary is in place. Idempotent: re-running produces no diff. See [Shell completions](#shell-completions) for manual setup or bespoke paths.
+- **Shell completions** — `install.sh` (and `hex upgrade` on re-run) automatically install shell completions for your current shell (zsh, bash, or fish) after the binary is in place. Idempotent: re-running produces no diff. See [Shell completions](#shell-completions) for manual setup or bespoke paths.
 - **C3 observability scripts** — baseline instrumentation scripts (`c3-mirror-sink`, `c3-audit-completeness`, `c3-ttd-tracker`, `c3-orphan-scan`, `c3-quiet-failure-snapshot`) that track wake completion ratios, time-to-detect for quiet failures, orphaned audit records, and drain `action_log` to a queryable JSONL mirror. SQL migrations at `system/telemetry/migrations/` define the C3 VIEWs.
 
 ---
@@ -96,13 +96,11 @@ These are Claude Code slash commands, not shell CLIs. Use them inside a `claude`
 
 | Command | What it does |
 |---------|--------------|
-| `/hex-debrief` | Weekly walk-through of projects, org signals, relationships, career. |
 | `/hex-decide` | Structured decision framework — context, options, reasoning, impact. |
-| `/hex-triage` | Route untriaged content from `raw/` to the right files. |
 | `/hex-doctor` | Health check. 20-point validation across env, memory, structure, config, and companions. Use `--fix` to repair auto-fixable issues, `--json` for machine-readable output. For the unified consolidate pass (structural + memory DB + optional LLM operating-model audit), use `hex memory consolidate quick` or `hex memory consolidate full`. |
 | `/hex-upgrade` | Pull latest system files from hex-foundation. Runs doctor after. |
 
-> Session-lifecycle commands (startup, checkpoint, shutdown, reflect, save) were removed — hex is sessionless and event-driven. Pre-demolition agent-fleet skills no longer ship.
+The commands that ship live in `system/commands/` (currently `hex-decide`, `hex-doctor`, `hex-upgrade`). Session-lifecycle commands (`hex-debrief`, `hex-triage`, startup, checkpoint, shutdown, reflect, save) are not shipped — hex is sessionless and event-driven, and the pre-demolition agent-fleet skills no longer ship.
 
 ---
 
@@ -111,14 +109,14 @@ These are Claude Code slash commands, not shell CLIs. Use them inside a `claude`
 Inside your hex instance directory:
 
 ```bash
-bash .hex/scripts/upgrade.sh
+hex upgrade         # in-place upgrade
+hex doctor          # post-upgrade health check
 ```
 
-Options:
+Common `hex upgrade` flags:
 
-- `--dry-run` — show what would change
+- `--dry-run` — show what would change without writing
 - `--local PATH` — use a local hex-foundation checkout instead of fetching
-- `--skip-boi` / `--skip-events` — skip a companion
 
 What it does:
 
@@ -128,9 +126,8 @@ What it does:
 4. Deletion pass: removes files no longer present in foundation (backed up before deletion)
 5. Rebuilds the `hex` binary if the Cargo.toml version changed; verifies the installed binary matches
 6. Merges `CLAUDE.md`: system zone replaced, user zone preserved
-7. Runs `doctor.sh`
 
-Your data (`me/`, `projects/`, `people/`, `evolution/`, `landings/`, `raw/`, `todo.md`) is never touched.
+Your data (`me/`, `projects/`, `people/`, `evolution/`, `landings/`, `raw/`, `todo.md`) is never touched. Run `hex doctor` afterward for the post-upgrade health check.
 
 You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 
@@ -267,11 +264,11 @@ hex-foundation/
 │   │   ├── src/doctor.rs   DoctorCheck trait + checks
 │   │   ├── src/upgrade.rs  upgrade pipeline
 │   │   └── build.rs        injects git SHA; Cargo.toml is version source
-│   ├── scripts/         startup.sh, doctor.sh, upgrade.sh, ...
+│   ├── scripts/         env.sh, hex-integration, hex-integration-check.sh
 │   ├── commands/        → copied to ~/hex/.claude/commands/ (Claude Code) and ~/hex/.hex/commands/
-│   ├── skills/          memory/, landings, hex-decide,
-│   │                    hex-debrief, hex-event,
-│   │                    remodeling, conjecture-criticism, vibe-to-prod
+│   ├── skills/          memory/, landings, hex-decide, hex-doctor, hex-upgrade,
+│   │                    boi-delegation, conjecture-criticism, repo-audit,
+│   │                    repo-docs, vibe-to-prod
 │   └── reference/       core-agents/ — agent charters
 ├── templates/           Seeds for CLAUDE.md, AGENTS.md, me.md, todo.md, decision-template.md
 ├── docs/architecture.md System overview
@@ -359,9 +356,9 @@ v0.15.0: **Harness messaging + binary resolution fix.**
 - **Agent messaging deadlock fixed**: `cli_send()` now writes to per-agent JSONL inbox (`.hex/messages/{agent}.jsonl`). Prior behavior wrote only to `messages.json`, which the harness wake cycle doesn't read — messages were silently dropped.
 - **Daemon binary resolution**: `claude::invoke()` resolves the binary via `$CLAUDE_BIN` env var, then `$HOME/.local/bin/claude`, then PATH. Fixes "No such file or directory" on LaunchAgent/daemon wakes where `~/.local/bin` is not in PATH.
 
-v0.14.0: **Slack/cc-connect deprecation + upgrade.sh cleanup.**
+v0.14.0: **Slack/cc-connect deprecation + upgrade pipeline cleanup.**
 - **Slack/cc-connect fully removed**: hex no longer requires or references Slack. Removed `--slack` flag from `hex-vitals.py`, Slack posting code (~155 LOC), dead `check-slack-alert-roundtrip` module from doctor, `/api/messages` Slack-fetch endpoint from pulse dashboard, and `slack` surface from `telemetry-ratio.py`. `slack-bot.sh` and `secrets-pipeline.sh` archived.
-- **upgrade.sh simplified**: dropped legacy standalone install paths.
+- **Upgrade pipeline simplified**: the legacy standalone shell upgrader was retired in favor of the Rust `hex upgrade` subcommand; legacy standalone install paths dropped.
 
 v0.13.3 fixes: **Health scripts + messaging.receive + wake crash-recovery.**
 - **New health scripts**: `check-vector-search.sh` verifies sqlite-vec is loadable and memory.db has vectors.
