@@ -15,23 +15,30 @@ LaunchAgents, and **telemetry**.
 > `persistent-processes-via-iii-exec-not-launchagents-2026-06-11`).
 
 hex's supervised long-running services run as **per-user gui LaunchAgents** in
-`~/Library/LaunchAgents/`, bootstrapped into the **`gui/<uid>`** domain, with
-**`SessionCreate=true`** and **no `UserName`**. Examples: `com.hex.harness` (the core
+`~/Library/LaunchAgents/`, bootstrapped into the **`gui/<uid>`** domain, with **no
+`SessionCreate` key** and **no `UserName`**. Examples: `com.hex.harness` (the core
 harness); `com.mrap.boi-daemon` (the personal BOI daemon — same pattern). The code already
 implements this: `hex harness start|stop|status` targets `gui/$(id -u)/com.hex.harness` and
 `upgrade.rs` kickstarts the same target after a binary swap.
 
-### Why gui/ + SessionCreate (rationale)
+### Why gui/ with no SessionCreate (rationale)
 
 The harness runs per-task reasoning *inside* `claude`, and BOI workers spawn `claude`;
-Claude Code auth lives in the macOS **login keychain**. `SessionCreate=true` bridges the
-launchd job into the user's Aqua login (security) session so keychain lookups succeed. The
-alternatives cannot reach the login keychain:
+Claude Code auth lives in the macOS **login keychain**. A `gui/<uid>` LaunchAgent that
+is bootstrapped from a real Aqua login session **inherits that session's unlocked login
+keychain automatically** — no `SessionCreate` key needed. Setting `SessionCreate` to
+true would DETACH the job into a new audit session and BLOCK login-keychain access
+(verified 2026-06-05: rc=36 `errSecAuthFailed` with the key set, rc=0 without), so it
+is intentionally absent — enforced by `system/harness/tests/harness_cli_test.rs`
+(asserts the rendered plist has no `<key>SessionCreate</key>`) and re-asserted by
+`daemon_green_adoption_test.rs` against `main.rs`. The alternatives cannot reach the
+login keychain:
 
 | Option | Login keychain | Notes |
 |---|---|---|
-| **gui/ LaunchAgent + SessionCreate** (chosen) | yes — via the Aqua session | must be bootstrapped from a real GUI login session |
-| user/ LaunchAgent (no SessionCreate) | no — no Aqua session | `SessionCreate` + `user/` also fails to bootstrap (EIO) |
+| **gui/ LaunchAgent, no SessionCreate** (chosen) | yes — inherits the Aqua session | must be bootstrapped from a real GUI login session |
+| gui/ LaunchAgent with `SessionCreate` set | no — job detaches into a new audit session | verified rc=36 `errSecAuthFailed`; forbidden by test |
+| user/ LaunchAgent | no — no Aqua session | `user/` bootstrap from a GUI session also fails (EIO) |
 | system LaunchDaemon (`UserName=mrap`) | no — runs outside any login session | starts at boot but can't read the login keychain |
 
 FileVault forces a GUI login at every boot on this box, so there is effectively always a
