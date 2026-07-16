@@ -38,7 +38,7 @@ Verify: hex info repo-mission
 
 **Build status:** Run `cargo build` in `system/harness/` to verify binary compiles.
 
-Live session state lives in [PROGRESS.md](PROGRESS.md) — read it when the static answer above looks stale.
+[PROGRESS.md](PROGRESS.md) is a **historical snapshot** (frozen 2026-05-16) from the C1/C3 session — not live session state. When the static answer above looks stale, consult `CHANGELOG.md` and `git log` for what has actually shipped, and `todo.md` for the current priority list.
 
 Verify: hex doctor
 
