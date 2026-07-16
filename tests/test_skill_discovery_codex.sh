@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-# Verifies Codex can discover all 11 hex skill names and invoke 3 skill-equivalent
-# operations in a fresh install.
+# Verifies Codex can discover the shipped hex skill names and invoke a couple
+# of skill-equivalent operations in a fresh install.
 #
 # Note on Codex skill model: Codex does not have first-class "skills" (slash
 # commands). It reads AGENTS.md and the .hex/skills/ directory directly.
@@ -87,9 +87,12 @@ fi
 echo ""
 
 # ── 2. Structural: skill directories on disk ────────────────────────────────────
+# Synced to system/skills/ (2026-07-16): the session-lifecycle and consolidate
+# skills were demolished; boi-delegation/conjecture-criticism/repo-audit/
+# repo-docs/vibe-to-prod were added.
 echo "[2] Skill directories on disk (structural)"
-EXPECTED_SKILLS=(landings hex-reflect hex-decide hex-debrief hex-consolidate
-                 hex-doctor hex-checkpoint hex-shutdown hex-startup memory)
+EXPECTED_SKILLS=(boi-delegation conjecture-criticism hex-decide hex-doctor hex-upgrade
+                 landings memory repo-audit repo-docs vibe-to-prod)
 for skill in "${EXPECTED_SKILLS[@]}"; do
     if [ -d "$INSTALL_DIR/.hex/skills/$skill" ]; then
         check_pass "skill dir present: $skill"
@@ -155,8 +158,8 @@ else
 fi
 echo ""
 
-# ── 6. Live: Codex skill-equivalent invocation (3 skills) ──────────────────────
-echo "[6] Codex skill-equivalent invocation (3 skills)"
+# ── 6. Live: Codex skill-equivalent invocation ──────────────────────────────────
+echo "[6] Codex skill-equivalent invocation"
 if [ "$HAVE_KEY" != "yes" ]; then
     check_skip "OPENAI_API_KEY not set — skipping invocation tests"
 elif [ "$HAVE_CODEX" != "yes" ]; then
