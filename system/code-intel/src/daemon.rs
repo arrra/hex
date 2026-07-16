@@ -609,4 +609,72 @@ mod tests {
         let d = Daemon::bind(home.path(), test_pool()).unwrap();
         drop(d);
     }
+
+    /// RED TEST — pins the concrete race behind the load-sensitive flake in
+    /// `bind_unlinks_stale_socket_and_succeeds`.
+    ///
+    /// Root cause: `Daemon::bind`'s liveness probe is a raw
+    /// `UnixStream::connect(&socket)` — it decides "another daemon owns this
+    /// socket" purely by whether the kernel socket associated with the path
+    /// still accepts connections. That's not the same question as "is the
+    /// daemon process that used to own this alive?": any other file
+    /// descriptor referencing the same kernel socket keeps it connectable,
+    /// even after the daemon that bound it has dropped its listener.
+    ///
+    /// Under load, Rust std's `UnixListener::bind` on macOS creates the
+    /// socket via `socket(2)` and then sets `FD_CLOEXEC` via a follow-up
+    /// `fcntl(2)` — a tiny race window during which any concurrent `fork` /
+    /// `posix_spawn` in the process (cargo test parallelism spawns plenty:
+    /// `Command::new("git")`, `Command::new("cargo")`, `launchctl`, `id`,
+    /// etc. — see grep of `Command::new` across the crate) leaks the
+    /// listener fd into a child. When the daemon later drops the listener,
+    /// the child's inherited fd still holds the kernel socket alive, so the
+    /// bind probe's `connect()` succeeds and returns `AlreadyRunning`
+    /// against a socket in a *fresh tempdir* whose owning daemon is gone.
+    ///
+    /// This test reproduces the same failure mode deterministically without
+    /// needing to actually race with a fork: it dups the listener fd in the
+    /// same process to keep the kernel socket alive after the parent drops
+    /// its listener. The connect probe cannot tell that apart from an
+    /// inherited-fd leak. A correct probe (e.g. a pidfile + `kill(pid, 0)`
+    /// liveness check, or a ping request + read within timeout) reports the
+    /// socket stale and rebinds successfully.
+    #[test]
+    fn bind_probe_ignores_orphaned_fd_holding_socket_alive() {
+        use std::os::unix::io::AsRawFd;
+
+        let home = tempfile::tempdir().unwrap();
+        let first = Daemon::bind(home.path(), test_pool()).unwrap();
+
+        // Simulate the leaked-into-child fd: dup the listener so the kernel
+        // socket persists after the parent's listener drops. This is exactly
+        // what happens under load when the FD_CLOEXEC window is lost to a
+        // concurrent posix_spawn — the child's inherited fd is the "extra
+        // reference" that keeps the socket connectable.
+        let _fd_hostage = first
+            .listener
+            .try_clone()
+            .expect("dup listener to simulate inherited fd");
+        // Sanity: the dup really is a distinct fd referencing the same
+        // socket (not the same fd number).
+        assert_ne!(_fd_hostage.as_raw_fd(), first.listener.as_raw_fd());
+        drop(first);
+
+        // The daemon that bound this socket is gone. A correct liveness
+        // probe must recognize that and rebind. The current connect-based
+        // probe cannot — the dup keeps the socket answering, so the probe
+        // returns Ok and bind refuses with AlreadyRunning against a socket
+        // in a fresh tempdir.
+        let result = Daemon::bind(home.path(), test_pool());
+        drop(_fd_hostage);
+        match result {
+            Ok(d) => drop(d),
+            Err(e) => panic!(
+                "bind must not be fooled by an orphaned fd keeping the socket \
+                 reachable — this is the concrete race behind the flake. \
+                 The probe needs to check daemon-process liveness, not just \
+                 socket reachability. Got: {e}"
+            ),
+        }
+    }
 }
