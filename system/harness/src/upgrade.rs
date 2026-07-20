@@ -620,29 +620,36 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
         return;
     };
 
+    // Preserve every existing line — comments, blank lines, and any
+    // KEY=VALUE we do not manage (BOI_VERSION, custom instance pins,
+    // repo overrides, etc.). Only update the managed keys we own in
+    // place, or append them if missing. Regression: previous behavior
+    // rewrote the file with only HEX_FOUNDATION_VERSION, destroying
+    // unmanaged pins like BOI_VERSION that install.sh parity reads
+    // (2026-07-16 audit).
     let existing = fs::read_to_string(&versions_file).unwrap_or_default();
-    let header: String = existing
-        .lines()
-        .filter(|l| l.starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let repo_overrides: String = existing
-        .lines()
-        .filter(|l| l.starts_with("HEX_") && l.contains("_REPO="))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let mut new_content = String::new();
-    if !header.is_empty() {
-        new_content.push_str(&header);
-        new_content.push_str("\n\n");
+    let managed_key = "HEX_FOUNDATION_VERSION";
+    let managed_line = format!("{managed_key}=v{cargo_ver}");
+    let mut replaced = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in existing.lines() {
+        let key_prefix = format!("{managed_key}=");
+        if line.trim_start().starts_with(&key_prefix) {
+            if !replaced {
+                lines.push(managed_line.clone());
+                replaced = true;
+            }
+            // Drop duplicate managed lines silently — a rewrite should
+            // leave exactly one canonical managed line.
+        } else {
+            lines.push(line.to_string());
+        }
     }
-    new_content.push_str(&format!("HEX_FOUNDATION_VERSION=v{cargo_ver}\n"));
-    if !repo_overrides.is_empty() {
-        new_content.push('\n');
-        new_content.push_str(&repo_overrides);
-        new_content.push('\n');
+    if !replaced {
+        lines.push(managed_line.clone());
     }
+    let mut new_content = lines.join("\n");
+    new_content.push('\n');
 
     let tmp = versions_file.with_extension("tmp");
     if fs::write(&tmp, &new_content).is_ok() {
