@@ -233,12 +233,21 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
         LogExtras,
     ) = match super::open_db(&db) {
         Ok(conn) => {
-            // Route the hot path through the v1 ContextAssembler.
+            // Route the hot path through the v1 ContextAssembler. Passing
+            // `None` for `query_vec` is the load-bearing hot-path policy: the
+            // assembler runs in FTS-only mode and — by construction, not by
+            // env-var toggle — never constructs an `Embedder`. Per spec
+            // Tj0b203yv (finding 1 of the 2026-07-16 audit), this hook is a
+            // fresh OS process per user message; cold-loading the 522 MB nomic
+            // model here blew the latency budget (measured 1.33-1.9 s per
+            // recall). Offline CLI callers who want semantic search embed the
+            // query themselves and pass `Some(&qv)`.
             let assembled = super::assemble::assemble(
                 &conn,
                 query,
                 for_agent,
                 MAX_CONTEXT_CHARS,
+                None,
             );
 
             // Capture per-move stats for the recall-log (calibration seam —
