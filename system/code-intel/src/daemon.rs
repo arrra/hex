@@ -9,20 +9,35 @@
 //! the ops hatch.
 //!
 //! Socket lifecycle:
-//! - bind at `<home>/scipd.sock`;
-//! - a stale socket file (no listener behind it) is unlinked before bind;
+//! - bind at `<home>/scipd.sock`, gated on an exclusive advisory lock
+//!   (`<home>/scipd.lock`) held for the daemon's lifetime;
+//! - a stale socket file with no live daemon behind it is unlinked before
+//!   bind — liveness is decided by whether the lockfile is held, NOT by
+//!   whether the socket is reachable. `UnixStream::connect` succeeds on
+//!   any socket file whose kernel object is still in listen state, and a
+//!   listener fd inherited by a `posix_spawn`ed child (macOS Rust std
+//!   sets `FD_CLOEXEC` in a follow-up `fcntl` after `socket(2)` — a race
+//!   window under cargo-test load) keeps the kernel socket connectable
+//!   after the owning daemon has dropped its listener. The lockfile fd
+//!   is opened via `std::fs::File`, which uses `O_CLOEXEC` atomically —
+//!   the very fd-inheritance leak that fools connect probes cannot
+//!   propagate this fd, and the lock is released the instant the owning
+//!   process drops its `File` (crash, SIGKILL, or clean shutdown alike);
 //! - if a LIVE daemon already owns the socket, [`Daemon::bind`] refuses
 //!   loudly ([`BindError::AlreadyRunning`]) — never two daemons;
 //! - SIGTERM (flag set by the bin) drains the accept loop, removes the
 //!   socket file, and returns; the bin then calls `pool.shutdown_all()` so
 //!   no rust-analyzer child is ever orphaned.
 
+use std::fs::{File, OpenOptions};
 use std::io::{BufRead, BufReader, Write};
 use std::os::unix::net::{UnixListener, UnixStream};
 use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
 use std::time::Duration;
+
+use fs2::FileExt;
 
 use crate::live::{translate, LiveBackend, LiveError, Pool};
 use crate::proto::{parse_request, Op, QueryVerb, Reply, Request, Warming};
@@ -43,6 +58,17 @@ pub const SWEEP_INTERVAL: Duration = Duration::from_secs(30);
 /// The daemon socket lives directly under the codeintel home (SPEC-A2 §2).
 pub fn socket_path(home: &Path) -> PathBuf {
     home.join("scipd.sock")
+}
+
+/// The daemon liveness lockfile lives alongside the socket. Held
+/// exclusively by the running daemon for its entire lifetime; released
+/// (by the OS) as soon as the owning process's `File` handle drops —
+/// clean shutdown, panic, or SIGKILL. Any concurrent bind attempt whose
+/// `try_lock_exclusive` returns `WouldBlock` is looking at a real live
+/// daemon; anyone else is looking at a stale socket file and may reclaim
+/// the home.
+pub fn lock_path(home: &Path) -> PathBuf {
+    home.join("scipd.lock")
 }
 
 /// Why `bind` refused.
@@ -76,31 +102,87 @@ pub struct Daemon<B: LiveBackend + 'static> {
     socket: PathBuf,
     pool: Arc<Pool<B>>,
     shutdown: Arc<AtomicBool>,
+    /// Exclusive advisory lock (BSD `flock`) on `<home>/scipd.lock`,
+    /// held for the daemon's entire lifetime. Underscored to signal
+    /// "presence matters, contents don't"; the OS releases the lock the
+    /// moment this `File` drops. Opened via `std::fs::File` which sets
+    /// `O_CLOEXEC` atomically, so a concurrent `posix_spawn` cannot
+    /// inherit it — the exact fd-inheritance leak that fooled the
+    /// previous connect-based liveness probe (see [`Daemon::bind`] and
+    /// `bind_probe_ignores_orphaned_fd_holding_socket_alive`).
+    _lockfile: File,
 }
 
 impl<B: LiveBackend + 'static> Daemon<B> {
-    /// Bind the UDS at `<home>/scipd.sock` with stale-socket handling:
-    /// try-connect first — a successful connect means a live daemon owns the
-    /// socket (refuse); a refused/failed connect means the file is stale
-    /// (unlink, then bind).
+    /// Bind the UDS at `<home>/scipd.sock`, gated on an exclusive flock
+    /// held on `<home>/scipd.lock` for the daemon's lifetime.
+    ///
+    /// **Why an flock, not a socket probe.** `UnixStream::connect`
+    /// succeeds on any socket file whose kernel socket is still in
+    /// listen state — including one whose listener fd was inherited by
+    /// a `posix_spawn`ed child (macOS Rust std sets `FD_CLOEXEC` in a
+    /// follow-up `fcntl` after `socket(2)`; concurrent cargo-test
+    /// spawns win that tiny race window under load) and outlived the
+    /// daemon. That was the concrete mechanism behind the
+    /// load-sensitive `bind_unlinks_stale_socket_and_succeeds` flake:
+    /// a leaked listener fd kept the kernel socket answering `connect`
+    /// in a fresh tempdir long after the daemon dropped. A protocol
+    /// probe (ping/pong over the socket) is also load-fragile — its
+    /// verdict hinges on round-trip timing that degrades under CPU
+    /// starvation, and `read_line` on an unaccepted queued connection
+    /// has no upper bound guarantee in practice.
+    ///
+    /// The lockfile keys liveness on the OS process-lifetime signal
+    /// directly: BSD `flock` is released the instant its owning `File`
+    /// drops (clean shutdown, panic, SIGKILL, or crash), and the
+    /// lockfile fd itself is opened via `std::fs::File` which uses
+    /// `O_CLOEXEC` atomically — the very inheritance leak that fools
+    /// connect-based probes cannot carry this fd into a child. See
+    /// `bind_probe_ignores_orphaned_fd_holding_socket_alive` for the
+    /// deterministic reproducer.
+    ///
+    /// On success we own the lock, safely unlink any stale socket file
+    /// (any prior owner is provably gone — we hold the lock), and bind
+    /// a fresh listener. On contention (`WouldBlock`) we refuse loudly
+    /// with [`BindError::AlreadyRunning`].
     pub fn bind(home: &Path, pool: Arc<Pool<B>>) -> Result<Daemon<B>, BindError> {
+        std::fs::create_dir_all(home).map_err(BindError::Io)?;
         let socket = socket_path(home);
-        if socket.exists() {
-            match UnixStream::connect(&socket) {
-                Ok(_) => return Err(BindError::AlreadyRunning { socket }),
-                Err(e) => {
-                    eprintln!(
-                        "scipd: removing stale socket {} (connect failed: {e})",
-                        socket.display()
-                    );
-                    std::fs::remove_file(&socket).map_err(BindError::Io)?;
-                }
+        let lock_path = lock_path(home);
+        let lockfile = OpenOptions::new()
+            .create(true)
+            .read(true)
+            .write(true)
+            .truncate(false)
+            .open(&lock_path)
+            .map_err(BindError::Io)?;
+        match lockfile.try_lock_exclusive() {
+            Ok(()) => {}
+            Err(e) if e.kind() == std::io::ErrorKind::WouldBlock => {
+                return Err(BindError::AlreadyRunning { socket });
             }
+            Err(e) => return Err(BindError::Io(e)),
+        }
+        // We hold the exclusive lock. Any socket file left over is
+        // provably stale (no live daemon can be behind it).
+        if socket.exists() {
+            eprintln!(
+                "scipd: removing stale socket {} (acquired daemon lock {} — no live daemon behind it)",
+                socket.display(),
+                lock_path.display()
+            );
+            std::fs::remove_file(&socket).map_err(BindError::Io)?;
         }
         let listener = UnixListener::bind(&socket).map_err(BindError::Io)?;
         // Nonblocking accept so the loop can observe the shutdown flag.
         listener.set_nonblocking(true).map_err(BindError::Io)?;
-        Ok(Daemon { listener, socket, pool, shutdown: Arc::new(AtomicBool::new(false)) })
+        Ok(Daemon {
+            listener,
+            socket,
+            pool,
+            shutdown: Arc::new(AtomicBool::new(false)),
+            _lockfile: lockfile,
+        })
     }
 
     /// Flag the bin wires to SIGTERM: once set, `run` drains and returns.
@@ -588,15 +670,34 @@ mod tests {
     #[test]
     fn bind_refuses_when_live_daemon_owns_socket() {
         let home = tempfile::tempdir().unwrap();
+        // Liveness is decided by whether the daemon's flock on
+        // `<home>/scipd.lock` is still held (see [`Daemon::bind`]).
+        // Holding the `Daemon` struct — whose `_lockfile` field owns
+        // the exclusive lock — is sufficient; we don't need to start
+        // the accept loop to prove liveness.
         let first = Daemon::bind(home.path(), test_pool()).unwrap();
         let err = match Daemon::bind(home.path(), test_pool()) {
-            Ok(_) => panic!("second bind must refuse"),
+            Ok(_) => panic!("second bind must refuse a live daemon"),
             Err(e) => e,
         };
         assert!(matches!(err, BindError::AlreadyRunning { .. }), "{err}");
         drop(first);
     }
 
+    /// Once flaked under cargo-test load (measured 2026-07-16: failed
+    /// once with two parallel cargo builds running, passed 13 straight
+    /// runs idle). Root cause is pinned by the sibling
+    /// `bind_probe_ignores_orphaned_fd_holding_socket_alive` — the
+    /// legacy `UnixStream::connect` liveness probe was fooled by an
+    /// orphaned listener fd (a concurrent posix_spawn winning the
+    /// `FD_CLOEXEC` race window `UnixListener::bind` opens on macOS)
+    /// keeping the kernel socket connectable after the owning daemon
+    /// dropped. Fix: [`Daemon::bind`] now keys liveness on an exclusive
+    /// flock over `<home>/scipd.lock`, held on an `O_CLOEXEC` `File` —
+    /// which cannot be inherited into `posix_spawn`ed children, and is
+    /// released the instant its owning `File` drops. An orphaned
+    /// listener fd cannot forge that signal, so bind correctly
+    /// recognizes the socket as stale.
     #[test]
     fn bind_unlinks_stale_socket_and_succeeds() {
         let home = tempfile::tempdir().unwrap();
