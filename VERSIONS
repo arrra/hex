@@ -9,5 +9,5 @@
 # 2.0.0") to the v2 TOML engine (control-socket daemon, ~/.boi/v2). The v3.0.0
 # release supersedes the old 2.0.0 line (V1 lives only in git history now).
 
-BOI_VERSION=v3.3.3
+BOI_VERSION=v3.4.0
 HARNESS_VERSION=v0.8.0
