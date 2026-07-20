@@ -104,12 +104,15 @@ pub struct Daemon<B: LiveBackend + 'static> {
     shutdown: Arc<AtomicBool>,
     /// Exclusive advisory lock (BSD `flock`) on `<home>/scipd.lock`,
     /// held for the daemon's entire lifetime. Underscored to signal
-    /// "presence matters, contents don't"; the OS releases the lock the
-    /// moment this `File` drops. Opened via `std::fs::File` which sets
-    /// `O_CLOEXEC` atomically, so a concurrent `posix_spawn` cannot
-    /// inherit it — the exact fd-inheritance leak that fooled the
-    /// previous connect-based liveness probe (see [`Daemon::bind`] and
-    /// `bind_probe_ignores_orphaned_fd_holding_socket_alive`).
+    /// "presence matters, contents don't". `O_CLOEXEC` on this file
+    /// prevents the fd from surviving `exec(2)` — but a concurrent
+    /// `posix_spawn` in another thread briefly holds the fd in the
+    /// forked child *before* it execs, and BSD `flock` is released
+    /// only when the last OFD reference is closed (see [`Daemon`]'s
+    /// `Drop` impl for the explicit `LOCK_UN` that closes that
+    /// window). See [`Daemon::bind`] and
+    /// `bind_probe_ignores_orphaned_fd_holding_socket_alive` for the
+    /// full mechanism.
     _lockfile: File,
 }
 
@@ -133,13 +136,26 @@ impl<B: LiveBackend + 'static> Daemon<B> {
     /// has no upper bound guarantee in practice.
     ///
     /// The lockfile keys liveness on the OS process-lifetime signal
-    /// directly: BSD `flock` is released the instant its owning `File`
-    /// drops (clean shutdown, panic, SIGKILL, or crash), and the
-    /// lockfile fd itself is opened via `std::fs::File` which uses
-    /// `O_CLOEXEC` atomically — the very inheritance leak that fools
-    /// connect-based probes cannot carry this fd into a child. See
+    /// directly: BSD `flock` is released when its owning `File` drops
+    /// (clean shutdown, panic, SIGKILL, or crash), and the lockfile
+    /// fd itself is opened via `std::fs::File` which uses `O_CLOEXEC`
+    /// atomically. `O_CLOEXEC` keeps the fd out of any `exec(2)`ed
+    /// child — but not out of the *forked* child before it execs. A
+    /// concurrent `posix_spawn` in another thread of the same process
+    /// (cargo test spawns plenty — `Command::new("git")`, `launchctl`,
+    /// `id`, `cargo`, etc.) briefly holds a reference to every open
+    /// fd in the forked child, including the lockfile fd, until the
+    /// exec closes cloexec fds. During that window BSD `flock`'s
+    /// OFD refcount stays >0 even after the parent's `close(2)`, so a
+    /// fresh `open + try_lock_exclusive` from the parent thread races
+    /// against the child's exec and can spuriously see the lock held.
+    /// [`Daemon`]'s `Drop` impl closes that window with an explicit
+    /// `flock(LOCK_UN)`, which releases the OFD's lock immediately
+    /// regardless of any lingering child references. See
     /// `bind_probe_ignores_orphaned_fd_holding_socket_alive` for the
-    /// deterministic reproducer.
+    /// deterministic reproducer of the orphaned-fd class of race, and
+    /// the same test under sustained cargo-test parallelism for the
+    /// fork-inherited-fd tail this Drop impl kills.
     ///
     /// On success we own the lock, safely unlink any stale socket file
     /// (any prior owner is provably gone — we hold the lock), and bind
@@ -229,6 +245,30 @@ impl<B: LiveBackend + 'static> Daemon<B> {
             eprintln!("scipd: removing socket on shutdown: {e}");
         }
         Ok(())
+    }
+}
+
+impl<B: LiveBackend + 'static> Drop for Daemon<B> {
+    /// Explicitly release the lockfile's BSD `flock` before the `File`
+    /// closes. Relying on `close(2)` to release the lock is a race under
+    /// concurrent `posix_spawn`: a child forked in another thread of
+    /// this process briefly holds a reference to every open fd
+    /// (including the lockfile fd, before the exec closes cloexec fds).
+    /// While that reference is live, `close(2)` on the parent's fd only
+    /// decrements the OFD refcount — the lock stays held until the
+    /// child execs, and a fresh `open + try_lock_exclusive` in the
+    /// parent within that window spuriously returns `WouldBlock`.
+    /// `LOCK_UN` releases the OFD's lock immediately regardless of
+    /// remaining references, closing the window. See
+    /// `bind_probe_ignores_orphaned_fd_holding_socket_alive` and the
+    /// doc on [`Daemon::bind`] for the full mechanism.
+    fn drop(&mut self) {
+        // Loud on failure per Standing Order S6, but never panic in
+        // Drop — a stale lock at worst blocks the next bind, and the
+        // next bind's own diagnostics will surface it.
+        if let Err(e) = fs2::FileExt::unlock(&self._lockfile) {
+            eprintln!("scipd: releasing daemon lockfile on drop: {e}");
+        }
     }
 }
 
