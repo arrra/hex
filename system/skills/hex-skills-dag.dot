@@ -23,6 +23,9 @@ digraph hex_skills {
   "hex-context-sync" [fillcolor="#d4c5f9"];
   "boi-delegation" [fillcolor="#d4c5f9"];
   "landings" [fillcolor="#d4c5f9"];
+  "repo-audit" [fillcolor="#d4c5f9"];
+  "repo-docs" [fillcolor="#d4c5f9"];
+  "repo-cleanup" [fillcolor="#d4c5f9"];
 
   // Standalone
   "x-twitter" [fillcolor="#e8e8e8"];
@@ -43,6 +46,9 @@ digraph hex_skills {
   "hex-decide" -> "memory";
   "hex-upgrade" -> "memory";
   "hex-context-sync" -> "memory";
+  "repo-cleanup" -> "repo-audit";   // consumes the audit's Task Plan as its candidate list
+  "repo-cleanup" -> "repo-docs";    // hands off doc drift at Closeout
+  "repo-cleanup" -> "boi-delegation"; // per-module fan-out for independent modules
 
   // Edges — teams (circular, removing)
   "hex-sync" -> "hex-connect-team" [color="#cc0000", style=dashed];
