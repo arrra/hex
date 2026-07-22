@@ -133,5 +133,9 @@ Grandfathered: `docs/code-intel.md`.
     let rows = registry_rows(sample);
     assert_eq!(rows.len(), 2, "two data rows expected, got: {rows:?}");
     assert_eq!(doc_link(&rows[0]), Some("memory.md".to_string()));
-    assert_eq!(doc_link(&rows[1]), None, "row without a link must parse as None (and fail the main test)");
+    assert_eq!(
+        doc_link(&rows[1]),
+        None,
+        "row without a link must parse as None (and fail the main test)"
+    );
 }

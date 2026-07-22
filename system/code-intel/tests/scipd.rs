@@ -56,7 +56,11 @@ fn wait_ready(home: &Path) {
         if socket.exists() && UnixStream::connect(&socket).is_ok() {
             return;
         }
-        assert!(Instant::now() < deadline, "scipd never became ready at {}", socket.display());
+        assert!(
+            Instant::now() < deadline,
+            "scipd never became ready at {}",
+            socket.display()
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
 }
@@ -64,14 +68,20 @@ fn wait_ready(home: &Path) {
 /// One request line → one reply object over a fresh connection.
 fn request(home: &Path, line: &str) -> serde_json::Value {
     let stream = UnixStream::connect(socket_path(home)).expect("connect");
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
-    stream.set_write_timeout(Some(Duration::from_secs(1))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
+    stream
+        .set_write_timeout(Some(Duration::from_secs(1)))
+        .unwrap();
     let mut writer = stream.try_clone().unwrap();
     writer.write_all(line.as_bytes()).unwrap();
     writer.write_all(b"\n").unwrap();
     writer.flush().unwrap();
     let mut reply = String::new();
-    BufReader::new(stream).read_line(&mut reply).expect("read reply line");
+    BufReader::new(stream)
+        .read_line(&mut reply)
+        .expect("read reply line");
     serde_json::from_str(reply.trim())
         .unwrap_or_else(|e| panic!("reply is not JSON: {e}\nreply: {reply}"))
 }
@@ -82,7 +92,10 @@ fn wait_exit(guard: &mut DaemonGuard, budget: Duration) -> std::process::ExitSta
         if let Some(status) = guard.child.try_wait().expect("try_wait") {
             return status;
         }
-        assert!(Instant::now() < deadline, "scipd did not exit within {budget:?}");
+        assert!(
+            Instant::now() < deadline,
+            "scipd did not exit within {budget:?}"
+        );
         std::thread::sleep(Duration::from_millis(25));
     }
 }
@@ -111,7 +124,10 @@ fn ping_status_and_bad_op_over_the_socket() {
     let status = request(home.path(), r#"{"id":2,"op":"status"}"#);
     assert_eq!(status["id"], 2);
     assert_eq!(status["ok"], true);
-    assert_eq!(status["status"]["pool_cap"], 2, "default cap per SPEC-A2 §4");
+    assert_eq!(
+        status["status"]["pool_cap"], 2,
+        "default cap per SPEC-A2 §4"
+    );
     assert_eq!(status["status"]["instances"], serde_json::json!([]));
 
     // unknown op: structured error reply, daemon survives
@@ -138,7 +154,9 @@ fn multiple_requests_on_one_connection() {
     wait_ready(home.path());
 
     let stream = UnixStream::connect(socket_path(home.path())).unwrap();
-    stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+    stream
+        .set_read_timeout(Some(Duration::from_secs(5)))
+        .unwrap();
     let mut writer = stream.try_clone().unwrap();
     let mut reader = BufReader::new(stream);
     for id in 1..=3u64 {
@@ -263,7 +281,16 @@ fn fixture_repo() -> TempDir {
     run(
         dir.path(),
         "git",
-        &["-c", "user.email=cq@test", "-c", "user.name=cq-test", "commit", "-q", "-m", "golden"],
+        &[
+            "-c",
+            "user.email=cq@test",
+            "-c",
+            "user.name=cq-test",
+            "commit",
+            "-q",
+            "-m",
+            "golden",
+        ],
     );
     dir
 }
@@ -348,7 +375,10 @@ fn live_pool_lifecycle_over_the_socket() {
         "query during prime took {elapsed:?} (> 2s) — reply queued behind the prime?"
     );
     assert_eq!(first["id"], 3);
-    assert_eq!(first["ok"], false, "fresh spawn cannot be quiescent yet: {first}");
+    assert_eq!(
+        first["ok"], false,
+        "fresh spawn cannot be quiescent yet: {first}"
+    );
     assert!(
         first["warming"]["elapsed_secs"].is_u64(),
         "warming reply must carry elapsed_secs: {first}"
@@ -362,9 +392,16 @@ fn live_pool_lifecycle_over_the_socket() {
     // The spawn proceeded: a rust-analyzer child exists and status shows the
     // warming instance.
     let first_ra = ra_children(daemon.child.id());
-    assert_eq!(first_ra.len(), 1, "exactly one rust-analyzer child, got {first_ra:?}");
+    assert_eq!(
+        first_ra.len(),
+        1,
+        "exactly one rust-analyzer child, got {first_ra:?}"
+    );
     let status = request(home.path(), r#"{"id":4,"op":"status"}"#);
-    assert_eq!(status["status"]["instances"][0]["state"], "warming", "{status}");
+    assert_eq!(
+        status["status"]["instances"][0]["state"], "warming",
+        "{status}"
+    );
     assert_eq!(
         status["status"]["instances"][0]["worktree"],
         worktree.display().to_string().as_str()
@@ -391,16 +428,25 @@ fn live_pool_lifecycle_over_the_socket() {
     let results = live["results"].as_array().expect("results array");
     assert_eq!(results.len(), 1, "one definition for double: {live}");
     assert_eq!(results[0]["path"], "src/ops.rs");
-    assert_eq!(results[0]["line"], 1, "`pub fn double` sits on ops.rs:1 (1-based)");
+    assert_eq!(
+        results[0]["line"], 1,
+        "`pub fn double` sits on ops.rs:1 (1-based)"
+    );
     assert_eq!(results[0]["role"], "definition");
 
     let status = request(home.path(), r#"{"id":5,"op":"status"}"#);
-    assert_eq!(status["status"]["instances"][0]["state"], "ready", "{status}");
+    assert_eq!(
+        status["status"]["instances"][0]["state"], "ready",
+        "{status}"
+    );
 
     // 3. Evict: pool empties and the rust-analyzer child dies.
     let evict = request(
         home.path(),
-        &format!(r#"{{"id":6,"op":"evict","worktree":"{}"}}"#, worktree.display()),
+        &format!(
+            r#"{{"id":6,"op":"evict","worktree":"{}"}}"#,
+            worktree.display()
+        ),
     );
     assert_eq!(evict["ok"], true, "{evict}");
     let status = request(home.path(), r#"{"id":7,"op":"status"}"#);
@@ -427,9 +473,16 @@ fn live_pool_lifecycle_over_the_socket() {
     //    and the fresh rust-analyzer child is gone — no orphans.
     let respawn = request(home.path(), &query);
     assert_eq!(respawn["ok"], false);
-    assert!(respawn["warming"].is_object(), "respawn must warm again: {respawn}");
+    assert!(
+        respawn["warming"].is_object(),
+        "respawn must warm again: {respawn}"
+    );
     let second_ra = ra_children(daemon.child.id());
-    assert_eq!(second_ra.len(), 1, "respawn must yield one child, got {second_ra:?}");
+    assert_eq!(
+        second_ra.len(),
+        1,
+        "respawn must yield one child, got {second_ra:?}"
+    );
 
     let killed = Command::new("kill")
         .args(["-TERM", &daemon.child.id().to_string()])
@@ -449,8 +502,14 @@ fn live_pool_lifecycle_over_the_socket() {
     );
 
     let log = stderr.lock().unwrap().clone();
-    assert!(log.contains("spawned instance for"), "pool transitions must be logged:\n{log}");
-    assert!(log.contains("pool shutdown"), "SIGTERM shutdown must be logged:\n{log}");
+    assert!(
+        log.contains("spawned instance for"),
+        "pool transitions must be logged:\n{log}"
+    );
+    assert!(
+        log.contains("pool shutdown"),
+        "SIGTERM shutdown must be logged:\n{log}"
+    );
 }
 
 #[test]
@@ -459,7 +518,10 @@ fn malformed_config_is_fatal_and_loud() {
     std::fs::write(home.path().join("scipd.toml"), "pool_cap = \"lots\"\n").unwrap();
     let mut daemon = spawn_scipd(home.path());
     let status = wait_exit(&mut daemon, Duration::from_secs(10));
-    assert!(!status.success(), "malformed config must never default silently");
+    assert!(
+        !status.success(),
+        "malformed config must never default silently"
+    );
     let stderr = collect_stderr(&mut daemon);
     assert!(stderr.contains("BAD_CONFIG"), "stderr: {stderr}");
 }

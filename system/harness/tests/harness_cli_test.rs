@@ -26,9 +26,18 @@ fn hex_harness_help_lists_start_stop_status_and_hides_serve() {
         String::from_utf8_lossy(&out.stderr),
     );
     let help = String::from_utf8_lossy(&out.stdout);
-    assert!(help.contains("start"), "harness --help must list `start`; got:\n{help}");
-    assert!(help.contains("stop"), "harness --help must list `stop`; got:\n{help}");
-    assert!(help.contains("status"), "harness --help must list `status`; got:\n{help}");
+    assert!(
+        help.contains("start"),
+        "harness --help must list `start`; got:\n{help}"
+    );
+    assert!(
+        help.contains("stop"),
+        "harness --help must list `stop`; got:\n{help}"
+    );
+    assert!(
+        help.contains("status"),
+        "harness --help must list `status`; got:\n{help}"
+    );
     assert!(
         !help.contains("serve"),
         "harness --help must NOT advertise `serve` (must be hidden); got:\n{help}"

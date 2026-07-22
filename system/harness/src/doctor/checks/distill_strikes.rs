@@ -9,8 +9,12 @@ use crate::doctor::check::{Category, CheckResult, Context, DoctorCheck};
 pub struct DistillStrikes;
 
 impl DoctorCheck for DistillStrikes {
-    fn name(&self) -> &str { "distill-strikes" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "distill-strikes"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let db = ctx.hex_dir.join(".hex/memory.db");
         if !db.is_file() {

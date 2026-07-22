@@ -31,7 +31,11 @@ fn truncate(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let end = text.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(text.len());
+    let end = text
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
     let slice = &text[..end];
     match slice.rfind(' ') {
         Some(pos) => format!("{}...", &slice[..pos]),
@@ -72,10 +76,7 @@ fn highlight_terms(text: &str, query: &str) -> String {
 // Mirror Python's _print_context_content().
 fn print_context_content(content: &str, query: &str, context_lines: usize) {
     let lines: Vec<&str> = content.split('\n').collect();
-    let query_terms: Vec<String> = query
-        .split_whitespace()
-        .map(|t| t.to_lowercase())
-        .collect();
+    let query_terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
     let mut matching: BTreeSet<usize> = BTreeSet::new();
 
     for (idx, line) in lines.iter().enumerate() {
@@ -348,8 +349,8 @@ pub(crate) fn run_query(
     query_vec: Option<&[f32]>,
 ) -> (Vec<SearchResult>, Vec<super::recall::FactHit>) {
     // FTS5 arm — keeps bm25 * source_weight as its pre-RRF rank input (spec §7).
-    let fts = search_fts(conn, &args.query, args.top.max(20), args.file.as_deref())
-        .unwrap_or_default();
+    let fts =
+        search_fts(conn, &args.query, args.top.max(20), args.file.as_deref()).unwrap_or_default();
     let fts_rowids: Vec<i64> = fts.iter().map(|r| r.rowid).collect();
 
     // Vector arm — best-effort. If KNN fails, log loud and fall back to
@@ -436,15 +437,14 @@ pub fn run(hex_root: &Path, args: &SearchArgs) -> i32 {
 
     // Embed the query ONCE — the same vector feeds the chunk KNN arm and the
     // facts KNN arm. If the model fails, log loud and fall back to FTS5-only.
-    let query_vec: Option<Vec<f32>> = match super::embed::Embedder::new(hex_root)
-        .and_then(|e| e.embed_query(&args.query))
-    {
-        Ok(qv) => Some(qv),
-        Err(e) => {
-            eprintln!("query embedding failed, FTS5-only: {e}");
-            None
-        }
-    };
+    let query_vec: Option<Vec<f32>> =
+        match super::embed::Embedder::new(hex_root).and_then(|e| e.embed_query(&args.query)) {
+            Ok(qv) => Some(qv),
+            Err(e) => {
+                eprintln!("query embedding failed, FTS5-only: {e}");
+                None
+            }
+        };
 
     let (results, facts) = run_query(&conn, args, query_vec.as_deref());
 
@@ -618,7 +618,13 @@ mod tests {
         let conn = setup_full_db();
 
         // me/decisions doc: FTS-matchable by the query.
-        insert_chunk(&conn, "me/decisions/d.md", "decision", "alpha decision record", 1.0);
+        insert_chunk(
+            &conn,
+            "me/decisions/d.md",
+            "decision",
+            "alpha decision record",
+            1.0,
+        );
         // CLAUDE.md doc: shares NO query token (FTS won't surface it) but gets
         // the query vector, so ONLY the vector arm can surface it — the leak.
         insert_chunk(&conn, "CLAUDE.md", "footguns", "zzqx qqzz unrelated", 1.0);
@@ -645,7 +651,9 @@ mod tests {
         let (results, facts) = run_query(&conn, &args, Some(&qv));
 
         assert!(
-            results.iter().all(|r| r.source_path.contains("me/decisions")),
+            results
+                .iter()
+                .all(|r| r.source_path.contains("me/decisions")),
             "--file must exclude non-matching paths from ALL arms, got {:?}",
             results.iter().map(|r| &r.source_path).collect::<Vec<_>>()
         );
@@ -697,8 +705,20 @@ mod tests {
     #[test]
     fn test_search_returns_results() {
         let conn = setup_db();
-        insert_chunk(&conn, "projects/foo.md", "Intro", "This is about Rust programming.", 1.0);
-        insert_chunk(&conn, "projects/bar.md", "Overview", "Python scripting overview.", 1.2);
+        insert_chunk(
+            &conn,
+            "projects/foo.md",
+            "Intro",
+            "This is about Rust programming.",
+            1.0,
+        );
+        insert_chunk(
+            &conn,
+            "projects/bar.md",
+            "Overview",
+            "Python scripting overview.",
+            1.2,
+        );
 
         let results = search_fts(&conn, "Rust programming", 10, None).unwrap();
         assert!(!results.is_empty());
@@ -712,8 +732,20 @@ mod tests {
         // phrase anywhere — the exact-phrase and all-terms-AND variants both
         // miss. Only an OR fallback can surface these. This is the natural-
         // language recall case the UserPromptSubmit hook actually sees.
-        insert_chunk(&conn, "a.md", "Deploy", "the deployment pipeline runs nightly", 1.0);
-        insert_chunk(&conn, "b.md", "Schema", "we chose a vector schema for embeddings", 1.0);
+        insert_chunk(
+            &conn,
+            "a.md",
+            "Deploy",
+            "the deployment pipeline runs nightly",
+            1.0,
+        );
+        insert_chunk(
+            &conn,
+            "b.md",
+            "Schema",
+            "we chose a vector schema for embeddings",
+            1.0,
+        );
 
         let results =
             search_fts(&conn, "what schema did we pick for deployment", 10, None).unwrap();
@@ -734,8 +766,16 @@ mod tests {
         // b.md has weight 2.0 so its score is more negative (better in BM25 ordering).
         assert_eq!(results.len(), 2);
         // Verify scores differ by weight factor.
-        let score_a = results.iter().find(|r| r.source_path == "a.md").unwrap().score;
-        let score_b = results.iter().find(|r| r.source_path == "b.md").unwrap().score;
+        let score_a = results
+            .iter()
+            .find(|r| r.source_path == "a.md")
+            .unwrap()
+            .score;
+        let score_b = results
+            .iter()
+            .find(|r| r.source_path == "b.md")
+            .unwrap()
+            .score;
         // b score should be ~2x more negative than a score.
         assert!(
             (score_b / score_a - 2.0).abs() < 0.01,
@@ -752,13 +792,23 @@ mod tests {
         conn.execute(
             "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
              VALUES (1, ?, ?, '0', ?, ?)",
-            params!["me/journal.md", "Notes", "private personal notes here", 1i64],
+            params![
+                "me/journal.md",
+                "Notes",
+                "private personal notes here",
+                1i64
+            ],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
              VALUES (1, ?, ?, '0', ?, ?)",
-            params!["projects/work.md", "Work", "private work project details", 0i64],
+            params![
+                "projects/work.md",
+                "Work",
+                "private work project details",
+                0i64
+            ],
         )
         .unwrap();
 
@@ -774,8 +824,20 @@ mod tests {
     #[test]
     fn test_file_filter() {
         let conn = setup_db();
-        insert_chunk(&conn, "projects/alpha.md", "Alpha", "shared topic content", 1.0);
-        insert_chunk(&conn, "projects/beta.md", "Beta", "shared topic content", 1.0);
+        insert_chunk(
+            &conn,
+            "projects/alpha.md",
+            "Alpha",
+            "shared topic content",
+            1.0,
+        );
+        insert_chunk(
+            &conn,
+            "projects/beta.md",
+            "Beta",
+            "shared topic content",
+            1.0,
+        );
 
         let results = search_fts(&conn, "shared topic", 10, Some("alpha")).unwrap();
         assert_eq!(results.len(), 1);

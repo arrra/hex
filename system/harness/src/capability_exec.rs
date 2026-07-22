@@ -132,7 +132,11 @@ pub fn execute_capability(
 
     // Reap the child (blocks until the OS confirms exit; safe after SIGKILL).
     let raw_exit = child.wait().ok().and_then(|s| s.code());
-    let exit_code: i32 = if timed_out { -1 } else { raw_exit.unwrap_or(-1) };
+    let exit_code: i32 = if timed_out {
+        -1
+    } else {
+        raw_exit.unwrap_or(-1)
+    };
 
     // Collect bounded output — the reader threads will have returned by now because
     // either the child exited naturally or SIGKILL closed its pipe ends.

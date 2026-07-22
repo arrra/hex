@@ -76,19 +76,32 @@ where
 {
     // 1. derive the assemble() query + optional pinned block
     let (query, pin) = if let Some(reply_to) = &e.reply_to {
-        match messages::lookup(conn, reply_to).map_err(|x| format!("messages lookup failed: {x}"))? {
+        match messages::lookup(conn, reply_to)
+            .map_err(|x| format!("messages lookup failed: {x}"))?
+        {
             // S6: a dangling reply_to is a referential-integrity violation — loud, not silent.
-            None => return Err(format!("reply_to target {reply_to:?} not found (referential integrity)")),
+            None => {
+                return Err(format!(
+                    "reply_to target {reply_to:?} not found (referential integrity)"
+                ))
+            }
             Some(m) => match (&m.prompt, &e.answer) {
                 (Some(q), Some(ans)) => {
                     let r = messages::resolve::resolve_answer(q, ans)?;
                     (r.query, Some(r.pin))
                 }
                 (None, _) => (
-                    format!("(reply to non-question {reply_to}) {}", e.body.clone().unwrap_or_default()),
-                    Some(format!("Note: reply_to target {reply_to} is not a question.\n")),
+                    format!(
+                        "(reply to non-question {reply_to}) {}",
+                        e.body.clone().unwrap_or_default()
+                    ),
+                    Some(format!(
+                        "Note: reply_to target {reply_to} is not a question.\n"
+                    )),
                 ),
-                (Some(_), None) => return Err(format!("reply to question {reply_to} carried no answer")),
+                (Some(_), None) => {
+                    return Err(format!("reply to question {reply_to} carried no answer"))
+                }
             },
         }
     } else {
@@ -140,7 +153,10 @@ where
             prompt: None,
         }),
         WorkerOutput::Question(p) => {
-            persist_message(conn, &StoredMessage::question(p.id.clone(), "hex".into(), p.clone(), e.ts.clone()))?;
+            persist_message(
+                conn,
+                &StoredMessage::question(p.id.clone(), "hex".into(), p.clone(), e.ts.clone()),
+            )?;
             Ok(ResultOut {
                 event_id: e.id.clone(),
                 status: "done".into(),
@@ -210,10 +226,18 @@ mod tests {
             ts: "t1".into(),
         };
         // fake worker echoes its input so we can assert the pin (with b's description) reached it
-        let worker = |input: &str| Ok::<_, String>(crate::worker::run::WorkerOutput::Answer(format!("SAW::{input}")));
+        let worker = |input: &str| {
+            Ok::<_, String>(crate::worker::run::WorkerOutput::Answer(format!(
+                "SAW::{input}"
+            )))
+        };
         let r = submit(&c, &e, worker).unwrap();
         assert_eq!(r.status, "done");
-        assert!(r.output.contains("sell ETH on rebuy"), "pin reached worker: {}", r.output);
+        assert!(
+            r.output.contains("sell ETH on rebuy"),
+            "pin reached worker: {}",
+            r.output
+        );
         assert!(crate::messages::lookup(&c, "E").unwrap().is_some());
     }
 

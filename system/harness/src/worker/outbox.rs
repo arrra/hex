@@ -235,10 +235,16 @@ mod tests {
         let dir = tempdir();
         let path = dir.join("outbox.jsonl");
         let ob = Outbox::new(&path);
-        ob.append(&Emission { event: "a".into(), data: json!({ "n": 1 }) })
-            .unwrap();
-        ob.append(&Emission { event: "b".into(), data: json!({ "n": 2 }) })
-            .unwrap();
+        ob.append(&Emission {
+            event: "a".into(),
+            data: json!({ "n": 1 }),
+        })
+        .unwrap();
+        ob.append(&Emission {
+            event: "b".into(),
+            data: json!({ "n": 2 }),
+        })
+        .unwrap();
 
         let first = ob.pop_front().unwrap().expect("first entry");
         assert_eq!(first.event, "a");

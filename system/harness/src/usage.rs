@@ -69,8 +69,7 @@ pub fn window_spend(projects_dir: &Path, now: DateTime<Utc>, window: Duration) -
         .into_iter()
         .filter_map(Result::ok)
         .filter(|e| {
-            e.file_type().is_file()
-                && e.path().extension().map(|x| x == "jsonl").unwrap_or(false)
+            e.file_type().is_file() && e.path().extension().map(|x| x == "jsonl").unwrap_or(false)
         })
     {
         // Skip files untouched since before the window — cheap and safe (a

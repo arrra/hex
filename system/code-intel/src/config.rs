@@ -127,7 +127,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("scipd.toml"), "pool_cap = \"lots\"\n").unwrap();
         let err = ScipdConfig::load(home.path()).unwrap_err();
-        assert!(err.contains("scipd.toml"), "error must name the file: {err}");
+        assert!(
+            err.contains("scipd.toml"),
+            "error must name the file: {err}"
+        );
     }
 
     #[test]
@@ -135,7 +138,10 @@ mod tests {
         let home = tempfile::tempdir().unwrap();
         std::fs::write(home.path().join("scipd.toml"), "pool_capp = 4\n").unwrap();
         let err = ScipdConfig::load(home.path()).unwrap_err();
-        assert!(err.contains("pool_capp"), "error must name the bad key: {err}");
+        assert!(
+            err.contains("pool_capp"),
+            "error must name the bad key: {err}"
+        );
     }
 
     #[test]

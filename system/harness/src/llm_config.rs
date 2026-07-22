@@ -168,8 +168,8 @@ fn load_file() -> Result<Option<LlmTomlFile>> {
     }
     let body = std::fs::read_to_string(&path)
         .with_context(|| format!("reading llm.toml at {}", path.display()))?;
-    let parsed: LlmTomlFile = toml::from_str(&body)
-        .with_context(|| format!("parsing llm.toml at {}", path.display()))?;
+    let parsed: LlmTomlFile =
+        toml::from_str(&body).with_context(|| format!("parsing llm.toml at {}", path.display()))?;
 
     // Warn (do not fail) on unknown use-case table names.
     for name in parsed.use_cases.keys() {
@@ -225,7 +225,10 @@ pub fn resolve(use_case: &str) -> Result<ResolvedLlm> {
 
     let file = load_file()?;
 
-    let defaults = file.as_ref().and_then(|f| f.defaults.clone()).unwrap_or_default();
+    let defaults = file
+        .as_ref()
+        .and_then(|f| f.defaults.clone())
+        .unwrap_or_default();
     let uc = file
         .as_ref()
         .and_then(|f| f.use_cases.get(use_case).cloned())

@@ -21,9 +21,11 @@ impl std::fmt::Display for ProviderError {
 impl std::error::Error for ProviderError {}
 
 pub fn hex_root() -> PathBuf {
-    env::var("HEX_DIR")
-        .map(PathBuf::from)
-        .unwrap_or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join("hex")).unwrap_or_else(|_| PathBuf::from("/tmp/hex")))
+    env::var("HEX_DIR").map(PathBuf::from).unwrap_or_else(|_| {
+        std::env::var("HOME")
+            .map(|h| PathBuf::from(h).join("hex"))
+            .unwrap_or_else(|_| PathBuf::from("/tmp/hex"))
+    })
 }
 
 pub fn load_openrouter_key() -> Option<String> {
@@ -171,10 +173,23 @@ fn generate_inner(
     // OBS-024: OpenRouter-shape usage (prompt_tokens/completion_tokens;
     // `cost` is OpenRouter-specific and absent on other gateways → 0.0).
     if let Some(usage) = json.get("usage") {
-        let in_tok = usage.get("prompt_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let out_tok = usage.get("completion_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
+        let in_tok = usage
+            .get("prompt_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let out_tok = usage
+            .get("completion_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
         let cost = usage.get("cost").and_then(|v| v.as_f64()).unwrap_or(0.0);
-        crate::llm_cost::record_llm_cost("openrouter", use_case, in_tok, out_tok, cost, Some(model));
+        crate::llm_cost::record_llm_cost(
+            "openrouter",
+            use_case,
+            in_tok,
+            out_tok,
+            cost,
+            Some(model),
+        );
     } else {
         // S6 / OBS-024: a response with no usage block must NOT vanish from the
         // cost ledger — that's the exact silent under-report this seam exists to
@@ -241,9 +256,14 @@ mod tests {
     fn anthropic_model_includes_provider_routing() {
         let body = build_request_body("hello", "anthropic/claude-sonnet-4-5", 100);
         let provider = &body["provider"];
-        assert!(!provider.is_null(), "provider field must be present for anthropic/* models");
+        assert!(
+            !provider.is_null(),
+            "provider field must be present for anthropic/* models"
+        );
         assert_eq!(provider["allow_fallbacks"], serde_json::json!(false));
-        let order = provider["order"].as_array().expect("order must be an array");
+        let order = provider["order"]
+            .as_array()
+            .expect("order must be an array");
         assert_eq!(order.len(), 1);
         assert_eq!(order[0], serde_json::json!("anthropic"));
     }

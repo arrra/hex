@@ -52,7 +52,14 @@ mod tests {
         let mut found = None;
         for _ in 0..100 {
             std::env::set_var("HEX_DIR", _t.path());
-            record_llm_cost("claude-cli", "extract", 1200, 340, 0.0425, Some("claude-sonnet-4-6"));
+            record_llm_cost(
+                "claude-cli",
+                "extract",
+                1200,
+                340,
+                0.0425,
+                Some("claude-sonnet-4-6"),
+            );
             let rows = crate::telemetry::recent(5).unwrap();
             if let Some(r) = rows.iter().find(|r| r.source == "llm-cost") {
                 found = Some(r.clone());

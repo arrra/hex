@@ -7,10 +7,21 @@ use serde::{Deserialize, Deserializer, Serialize};
 #[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum ActEvidence {
-    GitTag { value: String, repo: String },
-    GitPush { repo: String, #[serde(rename = "ref")] git_ref: String },
-    BoiDispatch { spec_id: String },
-    FileWritten { path: String },
+    GitTag {
+        value: String,
+        repo: String,
+    },
+    GitPush {
+        repo: String,
+        #[serde(rename = "ref")]
+        git_ref: String,
+    },
+    BoiDispatch {
+        spec_id: String,
+    },
+    FileWritten {
+        path: String,
+    },
 }
 
 // ── Trigger spec (event policy triggers) ─────────────────────────────────────
@@ -35,7 +46,10 @@ enum TriggerSpecRepr {
 impl<'de> Deserialize<'de> for TriggerSpec {
     fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
         match TriggerSpecRepr::deserialize(d)? {
-            TriggerSpecRepr::Bare(s) => Ok(TriggerSpec { event: s, condition: None }),
+            TriggerSpecRepr::Bare(s) => Ok(TriggerSpec {
+                event: s,
+                condition: None,
+            }),
             TriggerSpecRepr::Full { event, condition } => Ok(TriggerSpec { event, condition }),
         }
     }

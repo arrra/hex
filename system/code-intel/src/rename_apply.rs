@@ -53,8 +53,7 @@ pub fn apply(worktree_root: &Path, edits: &[RenameEdit]) -> Result<Vec<String>> 
     for (path, new_content) in planned {
         let full = worktree_root.join(path);
         let tmp = full.with_extension("cq-rename-tmp");
-        std::fs::write(&tmp, &new_content)
-            .with_context(|| format!("writing {}", tmp.display()))?;
+        std::fs::write(&tmp, &new_content).with_context(|| format!("writing {}", tmp.display()))?;
         // Preserve the original file's permissions across the rename. The
         // file is known to exist (phase 1 read it), so a metadata failure
         // here is a real error — never silently skip preservation (S6).
@@ -82,7 +81,10 @@ fn apply_to_content(path: &str, content: &str, edits: &[&RenameEdit]) -> Result<
         if end < start {
             bail!(
                 "malformed rename edit in {path}: end {}:{} precedes start {}:{}",
-                edit.end_line, edit.end_col, edit.line, edit.col
+                edit.end_line,
+                edit.end_col,
+                edit.line,
+                edit.col
             );
         }
         let found = &content[start..end];
@@ -108,7 +110,8 @@ fn apply_to_content(path: &str, content: &str, edits: &[&RenameEdit]) -> Result<
         if earlier_end > later_start {
             bail!(
                 "overlapping rename edits in {path} (at {}:{}) — refusing to apply",
-                e.line, e.col
+                e.line,
+                e.col
             );
         }
     }
@@ -132,13 +135,7 @@ fn line_starts(content: &str) -> Vec<usize> {
 }
 
 /// 1-based (line, byte-col) → byte offset, with loud bounds checks.
-fn offset(
-    path: &str,
-    content: &str,
-    line_starts: &[usize],
-    line: u32,
-    col: u32,
-) -> Result<usize> {
+fn offset(path: &str, content: &str, line_starts: &[usize], line: u32, col: u32) -> Result<usize> {
     if line < 1 || col < 1 {
         bail!("rename edit in {path} has non-1-based position {line}:{col}");
     }
@@ -163,14 +160,7 @@ mod tests {
     use super::*;
     use tempfile::TempDir;
 
-    fn edit(
-        path: &str,
-        line: u32,
-        col: u32,
-        end_col: u32,
-        old: &str,
-        new: &str,
-    ) -> RenameEdit {
+    fn edit(path: &str, line: u32, col: u32, end_col: u32, old: &str, new: &str) -> RenameEdit {
         RenameEdit {
             path: path.into(),
             line,
@@ -193,7 +183,8 @@ mod tests {
     }
 
     const OPS: &str = "pub fn double(x: i32) -> i32 { x * 2 }\n";
-    const LIB: &str = "pub fn top(x: i32) -> i32 { double(x) }\npub fn other() -> i32 { double(3) }\n";
+    const LIB: &str =
+        "pub fn top(x: i32) -> i32 { double(x) }\npub fn other() -> i32 { double(3) }\n";
 
     #[test]
     fn applies_multi_file_multi_edit_plan() {
@@ -204,7 +195,10 @@ mod tests {
             edit("src/lib.rs", 2, 25, 31, "double", "twice"),
         ];
         let modified = apply(wt.path(), &edits).unwrap();
-        assert_eq!(modified, vec!["src/lib.rs".to_string(), "src/ops.rs".to_string()]);
+        assert_eq!(
+            modified,
+            vec!["src/lib.rs".to_string(), "src/ops.rs".to_string()]
+        );
         assert_eq!(
             std::fs::read_to_string(wt.path().join("src/ops.rs")).unwrap(),
             "pub fn twice(x: i32) -> i32 { x * 2 }\n"
@@ -243,8 +237,14 @@ mod tests {
         assert!(matches!(cq, CqError::RenameAborted { .. }), "{cq}");
         assert_eq!(cq.exit_code(), 7);
         // Zero files modified — including the one whose assertions passed.
-        assert_eq!(std::fs::read_to_string(wt.path().join("src/ops.rs")).unwrap(), OPS);
-        assert_eq!(std::fs::read_to_string(wt.path().join("src/lib.rs")).unwrap(), LIB);
+        assert_eq!(
+            std::fs::read_to_string(wt.path().join("src/ops.rs")).unwrap(),
+            OPS
+        );
+        assert_eq!(
+            std::fs::read_to_string(wt.path().join("src/lib.rs")).unwrap(),
+            LIB
+        );
         // No temp droppings either.
         let leftovers: Vec<_> = walk(wt.path())
             .into_iter()
@@ -291,7 +291,10 @@ mod tests {
         ];
         let err = apply(wt.path(), &edits).unwrap_err();
         assert!(err.to_string().contains("overlapping"), "{err}");
-        assert_eq!(std::fs::read_to_string(wt.path().join("a.rs")).unwrap(), "abcdef\n");
+        assert_eq!(
+            std::fs::read_to_string(wt.path().join("a.rs")).unwrap(),
+            "abcdef\n"
+        );
     }
 
     #[test]

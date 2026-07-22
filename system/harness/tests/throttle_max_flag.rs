@@ -23,8 +23,7 @@ fn throttle_module_file_exists() {
 #[test]
 fn throttle_module_exposes_documented_surface() {
     let p = src_dir().join("throttle.rs");
-    let body = std::fs::read_to_string(&p)
-        .expect("throttle.rs must be readable");
+    let body = std::fs::read_to_string(&p).expect("throttle.rs must be readable");
     for needle in [
         "pub fn should_throttle",
         "pub fn lower_to_background",

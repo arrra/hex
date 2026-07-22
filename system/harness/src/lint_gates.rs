@@ -67,12 +67,11 @@ pub fn content_hash(cmd: &str) -> String {
 fn rule_path_127(cmd: &str) -> bool {
     // Non-coreutils binary invoked without an `export PATH=` prefix.
     const BINS: &[&str] = &[
-        "cargo ", "node ", "pnpm ", "npm ", "yarn ", "rustc ", "rustup ",
-        "deno ", "bun ",
+        "cargo ", "node ", "pnpm ", "npm ", "yarn ", "rustc ", "rustup ", "deno ", "bun ",
     ];
-    let hit = BINS.iter().any(|b| {
-        cmd.contains(b) || cmd.trim_start().starts_with(b.trim_end())
-    });
+    let hit = BINS
+        .iter()
+        .any(|b| cmd.contains(b) || cmd.trim_start().starts_with(b.trim_end()));
     if !hit {
         return false;
     }
@@ -86,8 +85,10 @@ fn rule_pipe_tail_exitcode(cmd: &str) -> bool {
     while i < bytes.len() {
         if bytes[i] == b'|' && bytes.get(i + 1) != Some(&b'|') {
             let rest = &cmd[i + 1..].trim_start();
-            if rest.starts_with("tail ") || rest.starts_with("tail\t")
-                || rest.starts_with("head ") || rest.starts_with("head\t")
+            if rest.starts_with("tail ")
+                || rest.starts_with("tail\t")
+                || rest.starts_with("head ")
+                || rest.starts_with("head\t")
             {
                 return true;
             }
@@ -168,9 +169,7 @@ fn rule_hex_from_worker(cmd: &str) -> bool {
 }
 
 fn rule_inverted_grep_v(cmd: &str) -> bool {
-    cmd.contains("grep -q -v")
-        || cmd.contains("grep -qv")
-        || cmd.contains("grep -v -q")
+    cmd.contains("grep -q -v") || cmd.contains("grep -qv") || cmd.contains("grep -v -q")
 }
 
 fn rule_macos_wc_whitespace(cmd: &str) -> bool {
@@ -179,9 +178,13 @@ fn rule_macos_wc_whitespace(cmd: &str) -> bool {
         return false;
     }
     // Look for `wc -l ... | ... grep -q "^<digit>`.
-    let Some(wc_idx) = cmd.find("wc -l") else { return false };
+    let Some(wc_idx) = cmd.find("wc -l") else {
+        return false;
+    };
     let after = &cmd[wc_idx..];
-    let Some(pipe_idx) = after.find('|') else { return false };
+    let Some(pipe_idx) = after.find('|') else {
+        return false;
+    };
     let tail = &after[pipe_idx + 1..];
     // Allow any whitespace between `|` and `grep`.
     let tail = tail.trim_start();
@@ -194,7 +197,10 @@ fn rule_macos_wc_whitespace(cmd: &str) -> bool {
 
 fn rule_python_c_indent(cmd: &str) -> bool {
     // `python3 -c "..."` where the literal body has a leading-indent line.
-    let Some(idx) = cmd.find("python3 -c \"").or_else(|| cmd.find("python -c \"")) else {
+    let Some(idx) = cmd
+        .find("python3 -c \"")
+        .or_else(|| cmd.find("python -c \""))
+    else {
         return false;
     };
     let rest = &cmd[idx..];
@@ -268,8 +274,13 @@ impl CompiledRule {
     /// message so a malformed registry entry can be pinpointed (S6 — loud).
     pub fn compile(rule_id: &str, pattern: &str) -> Result<Self, String> {
         Regex::new(pattern)
-            .map(|regex| CompiledRule { rule_id: rule_id.to_string(), regex })
-            .map_err(|e| format!("rule '{rule_id}': pattern '{pattern}' does not compile as regex: {e}"))
+            .map(|regex| CompiledRule {
+                rule_id: rule_id.to_string(),
+                regex,
+            })
+            .map_err(|e| {
+                format!("rule '{rule_id}': pattern '{pattern}' does not compile as regex: {e}")
+            })
     }
 }
 
@@ -380,7 +391,9 @@ impl std::fmt::Display for LintError {
 impl std::error::Error for LintError {}
 
 impl From<std::io::Error> for LintError {
-    fn from(e: std::io::Error) -> Self { LintError::Io(e) }
+    fn from(e: std::io::Error) -> Self {
+        LintError::Io(e)
+    }
 }
 
 /// Extract every lintable verification command (contract + per-task) from a
@@ -435,18 +448,26 @@ mod tests {
     #[test]
     fn lint_path_127_positive_and_negative() {
         assert!(rule_path_127("cargo build && test -f target/release/hex"));
-        assert!(!rule_path_127("export PATH=/opt/homebrew/bin:$PATH && cargo build"));
+        assert!(!rule_path_127(
+            "export PATH=/opt/homebrew/bin:$PATH && cargo build"
+        ));
     }
 
     #[test]
     fn lint_pipe_tail_exitcode_positive_and_negative() {
-        assert!(rule_pipe_tail_exitcode("cargo build 2>&1 | tail -5 | grep warn"));
-        assert!(!rule_pipe_tail_exitcode("cargo build > /tmp/log && grep warn /tmp/log"));
+        assert!(rule_pipe_tail_exitcode(
+            "cargo build 2>&1 | tail -5 | grep warn"
+        ));
+        assert!(!rule_pipe_tail_exitcode(
+            "cargo build > /tmp/log && grep warn /tmp/log"
+        ));
     }
 
     #[test]
     fn lint_deployed_binary_positive_and_negative() {
-        assert!(rule_deployed_binary("test -x .hex/bin/hex && .hex/bin/hex --version"));
+        assert!(rule_deployed_binary(
+            "test -x .hex/bin/hex && .hex/bin/hex --version"
+        ));
         assert!(!rule_deployed_binary("test -x target/release/hex"));
     }
 
@@ -459,7 +480,9 @@ mod tests {
         assert!(rule_hex_from_worker("echo $(hex recent)"));
         // env-prefixed hex still reads $HEX_DIR → must still fire (review fix)
         assert!(rule_hex_from_worker("HEX_DIR=/tmp/x hex doctor"));
-        assert!(rule_hex_from_worker("PATH=/opt/homebrew/bin:$PATH A=1 hex stats"));
+        assert!(rule_hex_from_worker(
+            "PATH=/opt/homebrew/bin:$PATH A=1 hex stats"
+        ));
         // backgrounded hex after a lone & (review fix)
         assert!(rule_hex_from_worker("echo done & hex backup"));
         // not a hex subcommand → does not fire
@@ -506,9 +529,7 @@ mod tests {
 
     #[test]
     fn lint_analyze_aggregates_multiple_rules() {
-        let v = analyze_command(
-            "cargo test 2>/dev/null && grep -q -v ERROR /tmp/log",
-        );
+        let v = analyze_command("cargo test 2>/dev/null && grep -q -v ERROR /tmp/log");
         assert!(matches!(v.predicted, Prediction::Fail));
         // Should fire at least the path-127, stderr-swallow, and inverted-grep-v rules.
         assert!(v.rules_fired.iter().any(|r| r == "stderr-swallow"));
@@ -563,7 +584,10 @@ verifications = [
 ]
 "#;
         let gates = extract_gates_from_spec(src).unwrap();
-        assert_eq!(gates, vec!["test -f foo".to_string(), "test -d src".to_string()]);
+        assert_eq!(
+            gates,
+            vec!["test -f foo".to_string(), "test -d src".to_string()]
+        );
     }
 
     #[test]
@@ -590,8 +614,14 @@ verifications = [{ name = "greedy-gate", command = "true", intent = "also a clai
 "#;
         let err = extract_gates_from_spec(src).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("greedy-gate"), "error must name the gate: {msg}");
-        assert!(msg.contains("BOTH"), "error must say both were given: {msg}");
+        assert!(
+            msg.contains("greedy-gate"),
+            "error must name the gate: {msg}"
+        );
+        assert!(
+            msg.contains("BOTH"),
+            "error must say both were given: {msg}"
+        );
     }
 
     #[test]
@@ -607,8 +637,14 @@ verifications = [{ name = "empty-gate" }]
 "#;
         let err = extract_gates_from_spec(src).unwrap_err();
         let msg = err.to_string();
-        assert!(msg.contains("empty-gate"), "error must name the gate: {msg}");
-        assert!(msg.contains("NEITHER"), "error must say neither was given: {msg}");
+        assert!(
+            msg.contains("empty-gate"),
+            "error must name the gate: {msg}"
+        );
+        assert!(
+            msg.contains("NEITHER"),
+            "error must say neither was given: {msg}"
+        );
     }
 
     #[test]
@@ -678,7 +714,9 @@ verifications = [{ intent = "it really works" }]
         let cmd = "results=$(ls -1 | wc -l | grep '^14$')";
         // Builtin 8 alone: does not fire (this exact footgun isn't builtin).
         let builtin_only = analyze_command(cmd);
-        assert!(!builtin_only.rules_fired.contains(&"wc-l-grep-no-tr".to_string()));
+        assert!(!builtin_only
+            .rules_fired
+            .contains(&"wc-l-grep-no-tr".to_string()));
         // Merged: the landed rule fires and is named in rules_fired.
         let merged = analyze_command_with(&[rule], cmd);
         assert!(matches!(merged.predicted, Prediction::Fail));

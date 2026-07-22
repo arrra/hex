@@ -120,7 +120,11 @@ fn test_timeout_kill_reports_timed_out() {
     let result = execute_capability(&registry_dir, "fn-hang", &[], &ctx, &sandbox, &mut count);
     let elapsed = start.elapsed();
 
-    assert!(result.is_ok(), "execute_capability must return Ok (timed-out result), got: {:?}", result.err());
+    assert!(
+        result.is_ok(),
+        "execute_capability must return Ok (timed-out result), got: {:?}",
+        result.err()
+    );
     let exec_result = result.unwrap();
     assert!(
         exec_result.timed_out,
@@ -128,7 +132,8 @@ fn test_timeout_kill_reports_timed_out() {
     );
     assert!(
         elapsed.as_secs() < 5,
-        "timeout must fire quickly (took {}s)", elapsed.as_secs()
+        "timeout must fire quickly (took {}s)",
+        elapsed.as_secs()
     );
 }
 
@@ -146,8 +151,8 @@ fn test_timeout_kill_records_minus_one_exit_code() {
     };
 
     let mut count = 0u32;
-    let result = execute_capability(&registry_dir, "fn-hang2", &[], &ctx, &sandbox, &mut count)
-        .unwrap();
+    let result =
+        execute_capability(&registry_dir, "fn-hang2", &[], &ctx, &sandbox, &mut count).unwrap();
 
     assert_eq!(
         result.exit_code, -1,
@@ -176,8 +181,8 @@ fn test_output_truncation_stdout() {
     };
 
     let mut count = 0u32;
-    let result = execute_capability(&registry_dir, "fn-bigout", &[], &ctx, &sandbox, &mut count)
-        .unwrap();
+    let result =
+        execute_capability(&registry_dir, "fn-bigout", &[], &ctx, &sandbox, &mut count).unwrap();
 
     assert!(
         result.output_truncated,
@@ -185,7 +190,8 @@ fn test_output_truncation_stdout() {
     );
     assert!(
         result.stdout.len() <= 50,
-        "stdout must be at most cap bytes, got {} bytes", result.stdout.len()
+        "stdout must be at most cap bytes, got {} bytes",
+        result.stdout.len()
     );
 }
 
@@ -203,8 +209,15 @@ fn test_output_not_truncated_under_cap() {
     };
 
     let mut count = 0u32;
-    let result = execute_capability(&registry_dir, "fn-smallout", &[], &ctx, &sandbox, &mut count)
-        .unwrap();
+    let result = execute_capability(
+        &registry_dir,
+        "fn-smallout",
+        &[],
+        &ctx,
+        &sandbox,
+        &mut count,
+    )
+    .unwrap();
 
     assert!(
         !result.output_truncated,
@@ -294,21 +307,45 @@ fn test_calls_jsonl_row_shape() {
     execute_capability(&registry_dir, "fn-rowtest", &[], &ctx, &sandbox, &mut count).unwrap();
 
     let calls_path = registry_dir.join("calls.jsonl");
-    assert!(calls_path.exists(), "calls.jsonl must exist after execution");
+    assert!(
+        calls_path.exists(),
+        "calls.jsonl must exist after execution"
+    );
 
     let content = fs::read_to_string(&calls_path).unwrap();
     let lines: Vec<&str> = content.lines().collect();
-    assert!(!lines.is_empty(), "calls.jsonl must have at least one entry");
+    assert!(
+        !lines.is_empty(),
+        "calls.jsonl must have at least one entry"
+    );
 
     // Parse the last entry
     let row: serde_json::Value = serde_json::from_str(lines.last().unwrap()).unwrap();
 
-    assert!(row["ts"].is_string() && !row["ts"].as_str().unwrap().is_empty(), "ts must be present");
-    assert_eq!(row["fn_id"].as_str(), Some("fn-rowtest"), "fn_id must match");
-    assert_eq!(row["caller"].as_str(), Some("agent-caller-x"), "caller must be harness-set value");
-    assert_eq!(row["created_by"].as_str(), Some("agent-creator-y"), "created_by must be harness-set value");
+    assert!(
+        row["ts"].is_string() && !row["ts"].as_str().unwrap().is_empty(),
+        "ts must be present"
+    );
+    assert_eq!(
+        row["fn_id"].as_str(),
+        Some("fn-rowtest"),
+        "fn_id must match"
+    );
+    assert_eq!(
+        row["caller"].as_str(),
+        Some("agent-caller-x"),
+        "caller must be harness-set value"
+    );
+    assert_eq!(
+        row["created_by"].as_str(),
+        Some("agent-creator-y"),
+        "created_by must be harness-set value"
+    );
     assert_eq!(row["wake_n"].as_u64(), Some(42), "wake_n must match");
-    assert!(row["exit_code"].is_number(), "exit_code must be present and numeric");
+    assert!(
+        row["exit_code"].is_number(),
+        "exit_code must be present and numeric"
+    );
 }
 
 #[test]
@@ -320,9 +357,21 @@ fn test_calls_jsonl_exit_code_zero_on_success() {
     make_bin(&registry_dir, "fn-exit0", "exit 0");
 
     let mut count = 0u32;
-    execute_capability(&registry_dir, "fn-exit0", &[], &base_ctx(), &sandbox, &mut count).unwrap();
+    execute_capability(
+        &registry_dir,
+        "fn-exit0",
+        &[],
+        &base_ctx(),
+        &sandbox,
+        &mut count,
+    )
+    .unwrap();
 
     let content = fs::read_to_string(registry_dir.join("calls.jsonl")).unwrap();
     let row: serde_json::Value = serde_json::from_str(content.lines().last().unwrap()).unwrap();
-    assert_eq!(row["exit_code"].as_i64(), Some(0), "successful script must record exit_code=0");
+    assert_eq!(
+        row["exit_code"].as_i64(),
+        Some(0),
+        "successful script must record exit_code=0"
+    );
 }

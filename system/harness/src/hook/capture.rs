@@ -12,11 +12,7 @@ fn dir_to_slug(project_dir: &str) -> String {
 }
 
 /// Fast-path source resolution using env vars (O(1)).
-pub fn fast_path_source(
-    projects_dir: &Path,
-    project_dir: &str,
-    session_id: &str,
-) -> PathBuf {
+pub fn fast_path_source(projects_dir: &Path, project_dir: &str, session_id: &str) -> PathBuf {
     let slug = dir_to_slug(project_dir);
     projects_dir.join(&slug).join(format!("{session_id}.jsonl"))
 }
@@ -134,7 +130,11 @@ fn run_inner(raw: &str, hex_dir: &Path) {
                 detail: Some(format!("{} ({bytes} bytes)", dest.display())),
             });
         }
-        Err(e) => fail(&format!("copy {} -> {}: {e}", source.display(), dest.display())),
+        Err(e) => fail(&format!(
+            "copy {} -> {}: {e}",
+            source.display(),
+            dest.display()
+        )),
     }
 }
 
@@ -172,9 +172,7 @@ mod tests {
         let session_id = "abc123";
 
         let got = fast_path_source(projects_dir, project_dir, session_id);
-        let expected = projects_dir
-            .join("-Users-test-hex")
-            .join("abc123.jsonl");
+        let expected = projects_dir.join("-Users-test-hex").join("abc123.jsonl");
         assert_eq!(got, expected);
     }
 

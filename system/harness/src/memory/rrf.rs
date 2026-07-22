@@ -39,6 +39,9 @@ mod tests {
     #[test]
     fn single_list_preserves_order() {
         let fused = rrf_fuse(&[vec![9, 8, 7]], RRF_K);
-        assert_eq!(fused.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![9, 8, 7]);
+        assert_eq!(
+            fused.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![9, 8, 7]
+        );
     }
 }

@@ -240,9 +240,7 @@ impl VersionFile {
                 let line = body
                     .lines()
                     .find(|l| l.starts_with("version"))
-                    .with_context(|| {
-                        format!("no `version = \"…\"` line in {}", full.display())
-                    })?;
+                    .with_context(|| format!("no `version = \"…\"` line in {}", full.display()))?;
                 line.split('"').nth(1).map(str::to_string).with_context(|| {
                     format!("unquotable version line in {}: {line}", full.display())
                 })
@@ -254,10 +252,8 @@ impl VersionFile {
     pub fn write_version(&self, repo_root: &Path, new_version: &str) -> Result<()> {
         let full = repo_root.join(&self.path);
         match self.kind {
-            VersionFileKind::Plain => {
-                std::fs::write(&full, format!("{new_version}\n"))
-                    .with_context(|| format!("writing version file {}", full.display()))
-            }
+            VersionFileKind::Plain => std::fs::write(&full, format!("{new_version}\n"))
+                .with_context(|| format!("writing version file {}", full.display())),
             VersionFileKind::CargoToml => {
                 let body = std::fs::read_to_string(&full)
                     .with_context(|| format!("reading version file {}", full.display()))?;
@@ -349,16 +345,34 @@ pub fn builtin_foundation() -> ReleaseProfile {
         match_remote: Some("hex-foundation".to_string()),
         match_dir: Some("hex-foundation".to_string()),
         gates: vec![
-            GateSpec { name: "clean-tree".to_string(), kind: GateKind::CleanTree },
+            GateSpec {
+                name: "clean-tree".to_string(),
+                kind: GateKind::CleanTree,
+            },
             // Tests runs before docker-e2e — fast local `cargo test --workspace`
             // catches red-suite regressions (finding 2 of the 2026-07-16 audit
             // shipped only because the release battery never ran cargo test)
             // before the slow container gates start.
-            GateSpec { name: "tests".to_string(), kind: GateKind::Tests },
-            GateSpec { name: "docker-e2e".to_string(), kind: GateKind::DockerE2e },
-            GateSpec { name: "sanitize".to_string(), kind: GateKind::Sanitize },
-            GateSpec { name: "codex-parity".to_string(), kind: GateKind::CodexParity },
-            GateSpec { name: "autonomy".to_string(), kind: GateKind::Autonomy },
+            GateSpec {
+                name: "tests".to_string(),
+                kind: GateKind::Tests,
+            },
+            GateSpec {
+                name: "docker-e2e".to_string(),
+                kind: GateKind::DockerE2e,
+            },
+            GateSpec {
+                name: "sanitize".to_string(),
+                kind: GateKind::Sanitize,
+            },
+            GateSpec {
+                name: "codex-parity".to_string(),
+                kind: GateKind::CodexParity,
+            },
+            GateSpec {
+                name: "autonomy".to_string(),
+                kind: GateKind::Autonomy,
+            },
         ],
         version_files: vec![
             VersionFile {
@@ -510,7 +524,10 @@ impl ProfileToml {
                         vf.path
                     ),
                 };
-                Ok(VersionFile { path: vf.path, kind })
+                Ok(VersionFile {
+                    path: vf.path,
+                    kind,
+                })
             })
             .collect::<Result<Vec<_>>>()?;
         let (repo_dir, watch) = watcher_fields(&self.name, self.repo_dir, self.watch)?;
@@ -521,7 +538,10 @@ impl ProfileToml {
             gates: self
                 .gates
                 .into_iter()
-                .map(|g| GateSpec { name: g.name, kind: GateKind::Command(g.command) })
+                .map(|g| GateSpec {
+                    name: g.name,
+                    kind: GateKind::Command(g.command),
+                })
                 .collect(),
             version_files,
             build_command: self.build_command,
@@ -802,7 +822,10 @@ pub fn run_battery(
                 GateResult::Fail(reason) => red(&format!("  GATE FAIL: {}: {reason}", gate.name)),
                 GateResult::Skipped(reason) => red(&format!("  SKIPPED: {reason}")),
             }
-            GateOutcome { name: gate.name.clone(), result }
+            GateOutcome {
+                name: gate.name.clone(),
+                result,
+            }
         })
         .collect()
 }
@@ -1014,8 +1037,12 @@ fn gate_autonomy(repo_root: &Path) -> GateResult {
     }
     println!("  Running mechanism routing tests...");
     let mut cmd = Command::new("python3");
-    cmd.args(["tests/autonomy/run_autonomy_suite.py", "--mode", "structural"])
-        .current_dir(repo_root);
+    cmd.args([
+        "tests/autonomy/run_autonomy_suite.py",
+        "--mode",
+        "structural",
+    ])
+    .current_dir(repo_root);
     let r = match run_checked("python3", &mut cmd) {
         Ok(r) => r,
         Err(msg) => return GateResult::Fail(msg),
@@ -1293,9 +1320,7 @@ impl ReleaseLock {
                     path.display()
                 );
             }
-            Err(e) => {
-                Err(e).with_context(|| format!("creating release lock {}", path.display()))
-            }
+            Err(e) => Err(e).with_context(|| format!("creating release lock {}", path.display())),
         }
     }
 }
@@ -1339,7 +1364,9 @@ pub fn lock_file_path(repo_root: &Path) -> Result<PathBuf> {
 // ---------------------------------------------------------------------------
 
 fn rev_parse(repo_root: &Path, refname: &str) -> Result<String> {
-    Ok(git_stdout(repo_root, &["rev-parse", refname])?.trim().to_string())
+    Ok(git_stdout(repo_root, &["rev-parse", refname])?
+        .trim()
+        .to_string())
 }
 
 fn short_sha(sha: &str) -> &str {
@@ -1417,7 +1444,12 @@ fn parse_ls_remote(out: &str, refname: &str) -> Option<String> {
 pub fn ls_remote_watch_heads(repo_root: &Path) -> Result<Vec<(String, String)>> {
     let out = git_stdout(
         repo_root,
-        &["ls-remote", "origin", "refs/heads/release/*", "refs/heads/hotfix/*"],
+        &[
+            "ls-remote",
+            "origin",
+            "refs/heads/release/*",
+            "refs/heads/hotfix/*",
+        ],
     )
     .context("listing origin release/* and hotfix/* heads")?;
     Ok(parse_ls_remote_heads(&out))
@@ -1602,7 +1634,10 @@ pub fn sync_develop_to_origin(repo_root: &Path, develop: &str) -> Result<Develop
         DevelopSyncClass::Ahead => {
             push_ref(repo_root, develop)?;
             verify_pushed(repo_root, develop, &local)?;
-            Ok(DevelopSyncOutcome::Pushed { from: origin, to: local })
+            Ok(DevelopSyncOutcome::Pushed {
+                from: origin,
+                to: local,
+            })
         }
         DevelopSyncClass::Behind => Ok(DevelopSyncOutcome::Behind { local, origin }),
         DevelopSyncClass::Diverged => Ok(DevelopSyncOutcome::Diverged { local, origin }),
@@ -1685,7 +1720,9 @@ pub fn tag_push_action(local_sha: &str, remote_sha: Option<&str>) -> TagPushActi
     match remote_sha {
         None => TagPushAction::Push,
         Some(sha) if sha == local_sha => TagPushAction::SkipAlreadyOnOrigin,
-        Some(sha) => TagPushAction::RefuseDivergent { remote_sha: sha.to_string() },
+        Some(sha) => TagPushAction::RefuseDivergent {
+            remote_sha: sha.to_string(),
+        },
     }
 }
 
@@ -1736,15 +1773,17 @@ pub struct FinishSpec {
 /// Parse a finish-mode branch name. Only `release/X.Y.Z` and `hotfix/X.Y.Z`
 /// are finishable — anything else is a loud refusal, never a guess.
 pub fn parse_finish_branch(branch: &str) -> Result<FinishSpec> {
-    let (hotfix, version) =
-        match (branch.strip_prefix("release/"), branch.strip_prefix("hotfix/")) {
-            (Some(v), _) => (false, v),
-            (_, Some(v)) => (true, v),
-            _ => bail!(
-                "--finish branch `{branch}` is not finishable — expected \
+    let (hotfix, version) = match (
+        branch.strip_prefix("release/"),
+        branch.strip_prefix("hotfix/"),
+    ) {
+        (Some(v), _) => (false, v),
+        (_, Some(v)) => (true, v),
+        _ => bail!(
+            "--finish branch `{branch}` is not finishable — expected \
                  release/X.Y.Z or hotfix/X.Y.Z"
-            ),
-        };
+        ),
+    };
     if !semver_valid(version) {
         bail!(
             "--finish branch `{branch}` does not carry a semver version \
@@ -1772,8 +1811,11 @@ fn resolve_finish_branch_tip(repo_root: &Path, branch: &str) -> Result<String> {
     };
     let remote = ls_remote_sha(repo_root, &local_ref)?;
     let fetch = || -> Result<String> {
-        git_stdout(repo_root, &["fetch", "-q", "origin", &format!("{branch}:{branch}")])
-            .with_context(|| format!("fetching origin {branch} into local {branch}"))?;
+        git_stdout(
+            repo_root,
+            &["fetch", "-q", "origin", &format!("{branch}:{branch}")],
+        )
+        .with_context(|| format!("fetching origin {branch} into local {branch}"))?;
         rev_parse(repo_root, &local_ref)
     };
     match (local, remote) {
@@ -1915,7 +1957,10 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
     // requested and what the battery must test); a fresh cut pins the
     // GitFlow source branch.
     let (pinned_branch, pinned_sha) = match &finish {
-        Some(f) => (f.branch.as_str(), resolve_finish_branch_tip(repo_root, &f.branch)?),
+        Some(f) => (
+            f.branch.as_str(),
+            resolve_finish_branch_tip(repo_root, &f.branch)?,
+        ),
         None => {
             let pb = if hotfix { main } else { develop };
             let sha = rev_parse(repo_root, &format!("refs/heads/{pb}"))?;
@@ -1937,8 +1982,10 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
     // a doomed finish (tag taken, version not above the latest tag) refuses
     // here instead of after minutes of gates.
     if let Some(f) = &finish {
-        let tags: Vec<String> =
-            git_stdout(repo_root, &["tag"])?.lines().map(str::to_string).collect();
+        let tags: Vec<String> = git_stdout(repo_root, &["tag"])?
+            .lines()
+            .map(str::to_string)
+            .collect();
         if let Some(latest) = highest_semver_tag(&tags, &profile.tag_prefix) {
             if !semver_gt(&f.version, &latest) {
                 bail!(
@@ -2055,8 +2102,11 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
         }
         phases.push(("branch", format!("{rel_branch} (existing — finish mode)")));
     } else {
-        git_stdout(repo_root, &["checkout", "-q", "-b", &rel_branch, &pinned_sha])
-            .with_context(|| format!("creating branch {rel_branch}"))?;
+        git_stdout(
+            repo_root,
+            &["checkout", "-q", "-b", &rel_branch, &pinned_sha],
+        )
+        .with_context(|| format!("creating branch {rel_branch}"))?;
         phases.push(("branch", rel_branch.clone()));
     }
 
@@ -2067,7 +2117,9 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
             "The branch {rel_branch} is preserved — fix it and re-run \
              `hex release cut --finish {rel_branch}`."
         ),
-        None => format!("Clean up with: git checkout {pinned_branch} && git branch -D {rel_branch}"),
+        None => {
+            format!("Clean up with: git checkout {pinned_branch} && git branch -D {rel_branch}")
+        }
     };
 
     // (f) Bump version files; a failing build reverts them and aborts. A
@@ -2093,8 +2145,8 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
     }
 
     // (g) Release notes — failures downgrade to loud WARN, never an abort.
-    let notes = generate_release_notes(repo_root, &profile.tag_prefix, &version)
-        .unwrap_or_else(|e| {
+    let notes =
+        generate_release_notes(repo_root, &profile.tag_prefix, &version).unwrap_or_else(|e| {
             red(&format!(
                 "WARN: release notes generation failed ({e:#}) — continuing with \
                  minimal notes"
@@ -2139,7 +2191,10 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
         .with_context(|| format!("tagging {tag} on the merge commit"))?;
     phases.push((
         "merge",
-        format!("{rel_branch} → {main} @ {} (tag {tag})", short_sha(&main_sha)),
+        format!(
+            "{rel_branch} → {main} @ {} (tag {tag})",
+            short_sha(&main_sha)
+        ),
     ));
 
     // (i)+(j) Race guard, then --no-ff back-merge to develop. The guard runs
@@ -2252,7 +2307,9 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
     match git_stdout(repo_root, &["branch", "-d", &rel_branch]) {
         Ok(_) => cleanup.push(format!("{rel_branch} deleted locally")),
         Err(e) => {
-            red(&format!("WARN: could not delete {rel_branch} locally: {e:#}"));
+            red(&format!(
+                "WARN: could not delete {rel_branch} locally: {e:#}"
+            ));
             cleanup.push(format!("{rel_branch} NOT deleted locally"));
         }
     }
@@ -2261,11 +2318,15 @@ fn cut_ceremony(repo_root: &Path, profile: &ReleaseProfile, opts: &CutOptions) -
         Ok(Some(_)) => match push_ref(repo_root, &format!(":refs/heads/{rel_branch}")) {
             Ok(()) => cleanup.push(format!("{rel_branch} deleted on origin")),
             Err(e) => {
-                red(&format!("WARN: could not delete {rel_branch} on origin: {e:#}"));
+                red(&format!(
+                    "WARN: could not delete {rel_branch} on origin: {e:#}"
+                ));
                 cleanup.push(format!("{rel_branch} NOT deleted on origin"));
             }
         },
-        Err(e) => red(&format!("WARN: could not check origin for {rel_branch}: {e:#}")),
+        Err(e) => red(&format!(
+            "WARN: could not check origin for {rel_branch}: {e:#}"
+        )),
     }
     phases.push(("cleanup", cleanup.join("; ")));
 
@@ -2518,7 +2579,15 @@ mod tests {
     #[test]
     fn semver_valid_rejects_invalid_versions() {
         for v in [
-            "banana", "1.0", "1", "v1.0.0", "1.0.0-beta", "1.0.0.1", "", "+1.0.0", "1. 0.0",
+            "banana",
+            "1.0",
+            "1",
+            "v1.0.0",
+            "1.0.0-beta",
+            "1.0.0.1",
+            "",
+            "+1.0.0",
+            "1. 0.0",
         ] {
             assert!(!semver_valid(v), "semver_valid accepted invalid '{v}'");
         }
@@ -2578,9 +2647,18 @@ mod tests {
 
     #[test]
     fn bump_version_levels() {
-        assert_eq!(bump_version("1.2.3", BumpLevel::Patch).as_deref(), Some("1.2.4"));
-        assert_eq!(bump_version("1.2.3", BumpLevel::Minor).as_deref(), Some("1.3.0"));
-        assert_eq!(bump_version("1.2.3", BumpLevel::Major).as_deref(), Some("2.0.0"));
+        assert_eq!(
+            bump_version("1.2.3", BumpLevel::Patch).as_deref(),
+            Some("1.2.4")
+        );
+        assert_eq!(
+            bump_version("1.2.3", BumpLevel::Minor).as_deref(),
+            Some("1.3.0")
+        );
+        assert_eq!(
+            bump_version("1.2.3", BumpLevel::Major).as_deref(),
+            Some("2.0.0")
+        );
         assert_eq!("patch".parse::<BumpLevel>().unwrap(), BumpLevel::Patch);
         assert!("banana".parse::<BumpLevel>().is_err());
     }
@@ -2685,8 +2763,7 @@ mod tests {
     fn gate_result_formatting() {
         assert_eq!(GateResult::Pass.to_string(), "PASS");
         assert_eq!(
-            GateResult::Fail("docker E2E build failed (exit 1): env resolution".into())
-                .to_string(),
+            GateResult::Fail("docker E2E build failed (exit 1): env resolution".into()).to_string(),
             "FAIL — docker E2E build failed (exit 1): env resolution"
         );
         assert_eq!(
@@ -2695,8 +2772,14 @@ mod tests {
         );
 
         let outcomes = vec![
-            GateOutcome { name: "clean-tree".into(), result: GateResult::Pass },
-            GateOutcome { name: "docker-e2e".into(), result: GateResult::Fail("boom".into()) },
+            GateOutcome {
+                name: "clean-tree".into(),
+                result: GateResult::Pass,
+            },
+            GateOutcome {
+                name: "docker-e2e".into(),
+                result: GateResult::Fail("boom".into()),
+            },
         ];
         assert_eq!(
             format_battery_summary(&outcomes),
@@ -2723,15 +2806,24 @@ mod tests {
         let msg = fail_msg(doctor_carveout(two, 1));
         assert!(msg.contains("exit 1"), "exit code must be reported: {msg}");
         assert!(msg.contains("2 FAIL line(s)"), "{msg}");
-        assert!(msg.contains("FAIL: memory index"), "output tail must carry evidence: {msg}");
+        assert!(
+            msg.contains("FAIL: memory index"),
+            "output tail must carry evidence: {msg}"
+        );
         // Killed container: nonzero exit, ZERO FAIL lines — the v0.38.0
         // attempt-1 shape. Must name the exit code and classify 137.
         let none = "container crashed before the suite started\n";
         let msg = fail_msg(doctor_carveout(none, 137));
         assert!(msg.contains("exit 137"), "{msg}");
-        assert!(msg.contains("OOM"), "137 must be classified as a likely OOM kill: {msg}");
+        assert!(
+            msg.contains("OOM"),
+            "137 must be classified as a likely OOM kill: {msg}"
+        );
         assert!(msg.contains("0 FAIL line(s)"), "{msg}");
-        assert!(msg.contains("container crashed"), "output tail must surface: {msg}");
+        assert!(
+            msg.contains("container crashed"),
+            "output tail must surface: {msg}"
+        );
         // Non-137 exits get no OOM note.
         let msg = fail_msg(doctor_carveout(none, 2));
         assert!(!msg.contains("OOM"), "{msg}");
@@ -2826,12 +2918,21 @@ mod tests {
     fn skip_flag_interplay() {
         let td = tempfile::tempdir().unwrap();
         let root = td.path();
-        let e2e = SkipFlags { skip_e2e: true, skip_parity: false };
-        let parity = SkipFlags { skip_e2e: false, skip_parity: true };
+        let e2e = SkipFlags {
+            skip_e2e: true,
+            skip_parity: false,
+        };
+        let parity = SkipFlags {
+            skip_e2e: false,
+            skip_parity: true,
+        };
 
         // --skip-e2e skips docker outright (no docker spawn).
         match run_gate(
-            &GateSpec { name: "docker-e2e".into(), kind: GateKind::DockerE2e },
+            &GateSpec {
+                name: "docker-e2e".into(),
+                kind: GateKind::DockerE2e,
+            },
             root,
             e2e,
         ) {
@@ -2918,7 +3019,10 @@ mod tests {
 
     #[test]
     fn unknown_repo_is_refused_listing_known_profiles() {
-        let profiles = vec![builtin_foundation(), toy_profile("widget", Some("acme/widget"), None)];
+        let profiles = vec![
+            builtin_foundation(),
+            toy_profile("widget", Some("acme/widget"), None),
+        ];
         assert!(match_profile(&profiles, Some("https://example.com/x/y.git"), "y").is_none());
         let msg = refusal_message(&profiles, Some("https://example.com/x/y.git"), "y");
         assert!(msg.contains("no release profile matches"), "got: {msg}");
@@ -2940,7 +3044,14 @@ mod tests {
         // battery had never run `cargo test`).
         assert_eq!(
             names,
-            ["clean-tree", "tests", "docker-e2e", "sanitize", "codex-parity", "autonomy"]
+            [
+                "clean-tree",
+                "tests",
+                "docker-e2e",
+                "sanitize",
+                "codex-parity",
+                "autonomy"
+            ]
         );
         assert_eq!(
             p.gates.iter().find(|g| g.name == "tests").map(|g| &g.kind),
@@ -2984,10 +3095,7 @@ build_command = "cargo build --release"
         let p = &cfg.profiles[0];
         assert_eq!(p.name, "boi");
         assert_eq!(p.gates.len(), 2);
-        assert_eq!(
-            p.gates[0].kind,
-            GateKind::Command("just check".to_string())
-        );
+        assert_eq!(p.gates[0].kind, GateKind::Command("just check".to_string()));
         assert_eq!(p.version_files[0].kind, VersionFileKind::CargoToml);
         // Defaults applied.
         assert_eq!(p.tag_prefix, "v");
@@ -3152,7 +3260,10 @@ match_dir = "boi"
         let bad = td.path().join("bad.toml");
         std::fs::write(&bad, "this is = = not valid toml [[[").unwrap();
         let err = format!("{:#}", load_profiles_file(&bad).unwrap_err());
-        assert!(err.contains("releases.toml") || err.contains("TOML"), "got: {err}");
+        assert!(
+            err.contains("releases.toml") || err.contains("TOML"),
+            "got: {err}"
+        );
 
         // A profile with no match rule is refused.
         let unmatched = td.path().join("unmatched.toml");
@@ -3221,8 +3332,14 @@ match_dir = "boi"
         let td = tempfile::tempdir().unwrap();
         let mut profile = toy_profile("toy", None, Some("toy"));
         profile.gates = vec![
-            GateSpec { name: "ok".into(), kind: GateKind::Command("true".into()) },
-            GateSpec { name: "bad".into(), kind: GateKind::Command("exit 7".into()) },
+            GateSpec {
+                name: "ok".into(),
+                kind: GateKind::Command("true".into()),
+            },
+            GateSpec {
+                name: "bad".into(),
+                kind: GateKind::Command("exit 7".into()),
+            },
         ];
         let outcomes = run_battery(&profile, td.path(), SkipFlags::default());
         assert_eq!(outcomes.len(), 2);
@@ -3242,16 +3359,25 @@ match_dir = "boi"
             compute_next_version(Some("1.2.3"), None, Some("1.2.2")).unwrap(),
             "1.2.3"
         );
-        let err = format!("{:#}", compute_next_version(Some("banana"), None, None).unwrap_err());
+        let err = format!(
+            "{:#}",
+            compute_next_version(Some("banana"), None, None).unwrap_err()
+        );
         assert!(err.contains("not semver"), "got: {err}");
         // Explicit on a first release (no tags at all) is fine.
-        assert_eq!(compute_next_version(Some("0.1.0"), None, None).unwrap(), "0.1.0");
+        assert_eq!(
+            compute_next_version(Some("0.1.0"), None, None).unwrap(),
+            "0.1.0"
+        );
         // Level bumps the latest tag; the default level is patch.
         assert_eq!(
             compute_next_version(None, Some(BumpLevel::Minor), Some("1.2.3")).unwrap(),
             "1.3.0"
         );
-        assert_eq!(compute_next_version(None, None, Some("1.2.3")).unwrap(), "1.2.4");
+        assert_eq!(
+            compute_next_version(None, None, Some("1.2.3")).unwrap(),
+            "1.2.4"
+        );
         // Level with no tags refuses, pointing at --version.
         let err = format!(
             "{:#}",
@@ -3276,7 +3402,9 @@ match_dir = "boi"
         );
         assert_eq!(
             tag_push_action("abc", Some("def")),
-            TagPushAction::RefuseDivergent { remote_sha: "def".to_string() }
+            TagPushAction::RefuseDivergent {
+                remote_sha: "def".to_string()
+            }
         );
     }
 
@@ -3343,7 +3471,10 @@ match_dir = "boi"
             PushDecision::Allow => panic!("main without env must be blocked"),
         }
         // ...and allowed with it.
-        assert_eq!(guard_decision("refs/heads/main", true, "main"), PushDecision::Allow);
+        assert_eq!(
+            guard_decision("refs/heads/main", true, "main"),
+            PushDecision::Allow
+        );
         // develop, feature/*, release/*, hotfix/*, and tags pass through env-less.
         for r in [
             "refs/heads/develop",
@@ -3359,7 +3490,10 @@ match_dir = "boi"
             guard_decision("refs/heads/trunk", false, "trunk"),
             PushDecision::Block(_)
         ));
-        assert_eq!(guard_decision("refs/heads/main", false, "trunk"), PushDecision::Allow);
+        assert_eq!(
+            guard_decision("refs/heads/main", false, "trunk"),
+            PushDecision::Allow
+        );
     }
 
     #[test]
@@ -3404,12 +3538,18 @@ match_dir = "boi"
         // Hermetic commits/pushes: neutralize any global hooks.
         let nohooks = td.join("nohooks");
         std::fs::create_dir_all(&nohooks).unwrap();
-        git(&repo, &["config", "core.hooksPath", nohooks.to_str().unwrap()]);
+        git(
+            &repo,
+            &["config", "core.hooksPath", nohooks.to_str().unwrap()],
+        );
         std::fs::write(repo.join("version.txt"), "0.1.0\n").unwrap();
         git(&repo, &["add", "-A"]);
         commit(&repo, "feat: initial");
         git(&repo, &["branch", "develop"]);
-        git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+        git(
+            &repo,
+            &["remote", "add", "origin", origin.to_str().unwrap()],
+        );
         git(&repo, &["push", "-q", "origin", "main", "develop"]);
         repo
     }
@@ -3429,7 +3569,10 @@ match_dir = "boi"
         cut_with_profile(
             repo,
             profile,
-            &CutOptions { version: Some(version.to_string()), ..Default::default() },
+            &CutOptions {
+                version: Some(version.to_string()),
+                ..Default::default()
+            },
         )
     }
 
@@ -3445,21 +3588,38 @@ match_dir = "boi"
 
         // Tag sits on the main merge commit, locally and on origin.
         let main_sha = git_stdout(&repo, &["rev-parse", "refs/heads/main"]).unwrap();
-        assert_eq!(git_stdout(&repo, &["rev-parse", "v0.2.0^{commit}"]).unwrap(), main_sha);
-        assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap(), main_sha);
-        assert_eq!(git_stdout(&origin, &["rev-parse", "v0.2.0^{commit}"]).unwrap(), main_sha);
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "v0.2.0^{commit}"]).unwrap(),
+            main_sha
+        );
+        assert_eq!(
+            git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap(),
+            main_sha
+        );
+        assert_eq!(
+            git_stdout(&origin, &["rev-parse", "v0.2.0^{commit}"]).unwrap(),
+            main_sha
+        );
         // develop pushed too, carrying the back-merged bump.
         assert_eq!(
             git_stdout(&origin, &["rev-parse", "refs/heads/develop"]).unwrap(),
             git_stdout(&repo, &["rev-parse", "refs/heads/develop"]).unwrap()
         );
-        assert_eq!(git_stdout(&repo, &["show", "main:version.txt"]).unwrap(), "0.2.0\n");
-        assert_eq!(git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(), "0.2.0\n");
+        assert_eq!(
+            git_stdout(&repo, &["show", "main:version.txt"]).unwrap(),
+            "0.2.0\n"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(),
+            "0.2.0\n"
+        );
         // Release branch cleaned up; lock released; repo left on develop.
         assert!(!ref_exists(&repo, "refs/heads/release/0.2.0"));
         assert!(!repo.join(".git/hex-release.lock").exists());
         assert_eq!(
-            git_stdout(&repo, &["symbolic-ref", "--short", "HEAD"]).unwrap().trim(),
+            git_stdout(&repo, &["symbolic-ref", "--short", "HEAD"])
+                .unwrap()
+                .trim(),
             "develop"
         );
     }
@@ -3489,11 +3649,20 @@ match_dir = "boi"
         .unwrap();
 
         let main_sha = git_stdout(&repo, &["rev-parse", "refs/heads/main"]).unwrap();
-        assert_eq!(git_stdout(&repo, &["rev-parse", "v0.1.1^{commit}"]).unwrap(), main_sha);
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "v0.1.1^{commit}"]).unwrap(),
+            main_sha
+        );
         assert!(!ref_exists(&repo, "refs/heads/hotfix/0.1.1"));
         // The back-merge carried the bump to develop without losing its work.
-        assert_eq!(git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(), "0.1.1\n");
-        assert_eq!(git_stdout(&repo, &["show", "develop:dev.txt"]).unwrap(), "wip");
+        assert_eq!(
+            git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(),
+            "0.1.1\n"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "develop:dev.txt"]).unwrap(),
+            "wip"
+        );
     }
 
     #[test]
@@ -3505,11 +3674,20 @@ match_dir = "boi"
         git(&repo, &["checkout", "-q", "main"]);
 
         // Green battery: exit 0, nothing mutated, original checkout restored.
-        cut_with_profile(&repo, &profile, &CutOptions { dry_run: true, ..Default::default() })
-            .unwrap();
+        cut_with_profile(
+            &repo,
+            &profile,
+            &CutOptions {
+                dry_run: true,
+                ..Default::default()
+            },
+        )
+        .unwrap();
         assert!(git_stdout(&repo, &["tag"]).unwrap().trim().is_empty());
         assert_eq!(
-            git_stdout(&repo, &["symbolic-ref", "--short", "HEAD"]).unwrap().trim(),
+            git_stdout(&repo, &["symbolic-ref", "--short", "HEAD"])
+                .unwrap()
+                .trim(),
             "main"
         );
 
@@ -3521,8 +3699,15 @@ match_dir = "boi"
         }];
         let err = format!(
             "{:#}",
-            cut_with_profile(&repo, &blocked, &CutOptions { dry_run: true, ..Default::default() })
-                .unwrap_err()
+            cut_with_profile(
+                &repo,
+                &blocked,
+                &CutOptions {
+                    dry_run: true,
+                    ..Default::default()
+                }
+            )
+            .unwrap_err()
         );
         assert!(err.contains("BLOCKED"), "got: {err}");
         assert!(git_stdout(&repo, &["tag"]).unwrap().trim().is_empty());
@@ -3557,8 +3742,15 @@ match_dir = "boi"
         let (_hex, _guard) = crate::telemetry::test_support::isolate();
         let td = tempfile::tempdir().unwrap();
         let repo = gitflow_fixture(td.path());
-        std::fs::write(repo.join(".git/hex-release.lock"), "pid=999 started=earlier").unwrap();
-        let err = format!("{:#}", cut_v(&repo, &ceremony_profile(), "0.2.0").unwrap_err());
+        std::fs::write(
+            repo.join(".git/hex-release.lock"),
+            "pid=999 started=earlier",
+        )
+        .unwrap();
+        let err = format!(
+            "{:#}",
+            cut_v(&repo, &ceremony_profile(), "0.2.0").unwrap_err()
+        );
         assert!(err.contains("already in flight"), "got: {err}");
         assert!(err.contains("pid=999"), "got: {err}");
         // The holder's lock survives the refused attempt.
@@ -3576,8 +3768,14 @@ match_dir = "boi"
         let err = format!("{:#}", cut_v(&repo, &profile, "0.2.0").unwrap_err());
         assert!(err.contains("version files reverted"), "got: {err}");
         // Reverted on disk, tree clean again, nothing tagged or pushed.
-        assert_eq!(std::fs::read_to_string(repo.join("version.txt")).unwrap(), "0.1.0\n");
-        assert!(git_stdout(&repo, &["status", "--porcelain"]).unwrap().trim().is_empty());
+        assert_eq!(
+            std::fs::read_to_string(repo.join("version.txt")).unwrap(),
+            "0.1.0\n"
+        );
+        assert!(git_stdout(&repo, &["status", "--porcelain"])
+            .unwrap()
+            .trim()
+            .is_empty());
         assert!(git_stdout(&repo, &["tag"]).unwrap().trim().is_empty());
     }
 
@@ -3621,7 +3819,10 @@ match_dir = "boi"
         let err = format!("{:#}", cut_v(&repo, &profile, "0.2.0").unwrap_err());
         assert!(err.contains("moved during the cut"), "got: {err}");
         // Nothing reached origin.
-        assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap(), origin_main);
+        assert_eq!(
+            git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap(),
+            origin_main
+        );
         assert_eq!(
             git_stdout(&origin, &["rev-parse", "refs/heads/develop"]).unwrap(),
             origin_dev
@@ -3645,7 +3846,10 @@ match_dir = "boi"
     }
 
     fn finish_opts(branch: &str) -> CutOptions {
-        CutOptions { finish: Some(branch.to_string()), ..Default::default() }
+        CutOptions {
+            finish: Some(branch.to_string()),
+            ..Default::default()
+        }
     }
 
     #[test]
@@ -3655,8 +3859,14 @@ match_dir = "boi"
         let f = parse_finish_branch("hotfix/0.0.9").unwrap();
         assert_eq!((f.hotfix, f.version.as_str()), (true, "0.0.9"));
 
-        for bad in ["main", "feature/x", "release/abc", "release/1.2", "hotfix/", "release/1.2.3.4"]
-        {
+        for bad in [
+            "main",
+            "feature/x",
+            "release/abc",
+            "release/1.2",
+            "hotfix/",
+            "release/1.2.3.4",
+        ] {
             let err = format!("{:#}", parse_finish_branch(bad).unwrap_err());
             assert!(err.contains(bad), "got: {err}");
         }
@@ -3673,22 +3883,44 @@ match_dir = "boi"
 
         // Tag on the main merge commit, locally and on origin.
         let main_sha = git_stdout(&repo, &["rev-parse", "refs/heads/main"]).unwrap();
-        assert_eq!(git_stdout(&repo, &["rev-parse", "v0.2.0^{commit}"]).unwrap(), main_sha);
-        assert_eq!(git_stdout(&origin, &["rev-parse", "v0.2.0^{commit}"]).unwrap(), main_sha);
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "v0.2.0^{commit}"]).unwrap(),
+            main_sha
+        );
+        assert_eq!(
+            git_stdout(&origin, &["rev-parse", "v0.2.0^{commit}"]).unwrap(),
+            main_sha
+        );
         // The branch's work and the bump both landed on main AND develop.
-        assert_eq!(git_stdout(&repo, &["show", "main:feature.txt"]).unwrap(), "shipped\n");
-        assert_eq!(git_stdout(&repo, &["show", "main:version.txt"]).unwrap(), "0.2.0\n");
-        assert_eq!(git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(), "0.2.0\n");
+        assert_eq!(
+            git_stdout(&repo, &["show", "main:feature.txt"]).unwrap(),
+            "shipped\n"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "main:version.txt"]).unwrap(),
+            "0.2.0\n"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(),
+            "0.2.0\n"
+        );
         // The ceremony added the bump commit itself (branch carried none).
-        assert!(!git_stdout(&repo, &["log", "--grep=bump: v0.2.0", "--oneline", "main"])
-            .unwrap()
-            .trim()
-            .is_empty());
+        assert!(
+            !git_stdout(&repo, &["log", "--grep=bump: v0.2.0", "--oneline", "main"])
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
         // The request branch is consumed: gone locally and on origin.
         assert!(!ref_exists(&repo, "refs/heads/release/0.2.0"));
-        assert!(ls_remote_sha(&repo, "refs/heads/release/0.2.0").unwrap().is_none());
+        assert!(ls_remote_sha(&repo, "refs/heads/release/0.2.0")
+            .unwrap()
+            .is_none());
         // Both branch tips pushed.
-        assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap(), main_sha);
+        assert_eq!(
+            git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap(),
+            main_sha
+        );
         assert_eq!(
             git_stdout(&origin, &["rev-parse", "refs/heads/develop"]).unwrap(),
             git_stdout(&repo, &["rev-parse", "refs/heads/develop"]).unwrap()
@@ -3710,12 +3942,17 @@ match_dir = "boi"
 
         cut_with_profile(&repo, &ceremony_profile(), &finish_opts("release/0.2.0")).unwrap();
 
-        assert_eq!(git_stdout(&repo, &["show", "main:version.txt"]).unwrap(), "0.2.0\n");
+        assert_eq!(
+            git_stdout(&repo, &["show", "main:version.txt"]).unwrap(),
+            "0.2.0\n"
+        );
         // No duplicate ceremony bump commit (it would fail as an empty commit).
-        assert!(git_stdout(&repo, &["log", "--grep=bump: v0.2.0", "--oneline", "main"])
-            .unwrap()
-            .trim()
-            .is_empty());
+        assert!(
+            git_stdout(&repo, &["log", "--grep=bump: v0.2.0", "--oneline", "main"])
+                .unwrap()
+                .trim()
+                .is_empty()
+        );
     }
 
     #[test]
@@ -3730,8 +3967,14 @@ match_dir = "boi"
         cut_with_profile(&repo, &ceremony_profile(), &finish_opts("release/0.2.0")).unwrap();
 
         let main_sha = git_stdout(&repo, &["rev-parse", "refs/heads/main"]).unwrap();
-        assert_eq!(git_stdout(&repo, &["rev-parse", "v0.2.0^{commit}"]).unwrap(), main_sha);
-        assert_eq!(git_stdout(&repo, &["show", "main:feature.txt"]).unwrap(), "shipped\n");
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "v0.2.0^{commit}"]).unwrap(),
+            main_sha
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "main:feature.txt"]).unwrap(),
+            "shipped\n"
+        );
         assert!(!ref_exists(&repo, "refs/heads/release/0.2.0"));
     }
 
@@ -3741,14 +3984,26 @@ match_dir = "boi"
         let td = tempfile::tempdir().unwrap();
         let repo = finish_fixture(td.path());
         // Local copy of the branch is strictly behind the origin request.
-        let origin_tip =
-            git_stdout(&repo, &["rev-parse", "refs/heads/release/0.2.0"]).unwrap().trim().to_string();
-        git(&repo, &["update-ref", "refs/heads/release/0.2.0", "refs/heads/develop"]);
+        let origin_tip = git_stdout(&repo, &["rev-parse", "refs/heads/release/0.2.0"])
+            .unwrap()
+            .trim()
+            .to_string();
+        git(
+            &repo,
+            &[
+                "update-ref",
+                "refs/heads/release/0.2.0",
+                "refs/heads/develop",
+            ],
+        );
 
         cut_with_profile(&repo, &ceremony_profile(), &finish_opts("release/0.2.0")).unwrap();
 
         // The origin tip (with feature.txt) is what got released.
-        assert_eq!(git_stdout(&repo, &["show", "main:feature.txt"]).unwrap(), "shipped\n");
+        assert_eq!(
+            git_stdout(&repo, &["show", "main:feature.txt"]).unwrap(),
+            "shipped\n"
+        );
         assert!(is_ancestor(&repo, &origin_tip, "refs/heads/main").unwrap());
     }
 
@@ -3768,8 +4023,14 @@ match_dir = "boi"
         cut_with_profile(&repo, &ceremony_profile(), &finish_opts("release/0.2.0")).unwrap();
 
         // develop kept its in-flight work AND received the back-merge.
-        assert_eq!(git_stdout(&repo, &["show", "develop:next.txt"]).unwrap(), "wip\n");
-        assert_eq!(git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(), "0.2.0\n");
+        assert_eq!(
+            git_stdout(&repo, &["show", "develop:next.txt"]).unwrap(),
+            "wip\n"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(),
+            "0.2.0\n"
+        );
         // main got the release but NOT the in-flight develop work.
         assert!(git_stdout(&repo, &["show", "main:next.txt"]).is_err());
     }
@@ -3795,12 +4056,27 @@ match_dir = "boi"
         cut_with_profile(&repo, &ceremony_profile(), &finish_opts("hotfix/0.1.1")).unwrap();
 
         let main_sha = git_stdout(&repo, &["rev-parse", "refs/heads/main"]).unwrap();
-        assert_eq!(git_stdout(&repo, &["rev-parse", "v0.1.1^{commit}"]).unwrap(), main_sha);
-        assert_eq!(git_stdout(&repo, &["show", "main:fix.txt"]).unwrap(), "patched\n");
+        assert_eq!(
+            git_stdout(&repo, &["rev-parse", "v0.1.1^{commit}"]).unwrap(),
+            main_sha
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "main:fix.txt"]).unwrap(),
+            "patched\n"
+        );
         // develop kept its work and got the fix + bump via the back-merge.
-        assert_eq!(git_stdout(&repo, &["show", "develop:dev.txt"]).unwrap(), "wip");
-        assert_eq!(git_stdout(&repo, &["show", "develop:fix.txt"]).unwrap(), "patched\n");
-        assert_eq!(git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(), "0.1.1\n");
+        assert_eq!(
+            git_stdout(&repo, &["show", "develop:dev.txt"]).unwrap(),
+            "wip"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "develop:fix.txt"]).unwrap(),
+            "patched\n"
+        );
+        assert_eq!(
+            git_stdout(&repo, &["show", "develop:version.txt"]).unwrap(),
+            "0.1.1\n"
+        );
         assert!(!ref_exists(&repo, "refs/heads/hotfix/0.1.1"));
     }
 
@@ -3813,8 +4089,10 @@ match_dir = "boi"
         let profile = ceremony_profile();
 
         // Non-GitFlow branch name.
-        let err =
-            format!("{:#}", cut_with_profile(&repo, &profile, &finish_opts("main")).unwrap_err());
+        let err = format!(
+            "{:#}",
+            cut_with_profile(&repo, &profile, &finish_opts("main")).unwrap_err()
+        );
         assert!(err.contains("release/X.Y.Z or hotfix/X.Y.Z"), "got: {err}");
 
         // Branch that exists nowhere.
@@ -3830,7 +4108,10 @@ match_dir = "boi"
             version: Some("0.3.0".to_string()),
             ..Default::default()
         };
-        let err = format!("{:#}", cut_with_profile(&repo, &profile, &opts).unwrap_err());
+        let err = format!(
+            "{:#}",
+            cut_with_profile(&repo, &profile, &opts).unwrap_err()
+        );
         assert!(err.contains("--version"), "got: {err}");
 
         // --hotfix contradicts a release/* finish branch.
@@ -3839,7 +4120,10 @@ match_dir = "boi"
             hotfix: true,
             ..Default::default()
         };
-        let err = format!("{:#}", cut_with_profile(&repo, &profile, &opts).unwrap_err());
+        let err = format!(
+            "{:#}",
+            cut_with_profile(&repo, &profile, &opts).unwrap_err()
+        );
         assert!(err.contains("--hotfix"), "got: {err}");
 
         // Version not greater than the latest tag — pre-battery refusal.
@@ -3876,7 +4160,11 @@ match_dir = "boi"
 
         // Nothing was tagged or pushed by any refusal.
         assert!(git_stdout(&repo, &["tag"]).unwrap().trim().is_empty());
-        assert!(git_stdout(&origin, &["rev-parse", "--verify", "-q", "refs/tags/v0.2.0"]).is_err());
+        assert!(git_stdout(
+            &origin,
+            &["rev-parse", "--verify", "-q", "refs/tags/v0.2.0"]
+        )
+        .is_err());
         // The lock never leaks.
         assert!(!repo.join(".git/hex-release.lock").exists());
     }
@@ -3904,7 +4192,10 @@ match_dir = "boi"
         );
         assert!(err.contains("moved during the cut"), "got: {err}");
         // Nothing reached origin; no tag was created.
-        assert_eq!(git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap(), origin_main);
+        assert_eq!(
+            git_stdout(&origin, &["rev-parse", "refs/heads/main"]).unwrap(),
+            origin_main
+        );
         assert!(git_stdout(&repo, &["tag"]).unwrap().trim().is_empty());
     }
 
@@ -3923,7 +4214,9 @@ match_dir = "boi"
         assert!(git_stdout(&repo, &["tag"]).unwrap().trim().is_empty());
         assert!(ref_exists(&repo, "refs/heads/release/0.2.0"));
         assert_eq!(
-            git_stdout(&repo, &["symbolic-ref", "--short", "HEAD"]).unwrap().trim(),
+            git_stdout(&repo, &["symbolic-ref", "--short", "HEAD"])
+                .unwrap()
+                .trim(),
             "develop"
         );
     }
@@ -3936,10 +4229,21 @@ match_dir = "boi"
     fn second_clone(td: &Path, name: &str) -> PathBuf {
         let origin = td.join("origin.git");
         let dest = td.join(name);
-        git(td, &["clone", "-q", origin.to_str().unwrap(), dest.to_str().unwrap()]);
+        git(
+            td,
+            &[
+                "clone",
+                "-q",
+                origin.to_str().unwrap(),
+                dest.to_str().unwrap(),
+            ],
+        );
         git(&dest, &["config", "commit.gpgsign", "false"]);
         let nohooks = td.join("nohooks");
-        git(&dest, &["config", "core.hooksPath", nohooks.to_str().unwrap()]);
+        git(
+            &dest,
+            &["config", "core.hooksPath", nohooks.to_str().unwrap()],
+        );
         dest
     }
 
@@ -3953,19 +4257,40 @@ match_dir = "boi"
     fn classify_develop_sync_covers_the_full_matrix() {
         use DevelopSyncClass as C;
         // No origin branch at all.
-        assert_eq!(classify_develop_sync("aaa", None, false, false), C::RemoteMissing);
+        assert_eq!(
+            classify_develop_sync("aaa", None, false, false),
+            C::RemoteMissing
+        );
         // Identical SHAs are in sync regardless of the ancestry answers.
-        assert_eq!(classify_develop_sync("aaa", Some("aaa"), false, false), C::InSync);
-        assert_eq!(classify_develop_sync("aaa", Some("aaa"), true, true), C::InSync);
+        assert_eq!(
+            classify_develop_sync("aaa", Some("aaa"), false, false),
+            C::InSync
+        );
+        assert_eq!(
+            classify_develop_sync("aaa", Some("aaa"), true, true),
+            C::InSync
+        );
         // origin is an ancestor of local (and not vice versa): strictly ahead.
-        assert_eq!(classify_develop_sync("bbb", Some("aaa"), true, false), C::Ahead);
+        assert_eq!(
+            classify_develop_sync("bbb", Some("aaa"), true, false),
+            C::Ahead
+        );
         // local is an ancestor of origin: strictly behind.
-        assert_eq!(classify_develop_sync("aaa", Some("bbb"), false, true), C::Behind);
+        assert_eq!(
+            classify_develop_sync("aaa", Some("bbb"), false, true),
+            C::Behind
+        );
         // Neither is an ancestor of the other: diverged.
-        assert_eq!(classify_develop_sync("aaa", Some("bbb"), false, false), C::Diverged);
+        assert_eq!(
+            classify_develop_sync("aaa", Some("bbb"), false, false),
+            C::Diverged
+        );
         // Two DISTINCT commits cannot each be the other's ancestor; on
         // inconsistent evidence the classifier must never say "push".
-        assert_eq!(classify_develop_sync("aaa", Some("bbb"), true, true), C::Diverged);
+        assert_eq!(
+            classify_develop_sync("aaa", Some("bbb"), true, true),
+            C::Diverged
+        );
     }
 
     #[test]
@@ -3989,7 +4314,13 @@ match_dir = "boi"
         let local = rev_parse(&repo, "refs/heads/develop").unwrap();
 
         let out = sync_develop_to_origin(&repo, "develop").unwrap();
-        assert_eq!(out, DevelopSyncOutcome::Pushed { from: before, to: local.clone() });
+        assert_eq!(
+            out,
+            DevelopSyncOutcome::Pushed {
+                from: before,
+                to: local.clone()
+            }
+        );
         // Origin was fast-forwarded to the local head — and verified.
         assert_eq!(rev_parse(&origin, "refs/heads/develop").unwrap(), local);
         // Idempotent: the next pass is quiet.
@@ -4018,11 +4349,17 @@ match_dir = "boi"
         let out = sync_develop_to_origin(&repo, "develop").unwrap();
         assert_eq!(
             out,
-            DevelopSyncOutcome::Behind { local: local.clone(), origin: origin_sha.clone() }
+            DevelopSyncOutcome::Behind {
+                local: local.clone(),
+                origin: origin_sha.clone()
+            }
         );
         // Nothing moved on either side.
         assert_eq!(rev_parse(&repo, "refs/heads/develop").unwrap(), local);
-        assert_eq!(rev_parse(&origin, "refs/heads/develop").unwrap(), origin_sha);
+        assert_eq!(
+            rev_parse(&origin, "refs/heads/develop").unwrap(),
+            origin_sha
+        );
     }
 
     #[test]
@@ -4042,11 +4379,17 @@ match_dir = "boi"
         let out = sync_develop_to_origin(&repo, "develop").unwrap();
         assert_eq!(
             out,
-            DevelopSyncOutcome::Diverged { local: local.clone(), origin: origin_sha.clone() }
+            DevelopSyncOutcome::Diverged {
+                local: local.clone(),
+                origin: origin_sha.clone()
+            }
         );
         // NEVER auto-resolved: no push, no pull/rebase/reset on either side.
         assert_eq!(rev_parse(&repo, "refs/heads/develop").unwrap(), local);
-        assert_eq!(rev_parse(&origin, "refs/heads/develop").unwrap(), origin_sha);
+        assert_eq!(
+            rev_parse(&origin, "refs/heads/develop").unwrap(),
+            origin_sha
+        );
     }
 
     #[test]
@@ -4069,7 +4412,10 @@ match_dir = "boi"
         let td = tempfile::tempdir().unwrap();
         let repo = gitflow_fixture(td.path());
         git(&repo, &["branch", "-D", "develop"]);
-        let err = format!("{:#}", sync_develop_to_origin(&repo, "develop").unwrap_err());
+        let err = format!(
+            "{:#}",
+            sync_develop_to_origin(&repo, "develop").unwrap_err()
+        );
         assert!(err.contains("develop"), "got: {err}");
     }
 
@@ -4078,9 +4424,15 @@ match_dir = "boi"
         let td = tempfile::tempdir().unwrap();
         let repo = gitflow_fixture(td.path());
         let gone = td.path().join("gone.git");
-        git(&repo, &["remote", "set-url", "origin", gone.to_str().unwrap()]);
+        git(
+            &repo,
+            &["remote", "set-url", "origin", gone.to_str().unwrap()],
+        );
         // "Cannot check origin" must be a hard error, never read as absent.
-        let err = format!("{:#}", sync_develop_to_origin(&repo, "develop").unwrap_err());
+        let err = format!(
+            "{:#}",
+            sync_develop_to_origin(&repo, "develop").unwrap_err()
+        );
         assert!(err.contains("origin"), "got: {err}");
     }
 

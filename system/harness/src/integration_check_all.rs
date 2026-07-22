@@ -71,7 +71,11 @@ pub fn run(hex_dir: &Path, tier: &str) -> i32 {
         h.join().ok();
     }
 
-    if *failures.lock().unwrap() > 0 { 1 } else { 0 }
+    if *failures.lock().unwrap() > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 #[cfg(test)]

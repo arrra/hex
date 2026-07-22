@@ -116,9 +116,7 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
     // Done in Rust so we can stat the file (SQLite has no file_size()).
     let backfill_pending_bytes: i64 = {
         let mut total: i64 = 0;
-        if let Ok(mut stmt) =
-            conn.prepare("SELECT path, last_offset FROM transcript_files")
-        {
+        if let Ok(mut stmt) = conn.prepare("SELECT path, last_offset FROM transcript_files") {
             let rows = stmt
                 .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
                 .ok();
@@ -139,14 +137,20 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
 
     // Vector-gap surfacing: -1 (query failed) printing is intentional — a
     // broken gap-query must be visible, not a silent zero.
-    let unembedded_chunks: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM chunks WHERE rowid NOT IN (SELECT rowid FROM vec_chunks)",
-        [], |r| r.get(0),
-    ).unwrap_or(-1);
-    let orphan_vectors: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM vec_chunks WHERE rowid NOT IN (SELECT rowid FROM chunks)",
-        [], |r| r.get(0),
-    ).unwrap_or(-1);
+    let unembedded_chunks: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM chunks WHERE rowid NOT IN (SELECT rowid FROM vec_chunks)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(-1);
+    let orphan_vectors: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM vec_chunks WHERE rowid NOT IN (SELECT rowid FROM chunks)",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(-1);
 
     Ok(StatsReport {
         files_indexed,
@@ -165,10 +169,7 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
 fn print_table(r: &StatsReport) {
     println!("=== Memory Database Stats ===");
     println!();
-    println!(
-        "Files indexed:     {}",
-        r.files_indexed
-    );
+    println!("Files indexed:     {}", r.files_indexed);
     println!(
         "Unembedded chunks: {}   (semantic recall misses these — index backfills ≤500/run)",
         r.unembedded_chunks
@@ -204,7 +205,12 @@ fn print_table(r: &StatsReport) {
     if r.top_predicates.is_empty() {
         println!("  (none)");
     } else {
-        let max_w = r.top_predicates.iter().map(|(p, _)| p.len()).max().unwrap_or(0);
+        let max_w = r
+            .top_predicates
+            .iter()
+            .map(|(p, _)| p.len())
+            .max()
+            .unwrap_or(0);
         for (pred, cnt) in &r.top_predicates {
             println!("  {:<width$}  {}", pred, cnt, width = max_w);
         }
@@ -215,7 +221,12 @@ fn print_table(r: &StatsReport) {
     if r.top_subjects.is_empty() {
         println!("  (none)");
     } else {
-        let max_w = r.top_subjects.iter().map(|(s, _)| s.len()).max().unwrap_or(0);
+        let max_w = r
+            .top_subjects
+            .iter()
+            .map(|(s, _)| s.len())
+            .max()
+            .unwrap_or(0);
         for (subj, cnt) in &r.top_subjects {
             println!("  {:<width$}  {}", subj, cnt, width = max_w);
         }
@@ -326,7 +337,10 @@ mod tests {
 
         // No stamp yet → "never".
         let report = gather(&conn, &db_path).unwrap();
-        assert!(report.last_consolidated.is_none(), "should be unset before a run");
+        assert!(
+            report.last_consolidated.is_none(),
+            "should be unset before a run"
+        );
 
         // Simulate what memory::consolidate stamps.
         conn.execute_batch(
@@ -446,6 +460,9 @@ mod tests {
         .unwrap();
 
         let report = gather(&conn, &db_path).unwrap();
-        assert_eq!(report.total_facts, 1, "tombstoned facts should not be counted");
+        assert_eq!(
+            report.total_facts, 1,
+            "tombstoned facts should not be counted"
+        );
     }
 }

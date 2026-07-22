@@ -175,7 +175,11 @@ fn def_success_path_exit_0() {
         "{env}"
     );
     // Errors never pollute stdout; envelope never pollutes stderr.
-    assert!(out.stderr.is_empty(), "{}", String::from_utf8_lossy(&out.stderr));
+    assert!(
+        out.stderr.is_empty(),
+        "{}",
+        String::from_utf8_lossy(&out.stderr)
+    );
 
     // By FILE:LINE:COL position (1-based): the `double` call in lib.rs:4:43
     // resolves to the same definition.
@@ -269,7 +273,10 @@ fn unregistered_cwd_exit_4() {
     let err = stderr_json(&out);
     assert_eq!(err["error"]["code"], "UNREGISTERED_WORKSPACE");
     assert!(
-        err["error"]["hint"].as_str().unwrap().contains("cq register"),
+        err["error"]["hint"]
+            .as_str()
+            .unwrap()
+            .contains("cq register"),
         "{err}"
     );
 }
@@ -278,7 +285,11 @@ fn unregistered_cwd_exit_4() {
 fn registered_no_index_exit_3() {
     let home = tempfile::tempdir().unwrap();
     let repo = golden_repo();
-    let out = cq(home.path(), repo.path(), &["register", repo.path().to_str().unwrap()]);
+    let out = cq(
+        home.path(),
+        repo.path(),
+        &["register", repo.path().to_str().unwrap()],
+    );
     assert_exit(&out, 0);
 
     let out = cq(home.path(), repo.path(), &["def", "double"]);
@@ -320,10 +331,17 @@ fn stale_strict_exit_2() {
     let out = cq(home.path(), repo.path(), &["refs", "double"]);
     assert_exit(&out, 2);
     let env = stdout_json(&out);
-    assert_eq!(env["stale_files"], serde_json::json!(["src/ops.rs"]), "{env}");
+    assert_eq!(
+        env["stale_files"],
+        serde_json::json!(["src/ops.rs"]),
+        "{env}"
+    );
     for r in env["results"].as_array().unwrap() {
         if r["path"] == "src/ops.rs" {
-            assert!(r.get("snippet").is_none(), "stale file keeps no snippet: {r}");
+            assert!(
+                r.get("snippet").is_none(),
+                "stale file keeps no snippet: {r}"
+            );
         }
     }
 
@@ -347,9 +365,16 @@ fn doctor_red_when_no_index_and_green_after() {
     assert_exit(&out, 1);
 
     // Registered but never indexed → red with a "no index" reason.
-    let out = cq(home.path(), repo.path(), &["register", repo.path().to_str().unwrap()]);
+    let out = cq(
+        home.path(),
+        repo.path(),
+        &["register", repo.path().to_str().unwrap()],
+    );
     assert_exit(&out, 0);
-    let ws_id = stdout_json(&out)["registered"].as_str().unwrap().to_string();
+    let ws_id = stdout_json(&out)["registered"]
+        .as_str()
+        .unwrap()
+        .to_string();
 
     let out = cq(home.path(), repo.path(), &["doctor"]);
     assert_exit(&out, 1);
@@ -358,7 +383,9 @@ fn doctor_red_when_no_index_and_green_after() {
     assert_eq!(ws["id"], ws_id.as_str(), "{report}");
     let reasons = ws["red_reasons"].as_array().unwrap();
     assert!(
-        reasons.iter().any(|r| r.as_str().unwrap().contains("no index")),
+        reasons
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("no index")),
         "{report}"
     );
 
@@ -397,7 +424,9 @@ fn doctor_red_when_no_index_and_green_after() {
     let report = stdout_json(&out);
     let reasons = report["workspaces"][0]["red_reasons"].as_array().unwrap();
     assert!(
-        reasons.iter().any(|r| r.as_str().unwrap().contains("7 days")),
+        reasons
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("7 days")),
         "{report}"
     );
 
@@ -423,7 +452,9 @@ fn doctor_red_when_no_index_and_green_after() {
     let report = stdout_json(&out);
     let reasons = report["workspaces"][0]["red_reasons"].as_array().unwrap();
     assert!(
-        reasons.iter().any(|r| r.as_str().unwrap().contains("db unreadable")),
+        reasons
+            .iter()
+            .any(|r| r.as_str().unwrap().contains("db unreadable")),
         "{report}"
     );
 }

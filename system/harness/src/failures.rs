@@ -95,6 +95,11 @@ pub struct Report {
     pub missed: Vec<Missed>,
     pub never_ran: Vec<CronExpectation>,
     pub downtime: Vec<Downtime>,
+    /// events.db rows dropped from the downtime timeline because the row
+    /// failed to read or its `ts` failed RFC3339 parsing. Nonzero means the
+    /// store has corrupt rows — surfaced loudly by the caller (S6); never
+    /// silently swallowed (2026-07-16 audit, finding hex:23).
+    pub malformed_rows: usize,
 }
 
 /// Evaluate expectations against events.db at `now`. `extra_excused` lets
@@ -121,11 +126,18 @@ pub fn evaluate(
         .unwrap_or(900);
     let lookback = (now - chrono::Duration::hours(36)).to_rfc3339();
     let mut stmt = conn.prepare("SELECT ts FROM events WHERE ts >= ?1 ORDER BY ts")?;
-    let times: Vec<DateTime<Utc>> = stmt
-        .query_map([&lookback], |r| r.get::<_, String>(0))?
-        .filter_map(|r| r.ok())
-        .filter_map(|s| DateTime::parse_from_rfc3339(&s).ok().map(|d| d.with_timezone(&Utc)))
-        .collect();
+    let mut malformed_rows = 0usize;
+    let mut times: Vec<DateTime<Utc>> = Vec::new();
+    for r in stmt.query_map([&lookback], |r| r.get::<_, String>(0))? {
+        match r {
+            Ok(s) => match DateTime::parse_from_rfc3339(&s) {
+                Ok(d) => times.push(d.with_timezone(&Utc)),
+                Err(_) => malformed_rows += 1,
+            },
+            Err(_) => malformed_rows += 1,
+        }
+    }
+    report.malformed_rows = malformed_rows;
     let mut downtimes: Vec<(DateTime<Utc>, DateTime<Utc>)> = Vec::new();
     for pair in times.windows(2) {
         if (pair[1] - pair[0]).num_seconds() > 2 * shortest {
@@ -144,7 +156,9 @@ pub fn evaluate(
             report.never_ran.push(e.clone());
             continue;
         }
-        let Some(expected) = prev_fire(&e.expr, now) else { continue };
+        let Some(expected) = prev_fire(&e.expr, now) else {
+            continue;
+        };
         let cadence = cadence_secs(&e.expr, now).unwrap_or(86_400);
         let slack = std::cmp::max(cadence / 4, max_dur.unwrap_or(0) / 1000 + 60);
         if now < expected + chrono::Duration::seconds(slack) {
@@ -202,12 +216,17 @@ pub fn signature_head(detail: &str) -> String {
     let mut in_digits = false;
     for c in first.chars().take(160) {
         if c.is_ascii_digit() {
-            if !in_digits { out.push('#'); in_digits = true; }
+            if !in_digits {
+                out.push('#');
+                in_digits = true;
+            }
         } else {
             in_digits = false;
             out.push(c);
         }
-        if out.len() >= 80 { break; }
+        if out.len() >= 80 {
+            break;
+        }
     }
     out
 }
@@ -231,16 +250,27 @@ pub fn failure_signatures(
     let mut map: std::collections::BTreeMap<(String, String), FailureSignature> =
         Default::default();
     let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, String>(1)?,
-            r.get::<_, String>(2)?, r.get::<_, String>(3)?))
+        Ok((
+            r.get::<_, String>(0)?,
+            r.get::<_, String>(1)?,
+            r.get::<_, String>(2)?,
+            r.get::<_, String>(3)?,
+        ))
     })?;
     for r in rows {
         let (fid, status, detail, ts) = r?;
         let head = signature_head(&detail);
-        let e = map.entry((fid.clone(), head.clone())).or_insert(FailureSignature {
-            fid, head, status, count: 0, first_seen: ts.clone(),
-            last_seen: ts.clone(), is_new: false,
-        });
+        let e = map
+            .entry((fid.clone(), head.clone()))
+            .or_insert(FailureSignature {
+                fid,
+                head,
+                status,
+                count: 0,
+                first_seen: ts.clone(),
+                last_seen: ts.clone(),
+                is_new: false,
+            });
         e.count += 1;
         e.last_seen = ts;
     }
@@ -248,7 +278,10 @@ pub fn failure_signatures(
     let mut out: Vec<_> = map
         .into_values()
         .filter(|s| s.last_seen >= window_start)
-        .map(|mut s| { s.is_new = s.first_seen >= window_start; s })
+        .map(|mut s| {
+            s.is_new = s.first_seen >= window_start;
+            s
+        })
         .collect();
     out.sort_by(|a, b| (b.is_new, b.count).cmp(&(a.is_new, a.count)));
     Ok(out)
@@ -273,7 +306,9 @@ pub fn duplicate_fires(
     let conn = crate::telemetry::open_ro()?;
     let mut out = Vec::new();
     for e in exp {
-        let Some(expected) = prev_fire(&e.expr, now) else { continue };
+        let Some(expected) = prev_fire(&e.expr, now) else {
+            continue;
+        };
         let cadence = cadence_secs(&e.expr, now).unwrap_or(86_400);
         let lo = (expected - chrono::Duration::seconds(60)).to_rfc3339();
         let hi = (expected + chrono::Duration::seconds(cadence / 2)).to_rfc3339();
@@ -283,8 +318,11 @@ pub fn duplicate_fires(
             |r| r.get(0),
         )?;
         if n > 1 {
-            out.push(DuplicateFire { fid: e.fid.clone(), window_start: expected,
-                rows_in_window: n });
+            out.push(DuplicateFire {
+                fid: e.fid.clone(),
+                window_start: expected,
+                rows_in_window: n,
+            });
         }
     }
     Ok(out)
@@ -297,9 +335,18 @@ pub fn duplicate_fires(
 pub fn alert_key(kind: &str, ident: &str) -> String {
     let safe: String = ident
         .chars()
-        .map(|c| if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' { c } else { '-' })
+        .map(|c| {
+            if c.is_ascii_alphanumeric() || c == '.' || c == '_' || c == '-' {
+                c
+            } else {
+                '-'
+            }
+        })
         .collect::<String>()
-        .split('-').filter(|s| !s.is_empty()).collect::<Vec<_>>().join("-");
+        .split('-')
+        .filter(|s| !s.is_empty())
+        .collect::<Vec<_>>()
+        .join("-");
     format!("failures-{kind}-{safe}")
 }
 
@@ -308,15 +355,21 @@ pub(crate) mod testutil {
     use chrono::{DateTime, Utc};
     pub fn seed_schema() {
         crate::telemetry::record(&crate::telemetry::TelemetryEvent {
-            source: "seed".into(), event: "seed".into(), status: "ok".into(),
-            duration_ms: None, exit_code: None, detail: None,
-        }).unwrap();
+            source: "seed".into(),
+            event: "seed".into(),
+            status: "ok".into(),
+            duration_ms: None,
+            exit_code: None,
+            detail: None,
+        })
+        .unwrap();
     }
-    fn conn() -> rusqlite::Connection {
+    pub fn conn() -> rusqlite::Connection {
         rusqlite::Connection::open(
             std::path::PathBuf::from(std::env::var("HEX_DIR").unwrap())
                 .join(".hex/telemetry/events.db"),
-        ).unwrap()
+        )
+        .unwrap()
     }
     pub fn row(fid: &str, ts: DateTime<Utc>, status: &str, duration_ms: i64) {
         conn().execute(
@@ -325,10 +378,12 @@ pub(crate) mod testutil {
         ).unwrap();
     }
     pub fn row_d(fid: &str, ts: DateTime<Utc>, status: &str, detail: &str) {
-        conn().execute(
-            "INSERT INTO events (ts, source, event, status, detail) VALUES (?1,?2,?3,?4,?5)",
-            rusqlite::params![ts.to_rfc3339(), "w", fid, status, detail],
-        ).unwrap();
+        conn()
+            .execute(
+                "INSERT INTO events (ts, source, event, status, detail) VALUES (?1,?2,?3,?4,?5)",
+                rusqlite::params![ts.to_rfc3339(), "w", fid, status, detail],
+            )
+            .unwrap();
     }
 }
 
@@ -345,11 +400,37 @@ mod missed_tests {
         let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
         // daily 04:00 cron, last row 2 days ago → MISSED
         row("a::daily", now - Duration::days(2), "ok", 1000);
-        let exp = vec![CronExpectation { worker: "a".into(), fid: "a::daily".into(),
-            expr: "0 0 4 * * * *".into() }];
+        let exp = vec![CronExpectation {
+            worker: "a".into(),
+            fid: "a::daily".into(),
+            expr: "0 0 4 * * * *".into(),
+        }];
         let report = evaluate(&exp, now, &[]).unwrap();
         assert_eq!(report.missed.len(), 1, "{:?}", report.missed);
         assert_eq!(report.missed[0].fid, "a::daily");
+    }
+
+    #[test]
+    fn malformed_event_rows_are_counted_not_silently_dropped() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        seed_schema();
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        row("a::daily", now - Duration::hours(1), "ok", 1000);
+        // A corrupt ts must be COUNTED (S6), not silently vanish from the
+        // downtime timeline — audit 2026-07-16 finding hex:23.
+        conn()
+            .execute(
+                "INSERT INTO events (ts, source, event, status) VALUES (?1,?2,?3,?4)",
+                rusqlite::params!["not-a-timestamp", "w", "a::daily", "ok"],
+            )
+            .unwrap();
+        let exp = vec![CronExpectation {
+            worker: "a".into(),
+            fid: "a::daily".into(),
+            expr: "0 0 4 * * * *".into(),
+        }];
+        let report = evaluate(&exp, now, &[]).unwrap();
+        assert_eq!(report.malformed_rows, 1, "corrupt ts row must be counted");
     }
 
     #[test]
@@ -360,8 +441,11 @@ mod missed_tests {
         // still legitimately in-flight → NOT missed.
         let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 7, 0).unwrap();
         row("a::quarter", now - Duration::minutes(40), "ok", 1_800_000);
-        let exp = vec![CronExpectation { worker: "a".into(), fid: "a::quarter".into(),
-            expr: "0 */15 * * * * *".into() }];
+        let exp = vec![CronExpectation {
+            worker: "a".into(),
+            fid: "a::quarter".into(),
+            expr: "0 */15 * * * * *".into(),
+        }];
         let report = evaluate(&exp, now, &[]).unwrap();
         assert!(report.missed.is_empty(), "{:?}", report.missed);
     }
@@ -371,8 +455,11 @@ mod missed_tests {
         let (_t, _g) = crate::telemetry::test_support::isolate();
         seed_schema();
         let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
-        let exp = vec![CronExpectation { worker: "a".into(), fid: "a::daily".into(),
-            expr: "0 0 4 * * * *".into() }];
+        let exp = vec![CronExpectation {
+            worker: "a".into(),
+            fid: "a::daily".into(),
+            expr: "0 0 4 * * * *".into(),
+        }];
         let report = evaluate(&exp, now, &[]).unwrap();
         assert!(report.missed.is_empty());
         assert_eq!(report.never_ran.len(), 1);
@@ -393,18 +480,34 @@ mod missed_tests {
             t = t + Duration::minutes(15);
         }
         // Daily 04:00 fid (04:00 = now-8h, inside the hole), no row today.
-        row("a::daily", now - Duration::days(1) - Duration::hours(8), "ok", 1000);
+        row(
+            "a::daily",
+            now - Duration::days(1) - Duration::hours(8),
+            "ok",
+            1000,
+        );
         let exp = vec![
-            CronExpectation { worker: "hb".into(), fid: "hb::quarter".into(),
-                expr: "0 */15 * * * * *".into() },
-            CronExpectation { worker: "a".into(), fid: "a::daily".into(),
-                expr: "0 0 4 * * * *".into() },
+            CronExpectation {
+                worker: "hb".into(),
+                fid: "hb::quarter".into(),
+                expr: "0 */15 * * * * *".into(),
+            },
+            CronExpectation {
+                worker: "a".into(),
+                fid: "a::daily".into(),
+                expr: "0 0 4 * * * *".into(),
+            },
         ];
         let report = evaluate(&exp, now, &[]).unwrap();
-        assert!(report.missed.iter().all(|m| m.fid != "a::daily"),
-            "downtime must excuse a::daily: {:?}", report.missed);
+        assert!(
+            report.missed.iter().all(|m| m.fid != "a::daily"),
+            "downtime must excuse a::daily: {:?}",
+            report.missed
+        );
         assert_eq!(report.downtime.len(), 1);
-        assert!(report.downtime[0].excused_fids.contains(&"a::daily".to_string()));
+        assert!(report.downtime[0]
+            .excused_fids
+            .contains(&"a::daily".to_string()));
     }
 }
 
@@ -421,11 +524,19 @@ mod signature_tests {
         let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
         // chronic: 5 days of the same error; new: one today
         for d in 1..=5 {
-            row_d("old::daily", now - Duration::days(d), "error",
-                "`hex` exited 2: error: unrecognized subcommand backup");
+            row_d(
+                "old::daily",
+                now - Duration::days(d),
+                "error",
+                "`hex` exited 2: error: unrecognized subcommand backup",
+            );
         }
-        row_d("new::daily", now - Duration::hours(2), "error",
-            "`hex` exited 1: gate battery BLOCKED");
+        row_d(
+            "new::daily",
+            now - Duration::hours(2),
+            "error",
+            "`hex` exited 1: gate battery BLOCKED",
+        );
         let sigs = failure_signatures(now, 24).unwrap();
         let newsig = sigs.iter().find(|s| s.fid == "new::daily").unwrap();
         assert!(newsig.is_new);
@@ -444,8 +555,11 @@ mod signature_tests {
         let fire = Utc.with_ymd_and_hms(2026, 6, 11, 3, 59, 59).unwrap();
         row("a::daily", fire, "error", 100);
         row("a::daily", fire + Duration::milliseconds(150), "error", 100);
-        let exp = vec![CronExpectation { worker: "a".into(), fid: "a::daily".into(),
-            expr: "0 0 4 * * * *".into() }];
+        let exp = vec![CronExpectation {
+            worker: "a".into(),
+            fid: "a::daily".into(),
+            expr: "0 0 4 * * * *".into(),
+        }];
         let dups = duplicate_fires(&exp, now).unwrap();
         assert_eq!(dups.len(), 1);
         assert_eq!(dups[0].fid, "a::daily");
@@ -468,12 +582,19 @@ mod signature_tests {
         let (_t, _g) = crate::telemetry::test_support::isolate(); // fresh HEX_DIR, no seed → no db
         assert!(!crate::telemetry::db_exists());
         let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
-        let exp = vec![CronExpectation { worker: "a".into(), fid: "a::daily".into(),
-            expr: "0 0 4 * * * *".into() }];
+        let exp = vec![CronExpectation {
+            worker: "a".into(),
+            fid: "a::daily".into(),
+            expr: "0 0 4 * * * *".into(),
+        }];
         let report = evaluate(&exp, now, &[]).expect("evaluate must not Err on fresh install");
         assert!(report.missed.is_empty() && report.never_ran.is_empty());
-        assert!(failure_signatures(now, 24).expect("signatures must not Err").is_empty());
-        assert!(duplicate_fires(&exp, now).expect("dup_fires must not Err").is_empty());
+        assert!(failure_signatures(now, 24)
+            .expect("signatures must not Err")
+            .is_empty());
+        assert!(duplicate_fires(&exp, now)
+            .expect("dup_fires must not Err")
+            .is_empty());
     }
 }
 
@@ -497,12 +618,17 @@ pub fn modules_not_landed(hex_dir: &std::path::Path, compiled_basenames: &[Strin
 }
 
 fn collect_worker_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>) {
-    let Ok(entries) = std::fs::read_dir(dir) else { return };
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
     for e in entries.flatten() {
         let p = e.path();
         if p.is_dir() {
             collect_worker_files(&p, out);
-        } else if p.file_name().map_or(false, |f| f.to_string_lossy().ends_with(".worker.rs")) {
+        } else if p
+            .file_name()
+            .map_or(false, |f| f.to_string_lossy().ends_with(".worker.rs"))
+        {
             out.push(p);
         }
     }
@@ -574,11 +700,21 @@ mod tests {
     #[test]
     fn expectations_skip_event_triggers_and_disabled() {
         let regs = vec![
-            RegisteredTrigger { worker: "a".into(), fid: "a::daily".into(),
-                cron: Some("0 0 4 * * * *".into()) },
-            RegisteredTrigger { worker: "b".into(), fid: "b::0".into(), cron: None },
-            RegisteredTrigger { worker: "c".into(), fid: "c::daily".into(),
-                cron: Some("0 0 5 * * * *".into()) },
+            RegisteredTrigger {
+                worker: "a".into(),
+                fid: "a::daily".into(),
+                cron: Some("0 0 4 * * * *".into()),
+            },
+            RegisteredTrigger {
+                worker: "b".into(),
+                fid: "b::0".into(),
+                cron: None,
+            },
+            RegisteredTrigger {
+                worker: "c".into(),
+                fid: "c::daily".into(),
+                cron: Some("0 0 5 * * * *".into()),
+            },
         ];
         let disabled: std::collections::BTreeSet<String> = ["c".to_string()].into();
         let exp = cron_expectations(&regs, &disabled);
@@ -588,7 +724,10 @@ mod tests {
 
     #[test]
     fn alert_keys_are_path_safe() {
-        assert_eq!(alert_key("missed", "hex-backup::daily"), "failures-missed-hex-backup-daily");
+        assert_eq!(
+            alert_key("missed", "hex-backup::daily"),
+            "failures-missed-hex-backup-daily"
+        );
         assert_eq!(alert_key("missed", "a::b/c"), "failures-missed-a-b-c");
     }
 

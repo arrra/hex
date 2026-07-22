@@ -40,8 +40,14 @@ fn consolidate_writes_log_and_does_not_panic() {
         String::from_utf8_lossy(&output.stderr)
     );
 
-    let log_path = hex_dir.path().join("evolution").join("consolidation-latest.log");
-    assert!(log_path.exists(), "consolidation-latest.log must be written");
+    let log_path = hex_dir
+        .path()
+        .join("evolution")
+        .join("consolidation-latest.log");
+    assert!(
+        log_path.exists(),
+        "consolidation-latest.log must be written"
+    );
 
     let log = fs::read_to_string(&log_path).expect("read log");
     assert!(

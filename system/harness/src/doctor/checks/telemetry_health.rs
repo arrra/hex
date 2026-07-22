@@ -15,8 +15,12 @@ use chrono::{Duration, Utc};
 pub struct TelemetryHealth;
 
 impl DoctorCheck for TelemetryHealth {
-    fn name(&self) -> &str { "telemetry-health" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "telemetry-health"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let db = ctx.hex_dir.join(".hex/telemetry/events.db");
         if !db.is_file() {
@@ -45,7 +49,11 @@ impl DoctorCheck for TelemetryHealth {
 
         // Count total events in last 24h for the pass message.
         let total = telemetry::recent(usize::MAX)
-            .map(|rows| rows.into_iter().filter(|r| r.ts.as_str() >= since.to_rfc3339().as_str()).count())
+            .map(|rows| {
+                rows.into_iter()
+                    .filter(|r| r.ts.as_str() >= since.to_rfc3339().as_str())
+                    .count()
+            })
             .unwrap_or(0);
         CheckResult::pass(&format!(
             "telemetry store healthy ({total} events, 0 failures/24h)"
@@ -59,7 +67,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn ctx() -> Context {
-        Context { hex_dir: PathBuf::from("/tmp/fake-hex-telemetry-nope"), home: PathBuf::from("/tmp"), fix: false }
+        Context {
+            hex_dir: PathBuf::from("/tmp/fake-hex-telemetry-nope"),
+            home: PathBuf::from("/tmp"),
+            fix: false,
+        }
     }
 
     #[test]

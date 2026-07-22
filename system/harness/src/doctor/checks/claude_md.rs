@@ -5,8 +5,12 @@ use std::fs;
 pub struct ClaudeMdExists;
 
 impl DoctorCheck for ClaudeMdExists {
-    fn name(&self) -> &str { "claude-md" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "claude-md"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let path = ctx.hex_dir.join("CLAUDE.md");
         match fs::metadata(&path) {
@@ -14,7 +18,8 @@ impl DoctorCheck for ClaudeMdExists {
                 CheckResult::pass(format!("CLAUDE.md exists ({} bytes)", meta.len()))
             }
             Ok(meta) => CheckResult::fail(format!(
-                "CLAUDE.md too small ({} bytes, need ≥1000)", meta.len()
+                "CLAUDE.md too small ({} bytes, need ≥1000)",
+                meta.len()
             )),
             Err(_) => CheckResult::fail("CLAUDE.md missing"),
         }

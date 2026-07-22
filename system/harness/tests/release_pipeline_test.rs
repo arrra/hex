@@ -68,12 +68,18 @@ fn fixture_with_gates(gates: &str) -> Fixture {
     // Hermetic commits/pushes: neutralize any user/global hooks.
     let nohooks = root.join("nohooks");
     std::fs::create_dir_all(&nohooks).unwrap();
-    git(&repo, &["config", "core.hooksPath", nohooks.to_str().unwrap()]);
+    git(
+        &repo,
+        &["config", "core.hooksPath", nohooks.to_str().unwrap()],
+    );
     std::fs::write(repo.join("version.txt"), "0.1.0\n").unwrap();
     git(&repo, &["add", "-A"]);
     commit(&repo, "feat: initial");
     git(&repo, &["branch", "develop"]);
-    git(&repo, &["remote", "add", "origin", origin.to_str().unwrap()]);
+    git(
+        &repo,
+        &["remote", "add", "origin", origin.to_str().unwrap()],
+    );
     git(&repo, &["push", "-q", "origin", "main", "develop"]);
 
     let hex_dir = root.join("hexdir");
@@ -91,7 +97,12 @@ fn fixture_with_gates(gates: &str) -> Fixture {
     )
     .unwrap();
 
-    Fixture { _td: td, repo, origin, hex_dir }
+    Fixture {
+        _td: td,
+        repo,
+        origin,
+        hex_dir,
+    }
 }
 
 fn fixture() -> Fixture {
@@ -159,7 +170,10 @@ fn install_origin_tagger(origin: &Path, tag: &str, which: &str) {
     std::fs::create_dir_all(&hooks).unwrap();
     // Pin hooksPath: a user-global core.hooksPath would otherwise shadow the
     // bare repo's own hooks dir and the tagger would never fire.
-    git(origin, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    git(
+        origin,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
     let hook = hooks.join("post-receive");
     std::fs::write(
         &hook,
@@ -194,7 +208,10 @@ fn install_prepush_shim(fix: &Fixture) {
     let hook = hooks.join("pre-push");
     std::fs::write(&hook, PRE_PUSH_SHIM).unwrap();
     make_executable(&hook);
-    git(&fix.repo, &["config", "core.hooksPath", hooks.to_str().unwrap()]);
+    git(
+        &fix.repo,
+        &["config", "core.hooksPath", hooks.to_str().unwrap()],
+    );
 }
 
 /// `git push origin <refspec>` from the repo with the shim active and PATH
@@ -246,7 +263,10 @@ fn version_gate_blocks_unchanged_version_and_suggests_next_patch() {
     assert!(!out.status.success());
     let err = text(&out.stderr);
     assert!(err.contains("not greater"), "{err}");
-    assert!(err.contains("1.0.1"), "next-patch suggestion missing: {err}");
+    assert!(
+        err.contains("1.0.1"),
+        "next-patch suggestion missing: {err}"
+    );
 
     // The suggestion is numeric, not string math: 1.2.9 → 1.2.10.
     let f2 = fixture();
@@ -284,9 +304,18 @@ fn cut_success_path_patch_bump_lands_on_origin() {
     // Tag sits on the main merge commit, locally AND on origin (OBS-017:
     // a locally existing tag must still reach the remote).
     let main_sha = git_out(&f.repo, &["rev-parse", "refs/heads/main"]);
-    assert_eq!(git_out(&f.repo, &["rev-parse", "v1.0.1^{commit}"]), main_sha);
-    assert_eq!(git_out(&f.origin, &["rev-parse", "refs/heads/main"]), main_sha);
-    assert_eq!(git_out(&f.origin, &["rev-parse", "v1.0.1^{commit}"]), main_sha);
+    assert_eq!(
+        git_out(&f.repo, &["rev-parse", "v1.0.1^{commit}"]),
+        main_sha
+    );
+    assert_eq!(
+        git_out(&f.origin, &["rev-parse", "refs/heads/main"]),
+        main_sha
+    );
+    assert_eq!(
+        git_out(&f.origin, &["rev-parse", "v1.0.1^{commit}"]),
+        main_sha
+    );
     // develop pushed too, carrying the back-merged bump.
     assert_eq!(
         git_out(&f.origin, &["rev-parse", "refs/heads/develop"]),
@@ -307,7 +336,10 @@ fn cut_success_path_major_bump_lands_on_origin() {
     let out = run_cut(&f, &["--level", "major"]);
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
     let main_sha = git_out(&f.repo, &["rev-parse", "refs/heads/main"]);
-    assert_eq!(git_out(&f.origin, &["rev-parse", "v2.0.0^{commit}"]), main_sha);
+    assert_eq!(
+        git_out(&f.origin, &["rev-parse", "v2.0.0^{commit}"]),
+        main_sha
+    );
     assert_eq!(git_out(&f.repo, &["show", "main:version.txt"]), "2.0.0");
 }
 
@@ -397,7 +429,10 @@ fn tag_already_on_origin_at_same_commit_is_idempotent_success() {
     assert!(out.status.success(), "stderr: {}", text(&out.stderr));
     assert!(text(&out.stdout).contains("already on origin"));
     let main_sha = git_out(&f.repo, &["rev-parse", "refs/heads/main"]);
-    assert_eq!(git_out(&f.origin, &["rev-parse", "v0.2.0^{commit}"]), main_sha);
+    assert_eq!(
+        git_out(&f.origin, &["rev-parse", "v0.2.0^{commit}"]),
+        main_sha
+    );
 }
 
 #[test]
@@ -443,8 +478,14 @@ fn back_merge_conflict_aborts_loudly_and_pushes_nothing() {
     assert!(err.contains("BACK-MERGE CONFLICT"), "{err}");
     assert!(err.contains("Nothing was pushed"), "{err}");
     // Origin untouched; the conflicted merge was aborted, not left half-done.
-    assert_eq!(git_out(&f.origin, &["rev-parse", "refs/heads/main"]), origin_main);
-    assert_eq!(git_out(&f.origin, &["rev-parse", "refs/heads/develop"]), origin_dev);
+    assert_eq!(
+        git_out(&f.origin, &["rev-parse", "refs/heads/main"]),
+        origin_main
+    );
+    assert_eq!(
+        git_out(&f.origin, &["rev-parse", "refs/heads/develop"]),
+        origin_dev
+    );
     assert_eq!(git_out(&f.origin, &["tag"]), "");
     assert!(!ref_exists(&f.repo, "MERGE_HEAD"));
     // Local main carries the release merge + tag, exactly as the printed
@@ -471,8 +512,14 @@ fn develop_moved_mid_cut_race_aborts_before_any_push() {
     assert!(!out.status.success());
     assert!(text(&out.stderr).contains("moved during the cut"));
     // Nothing reached origin.
-    assert_eq!(git_out(&f.origin, &["rev-parse", "refs/heads/main"]), origin_main);
-    assert_eq!(git_out(&f.origin, &["rev-parse", "refs/heads/develop"]), origin_dev);
+    assert_eq!(
+        git_out(&f.origin, &["rev-parse", "refs/heads/main"]),
+        origin_main
+    );
+    assert_eq!(
+        git_out(&f.origin, &["rev-parse", "refs/heads/develop"]),
+        origin_dev
+    );
     assert_eq!(git_out(&f.origin, &["tag"]), "");
 }
 
@@ -498,7 +545,10 @@ fn prepush_shim_blocks_main_push_without_pipeline_env() {
     assert!(err.contains("BLOCKED"), "{err}");
     assert!(err.contains("hex release cut"), "{err}");
     // The blocked push changed nothing on origin.
-    assert_eq!(git_out(&f.origin, &["rev-parse", "refs/heads/main"]), origin_main);
+    assert_eq!(
+        git_out(&f.origin, &["rev-parse", "refs/heads/main"]),
+        origin_main
+    );
 }
 
 #[test]
@@ -528,9 +578,17 @@ fn prepush_shim_passes_develop_and_tag_pushes_through() {
     git(&f.repo, &["tag", "v9.9.9"]);
 
     let out = push_with_shim(&f.repo, "develop", false);
-    assert!(out.status.success(), "develop push must pass: {}", text(&out.stderr));
+    assert!(
+        out.status.success(),
+        "develop push must pass: {}",
+        text(&out.stderr)
+    );
     let out = push_with_shim(&f.repo, "v9.9.9", false);
-    assert!(out.status.success(), "tag push must pass: {}", text(&out.stderr));
+    assert!(
+        out.status.success(),
+        "tag push must pass: {}",
+        text(&out.stderr)
+    );
     assert_eq!(
         git_out(&f.origin, &["rev-parse", "refs/heads/develop"]),
         git_out(&f.repo, &["rev-parse", "refs/heads/develop"])

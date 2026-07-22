@@ -6,19 +6,19 @@ mod consolidate;
 mod throttle;
 use hex::doctor;
 mod integration;
-mod integration_cmd;
 mod integration_check_all;
+mod integration_cmd;
 // telemetry lives in the lib (used by the in-process worker runtime too); the
 // bin shares that one copy rather than compiling a second (mirrors hex::memory).
 use hex::alert;
 use hex::memory;
 use hex::telemetry;
-mod path_map;
 mod env;
 mod hook;
-mod usage;
-mod upgrade;
 mod learnings;
+mod path_map;
+mod upgrade;
+mod usage;
 // ops lives in the lib (the in-process worker runtime calls it too); the bin
 // shares that one copy rather than compiling a second (mirrors hex::memory).
 use hex::ops;
@@ -147,9 +147,7 @@ enum Commands {
     Version,
     /// Generate shell completions
     #[command(display_order = 12)]
-    Completions {
-        shell: clap_complete::Shell,
-    },
+    Completions { shell: clap_complete::Shell },
     /// Inspect auto-registered worker modules
     #[command(display_order = 14)]
     Module {
@@ -467,9 +465,7 @@ enum CharterCommands {
         alert: bool,
     },
     /// Print the governance trail (oldest first), optionally for one name.
-    Log {
-        name: Option<String>,
-    },
+    Log { name: Option<String> },
     /// Current registered charters: name, version, hash, path.
     Show,
 }
@@ -581,7 +577,11 @@ enum StateCommands {
     /// Print the JSON value at <scope>/<key>; empty + exit 1 if absent
     Get { scope: String, key: String },
     /// Set <scope>/<key> to <json> (a JSON literal, e.g. '{"a":1}' or '"str"')
-    Set { scope: String, key: String, json: String },
+    Set {
+        scope: String,
+        key: String,
+        json: String,
+    },
     /// Delete <scope>/<key>
     Delete { scope: String, key: String },
 }
@@ -843,7 +843,11 @@ fn main() {
             }
         },
         Commands::Triggers { command } => match command {
-            TriggersCommands::Emit { event, data, producer } => {
+            TriggersCommands::Emit {
+                event,
+                data,
+                producer,
+            } => {
                 let parsed: serde_json::Value = match data.as_deref() {
                     None | Some("") => serde_json::Value::Object(Default::default()),
                     Some(s) => match serde_json::from_str(s) {
@@ -922,8 +926,9 @@ fn main() {
                 // Personal overlay probes (discovered, never named here) take
                 // precedence; unknown names fall through to the bundle probe.
                 #[cfg(feature = "personal")]
-                if let Some((_, f)) =
-                    personal_mods::probe_registry().iter().find(|(n, _)| n == name)
+                if let Some((_, f)) = personal_mods::probe_registry()
+                    .iter()
+                    .find(|(n, _)| n == name)
                 {
                     std::process::exit(f());
                 }
@@ -940,7 +945,9 @@ fn main() {
             }
             if let IntegrationCommands::Update { ref name } = command {
                 let hex_dir = get_hex_dir();
-                std::process::exit(integration_cmd::update(&hex_dir, name, false, false, false, false));
+                std::process::exit(integration_cmd::update(
+                    &hex_dir, name, false, false, false, false,
+                ));
             }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
@@ -972,7 +979,14 @@ fn main() {
         Commands::Memory { command } => {
             let hex_dir = get_hex_dir();
             let exit_code = match &command {
-                MemoryCommands::Search { query, top, file, compact, context, private } => {
+                MemoryCommands::Search {
+                    query,
+                    top,
+                    file,
+                    compact,
+                    context,
+                    private,
+                } => {
                     let args = memory::search::SearchArgs {
                         query: query.clone(),
                         top: *top,
@@ -990,7 +1004,11 @@ fn main() {
                     }
                     memory::index::run(&hex_dir, *full, *stats)
                 }
-                MemoryCommands::ParseTranscripts { file, dry_run, force } => {
+                MemoryCommands::ParseTranscripts {
+                    file,
+                    dry_run,
+                    force,
+                } => {
                     let args = memory::parse_transcripts::ParseArgs {
                         file: file.clone(),
                         dry_run: *dry_run,
@@ -1026,15 +1044,12 @@ fn main() {
                         }
                     }
                 }
-                MemoryCommands::Stats { json } => {
-                    memory::stats::run(&hex_dir, *json)
-                }
-                MemoryCommands::Recent => {
-                    memory::recent::run(&hex_dir)
-                }
-                MemoryCommands::Maintain { vacuum, backfill_facts } => {
-                    memory::maintain::run(&hex_dir, *vacuum, *backfill_facts)
-                }
+                MemoryCommands::Stats { json } => memory::stats::run(&hex_dir, *json),
+                MemoryCommands::Recent => memory::recent::run(&hex_dir),
+                MemoryCommands::Maintain {
+                    vacuum,
+                    backfill_facts,
+                } => memory::maintain::run(&hex_dir, *vacuum, *backfill_facts),
                 MemoryCommands::Consolidate { command } => {
                     let (mode, max) = match command {
                         ConsolidateCommands::Quick { max } => (consolidate::Mode::Quick, *max),
@@ -1052,7 +1067,13 @@ fn main() {
                     let code = doctor::stale_deps(&hex_dir, threshold, json);
                     std::process::exit(code);
                 }
-                DoctorCommands::Run { fix, smoke: _, quiet, json, filter } => {
+                DoctorCommands::Run {
+                    fix,
+                    smoke: _,
+                    quiet,
+                    json,
+                    filter,
+                } => {
                     let ctx = doctor::Context::new(hex_dir.clone(), fix);
                     let runner = match &filter {
                         Some(pat) => doctor::Runner::filtered(pat),
@@ -1090,7 +1111,11 @@ fn main() {
         Commands::Resources { command } => {
             std::process::exit(run_resources(command));
         }
-        Commands::Failures { command, window, alert } => match command {
+        Commands::Failures {
+            command,
+            window,
+            alert,
+        } => match command {
             Some(FailuresCommands::Probe) => std::process::exit(run_failures_probe()),
             None => std::process::exit(run_failures(window, alert)),
         },
@@ -1100,7 +1125,11 @@ fn main() {
         Commands::Hook { command } => hook::run(command),
         Commands::Usage { command } => std::process::exit(usage::run(command)),
         Commands::Version => {
-            println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
+            println!(
+                "hex {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("HEX_GIT_SHA")
+            );
         }
         Commands::ClaudeFlags { profile } => {
             // Read HEX_DIR optionally — claude-flags must work even when the
@@ -1151,7 +1180,11 @@ fn main() {
                 let registry = hex::workers::registry();
                 for w in &registry {
                     let (kind, _path) = module_source(&w.name);
-                    let state = if disabled.contains(&w.name) { "  DISABLED" } else { "" };
+                    let state = if disabled.contains(&w.name) {
+                        "  DISABLED"
+                    } else {
+                        ""
+                    };
                     println!("{:<28} [{}]  {}{}", w.name, kind, trigger_summary(w), state);
                 }
                 // A disabled name with no registered worker is drift — loud.
@@ -1165,7 +1198,10 @@ fn main() {
                 std::process::exit(0)
             }
             ModuleCommands::Status { name } => {
-                match hex::workers::registry().into_iter().find(|w| w.name == name) {
+                match hex::workers::registry()
+                    .into_iter()
+                    .find(|w| w.name == name)
+                {
                     Some(w) => {
                         let hex_dir = get_hex_dir();
                         let state = match hex::module_state::disabled_set(&hex_dir) {
@@ -1202,64 +1238,112 @@ fn main() {
         Commands::Charter { command } => {
             let hex_dir = get_hex_dir();
             match command {
-                CharterCommands::Register { name, path, why, by } => {
-                    match hex::charter::register(&hex_dir, &name, &path, &by, &why) {
-                        Ok(st) => println!("charter '{}' registered at v{} ({})", st.name, st.version, st.sha256),
-                        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                CharterCommands::Register {
+                    name,
+                    path,
+                    why,
+                    by,
+                } => match hex::charter::register(&hex_dir, &name, &path, &by, &why) {
+                    Ok(st) => println!(
+                        "charter '{}' registered at v{} ({})",
+                        st.name, st.version, st.sha256
+                    ),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
                     }
-                }
-                CharterCommands::Amend { name, file, why, by } => {
-                    match hex::charter::amend(&hex_dir, &name, &file, &by, &why) {
-                        Ok(st) => println!("charter '{}' amended to v{} ({})", st.name, st.version, st.sha256),
-                        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                },
+                CharterCommands::Amend {
+                    name,
+                    file,
+                    why,
+                    by,
+                } => match hex::charter::amend(&hex_dir, &name, &file, &by, &why) {
+                    Ok(st) => println!(
+                        "charter '{}' amended to v{} ({})",
+                        st.name, st.version, st.sha256
+                    ),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
                     }
-                }
+                },
                 CharterCommands::Rebaseline { name, why, by } => {
                     match hex::charter::rebaseline(&hex_dir, &name, &by, &why) {
-                        Ok(st) => println!("charter '{}' rebaselined to v{} ({}) — drift accepted into the trail", st.name, st.version, st.sha256),
-                        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
-                    }
-                }
-                CharterCommands::Verify { alert } => {
-                    match hex::charter::verify(&hex_dir, alert) {
-                        Ok(drifts) if drifts.is_empty() => {
-                            println!("charter verify OK ({} registered)", hex::charter::latest_states(&hex_dir).map(|m| m.len()).unwrap_or(0));
-                        }
-                        Ok(drifts) => {
-                            eprintln!("charter verify: {} DRIFTED", drifts.len());
+                        Ok(st) => println!(
+                            "charter '{}' rebaselined to v{} ({}) — drift accepted into the trail",
+                            st.name, st.version, st.sha256
+                        ),
+                        Err(e) => {
+                            eprintln!("{e}");
                             std::process::exit(1);
                         }
-                        Err(e) => { eprintln!("{e}"); std::process::exit(2); }
                     }
                 }
+                CharterCommands::Verify { alert } => match hex::charter::verify(&hex_dir, alert) {
+                    Ok(drifts) if drifts.is_empty() => {
+                        println!(
+                            "charter verify OK ({} registered)",
+                            hex::charter::latest_states(&hex_dir)
+                                .map(|m| m.len())
+                                .unwrap_or(0)
+                        );
+                    }
+                    Ok(drifts) => {
+                        eprintln!("charter verify: {} DRIFTED", drifts.len());
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2);
+                    }
+                },
                 CharterCommands::Log { name } => {
                     match hex::charter::log(&hex_dir, name.as_deref()) {
                         Ok(rows) => {
                             for (ts, v) in rows {
-                                println!("{} {}", chrono::DateTime::from_timestamp(ts, 0).map(|d| d.to_rfc3339()).unwrap_or_else(|| ts.to_string()), v);
+                                println!(
+                                    "{} {}",
+                                    chrono::DateTime::from_timestamp(ts, 0)
+                                        .map(|d| d.to_rfc3339())
+                                        .unwrap_or_else(|| ts.to_string()),
+                                    v
+                                );
                             }
                         }
-                        Err(e) => { eprintln!("{e}"); std::process::exit(2); }
-                    }
-                }
-                CharterCommands::Show => {
-                    match hex::charter::latest_states(&hex_dir) {
-                        Ok(states) if states.is_empty() => println!("no charters registered"),
-                        Ok(states) => {
-                            for (_, st) in states {
-                                println!("{:<12} v{:<3} {}  {}", st.name, st.version, st.sha256, st.path);
-                            }
+                        Err(e) => {
+                            eprintln!("{e}");
+                            std::process::exit(2);
                         }
-                        Err(e) => { eprintln!("{e}"); std::process::exit(2); }
                     }
                 }
+                CharterCommands::Show => match hex::charter::latest_states(&hex_dir) {
+                    Ok(states) if states.is_empty() => println!("no charters registered"),
+                    Ok(states) => {
+                        for (_, st) in states {
+                            println!(
+                                "{:<12} v{:<3} {}  {}",
+                                st.name, st.version, st.sha256, st.path
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2);
+                    }
+                },
             }
         }
         Commands::Ledger { command } => {
             let hex_dir = get_hex_dir();
             let path = hex::ledger::default_path(&hex_dir);
             match command {
-                LedgerCommands::Append { agent, action_class, kind, payload } => {
+                LedgerCommands::Append {
+                    agent,
+                    action_class,
+                    kind,
+                    payload,
+                } => {
                     let payload_json: serde_json::Value = match serde_json::from_str(&payload) {
                         Ok(v) => v,
                         Err(e) => {
@@ -1424,7 +1508,12 @@ fn main() {
             );
             std::process::exit(0);
         }
-        Commands::Dial { agent, action_class, min_n, irreversible } => {
+        Commands::Dial {
+            agent,
+            action_class,
+            min_n,
+            irreversible,
+        } => {
             // Load all outcome rows from the ledger and feed the pure dial.
             let hex_dir = get_hex_dir();
             let path = hex::ledger::default_path(&hex_dir);
@@ -1452,7 +1541,16 @@ fn main() {
             }
         }
         Commands::Gatekeeper { command } => match command {
-            GatekeeperCommands::Judge { proposal, corpus, floor, out, now, store, canaries, boi_db } => {
+            GatekeeperCommands::Judge {
+                proposal,
+                corpus,
+                floor,
+                out,
+                now,
+                store,
+                canaries,
+                boi_db,
+            } => {
                 let hex_dir = get_hex_dir();
                 // Dial consult — recorded in the verdict, never upgrades it
                 // (P1: everything flags to Mike regardless).
@@ -1687,7 +1785,10 @@ fn main() {
                     version,
                     hotfix,
                     dry_run,
-                    skip: hex::release::SkipFlags { skip_e2e, skip_parity },
+                    skip: hex::release::SkipFlags {
+                        skip_e2e,
+                        skip_parity,
+                    },
                     finish,
                 };
                 match hex::release::cut(&opts) {
@@ -1710,7 +1811,9 @@ fn main() {
                     PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
                 }
                 _ => {
-                    eprintln!("hex sanitize: not inside a git repository — run from the repo to scan");
+                    eprintln!(
+                        "hex sanitize: not inside a git repository — run from the repo to scan"
+                    );
                     std::process::exit(2);
                 }
             };
@@ -1744,13 +1847,22 @@ fn main() {
     }
 }
 
+/// Open the ledger DB with a bounded busy_timeout, mirroring
+/// `memory::open_db`'s rationale: the applier holds an fs2 flock across its
+/// write sequence, and SQLite's default busy_timeout of 0 makes a concurrent
+/// read fail instantly with SQLITE_BUSY instead of waiting out the writer
+/// (2026-07-16 audit, finding hex:24).
+fn open_ledger(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
+    let conn = rusqlite::Connection::open(path).map_err(|e| format!("open: {e}"))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("busy_timeout: {e}"))?;
+    Ok(conn)
+}
+
 /// Load every `outcome`-kind row from the ledger into [`hex::dial::OutcomeRow`]s.
 /// Errors loudly per S6 — no silent skip on a malformed row.
-fn load_outcome_rows(
-    path: &std::path::Path,
-) -> Result<Vec<hex::dial::OutcomeRow>, String> {
-    use rusqlite::Connection;
-    let conn = Connection::open(path).map_err(|e| format!("open: {e}"))?;
+fn load_outcome_rows(path: &std::path::Path) -> Result<Vec<hex::dial::OutcomeRow>, String> {
+    let conn = open_ledger(path)?;
     let mut stmt = conn
         .prepare("SELECT ts, agent, action_class, payload FROM ledger WHERE kind='outcome'")
         .map_err(|e| format!("prepare: {e}"))?;
@@ -1766,10 +1878,9 @@ fn load_outcome_rows(
         .map_err(|e| format!("query: {e}"))?;
     let mut out = Vec::new();
     for row in rows {
-        let (ts, agent, action_class, payload) =
-            row.map_err(|e| format!("row read: {e}"))?;
-        let v: serde_json::Value = serde_json::from_str(&payload)
-            .map_err(|e| format!("payload parse (ts={ts}): {e}"))?;
+        let (ts, agent, action_class, payload) = row.map_err(|e| format!("row read: {e}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&payload).map_err(|e| format!("payload parse (ts={ts}): {e}"))?;
         let success = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
         out.push(hex::dial::OutcomeRow {
             agent,
@@ -1818,9 +1929,7 @@ fn run_freshness(ledger: &hex::ledger::Ledger) -> i32 {
                 "age_seconds": age,
                 "window_seconds": window,
             });
-            if let Err(e) =
-                ledger.append("freshness", "freshness.alert", "alert", &alert)
-            {
+            if let Err(e) = ledger.append("freshness", "freshness.alert", "alert", &alert) {
                 eprintln!("hex ledger freshness: alert append failed: {e}");
             }
             // macOS notification (osascript). Best-effort — log a stderr
@@ -1857,9 +1966,7 @@ fn run_freshness(ledger: &hex::ledger::Ledger) -> i32 {
 /// Detection only; exit 1 when anything is bad, 2 on store read failure.
 fn run_failures(window: i64, alert: bool) -> i32 {
     let now = chrono::Utc::now();
-    let hex_dir = std::path::PathBuf::from(
-        std::env::var("HEX_DIR").unwrap_or_else(|_| ".".into()),
-    );
+    let hex_dir = std::path::PathBuf::from(std::env::var("HEX_DIR").unwrap_or_else(|_| ".".into()));
     let regs = hex::failures::registered_triggers();
     let disabled = hex::module_state::disabled_set(&hex_dir).unwrap_or_else(|e| {
         eprintln!("failures: disabled-set unreadable ({e}) — evaluating ALL modules");
@@ -1868,7 +1975,10 @@ fn run_failures(window: i64, alert: bool) -> i32 {
     let exp = hex::failures::cron_expectations(&regs, &disabled);
     let report = match hex::failures::evaluate(&exp, now, &[]) {
         Ok(r) => r,
-        Err(e) => { eprintln!("failures: events.db read failed: {e}"); return 2; }
+        Err(e) => {
+            eprintln!("failures: events.db read failed: {e}");
+            return 2;
+        }
     };
     let sigs = hex::failures::failure_signatures(now, window).unwrap_or_default();
     let dups = hex::failures::duplicate_fires(&exp, now).unwrap_or_default();
@@ -1876,31 +1986,54 @@ fn run_failures(window: i64, alert: bool) -> i32 {
     let not_landed = hex::failures::modules_not_landed(&hex_dir, &compiled);
 
     let mut bad = false;
-    println!("== hex failures (window {window}h, {} cron fids, {} disabled) ==",
-        exp.len(), disabled.len());
+    println!(
+        "== hex failures (window {window}h, {} cron fids, {} disabled) ==",
+        exp.len(),
+        disabled.len()
+    );
     if !report.missed.is_empty() {
         bad = true;
         println!("\nMISSED ({}):", report.missed.len());
         for m in &report.missed {
-            println!("  {}  expected {}  last-seen {}", m.fid,
-                m.expected_at.to_rfc3339(), m.last_seen.as_deref().unwrap_or("never"));
+            println!(
+                "  {}  expected {}  last-seen {}",
+                m.fid,
+                m.expected_at.to_rfc3339(),
+                m.last_seen.as_deref().unwrap_or("never")
+            );
             if alert {
-                hex::alert::notify(&hex::failures::alert_key("missed", &m.fid),
+                hex::alert::notify(
+                    &hex::failures::alert_key("missed", &m.fid),
                     "hex worker missed its scheduled run",
-                    &format!("{} expected at {}", m.fid, m.expected_at.to_rfc3339()));
+                    &format!("{} expected at {}", m.fid, m.expected_at.to_rfc3339()),
+                );
             }
         }
     }
     if !not_landed.is_empty() {
         bad = true;
-        println!("\nMODULE NOT LANDED — on disk, not in this binary ({}):", not_landed.len());
+        println!(
+            "\nMODULE NOT LANDED — on disk, not in this binary ({}):",
+            not_landed.len()
+        );
         for f in &not_landed {
             println!("  {f}  (rebuild + redeploy the harness to land it)");
             if alert {
-                hex::alert::notify(&hex::failures::alert_key("notlanded", f),
-                    "hex module on disk but not in the running binary", f);
+                hex::alert::notify(
+                    &hex::failures::alert_key("notlanded", f),
+                    "hex module on disk but not in the running binary",
+                    f,
+                );
             }
         }
+    }
+    if report.malformed_rows > 0 {
+        // S6: corrupt events.db rows must be loud — they silently weaken the
+        // downtime analysis this whole probe exists for.
+        println!(
+            "\nMALFORMED ROWS ({}): events.db rows dropped from the downtime timeline (unreadable or bad ts) — inspect the telemetry store",
+            report.malformed_rows
+        );
     }
     if !report.never_ran.is_empty() {
         bad = true; // visible during grace by design (proposal: defaults chosen)
@@ -1912,28 +2045,47 @@ fn run_failures(window: i64, alert: bool) -> i32 {
     }
     for d in &report.downtime {
         bad = true;
-        let msg = format!("no telemetry {} → {} — harness down, box asleep, or restarted; excused: {}",
-            d.from.to_rfc3339(), d.to.to_rfc3339(), d.excused_fids.join(", "));
+        let msg = format!(
+            "no telemetry {} → {} — harness down, box asleep, or restarted; excused: {}",
+            d.from.to_rfc3339(),
+            d.to.to_rfc3339(),
+            d.excused_fids.join(", ")
+        );
         println!("\nDOWNTIME: {msg}");
         if alert {
-            hex::alert::notify(&hex::failures::alert_key("downtime",
-                &d.from.timestamp().to_string()), "telemetry gap", &msg);
+            hex::alert::notify(
+                &hex::failures::alert_key("downtime", &d.from.timestamp().to_string()),
+                "telemetry gap",
+                &msg,
+            );
         }
     }
     if !sigs.is_empty() {
         println!("\nFAILURE SIGNATURES (active in window; NEW first):");
         for s in &sigs {
-            if s.is_new { bad = true; }
-            println!("  [{}] {:>4}x  {}  {}  first {}  last {}",
-                if s.is_new { "NEW" } else { "old" }, s.count, s.fid, s.head,
-                s.first_seen, s.last_seen);
+            if s.is_new {
+                bad = true;
+            }
+            println!(
+                "  [{}] {:>4}x  {}  {}  first {}  last {}",
+                if s.is_new { "NEW" } else { "old" },
+                s.count,
+                s.fid,
+                s.head,
+                s.first_seen,
+                s.last_seen
+            );
         }
     }
     if !dups.is_empty() {
         println!("\nDUPLICATE FIRES (engine anomaly — >1 row per expected window):");
         for d in &dups {
-            println!("  {}  {} rows at {}", d.fid, d.rows_in_window,
-                d.window_start.to_rfc3339());
+            println!(
+                "  {}  {} rows at {}",
+                d.fid,
+                d.rows_in_window,
+                d.window_start.to_rfc3339()
+            );
         }
     }
     let event_fids: Vec<_> = regs.iter().filter(|t| t.cron.is_none()).collect();
@@ -1943,7 +2095,12 @@ fn run_failures(window: i64, alert: bool) -> i32 {
             println!("  {}", t.fid);
         }
     }
-    if bad { 1 } else { println!("\nall clear"); 0 }
+    if bad {
+        1
+    } else {
+        println!("\nall clear");
+        0
+    }
 }
 
 /// `hex failures probe` — out-of-process liveness probe. Alerts via osascript
@@ -1964,8 +2121,9 @@ fn run_failures_probe() -> i32 {
     let harness_listed = launchd.map(|o| o.status.success()).unwrap_or(false);
     let mut problems = Vec::new();
     match fresh {
-        Some(age) if age > stale_after_secs =>
-            problems.push(format!("events.db stale: last row {age}s ago")),
+        Some(age) if age > stale_after_secs => {
+            problems.push(format!("events.db stale: last row {age}s ago"))
+        }
         None => problems.push("events.db unreadable or empty".to_string()),
         _ => {}
     }
@@ -1982,7 +2140,10 @@ fn run_failures_probe() -> i32 {
         "display notification \"{}\" with title \"hex harness liveness probe\"",
         msg.replace('"', "'")
     );
-    let _ = std::process::Command::new("osascript").arg("-e").arg(&script).status();
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .status();
     1
 }
 
@@ -2054,7 +2215,11 @@ fn bootstrap_secrets_env(hex_dir: &std::path::Path) {
             }
         };
         for raw in content.lines() {
-            let line = raw.trim().strip_prefix("export").unwrap_or(raw.trim()).trim();
+            let line = raw
+                .trim()
+                .strip_prefix("export")
+                .unwrap_or(raw.trim())
+                .trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
@@ -2110,7 +2275,10 @@ fn harness_start() -> i32 {
     } else if let Err(e) = mgr.start(hex::harness::supervise::WATCHDOG_LABEL) {
         eprintln!("hex harness start: watchdog start failed (non-fatal): {e}");
     } else {
-        eprintln!("hex harness start: {} loaded", hex::harness::supervise::WATCHDOG_LABEL);
+        eprintln!(
+            "hex harness start: {} loaded",
+            hex::harness::supervise::WATCHDOG_LABEL
+        );
     }
     rc
 }
@@ -2152,7 +2320,7 @@ fn harness_restart() -> i32 {
 /// hand or from a health gate). Exit 0 when healthy or re-bootstrapped; nonzero only if it
 /// acted and the engine still did not come up.
 fn harness_ensure() -> i32 {
-    use hex::harness::supervise::{ensure_once, engine_listening, EnsureAction, ENGINE_ADDR};
+    use hex::harness::supervise::{engine_listening, ensure_once, EnsureAction, ENGINE_ADDR};
     let hex_dir = get_hex_dir();
     match ensure_once(&hex_dir) {
         EnsureAction::NoOp => {
@@ -2301,7 +2469,10 @@ fn run_messages(command: MessagesCommands) -> i32 {
                 for o in &p.options {
                     println!("  [{}] {} — {}", o.id, o.label, o.description);
                 }
-                println!("(reply: hex messages reply {} <id[,id]> [--text ...])", p.id);
+                println!(
+                    "(reply: hex messages reply {} <id[,id]> [--text ...])",
+                    p.id
+                );
             } else {
                 println!("{}", r.output);
             }
@@ -2320,7 +2491,11 @@ fn format_breach(b: &hex::resources::Breach) -> String {
             "BREACH floor: root free space {free_gb}G < {}G floor",
             hex::resources::FLOOR_FREE_GB
         ),
-        hex::resources::Breach::Trend { dir, growth_gb, window_hours } => {
+        hex::resources::Breach::Trend {
+            dir,
+            growth_gb,
+            window_hours,
+        } => {
             format!("BREACH trend: {dir} grew {growth_gb}G in {window_hours}h")
         }
     }
@@ -2612,6 +2787,19 @@ fn module_set_enabled(name: &str, enable: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn open_ledger_sets_bounded_busy_timeout() {
+        // SQLite reports the effective timeout via PRAGMA busy_timeout; the
+        // default 0 is exactly the audit finding this guards against.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let conn = super::open_ledger(&db).expect("open");
+        let ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ms, 5000, "ledger opens must wait out a mid-write applier");
+    }
+
     use super::*;
     use clap::CommandFactory;
     use clap_complete::Shell;

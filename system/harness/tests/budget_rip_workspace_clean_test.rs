@@ -98,7 +98,10 @@ fn no_budget_symbols_anywhere_in_harness_src() {
             let rel = path
                 .strip_prefix(env!("CARGO_MANIFEST_DIR"))
                 .unwrap_or(path);
-            msg.push_str(&format!("  {}:{lineno}  contains `{needle}`\n", rel.display()));
+            msg.push_str(&format!(
+                "  {}:{lineno}  contains `{needle}`\n",
+                rel.display()
+            ));
         }
         panic!("{msg}");
     }

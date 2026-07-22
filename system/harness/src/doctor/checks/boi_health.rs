@@ -5,8 +5,12 @@ use std::process::Command;
 pub struct BoiHealth;
 
 impl DoctorCheck for BoiHealth {
-    fn name(&self) -> &str { "boi-health" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "boi-health"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let boi_bin = ctx.home.join(".boi/bin/boi");
         if !boi_bin.is_file() {
@@ -14,14 +18,10 @@ impl DoctorCheck for BoiHealth {
         }
 
         // Check version
-        let version_out = Command::new(&boi_bin)
-            .arg("--version")
-            .output();
+        let version_out = Command::new(&boi_bin).arg("--version").output();
 
         let version = match version_out {
-            Ok(o) if o.status.success() => {
-                String::from_utf8_lossy(&o.stdout).trim().to_string()
-            }
+            Ok(o) if o.status.success() => String::from_utf8_lossy(&o.stdout).trim().to_string(),
             _ => {
                 return CheckResult::warn("boi binary found but --version failed");
             }

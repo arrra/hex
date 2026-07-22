@@ -102,9 +102,7 @@ impl Ctx {
             } else {
                 stderr_tail
             };
-            return Err(anyhow!(
-                "`{program}` exited {code}: {detail}"
-            ));
+            return Err(anyhow!("`{program}` exited {code}: {detail}"));
         }
         Ok(out)
     }
@@ -135,7 +133,11 @@ fn head_tail(s: &str, head: usize, tail: usize) -> String {
         .map(|(i, _)| i)
         .find(|&i| i >= flat.len().saturating_sub(tail))
         .unwrap_or(flat.len());
-    format!("{} …[truncated]… {}", &flat[..head_end], &flat[tail_start..])
+    format!(
+        "{} …[truncated]… {}",
+        &flat[..head_end],
+        &flat[tail_start..]
+    )
 }
 
 /// Handle for direct iii state access from a worker handler. Stateless — each
@@ -174,12 +176,9 @@ mod tests {
         let ctx = Ctx::new();
         let _h = ctx.state();
         fn _assert_api() {
-            let _: fn(&StateHandle, &str, &str) -> Result<Option<Value>, Error> =
-                StateHandle::get;
-            let _: fn(&StateHandle, &str, &str, Value) -> Result<(), Error> =
-                StateHandle::set;
-            let _: fn(&StateHandle, &str, &str) -> Result<(), Error> =
-                StateHandle::delete;
+            let _: fn(&StateHandle, &str, &str) -> Result<Option<Value>, Error> = StateHandle::get;
+            let _: fn(&StateHandle, &str, &str, Value) -> Result<(), Error> = StateHandle::set;
+            let _: fn(&StateHandle, &str, &str) -> Result<(), Error> = StateHandle::delete;
         }
         _assert_api();
     }
@@ -224,7 +223,10 @@ mod tests {
         ];
         let err = ctx.run(&argv).expect_err("non-zero exit must be an Err");
         let msg = err.to_string();
-        assert!(msg.contains("exited 7"), "error must carry exit code; got: {msg}");
+        assert!(
+            msg.contains("exited 7"),
+            "error must carry exit code; got: {msg}"
+        );
         assert!(
             msg.contains("boom-from-stderr"),
             "error must carry the stderr tail; got: {msg}"

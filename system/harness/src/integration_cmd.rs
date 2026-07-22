@@ -3,7 +3,6 @@
 ///
 /// State files live at: HEX_DIR/projects/integrations/_state/<name>.json
 /// Bundle dirs live at:  HEX_DIR/integrations/<name>/
-
 use serde_json::{json, Value};
 use sha2::{Digest, Sha256};
 use std::fs;
@@ -78,8 +77,8 @@ fn now_iso() -> String {
 
 fn read_manifest_yaml(bundle_dir: &Path) -> Result<Value, String> {
     let path = bundle_dir.join("integration.yaml");
-    let content = fs::read_to_string(&path)
-        .map_err(|e| format!("Cannot read integration.yaml: {e}"))?;
+    let content =
+        fs::read_to_string(&path).map_err(|e| format!("Cannot read integration.yaml: {e}"))?;
     serde_yaml::from_str(&content).map_err(|e| format!("Invalid YAML in integration.yaml: {e}"))
 }
 
@@ -128,7 +127,11 @@ pub fn list(hex_dir: &Path, json_out: bool) -> i32 {
         } else {
             let tier = read_manifest_yaml(&bundles.join(name))
                 .ok()
-                .and_then(|m| m.get("tier").and_then(|v| v.as_str()).map(|s| s.to_string()))
+                .and_then(|m| {
+                    m.get("tier")
+                        .and_then(|v| v.as_str())
+                        .map(|s| s.to_string())
+                })
                 .unwrap_or_else(|| "?".to_string());
             (tier, "-".to_string())
         };
@@ -141,9 +144,15 @@ pub fn list(hex_dir: &Path, json_out: bool) -> i32 {
     }
 
     if json_out {
-        println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+        println!(
+            "{}",
+            serde_json::to_string_pretty(&rows).unwrap_or_default()
+        );
     } else {
-        let header = format!("{:<30} {:<12} {:<10} {}", "NAME", "STATUS", "TIER", "LAST_PROBED");
+        let header = format!(
+            "{:<30} {:<12} {:<10} {}",
+            "NAME", "STATUS", "TIER", "LAST_PROBED"
+        );
         println!("{header}");
         println!("{}", "-".repeat(header.len()));
         for r in &rows {
@@ -180,7 +189,9 @@ pub fn status(hex_dir: &Path, name: Option<&str>, json_out: bool) -> i32 {
             );
             println!(
                 "  installed:  {}",
-                st.get("installed_at").and_then(|v| v.as_str()).unwrap_or("?")
+                st.get("installed_at")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("?")
             );
             println!(
                 "  version:    {}",
@@ -194,7 +205,9 @@ pub fn status(hex_dir: &Path, name: Option<&str>, json_out: bool) -> i32 {
             println!("  policies:   {policies}");
             println!(
                 "  last probe: {}",
-                st.get("last_probed").and_then(|v| v.as_str()).unwrap_or("-")
+                st.get("last_probed")
+                    .and_then(|v| v.as_str())
+                    .unwrap_or("-")
             );
         }
     } else {
@@ -221,7 +234,10 @@ pub fn status(hex_dir: &Path, name: Option<&str>, json_out: bool) -> i32 {
             }));
         }
         if json_out {
-            println!("{}", serde_json::to_string_pretty(&rows).unwrap_or_default());
+            println!(
+                "{}",
+                serde_json::to_string_pretty(&rows).unwrap_or_default()
+            );
         } else {
             let hdr = format!(
                 "{:<30} {:<10} {:<22} {:<10} {}",
@@ -309,7 +325,11 @@ pub fn probe(hex_dir: &Path, name: &str, json_out: bool, quiet: bool) -> i32 {
         }
     }
 
-    if ok { 0 } else { rc }
+    if ok {
+        0
+    } else {
+        rc
+    }
 }
 
 /// Port of lib/integration/commands/rotate.py
@@ -320,7 +340,9 @@ pub fn rotate(hex_dir: &Path, name: &str, json_out: bool, quiet: bool) -> i32 {
         return 1;
     }
 
-    let rotate_script = bundles_dir(hex_dir).join(name).join("maintenance/rotate.sh");
+    let rotate_script = bundles_dir(hex_dir)
+        .join(name)
+        .join("maintenance/rotate.sh");
     if !rotate_script.exists() {
         if json_out {
             println!(
@@ -334,7 +356,10 @@ pub fn rotate(hex_dir: &Path, name: &str, json_out: bool, quiet: bool) -> i32 {
     }
 
     if !quiet {
-        eprintln!("[rotate] Running rotate for {name}: {}", rotate_script.display());
+        eprintln!(
+            "[rotate] Running rotate for {name}: {}",
+            rotate_script.display()
+        );
     }
 
     let result = std::process::Command::new("bash")
@@ -455,7 +480,11 @@ pub fn validate(hex_dir: &Path, name: &str, json_out: bool, quiet: bool) -> i32 
             eprintln!("  - {err}");
         }
     }
-    if ok { 0 } else { 1 }
+    if ok {
+        0
+    } else {
+        1
+    }
 }
 
 /// Port of lib/integration/commands/update.py
