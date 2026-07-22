@@ -113,7 +113,13 @@ where
     // 3. assemble context, then build the worker input = retrieved context +
     //    the user-facing text. For a reply that text is the resolved pin (carries
     //    the chosen option's description); for a normal message it's the body.
-    let ctx = crate::memory::assemble::assemble(conn, &query, false, BUDGET);
+    // Hot path (`harness::submit`, called from the UserPromptSubmit hook / worker
+    // dispatch): pass `None` for `query_vec` so `assemble` runs in FTS-only mode
+    // and does not construct an `Embedder`. Per spec Tj0b203yv, the hook is a
+    // fresh OS process per user message and cold-loading the 522 MB nomic model
+    // blows the latency budget; the embedder policy is caller-decided, not env-
+    // gated, so this call site is *structurally* incapable of loading the model.
+    let ctx = crate::memory::assemble::assemble(conn, &query, false, BUDGET, None);
     let rendered = crate::memory::assemble::render_candidates(&ctx);
     let user_text = match &pin {
         Some(p) => p.clone(),

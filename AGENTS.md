@@ -38,7 +38,7 @@ Verify: hex info repo-mission
 
 **Build status:** Run `cargo build` in `system/harness/` to verify binary compiles.
 
-Live session state lives in [PROGRESS.md](PROGRESS.md) — read it when the static answer above looks stale.
+[PROGRESS.md](PROGRESS.md) is a **historical snapshot** (frozen 2026-05-16) from the C1/C3 session — not live session state. When the static answer above looks stale, consult `CHANGELOG.md` and `git log` for what has actually shipped, and `todo.md` for the current priority list.
 
 Verify: hex doctor
 
@@ -85,7 +85,11 @@ Verify: ~/.boi/bin/boi dashboard
 
 **BOI spec completion claims (verify outputs against codebase):**
 
-Verify: hex verify-claims
+There is no dedicated `hex verify-claims` subcommand yet — see the Open Verify
+Stubs table below. Until it lands, verify claims by running the checks the
+spec's own `verifications` block declares (each task carries them), plus
+`hex doctor` for system-level health and `cargo test --manifest-path
+system/harness/Cargo.toml` for harness behavior.
 
 Full test matrix — unit, core-e2e, codex-parity, containerized — in [docs/testing.md](docs/testing.md); read it before running or adding tests.
 
@@ -100,6 +104,7 @@ Each is a TODO for a future iteration.
 |---------|----------|-----------------------|
 | `hex info repo-mission` | Q1 | Print repo description from README header or `system/version.txt` |
 | `hex info active-locks` | Q4 | Query coordination lock files; print current holders and expiry times |
+| `hex verify-claims` | Q5 | Not implemented — re-run the spec's own declared `verifications` shell commands, plus `hex doctor` and `cargo test`, until this stub is filled in |
 
 ---
 
@@ -221,7 +226,7 @@ Each skill lives at `.hex/skills/<name>/SKILL.md`. Read the file to understand:
 | Skill | Path | Purpose |
 |---|---|---|
 | memory | `.hex/skills/memory/` | Search/save/index persistent memory |
-| boi | `.hex/skills/boi/` | BOI spec writing and dispatch |
+| boi | `.hex/skills/boi-delegation/` | BOI spec writing and dispatch |
 
 Read `cat .hex/skills/<name>/SKILL.md` before invoking any skill to get current instructions.
 

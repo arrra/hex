@@ -36,7 +36,7 @@
 
 [defaults]
 # Default model for every use case unless overridden below.
-model = "anthropic/claude-sonnet-4.5"
+model = "anthropic/claude-sonnet-5"
 
 # Default transport for every use case. "http" preserves pre-Sbe8m4886
 # behavior. Switch to "claude-cli" globally or per-use-case below to drive
@@ -64,18 +64,18 @@ model = "anthropic/claude-sonnet-4.5"
 # emit a stderr warning but do not fail.
 
 [use_cases.memory_extract]
-# Built-in default: anthropic/claude-sonnet-4.5, max_tokens 16384
-# model      = "anthropic/claude-sonnet-4.5"
+# Built-in default: anthropic/claude-sonnet-5, max_tokens 16384
+# model      = "anthropic/claude-sonnet-5"
 # max_tokens = 16384
 
 [use_cases.memory_judge]
-# Built-in default: anthropic/claude-sonnet-4.5, max_tokens 256
-# model      = "anthropic/claude-sonnet-4.5"
+# Built-in default: anthropic/claude-sonnet-5, max_tokens 256
+# model      = "anthropic/claude-sonnet-5"
 # max_tokens = 256
 
 [use_cases.consolidate_audit]
-# Built-in default: anthropic/claude-sonnet-4.5, max_tokens 4096
-# model      = "anthropic/claude-sonnet-4.5"
+# Built-in default: anthropic/claude-sonnet-5, max_tokens 4096
+# model      = "anthropic/claude-sonnet-5"
 # max_tokens = 4096
 
 [use_cases.health_check]

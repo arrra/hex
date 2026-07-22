@@ -10,7 +10,7 @@ trigger: >
 version: 2
 ---
 
-> **Updated 2026-05-24 for BOI v2 cutover.**
+> **Updated 2026-07-22 for BOI v3.5.0 (per-phase runtime config) + v3.4.0 (lifecycle hardening).**
 > v1's SKILL.md is preserved in git history if you need to see what changed.
 
 # BOI Delegation
@@ -147,6 +147,7 @@ schema reference.
 - `[contract].must_emit = ["path/to/file"]`
 - `[[tasks]].ref = "slug"` — required if other tasks depend on it
 - `[[tasks]].blocked_by = ["other-ref"]` — DAG predecessors
+- `[overrides.<phase>.runtime]` — per-phase provider/model/effort for THIS spec (v3.5.0, see below)
 - `[[decision]]` blocks — authored decisions (§3.6)
 - `[[skill]]` blocks — declare skills (e.g. TDD, verification-before-completion)
 
@@ -163,6 +164,44 @@ schema reference.
 
 Any unrecognized field (typo, drifted-field) is rejected at parse time by
 `deny_unknown_fields`.
+
+### Per-Phase Runtime Overrides (v3.5.0)
+
+Every worker phase's LLM settings are configurable at three layers, resolved
+field-by-field with precedence **spec override > pipeline override > phase
+TOML base** (`~/.boi/v2/phases/<phase>.toml`, base default today:
+`claude-opus-4-8`):
+
+```toml
+# In a spec TOML — run red-test authoring on a cheaper model for this spec:
+[overrides.write_red_tests.runtime]
+model = "claude-sonnet-5"
+
+[overrides.critique_plan.runtime]
+provider = "openrouter"
+model = "openai/gpt-5"
+effort = "high"                 # OpenAI reasoning-family only — see rules
+extra = { temperature = 0.2 }   # passed verbatim into goose settings
+```
+
+Rules that will bite you if ignored:
+- **Naming a phase that doesn't exist in the pipeline is a loud parse error**
+  at dispatch — check the phase table below for valid names.
+- **`effort` is only expressible for OpenAI reasoning-family models** (goose
+  wires it via a model-name suffix). The `claude-code` provider has NO effort
+  knob in goose — BOI **rejects** `effort` on combos goose can't express
+  rather than silently ignoring it. On Claude phases, the cost/quality lever
+  is per-phase MODEL choice (opus/sonnet/haiku).
+- `extra` accepts scalar keys goose recipes understand today (`temperature`,
+  `max_turns`) and passes them through verbatim — future goose settings need
+  no BOI change.
+- **Model-tier guidance (Standing Order 3b applied to specs):** phase defaults
+  run opus-tier; when a spec's work is mechanical (docs batches, config
+  sweeps, well-specified small fixes), downshift `write_red_tests` /
+  `critique_plan` / `review` to `claude-sonnet-5` via overrides and say so in
+  the scope. Leave `execute` on the default unless the whole spec is trivial.
+- Survey of what goose recipes actually accept:
+  `~/github.com/mrap/boi/docs/research/2026-07-21-goose-recipe-settings.md`.
 
 ### Worked Example (the §13 typo-fix fixture)
 
@@ -233,6 +272,12 @@ verifications = [
 ~/.boi/bin/boi traces query "<sql>"            # OTel/DuckDB
 ~/.boi/bin/boi failures top --last 7d
 ```
+
+Since v3.4.0 (2026-07-20 hardening): `boi cancel` SIGKILLs the worker's whole
+process group (no more orphaned provider processes burning spend); `boi
+dispatch` verifies the spec row is durable from a fresh connection before
+reporting success (a durability failure is loud, not a silent loss); boot
+recovery kills crashed specs' surviving worker trees (pid-reuse guarded).
 
 Spec IDs are `S`-prefixed (e.g. `S0a3f1c2b`); task IDs are `T`-prefixed.
 `dispatch` requires `boi daemon` to be running — it exits non-zero with
@@ -370,7 +415,13 @@ conflict resolution is deferred to v1.x
    "I'll keep an eye on it." Use `boi dashboard` or `boi log <spec-id>` to
    check status; wire an OS-level launchd job or Claude Code hook to notify on
    completion or failure. Mechanical action, not verbal (SO #10).
-6. **One pipeline at v1.0.** Custom pipelines via `pipeline = "./my.toml"` are
+6. **Daemon deploys/restarts must carry the phase budget env.** `boi daemon
+   start` bakes `BOI_PHASE_WALL_CLOCK_BUDGET_SECS` into the launchd plist FROM
+   THE INVOKING SHELL (default 1200s). A redeploy from a clean shell silently
+   reverts a longer budget — this wedged two specs for 4 days (2026-07-16/20).
+   Until the value moves to a config file: always
+   `BOI_PHASE_WALL_CLOCK_BUDGET_SECS=3600 boi daemon start`.
+7. **One pipeline at v1.0.** Custom pipelines via `pipeline = "./my.toml"` are
    supported but rare; ship with `pipeline = "standard"` unless you have a
    specific reason and a written pipeline TOML.
 

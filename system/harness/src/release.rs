@@ -65,11 +65,11 @@
 //! is always reported loudly. Exit 127 from a child process (and a spawn
 //! `NotFound`) means "tool not found" and is reported as such — never
 //! conflated with a test failure. The built-in hex-foundation battery ports
-//! the legacy `release.sh` gates: clean-tree, docker-e2e (with the pinned
-//! doctor carve-out), sanitize (in-process [`crate::sanitize::scan`]),
-//! codex-parity, autonomy. The legacy version gate and ahead-of-remote gate
-//! are NOT ported — the ceremony's version computation and push steps
-//! subsume them.
+//! the legacy `release.sh` gates: clean-tree, tests (workspace `cargo test`),
+//! docker-e2e (with the pinned doctor carve-out), sanitize (in-process
+//! [`crate::sanitize::scan`]), codex-parity, autonomy. The legacy version
+//! gate and ahead-of-remote gate are NOT ported — the ceremony's version
+//! computation and push steps subsume them.
 //!
 //! Telemetry note: the battery itself records nothing — the ceremony layer
 //! owns `crate::telemetry::record_loud` (one event per gate outcome), so
@@ -172,6 +172,11 @@ pub fn format_battery_summary(outcomes: &[GateOutcome]) -> String {
 pub enum GateKind {
     /// `git status --porcelain` must be empty.
     CleanTree,
+    /// `cargo test --workspace` from the repo root — the unit/integration
+    /// suite for every workspace crate. Passes iff exit 0. The pre-release
+    /// last-line-of-defense so a red-suite change (a shipped flaky/broken
+    /// test) never merges to `main` under the release pipeline.
+    Tests,
     /// Both Docker suites: build+run `tests/Dockerfile.env`, then
     /// `tests/Dockerfile` with the doctor carve-out. Honors `--skip-e2e`.
     DockerE2e,
@@ -345,6 +350,11 @@ pub fn builtin_foundation() -> ReleaseProfile {
         match_dir: Some("hex-foundation".to_string()),
         gates: vec![
             GateSpec { name: "clean-tree".to_string(), kind: GateKind::CleanTree },
+            // Tests runs before docker-e2e — fast local `cargo test --workspace`
+            // catches red-suite regressions (finding 2 of the 2026-07-16 audit
+            // shipped only because the release battery never ran cargo test)
+            // before the slow container gates start.
+            GateSpec { name: "tests".to_string(), kind: GateKind::Tests },
             GateSpec { name: "docker-e2e".to_string(), kind: GateKind::DockerE2e },
             GateSpec { name: "sanitize".to_string(), kind: GateKind::Sanitize },
             GateSpec { name: "codex-parity".to_string(), kind: GateKind::CodexParity },
@@ -764,6 +774,7 @@ fn git_stdout(repo_root: &Path, args: &[&str]) -> Result<String> {
 pub fn run_gate(gate: &GateSpec, repo_root: &Path, skip: SkipFlags) -> GateResult {
     match &gate.kind {
         GateKind::CleanTree => gate_clean_tree(repo_root),
+        GateKind::Tests => gate_tests(repo_root),
         GateKind::DockerE2e => gate_docker_e2e(repo_root, skip),
         GateKind::Sanitize => gate_sanitize(repo_root),
         GateKind::CodexParity => gate_codex_parity(repo_root, skip),
@@ -814,6 +825,32 @@ fn gate_clean_tree(repo_root: &Path) -> GateResult {
         GateResult::Pass
     } else {
         GateResult::Fail("uncommitted changes — commit first".to_string())
+    }
+}
+
+/// Workspace test gate — `cargo test --workspace` from the repo root, wired
+/// loud (S6) like every other gate: exit 127 / spawn `NotFound` surface as
+/// "cargo not found", any nonzero exit surfaces as a fail with the exit code
+/// and a diagnostic tail so the ceremony summary shows the death rattle. The
+/// gate exists to keep red suites off `main` under the release pipeline — the
+/// full sibling audit (2026-07-16) found this battery had shipped zero test
+/// gates for months.
+fn gate_tests(repo_root: &Path) -> GateResult {
+    println!("  Running workspace tests (cargo test --workspace)...");
+    let mut cmd = Command::new("cargo");
+    cmd.args(["test", "--workspace"]).current_dir(repo_root);
+    let r = match run_checked("cargo test --workspace", &mut cmd) {
+        Ok(r) => r,
+        Err(msg) => return GateResult::Fail(msg),
+    };
+    if r.code == 0 {
+        GateResult::Pass
+    } else {
+        GateResult::Fail(format!(
+            "cargo test --workspace failed (exit {}); output tail: {}",
+            r.code,
+            output_tail(&r.combined(), 400)
+        ))
     }
 }
 
@@ -2894,12 +2931,22 @@ mod tests {
     }
 
     #[test]
-    fn builtin_foundation_battery_is_the_pinned_five() {
+    fn builtin_foundation_battery_is_the_pinned_six() {
         let p = builtin_foundation();
         let names: Vec<&str> = p.gates.iter().map(|g| g.name.as_str()).collect();
+        // `tests` sits between clean-tree and docker-e2e so a red workspace
+        // suite fails the battery before the slow container gates start
+        // (finding 2 of the 2026-07-16 audit shipped only because the
+        // battery had never run `cargo test`).
         assert_eq!(
             names,
-            ["clean-tree", "docker-e2e", "sanitize", "codex-parity", "autonomy"]
+            ["clean-tree", "tests", "docker-e2e", "sanitize", "codex-parity", "autonomy"]
+        );
+        assert_eq!(
+            p.gates.iter().find(|g| g.name == "tests").map(|g| &g.kind),
+            Some(&GateKind::Tests),
+            "tests gate must be the typed Tests kind — the pinned `cargo test --workspace`, \
+             not a Command(String) override",
         );
         assert_eq!(p.version_files.len(), 2);
         assert!(p.gh_release);
@@ -3044,7 +3091,7 @@ match_dir = "boi"
         let f = &profiles[0];
         assert_eq!(f.name, "hex-foundation");
         // Pinned fields intact…
-        assert_eq!(f.gates.len(), 5);
+        assert_eq!(f.gates.len(), 6);
         assert!(f.gh_release);
         // …watcher fields applied.
         assert_eq!(

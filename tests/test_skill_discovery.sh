@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-# Verifies Claude Code can discover all 11 hex skills and invoke 3 of them.
+# Verifies Claude Code can discover the shipped hex skills and invoke 2 of them.
 # Requires ANTHROPIC_API_KEY (auto-sourced from ~/.hex-test.env if present).
 set -uo pipefail
 
@@ -65,8 +65,11 @@ fi
 echo ""
 
 # ── 2. Skill files on disk ────────────────────────────────────────
+# Synced to system/skills/ (2026-07-16): the session-lifecycle and consolidate
+# skills were demolished; boi-delegation/conjecture-criticism/repo-audit/
+# repo-docs/vibe-to-prod were added.
 echo "[2] Skill files on disk"
-SKILLS_WITH_SKILL_MD=(landings hex-reflect hex-decide hex-debrief hex-consolidate hex-doctor hex-checkpoint hex-shutdown hex-startup memory)
+SKILLS_WITH_SKILL_MD=(boi-delegation conjecture-criticism hex-decide hex-doctor hex-upgrade landings memory repo-audit repo-docs vibe-to-prod)
 for skill in "${SKILLS_WITH_SKILL_MD[@]}"; do
     if [ -f "$INSTALL_DIR/.hex/skills/$skill/SKILL.md" ]; then
         check_pass "SKILL.md present: $skill"
@@ -81,8 +84,9 @@ echo "[3] Claude Code discovery (model: $MODEL)"
 echo "    Asking Claude to list all hex skills..."
 
 # landings and memory are not slash commands — landings is a dir-based framework,
-# memory is script-only. Claude discovers via .claude/commands/; hex-upgrade IS one.
-EXPECTED_SKILLS=(hex-reflect hex-decide hex-debrief hex-consolidate hex-doctor hex-checkpoint hex-shutdown hex-startup hex-upgrade)
+# memory is script-only. Claude discovers via .claude/commands/; the shipped
+# slash commands (system/commands/) are the three below.
+EXPECTED_SKILLS=(hex-decide hex-doctor hex-upgrade)
 
 DISCOVERY_OUTPUT=$(cd "$INSTALL_DIR" && $TIMEOUT_CMD claude \
     -p "What hex skills and commands are available in this installation? List them all." \

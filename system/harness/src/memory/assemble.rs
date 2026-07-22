@@ -2,15 +2,18 @@
 //! confidence score with a coverage floor. See
 //! `me/decisions/context-assembly-parallel-moves-confidence-2026-06-04.md`.
 //!
-//! v1 is a KEYWORD-SHAPE assembler. M1's vector arm is wired behind the
-//! existing embedder-optional guard (search.rs lines ~354-367) but will NOT
-//! fire when the embedder is unavailable — that's a separate concern. This
-//! module MUST NOT be described or logged as if it covers semantic retrieval
-//! while the embedder is down.
+//! v1 is a KEYWORD-SHAPE assembler. M1's vector arm fires ONLY when the
+//! caller supplies a pre-computed `query_vec` (semantic policy is a
+//! caller decision, per spec Tj0b203yv). The assembler NEVER constructs an
+//! `Embedder` itself — that would blow the UserPromptSubmit hook's latency
+//! budget, since the hook is a fresh OS process per user message and the
+//! 522 MB nomic model would load on every non-trivial recall (audit finding
+//! 1, 2026-07-16). The hot path (`recall::recall`, `harness::submit`) MUST
+//! pass `None`; offline CLI callers who want semantic search embed the query
+//! themselves and pass `Some(&qv)`.
 
 use rusqlite::Connection;
 use std::collections::HashSet;
-use std::path::Path;
 
 use super::recall::FactHit;
 use super::search::{search_fts_public, SearchResult};
@@ -171,8 +174,14 @@ fn fact_from_row(r: &rusqlite::Row) -> rusqlite::Result<(FactHit, f64)> {
 }
 
 /// M1 — content match. ALWAYS fires. FTS5 chunks, plus vector KNN ONLY when
-/// the embedder loads. Returns ordered candidates.
-fn m1_content(conn: &Connection, query: &str, for_agent: bool) -> Vec<Candidate> {
+/// the caller supplies a pre-computed `query_vec` (semantic policy is
+/// caller-decided per spec Tj0b203yv). Returns ordered candidates.
+fn m1_content(
+    conn: &Connection,
+    query: &str,
+    for_agent: bool,
+    query_vec: Option<&[f32]>,
+) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
 
     let chunks = search_fts_public(conn, query, TOP_K_PER_MOVE * 3, None).unwrap_or_default();
@@ -198,64 +207,56 @@ fn m1_content(conn: &Connection, query: &str, for_agent: bool) -> Vec<Candidate>
         rank += 1;
     }
 
-    // Vector arm — embedder-optional. Mirrors search.rs ~354-367. Without a
-    // hex_root in this signature we cannot resolve the fastembed cache; v1
-    // attempts the relative cache and falls back loudly on failure. The
-    // embedder being absent is EXPECTED in v1 — this is a keyword assembler.
-    match super::embed::Embedder::new(Path::new("."))
-        .and_then(|e| e.embed_query(query))
-    {
-        Ok(qv) => {
-            match super::vector::knn(conn, &qv, TOP_K_PER_MOVE) {
-                Ok(hits) => {
-                    for (i, (rowid, dist)) in hits.iter().enumerate() {
-                        // Fetch the chunk row to build a SearchResult.
-                        if let Ok(c) = conn.query_row(
-                            "SELECT rowid, source_path, heading, chunk_index, content, private \
-                             FROM chunks WHERE rowid = ?1",
-                            [rowid],
-                            |r| {
-                                Ok(SearchResult {
-                                    rowid: r.get(0)?,
-                                    source_path: r.get(1)?,
-                                    heading: r.get(2)?,
-                                    chunk_index: r.get(3)?,
-                                    content: r.get(4)?,
-                                    private: r.get::<_, i64>(5)? != 0,
-                                    score: *dist,
-                                })
-                            },
-                        ) {
-                            if for_agent && c.private {
-                                continue;
-                            }
-                            let dedup_key = format!("chunk:{}", c.rowid);
-                            if out.iter().any(|x| x.dedup_key == dedup_key) {
-                                continue;
-                            }
-                            let rank = i;
-                            let confidence = 1.0 / (rank as f32 + 1.0);
-                            out.push(Candidate {
-                                kind: CandidateKind::Chunk(c),
-                                move_id: MoveId::M1ContentMatch,
-                                move_fired: true,
-                                native_score: *dist,
-                                rank_in_move: rank,
-                                confidence,
-                                dedup_key,
-                            });
+    // Vector arm — caller-decided embedder policy. `None` = FTS-only (the
+    // UserPromptSubmit hot path per spec Tj0b203yv). `Some(qv)` = semantic
+    // fusion. The assembler NEVER constructs an `Embedder` itself; the hook
+    // process would otherwise cold-load a 522 MB model on every non-trivial
+    // message.
+    if let Some(qv) = query_vec {
+        match super::vector::knn(conn, qv, TOP_K_PER_MOVE) {
+            Ok(hits) => {
+                for (i, (rowid, dist)) in hits.iter().enumerate() {
+                    // Fetch the chunk row to build a SearchResult.
+                    if let Ok(c) = conn.query_row(
+                        "SELECT rowid, source_path, heading, chunk_index, content, private \
+                         FROM chunks WHERE rowid = ?1",
+                        [rowid],
+                        |r| {
+                            Ok(SearchResult {
+                                rowid: r.get(0)?,
+                                source_path: r.get(1)?,
+                                heading: r.get(2)?,
+                                chunk_index: r.get(3)?,
+                                content: r.get(4)?,
+                                private: r.get::<_, i64>(5)? != 0,
+                                score: *dist,
+                            })
+                        },
+                    ) {
+                        if for_agent && c.private {
+                            continue;
                         }
+                        let dedup_key = format!("chunk:{}", c.rowid);
+                        if out.iter().any(|x| x.dedup_key == dedup_key) {
+                            continue;
+                        }
+                        let rank = i;
+                        let confidence = 1.0 / (rank as f32 + 1.0);
+                        out.push(Candidate {
+                            kind: CandidateKind::Chunk(c),
+                            move_id: MoveId::M1ContentMatch,
+                            move_fired: true,
+                            native_score: *dist,
+                            rank_in_move: rank,
+                            confidence,
+                            dedup_key,
+                        });
                     }
                 }
-                Err(e) => {
-                    eprintln!("[assemble] M1 vector knn failed: {e}");
-                }
             }
-        }
-        Err(e) => {
-            // LOUD per S6 — keyword-only mode is the v1 default; this is
-            // expected unless the embedder cache is wired in this process.
-            eprintln!("[assemble] embedder unavailable, M1 keyword-only: {e}");
+            Err(e) => {
+                eprintln!("[assemble] M1 vector knn failed: {e}");
+            }
         }
     }
 
@@ -406,17 +407,27 @@ fn move_stats(move_id: MoveId, fired: bool, cands: &[Candidate]) -> MoveStats {
 
 /// Public entry. Runs the four moves, merges with floor + per-move quota
 /// round-robin by confidence DESC, dedups, and truncates to the char budget.
+///
+/// `query_vec` is the caller-decided embedder policy (spec Tj0b203yv):
+/// - `None` → FTS-only. The UserPromptSubmit hook path (`recall::recall`) and
+///   the worker submit path MUST pass `None` so no `Embedder` is constructed
+///   in a fresh OS process.
+/// - `Some(qv)` → semantic fusion via `vector::knn`. Offline CLI callers that
+///   want semantic M1 embed the query themselves and pass the vector.
+///
+/// The assembler NEVER constructs an `Embedder`.
 pub fn assemble(
     conn: &Connection,
     query: &str,
     for_agent: bool,
     budget: usize,
+    query_vec: Option<&[f32]>,
 ) -> AssembledContext {
     let budget = if budget == 0 { MAX_CONTEXT_CHARS } else { budget };
 
     // ── run the moves (sequential — local SQLite, the cost is dominated by
     // FTS5/index lookups; "parallel" in spec scope is logical, not threaded).
-    let m1_c = m1_content(conn, query, for_agent);
+    let m1_c = m1_content(conn, query, for_agent, query_vec);
     let (m2_f, m2_c) = m2_entity(conn, query, for_agent);
     let (m3_f, m3_c) = m3_predicate(conn, query, for_agent);
     let (m4_f, m4_c) = m4_temporal(conn, query, for_agent);
@@ -587,7 +598,7 @@ mod tests {
         // Entity in gazetteer should fire M2.
         insert_fact(&c, "f2", "person:alice", "prefers", "rust", false);
 
-        let r = assemble(&c, "what did alice decide about the schema", false, MAX_CONTEXT_CHARS);
+        let r = assemble(&c, "what did alice decide about the schema", false, MAX_CONTEXT_CHARS, None);
 
         assert!(!r.candidates.is_empty(), "assembler returned no candidates");
         // First candidate must come from M1 (the floor).
@@ -618,7 +629,7 @@ mod tests {
         insert_fact(&c, "p1", "me/secret", "decided", "fire bob", true);
         insert_fact(&c, "p2", "project:hex", "decided", "use sqlite-vec", false);
 
-        let r = assemble(&c, "what did we decide recently", true, MAX_CONTEXT_CHARS);
+        let r = assemble(&c, "what did we decide recently", true, MAX_CONTEXT_CHARS, None);
 
         for cand in &r.candidates {
             if let CandidateKind::Fact(f) = &cand.kind {
@@ -661,6 +672,7 @@ mod tests {
             "what did we decide about the schema",
             false,
             MAX_CONTEXT_CHARS,
+            None,
         );
 
         let m3_fired = r
@@ -697,7 +709,7 @@ mod tests {
         }
 
         // 1) confidence formula at rank 0 for a fired move must equal 1.0.
-        let full = assemble(&c, "schema", false, MAX_CONTEXT_CHARS);
+        let full = assemble(&c, "schema", false, MAX_CONTEXT_CHARS, None);
         let m1_top = full
             .candidates
             .iter()
@@ -722,7 +734,7 @@ mod tests {
         //    to stay at or under a small bound. (Floor candidate is allowed
         //    to push slightly over per the facet-coverage contract, so we
         //    assert the merge stopped well short of the unbounded length.)
-        let tiny = assemble(&c, "schema", false, 100);
+        let tiny = assemble(&c, "schema", false, 100, None);
         assert!(
             tiny.candidates.len() < full.candidates.len(),
             "tiny budget ({} cands) did not truncate vs full ({} cands)",
@@ -745,6 +757,7 @@ mod tests {
             "what did we decide about the memory schema",
             false,
             MAX_CONTEXT_CHARS,
+            None,
         );
 
         assert!(
