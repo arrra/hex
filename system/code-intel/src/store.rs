@@ -351,6 +351,25 @@ mod tests {
     }
 
     #[test]
+    fn is_generation_name_rejects_multibyte_names_at_every_byte_index() {
+        // Each fixture is a 23-byte name that clears `split_at_checked(16)`
+        // but puts a multi-byte char on one of the remaining byte indexes
+        // (`as_bytes()[8]`, `ts[..8]`, `ts[9..15]`). Every one must return
+        // false via the short-circuiting guards, never panic.
+        for name in [
+            // 'é' straddles bytes 7..9, so `as_bytes()[8]` is a continuation
+            // byte (never b'T') and `ts[..8]` is never reached.
+            "1234567\u{e9}890123Z-abcdef",
+            // 'é' occupies bytes 14..16, so `ts` does not end with 'Z' and
+            // `ts[9..15]` (which would split it) is never reached.
+            "12345678T90123\u{e9}-abcdef",
+        ] {
+            assert_eq!(name.len(), 23, "fixture must be 23 bytes: {name}");
+            assert!(!is_generation_name(name), "must reject: {name}");
+        }
+    }
+
+    #[test]
     fn prune_keeps_two_most_recent() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::new(home.path(), WS);
