@@ -72,7 +72,11 @@ fn parse_args(args: &[String]) -> Result<Args, String> {
             other => return Err(format!("Unknown option: {other}")),
         }
     }
-    Ok(Args { dry_run, repo_url, local_path })
+    Ok(Args {
+        dry_run,
+        repo_url,
+        local_path,
+    })
 }
 
 fn print_help() {
@@ -122,7 +126,10 @@ fn walk_files(dir: &Path) -> impl Iterator<Item = PathBuf> {
         .filter_map(|e| e.ok())
         .filter(|e| {
             let is_file = e.file_type().is_file();
-            let in_pycache = e.path().components().any(|c| c.as_os_str() == "__pycache__");
+            let in_pycache = e
+                .path()
+                .components()
+                .any(|c| c.as_os_str() == "__pycache__");
             is_file && !in_pycache
         })
         .map(|e| e.path().to_path_buf())
@@ -268,7 +275,10 @@ fn atomic_install_binary(src: &Path, dst: &Path) -> io::Result<()> {
             .arg(&tmp)
             .status()?;
         if !cs.success() {
-            return Err(io::Error::new(io::ErrorKind::Other, "codesign failed on temp binary"));
+            return Err(io::Error::new(
+                io::ErrorKind::Other,
+                "codesign failed on temp binary",
+            ));
         }
         fs::rename(&tmp, dst)
     })();
@@ -348,7 +358,9 @@ fn get_source_dir(args: &Args, hex_dir: &Path) -> Result<PathBuf, String> {
         clone_into_cache(&repo_url, &cache_dir)?;
         let layout = path_map::detect_layout(cache_dir.to_str().unwrap_or(""));
         if layout == "unknown" {
-            return Err("Clone succeeded but no recognized hex layout found. Wrong repo?".to_string());
+            return Err(
+                "Clone succeeded but no recognized hex layout found. Wrong repo?".to_string(),
+            );
         }
     }
 
@@ -401,7 +413,10 @@ fn clear_cache_dir(cache_dir: &Path) -> Result<(), String> {
         }
         match fs::rename(cache_dir, &aside) {
             Ok(()) => {
-                println!("  [WARN] Could not delete corrupt cache; moved aside to {}", aside.display());
+                println!(
+                    "  [WARN] Could not delete corrupt cache; moved aside to {}",
+                    aside.display()
+                );
                 return Ok(());
             }
             Err(_) => continue,
@@ -450,10 +465,7 @@ fn clone_into_cache(repo_url: &str, cache_dir: &Path) -> Result<(), String> {
         Err(rename_err) => {
             // Cross-device (EXDEV) rename can't move across volumes — shell out
             // to `mv`, which falls back to copy+remove.
-            let moved = Command::new("mv")
-                .arg(&tmp)
-                .arg(cache_dir)
-                .status();
+            let moved = Command::new("mv").arg(&tmp).arg(cache_dir).status();
             match moved {
                 Ok(s) if s.success() => Ok(()),
                 _ => {
@@ -786,7 +798,10 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                             let sha_tmp = installed_sha_file.with_extension("tmp");
                             if fs::write(&sha_tmp, sha).is_ok() {
                                 let _ = fs::rename(&sha_tmp, &installed_sha_file);
-                                println!("  → Recorded installed SHA: {}...", &sha[..sha.len().min(8)]);
+                                println!(
+                                    "  → Recorded installed SHA: {}...",
+                                    &sha[..sha.len().min(8)]
+                                );
                             }
                         }
                         // The binary changed, but the long-running harness
@@ -802,7 +817,10 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                         // failure here never blocks the hex swap above.
                         build_and_install_code_intel(&hex_dot_dir);
                     }
-                    Err(e) => { eprintln!("  [FAIL] atomic binary install failed: {e}"); return; }
+                    Err(e) => {
+                        eprintln!("  [FAIL] atomic binary install failed: {e}");
+                        return;
+                    }
                 }
             }
             _ => {
@@ -858,7 +876,9 @@ fn build_and_install_code_intel(hex_dot_dir: &Path) {
 ///
 /// `hex_dir` is the workspace root (parent of `.hex`).
 fn restart_harness(hex_dir: &Path) {
-    let Ok(home) = std::env::var("HOME") else { return };
+    let Ok(home) = std::env::var("HOME") else {
+        return;
+    };
     if !Path::new(&home)
         .join("Library/LaunchAgents/com.hex.harness.plist")
         .exists()
@@ -932,7 +952,9 @@ fn setup_shell(hex_dir: &Path) {
         lines.push(String::new());
         lines.push("# Claude Code — skip permission prompts".to_string());
         lines.push("unalias claude 2>/dev/null".to_string());
-        lines.push(r#"claude() { command claude --dangerously-skip-permissions "$@"; }"#.to_string());
+        lines.push(
+            r#"claude() { command claude --dangerously-skip-permissions "$@"; }"#.to_string(),
+        );
         dirty = true;
     }
 
@@ -1013,7 +1035,10 @@ pub fn run(args: &[String]) -> i32 {
 
     let layout = path_map::detect_layout(source_dir.to_str().unwrap_or(""));
     if layout == "unknown" {
-        eprintln!("  [FAIL] Unknown source layout at {} (expected v2)", source_dir.display());
+        eprintln!(
+            "  [FAIL] Unknown source layout at {} (expected v2)",
+            source_dir.display()
+        );
         return 1;
     }
     println!("  → Source layout: {layout}");
@@ -1028,20 +1053,37 @@ pub fn run(args: &[String]) -> i32 {
 
     // Step 3: Detect changes
     println!("\n3. Detect Changes");
-    let (c1, n1, u1, log1) = detect_changes(&src_dirs.scripts, &hex_dot_dir.join("scripts"), "scripts");
-    let (c2, n2, u2, log2) = detect_changes(&src_dirs.skills, &hex_dot_dir.join("skills"), "skills");
-    let (c3, n3, u3, log3) = detect_changes(&src_dirs.commands, &hex_dot_dir.join("commands"), "commands");
+    let (c1, n1, u1, log1) =
+        detect_changes(&src_dirs.scripts, &hex_dot_dir.join("scripts"), "scripts");
+    let (c2, n2, u2, log2) =
+        detect_changes(&src_dirs.skills, &hex_dot_dir.join("skills"), "skills");
+    let (c3, n3, u3, log3) = detect_changes(
+        &src_dirs.commands,
+        &hex_dot_dir.join("commands"),
+        "commands",
+    );
     let (c4, n4, u4, log4) = detect_changes(&src_dirs.hooks, &hex_dot_dir.join("hooks"), "hooks");
     // Additive dirs (iii engine config/workers, launchd + other templates)
     let (c5, n5, u5, log5) = detect_changes(&src_dirs.iii, &hex_dot_dir.join("iii"), "iii");
-    let (c6, n6, u6, log6) = detect_changes(&src_dirs.templates, &hex_dot_dir.join("templates"), "templates");
+    let (c6, n6, u6, log6) = detect_changes(
+        &src_dirs.templates,
+        &hex_dot_dir.join("templates"),
+        "templates",
+    );
 
     let total_changed = c1 + c2 + c3 + c4 + c5 + c6;
     let total_new = n1 + n2 + n3 + n4 + n5 + n6;
     let total_unchanged = u1 + u2 + u3 + u4 + u5 + u6;
 
     println!("  → {total_changed} changed, {total_new} new, {total_unchanged} unchanged");
-    for line in log1.iter().chain(&log2).chain(&log3).chain(&log4).chain(&log5).chain(&log6) {
+    for line in log1
+        .iter()
+        .chain(&log2)
+        .chain(&log3)
+        .chain(&log4)
+        .chain(&log5)
+        .chain(&log6)
+    {
         println!("{line}");
     }
 
@@ -1262,7 +1304,10 @@ mod tests {
         let hex_dot = tmp.path().join(".hex");
 
         // Set up v2 source with a hook file
-        write_file(&source.join("system/hooks/scripts/my-hook.sh"), "#!/bin/bash\necho hello");
+        write_file(
+            &source.join("system/hooks/scripts/my-hook.sh"),
+            "#!/bin/bash\necho hello",
+        );
         write_file(&source.join("templates/AGENTS.md"), "# Agents");
         fs::create_dir_all(source.join("system/scripts")).unwrap();
         fs::create_dir_all(source.join("system/skills")).unwrap();
@@ -1277,7 +1322,10 @@ mod tests {
         apply_sync(&src_dirs.hooks, &dst_hooks, None).unwrap();
 
         let target = dst_hooks.join("scripts/my-hook.sh");
-        assert!(target.exists(), "hook file must be synced to .hex/hooks/scripts/my-hook.sh");
+        assert!(
+            target.exists(),
+            "hook file must be synced to .hex/hooks/scripts/my-hook.sh"
+        );
         assert!(fs::read_to_string(&target).unwrap().contains("echo hello"));
     }
 
@@ -1287,10 +1335,16 @@ mod tests {
         let source = tmp.path().join("source");
         let hex_dot = tmp.path().join(".hex");
 
-        write_file(&source.join("system/hooks/scripts/hook.sh"), "#!/bin/bash\nnew content");
+        write_file(
+            &source.join("system/hooks/scripts/hook.sh"),
+            "#!/bin/bash\nnew content",
+        );
         write_file(&source.join("templates/AGENTS.md"), "# Agents");
         // Pre-existing stale hook in destination
-        write_file(&hex_dot.join("hooks/scripts/hook.sh"), "#!/bin/bash\nold content");
+        write_file(
+            &hex_dot.join("hooks/scripts/hook.sh"),
+            "#!/bin/bash\nold content",
+        );
 
         let layout = path_map::detect_layout(source.to_str().unwrap());
         let src_dirs = source_dirs_for_layout(layout, &source).unwrap();
@@ -1303,7 +1357,10 @@ mod tests {
         let result = fs::read_to_string(hex_dot.join("hooks/scripts/hook.sh")).unwrap();
         assert_eq!(result, "#!/bin/bash\nnew content");
         // Old file backed up
-        assert!(backup_dir.join("scripts/hook.sh").exists(), "old hook must be backed up");
+        assert!(
+            backup_dir.join("scripts/hook.sh").exists(),
+            "old hook must be backed up"
+        );
     }
 
     #[test]
@@ -1320,7 +1377,10 @@ mod tests {
         let deleted = deletion_pass(&dst, &src, &bak).unwrap();
         assert_eq!(deleted, 1);
         assert!(!dst.join("stale.sh").exists(), "stale file must be removed");
-        assert!(bak.join("stale.sh").exists(), "stale file must be backed up");
+        assert!(
+            bak.join("stale.sh").exists(),
+            "stale file must be backed up"
+        );
         assert!(dst.join("current.sh").exists(), "current file must remain");
     }
 
@@ -1342,9 +1402,15 @@ mod tests {
 
     #[test]
     fn test_parse_args_repo() {
-        let args = vec!["--repo".to_string(), "https://example.com/repo.git".to_string()];
+        let args = vec![
+            "--repo".to_string(),
+            "https://example.com/repo.git".to_string(),
+        ];
         let cfg = parse_args(&args).unwrap();
-        assert_eq!(cfg.repo_url.as_deref(), Some("https://example.com/repo.git"));
+        assert_eq!(
+            cfg.repo_url.as_deref(),
+            Some("https://example.com/repo.git")
+        );
     }
 
     #[test]
@@ -1397,7 +1463,10 @@ mod tests {
             .filter_map(|e| e.ok())
             .filter(|e| e.file_name().to_string_lossy().starts_with(".hex-install-"))
             .collect();
-        assert!(temps.is_empty(), "no temp files should remain after success");
+        assert!(
+            temps.is_empty(),
+            "no temp files should remain after success"
+        );
         drop(src);
     }
 
@@ -1500,12 +1569,24 @@ mod tests {
         let deleted = deletion_pass(&dst_src, &src_dir, &bak).unwrap();
 
         assert_eq!(deleted, 1, "only old_module.rs should be pruned");
-        assert!(!dst_src.join("old_module.rs").exists(), "stale src file must be removed");
-        assert!(dst_src.join("lib.rs").exists(), "current src file must remain");
+        assert!(
+            !dst_src.join("old_module.rs").exists(),
+            "stale src file must be removed"
+        );
+        assert!(
+            dst_src.join("lib.rs").exists(),
+            "current src file must remain"
+        );
 
         // Critical: target/ and Cargo.lock must be untouched
-        assert!(target_bin.exists(), "target/release/hex must NOT be deleted");
-        assert!(harness_dst.join("Cargo.lock").exists(), "Cargo.lock must NOT be deleted");
+        assert!(
+            target_bin.exists(),
+            "target/release/hex must NOT be deleted"
+        );
+        assert!(
+            harness_dst.join("Cargo.lock").exists(),
+            "Cargo.lock must NOT be deleted"
+        );
     }
 
     /// Defect 2: personal overlay detection keys on overlay PRESENCE (a
@@ -1519,7 +1600,10 @@ mod tests {
         assert!(!super::detect_personal_overlay(&hex_dot_dir));
 
         // A harness-personal/ overlay (e.g. an integration probe) → personal build.
-        write_file(&hex_dot_dir.join("harness-personal/integration_foo.rs"), "// probe");
+        write_file(
+            &hex_dot_dir.join("harness-personal/integration_foo.rs"),
+            "// probe",
+        );
         assert!(
             super::detect_personal_overlay(&hex_dot_dir),
             "overlay dir present → personal build"
@@ -1547,7 +1631,10 @@ mod tests {
             .status();
         // Skip the healthy assertion if git is unavailable in the test env.
         if matches!(init, Ok(s) if s.success()) {
-            assert!(cache_is_healthy(&good), "a real git init repo must be healthy");
+            assert!(
+                cache_is_healthy(&good),
+                "a real git init repo must be healthy"
+            );
         }
 
         // Headless .git shell (config + hook samples only, no HEAD) → unhealthy.

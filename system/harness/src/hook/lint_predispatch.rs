@@ -86,7 +86,9 @@ pub fn run() {
     let ledger = match hex::ledger::Ledger::open(&ledger_path) {
         Ok(l) => l,
         Err(e) => {
-            eprintln!("lint-predispatch: ledger open failed ({e}) — allowing dispatch, predictions LOST");
+            eprintln!(
+                "lint-predispatch: ledger open failed ({e}) — allowing dispatch, predictions LOST"
+            );
             std::process::exit(1); // loud, non-blocking
         }
     };
@@ -109,7 +111,10 @@ pub fn run() {
             std::process::exit(1);
         }
     }
-    eprintln!("lint-predispatch: {}", hex::lint_gates::shadow_summary(&gates));
+    eprintln!(
+        "lint-predispatch: {}",
+        hex::lint_gates::shadow_summary(&gates)
+    );
     std::process::exit(0);
 }
 
@@ -215,7 +220,8 @@ mod tests {
         // run()'s unreadable arm (exit 0) since run() owns process exit.
         let commit = r#"git commit -m "worker execs boi dispatch <template> when armed""#;
         assert_eq!(extract_spec_path(commit), Some(r#"<template>"#.to_string()));
-        let heredoc = "cat << 'EOF'\nthe worker runs boi dispatch /path/that/is/prose.toml nightly\nEOF";
+        let heredoc =
+            "cat << 'EOF'\nthe worker runs boi dispatch /path/that/is/prose.toml nightly\nEOF";
         assert_eq!(
             extract_spec_path(heredoc),
             Some("/path/that/is/prose.toml".to_string())

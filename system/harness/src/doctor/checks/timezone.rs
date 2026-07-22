@@ -6,8 +6,12 @@ use std::process::Command;
 pub struct TimezoneValid;
 
 impl DoctorCheck for TimezoneValid {
-    fn name(&self) -> &str { "timezone-valid" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "timezone-valid"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let path = ctx.hex_dir.join(".hex/timezone");
         let tz = match fs::read_to_string(&path) {

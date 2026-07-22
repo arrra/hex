@@ -72,8 +72,7 @@ fn call_builtin(function_id: &str, payload: Value) -> Result<Value, String> {
     let rt = tokio::runtime::Runtime::new()
         .map_err(|e| format!("ops::call_builtin: failed to start tokio runtime: {e}"))?;
     rt.block_on(async move {
-        let url =
-            std::env::var("III_URL").unwrap_or_else(|_| "ws://127.0.0.1:49134".to_string());
+        let url = std::env::var("III_URL").unwrap_or_else(|_| "ws://127.0.0.1:49134".to_string());
         let iii = iii_sdk::register_worker(&url, iii_sdk::InitOptions::default());
         iii.trigger(iii_sdk::protocol::TriggerRequest {
             function_id: function_id.to_string(),
@@ -116,9 +115,12 @@ pub fn emit(event: &str, data: Value, producer: Option<&str>) -> Result<(), Stri
     let ts = chrono::Utc::now().to_rfc3339();
     let target = emit_target(event, &producer, &ts, &data);
 
-    call_builtin("state::set", state_payload(&target.scope, &target.key, Some(&target.value)))
-        .map(|_| ())
-        .map_err(|e| format!("hex triggers emit: {e} (event '{event}')"))
+    call_builtin(
+        "state::set",
+        state_payload(&target.scope, &target.key, Some(&target.value)),
+    )
+    .map(|_| ())
+    .map_err(|e| format!("hex triggers emit: {e} (event '{event}')"))
 }
 
 #[cfg(test)]
@@ -146,22 +148,27 @@ mod tests {
         let data = json!({"x": 42});
         let t = emit_target("evt.name", "producer-a", "2026-06-04T12:34:56Z", &data);
         let obj = t.value.as_object().expect("value must be a JSON object");
-        let keys: std::collections::BTreeSet<&str> =
-            obj.keys().map(|s| s.as_str()).collect();
+        let keys: std::collections::BTreeSet<&str> = obj.keys().map(|s| s.as_str()).collect();
         let expected: std::collections::BTreeSet<&str> =
             ["event", "producer", "ts", "data"].into_iter().collect();
         assert_eq!(keys, expected, "envelope must have exactly these 4 keys");
         assert_eq!(obj["event"], json!("evt.name"));
         assert_eq!(obj["producer"], json!("producer-a"));
         assert_eq!(obj["ts"], json!("2026-06-04T12:34:56Z"));
-        assert_eq!(obj["data"], data, "data nested under `data` (not flattened)");
+        assert_eq!(
+            obj["data"], data,
+            "data nested under `data` (not flattened)"
+        );
     }
 
     #[test]
     fn state_payload_set_includes_value() {
         let v = json!({"n": 1});
         let p = state_payload("trading", "mids", Some(&v));
-        assert_eq!(p, json!({"scope": "trading", "key": "mids", "value": {"n": 1}}));
+        assert_eq!(
+            p,
+            json!({"scope": "trading", "key": "mids", "value": {"n": 1}})
+        );
     }
 
     #[test]
@@ -203,7 +210,10 @@ mod tests {
         let scope = "hex-test";
         let key = "ops-roundtrip";
         state_set(scope, key, &json!({"ok": true})).expect("set");
-        assert_eq!(state_get(scope, key).expect("get"), Some(json!({"ok": true})));
+        assert_eq!(
+            state_get(scope, key).expect("get"),
+            Some(json!({"ok": true}))
+        );
         state_delete(scope, key).expect("delete");
         assert_eq!(state_get(scope, key).expect("get-after-delete"), None);
     }

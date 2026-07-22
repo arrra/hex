@@ -194,13 +194,12 @@ mod tests {
         // No schema_version table created — bare DB, like a real Plan 1 production DB.
         apply_plan2(&conn).unwrap();
         let version: i64 = conn
-            .query_row(
-                "SELECT MAX(version) FROM schema_version",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(version, 4, "schema_version should record version=4 after apply_plan2");
+        assert_eq!(
+            version, 4,
+            "schema_version should record version=4 after apply_plan2"
+        );
     }
 
     #[test]

@@ -28,10 +28,19 @@ pub fn print_text(results: &[(String, CheckResult)], quiet: bool) {
         }
     }
 
-    let pass_count = results.iter().filter(|(_, r)| r.status.counts_as_pass()).count();
-    let warn_count = results.iter().filter(|(_, r)| r.status.is_warning()).count();
+    let pass_count = results
+        .iter()
+        .filter(|(_, r)| r.status.counts_as_pass())
+        .count();
+    let warn_count = results
+        .iter()
+        .filter(|(_, r)| r.status.is_warning())
+        .count();
     let error_count = results.iter().filter(|(_, r)| r.status.is_error()).count();
-    let fixed_count = results.iter().filter(|(_, r)| r.status == Status::Fixed).count();
+    let fixed_count = results
+        .iter()
+        .filter(|(_, r)| r.status == Status::Fixed)
+        .count();
 
     println!();
     println!(
@@ -42,10 +51,19 @@ pub fn print_text(results: &[(String, CheckResult)], quiet: bool) {
 
 /// Print JSON output compatible with doctor.sh --json schema.
 pub fn print_json(results: &[(String, CheckResult)]) {
-    let pass_count = results.iter().filter(|(_, r)| r.status.counts_as_pass()).count();
-    let warn_count = results.iter().filter(|(_, r)| r.status.is_warning()).count();
+    let pass_count = results
+        .iter()
+        .filter(|(_, r)| r.status.counts_as_pass())
+        .count();
+    let warn_count = results
+        .iter()
+        .filter(|(_, r)| r.status.is_warning())
+        .count();
     let error_count = results.iter().filter(|(_, r)| r.status.is_error()).count();
-    let fixed_count = results.iter().filter(|(_, r)| r.status == Status::Fixed).count();
+    let fixed_count = results
+        .iter()
+        .filter(|(_, r)| r.status == Status::Fixed)
+        .count();
 
     let overall = if error_count > 0 {
         "error"

@@ -63,8 +63,7 @@ fn claude_flags_unknown_profile_is_a_hard_error() {
     );
     let stderr = String::from_utf8_lossy(&out.stderr);
     assert!(
-        stderr.to_lowercase().contains("profile")
-            || stderr.to_lowercase().contains("unknown"),
+        stderr.to_lowercase().contains("profile") || stderr.to_lowercase().contains("unknown"),
         "stderr must explain the unknown profile; got: {stderr:?}"
     );
 }

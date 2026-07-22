@@ -36,7 +36,10 @@ pub enum LedgerError {
     InvalidKind(String),
     /// Used by [`verify`] when the chain is broken. Carries the row id and
     /// a short description of where the break was detected.
-    ChainBroken { at_row_id: i64, reason: String },
+    ChainBroken {
+        at_row_id: i64,
+        reason: String,
+    },
     Json(serde_json::Error),
 }
 
@@ -177,7 +180,15 @@ impl Ledger {
         self.conn.execute(
             "INSERT INTO ledger (ts, agent, action_class, kind, payload, prev_hash, row_hash) \
              VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
-            params![ts, agent, action_class, kind, payload_canonical, prev_hash, row_hash],
+            params![
+                ts,
+                agent,
+                action_class,
+                kind,
+                payload_canonical,
+                prev_hash,
+                row_hash
+            ],
         )?;
         Ok(self.conn.last_insert_rowid())
     }
@@ -296,9 +307,7 @@ fn canonical_json(v: &serde_json::Value) -> Result<String, serde_json::Error> {
                 }
                 serde_json::Value::Object(out)
             }
-            serde_json::Value::Array(a) => {
-                serde_json::Value::Array(a.iter().map(norm).collect())
-            }
+            serde_json::Value::Array(a) => serde_json::Value::Array(a.iter().map(norm).collect()),
             other => other.clone(),
         }
     }
@@ -371,11 +380,11 @@ pub fn default_path(hex_dir: &Path) -> PathBuf {
 /// beyond its window: `age == window` is still fresh, `age > window` alerts.
 pub fn default_freshness_window_secs(agent: &str) -> i64 {
     match agent {
-        "reconciler" => 2 * 3600,   // 2h: reconciler charter (hourly cron + slack)
-        "linter"     => 24 * 3600,  // 24h: linter is per-dispatch
-        "proposer"   => 26 * 3600,  // 26h: proposer nightly + overlap (charter)
-        "auditor"    => 26 * 3600,
-        _            => 24 * 3600,
+        "reconciler" => 2 * 3600, // 2h: reconciler charter (hourly cron + slack)
+        "linter" => 24 * 3600,    // 24h: linter is per-dispatch
+        "proposer" => 26 * 3600,  // 26h: proposer nightly + overlap (charter)
+        "auditor" => 26 * 3600,
+        _ => 24 * 3600,
     }
 }
 

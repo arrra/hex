@@ -23,9 +23,9 @@ pub fn run(conn: &mut Connection) -> anyhow::Result<ConsolidateReport> {
     }
 
     iso!("orientation-snapshot", op_orientation_snapshot(conn));
-    iso!("catchup-distill",      op_catchup_distill(conn));
-    iso!("dedup",                op_dedup(conn));
-    iso!("contradiction-sweep",  op_contradiction_sweep(conn));
+    iso!("catchup-distill", op_catchup_distill(conn));
+    iso!("dedup", op_dedup(conn));
+    iso!("contradiction-sweep", op_contradiction_sweep(conn));
     // PAUSED (Mike, 2026-06-11 — me/decisions/fact-prune-paused-until-access-counter):
     // prune tombstones on access_count=0 + age>60d, but NOTHING increments
     // access_count yet, so expiry was effectively universal for non-exempt
@@ -33,7 +33,7 @@ pub fn run(conn: &mut Connection) -> anyhow::Result<ConsolidateReport> {
     // recall/search bump access_count/last_accessed on facts they serve
     // (FIX-013 follow-up). Deliberately not deleted: the re-enable is one line.
     // iso!("prune",             op_prune(conn));
-    iso!("topic-rollup",         op_topic_rollup(conn));
+    iso!("topic-rollup", op_topic_rollup(conn));
 
     // Record when consolidation last ran so `hex memory stats` can report it.
     // This is advisory bookkeeping: log loudly on failure (Rule S6) but do NOT
@@ -222,7 +222,10 @@ mod tests {
                 |r| r.get(0),
             )
             .ok();
-        assert!(before.is_none(), "fresh DB should have no last_consolidated");
+        assert!(
+            before.is_none(),
+            "fresh DB should have no last_consolidated"
+        );
 
         let _ = run(&mut conn).unwrap();
 

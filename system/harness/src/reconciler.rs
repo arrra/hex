@@ -330,10 +330,8 @@ mod tests {
 
         let h_ok = gate_hash("grep -q foo README.md");
         let h_fail = gate_hash("test -f does/not/exist");
-        let by_hash: std::collections::HashMap<_, _> = records
-            .iter()
-            .map(|r| (r.gate_hash.clone(), r))
-            .collect();
+        let by_hash: std::collections::HashMap<_, _> =
+            records.iter().map(|r| (r.gate_hash.clone(), r)).collect();
         assert_eq!(by_hash.get(&h_ok).unwrap().first_exit_code, 0);
         assert_eq!(by_hash.get(&h_fail).unwrap().first_exit_code, 1);
     }
@@ -422,8 +420,14 @@ mod tests {
 
         let (records, _summary) = reconcile_from_boi_db(&boi_path).expect("reconcile");
         assert_eq!(records.len(), 1);
-        assert_eq!(records[0].first_exit_code, 1, "first attempt FAIL is the label");
-        assert_eq!(records[0].final_exit_code, 0, "final attempt PASS is tracked alongside");
+        assert_eq!(
+            records[0].first_exit_code, 1,
+            "first attempt FAIL is the label"
+        );
+        assert_eq!(
+            records[0].final_exit_code, 0,
+            "final attempt PASS is tracked alongside"
+        );
         assert_eq!(records[0].attempts, 2);
     }
 }

@@ -16,8 +16,12 @@ const KEY: &str = "last_full_consolidated";
 pub struct NightlyFullLiveness;
 
 impl DoctorCheck for NightlyFullLiveness {
-    fn name(&self) -> &str { "nightly-full-liveness" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "nightly-full-liveness"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let db_path = ctx.hex_dir.join(".hex/memory.db");
         if !db_path.exists() {
@@ -47,9 +51,7 @@ impl DoctorCheck for NightlyFullLiveness {
         let parsed = match chrono::DateTime::parse_from_rfc3339(&stamp) {
             Ok(dt) => dt,
             Err(e) => {
-                return CheckResult::fail(format!(
-                    "metadata.{KEY} unparseable ({stamp:?}): {e}"
-                ));
+                return CheckResult::fail(format!("metadata.{KEY} unparseable ({stamp:?}): {e}"));
             }
         };
         let now = chrono::Local::now();
@@ -107,7 +109,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = ctx_with_db(tmp.path(), None);
         let res = NightlyFullLiveness.run(&ctx);
-        assert_eq!(res.status, Status::Fail, "missing key must FAIL, got {:?}", res);
+        assert_eq!(
+            res.status,
+            Status::Fail,
+            "missing key must FAIL, got {:?}",
+            res
+        );
     }
 
     #[test]
@@ -118,7 +125,12 @@ mod tests {
         let stale = chrono::Local::now() - chrono::Duration::hours(30);
         let ctx = ctx_with_db(tmp.path(), Some(&stale.to_rfc3339()));
         let res = NightlyFullLiveness.run(&ctx);
-        assert_eq!(res.status, Status::Fail, "stale stamp must FAIL, got {:?}", res);
+        assert_eq!(
+            res.status,
+            Status::Fail,
+            "stale stamp must FAIL, got {:?}",
+            res
+        );
     }
 
     #[test]
@@ -128,6 +140,11 @@ mod tests {
         let fresh = chrono::Local::now() - chrono::Duration::hours(2);
         let ctx = ctx_with_db(tmp.path(), Some(&fresh.to_rfc3339()));
         let res = NightlyFullLiveness.run(&ctx);
-        assert_eq!(res.status, Status::Pass, "fresh stamp must PASS, got {:?}", res);
+        assert_eq!(
+            res.status,
+            Status::Pass,
+            "fresh stamp must PASS, got {:?}",
+            res
+        );
     }
 }

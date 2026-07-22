@@ -17,7 +17,10 @@ mod tests {
 
     #[test]
     fn detect_layout_unknown_for_missing_dir() {
-        assert_eq!(detect_layout("/tmp/does-not-exist-path-map-test"), "unknown");
+        assert_eq!(
+            detect_layout("/tmp/does-not-exist-path-map-test"),
+            "unknown"
+        );
     }
 
     #[test]

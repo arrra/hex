@@ -6,8 +6,12 @@ use std::fs;
 pub struct RegistryOrphanedBin;
 
 impl DoctorCheck for RegistryOrphanedBin {
-    fn name(&self) -> &str { "registry-orphaned-bin" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "registry-orphaned-bin"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
 
     fn run(&self, ctx: &Context) -> CheckResult {
         let registry_dir = ctx.hex_dir.join(".hex/registry");
@@ -49,8 +53,12 @@ impl DoctorCheck for RegistryOrphanedBin {
 pub struct RegistryStalePolicy;
 
 impl DoctorCheck for RegistryStalePolicy {
-    fn name(&self) -> &str { "registry-stale-policy" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "registry-stale-policy"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
 
     fn run(&self, ctx: &Context) -> CheckResult {
         let registry_dir = ctx.hex_dir.join(".hex/registry");

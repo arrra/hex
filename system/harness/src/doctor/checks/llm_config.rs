@@ -56,10 +56,7 @@ fn builtin_model(use_case: &str) -> &'static str {
 }
 
 fn resolve_model(parsed: &LlmTomlFile, use_case: &str) -> String {
-    let uc_model = parsed
-        .use_cases
-        .get(use_case)
-        .and_then(|s| s.model.clone());
+    let uc_model = parsed.use_cases.get(use_case).and_then(|s| s.model.clone());
     let default_model = parsed.defaults.as_ref().and_then(|s| s.model.clone());
     uc_model
         .or(default_model)
@@ -85,11 +82,7 @@ impl DoctorCheck for LlmConfigCheck {
         let body = match std::fs::read_to_string(&path) {
             Ok(b) => b,
             Err(e) => {
-                return CheckResult::fail(format!(
-                    "could not read {}: {}",
-                    path.display(),
-                    e
-                ));
+                return CheckResult::fail(format!("could not read {}: {}", path.display(), e));
             }
         };
         let parsed: LlmTomlFile = match toml::from_str(&body) {
@@ -123,8 +116,7 @@ impl DoctorCheck for LlmConfigCheck {
             ));
         }
         let details = lines.join("\n");
-        CheckResult::pass(format!("llm.toml parsed: {}", path.display()))
-            .with_details(details)
+        CheckResult::pass(format!("llm.toml parsed: {}", path.display())).with_details(details)
     }
 }
 
@@ -174,7 +166,11 @@ mod tests {
             .unwrap_or(0);
         let dir = std::env::temp_dir().join(format!("hex-llm-cfg-{pid}-{nanos}-{suffix}"));
         let _ = fs::create_dir_all(&dir);
-        let ctx = Context { hex_dir: dir.clone(), home: PathBuf::from("/tmp"), fix: false };
+        let ctx = Context {
+            hex_dir: dir.clone(),
+            home: PathBuf::from("/tmp"),
+            fix: false,
+        };
         (ctx, dir)
     }
 
@@ -189,7 +185,12 @@ mod tests {
     fn passes_when_llm_toml_absent() {
         let (ctx, dir) = tmp_ctx("absent");
         let r = LlmConfigCheck.run(&ctx);
-        assert_eq!(r.status, Status::Pass, "missing llm.toml must pass: {:?}", r);
+        assert_eq!(
+            r.status,
+            Status::Pass,
+            "missing llm.toml must pass: {:?}",
+            r
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 
@@ -200,7 +201,12 @@ mod tests {
         fs::create_dir_all(&cfg).unwrap();
         fs::write(cfg.join("llm.toml"), "this is = = not valid toml [[[").unwrap();
         let r = LlmConfigCheck.run(&ctx);
-        assert_eq!(r.status, Status::Fail, "malformed llm.toml must fail loudly: {:?}", r);
+        assert_eq!(
+            r.status,
+            Status::Fail,
+            "malformed llm.toml must fail loudly: {:?}",
+            r
+        );
         let _ = fs::remove_dir_all(&dir);
     }
 

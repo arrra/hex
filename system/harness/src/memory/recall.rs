@@ -35,10 +35,7 @@ pub struct RecallV2 {
     pub facts: Vec<FactHit>,
 }
 
-pub fn recall_with_facts(
-    conn: &rusqlite::Connection,
-    query: &str,
-) -> rusqlite::Result<RecallV2> {
+pub fn recall_with_facts(conn: &rusqlite::Connection, query: &str) -> rusqlite::Result<RecallV2> {
     let chunks = chunks_recall(conn, query, 5).unwrap_or_default();
     // Hot-path budget: no embedding model is loaded here (module doc), so the
     // facts vector arm is off (None ⇒ exactly the FTS-only behavior).
@@ -46,11 +43,7 @@ pub fn recall_with_facts(
     Ok(RecallV2 { chunks, facts })
 }
 
-fn chunks_recall(
-    conn: &rusqlite::Connection,
-    query: &str,
-    k: usize,
-) -> rusqlite::Result<Vec<Hit>> {
+fn chunks_recall(conn: &rusqlite::Connection, query: &str, k: usize) -> rusqlite::Result<Vec<Hit>> {
     super::search::search_fts_public(conn, query, k, None)
 }
 
@@ -70,7 +63,23 @@ pub(crate) fn facts_recall(
     let fts_query = query
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() >= 3 && !matches!(*t, "the" | "and" | "for" | "are" | "was" | "who" | "what" | "how" | "does" | "did" | "is"))
+        .filter(|t| {
+            t.len() >= 3
+                && !matches!(
+                    *t,
+                    "the"
+                        | "and"
+                        | "for"
+                        | "are"
+                        | "was"
+                        | "who"
+                        | "what"
+                        | "how"
+                        | "does"
+                        | "did"
+                        | "is"
+                )
+        })
         .collect::<Vec<_>>()
         .join(" OR ");
 
@@ -144,7 +153,9 @@ pub(crate) fn facts_recall(
     // contains `:<token>` after the type prefix (e.g. "alice" → subject
     // LIKE '%:alice%' matches both `person:alice` and `person:alice-chew`).
     for tok in query.to_lowercase().split_whitespace() {
-        if tok.len() < 3 { continue; }
+        if tok.len() < 3 {
+            continue;
+        }
         let pattern = format!("%:{tok}%");
         let mut q = conn.prepare(
             "SELECT subject, predicate, object, importance, private FROM facts
@@ -191,7 +202,10 @@ pub struct RecallOutcome {
 fn is_trivial(query: &str) -> bool {
     let q = query.trim().to_lowercase();
     q.len() < MIN_QUERY_CHARS
-        || matches!(q.as_str(), "ok" | "okay" | "thanks" | "thank you" | "yes" | "no" | "go" | "continue")
+        || matches!(
+            q.as_str(),
+            "ok" | "okay" | "thanks" | "thank you" | "yes" | "no" | "go" | "continue"
+        )
 }
 
 /// Machine-generated prompt pre-filter — the UserPromptSubmit hook fires for
@@ -218,111 +232,106 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
 
     if is_trivial(query) || is_machine(query) {
         let outcome = RecallOutcome {
-            injected: false, gated: true, result_count: 0,
-            facts_injected: 0, chunks_injected: 0,
-            latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
+            injected: false,
+            gated: true,
+            result_count: 0,
+            facts_injected: 0,
+            chunks_injected: 0,
+            latency_ms: t0.elapsed().as_millis() as u64,
+            context: String::new(),
         };
         log_recall(hex_root, &outcome, &LogExtras::default());
         return outcome;
     }
 
     let db = super::db_path(hex_root);
-    let (filtered, facts, extras): (
-        Vec<super::search::SearchResult>,
-        Vec<FactHit>,
-        LogExtras,
-    ) = match super::open_db(&db) {
-        Ok(conn) => {
-            // Route the hot path through the v1 ContextAssembler. Passing
-            // `None` for `query_vec` is the load-bearing hot-path policy: the
-            // assembler runs in FTS-only mode and — by construction, not by
-            // env-var toggle — never constructs an `Embedder`. Per spec
-            // Tj0b203yv (finding 1 of the 2026-07-16 audit), this hook is a
-            // fresh OS process per user message; cold-loading the 522 MB nomic
-            // model here blew the latency budget (measured 1.33-1.9 s per
-            // recall). Offline CLI callers who want semantic search embed the
-            // query themselves and pass `Some(&qv)`.
-            let assembled = super::assemble::assemble(
-                &conn,
-                query,
-                for_agent,
-                MAX_CONTEXT_CHARS,
-                None,
-            );
+    let (filtered, facts, extras): (Vec<super::search::SearchResult>, Vec<FactHit>, LogExtras) =
+        match super::open_db(&db) {
+            Ok(conn) => {
+                // Route the hot path through the v1 ContextAssembler. Passing
+                // `None` for `query_vec` is the load-bearing hot-path policy: the
+                // assembler runs in FTS-only mode and — by construction, not by
+                // env-var toggle — never constructs an `Embedder`. Per spec
+                // Tj0b203yv (finding 1 of the 2026-07-16 audit), this hook is a
+                // fresh OS process per user message; cold-loading the 522 MB nomic
+                // model here blew the latency budget (measured 1.33-1.9 s per
+                // recall). Offline CLI callers who want semantic search embed the
+                // query themselves and pass `Some(&qv)`.
+                let assembled =
+                    super::assemble::assemble(&conn, query, for_agent, MAX_CONTEXT_CHARS, None);
 
-            // Capture per-move stats for the recall-log (calibration seam —
-            // raw native scores per move; top_confidence alone is useless).
-            let per_move_stats: Vec<serde_json::Value> = assembled
-                .per_move_stats
-                .iter()
-                .map(|s| {
-                    json!({
-                        "move_id": move_id_str(s.move_id),
-                        "fired": s.fired,
-                        "candidate_count": s.candidate_count,
-                        "top_native_scores": s.top_native_scores,
-                        "native_score": s.top_native_scores.first().copied(),
+                // Capture per-move stats for the recall-log (calibration seam —
+                // raw native scores per move; top_confidence alone is useless).
+                let per_move_stats: Vec<serde_json::Value> = assembled
+                    .per_move_stats
+                    .iter()
+                    .map(|s| {
+                        json!({
+                            "move_id": move_id_str(s.move_id),
+                            "fired": s.fired,
+                            "candidate_count": s.candidate_count,
+                            "top_native_scores": s.top_native_scores,
+                            "native_score": s.top_native_scores.first().copied(),
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            // Identify M1's top-1 (first candidate from M1 in the merged
-            // list — floor places it first). Used for the ablation control.
-            let m1_top1_key: Option<String> = assembled
-                .candidates
-                .iter()
-                .find(|c| c.move_id == super::assemble::MoveId::M1ContentMatch)
-                .map(|c| c.dedup_key.clone());
+                // Identify M1's top-1 (first candidate from M1 in the merged
+                // list — floor places it first). Used for the ablation control.
+                let m1_top1_key: Option<String> = assembled
+                    .candidates
+                    .iter()
+                    .find(|c| c.move_id == super::assemble::MoveId::M1ContentMatch)
+                    .map(|c| c.dedup_key.clone());
 
-            // Ablation dedup_keys (the merge with M1 top-1 removed).
-            let ablation_dedup_keys: Vec<String> = assembled
-                .candidates
-                .iter()
-                .filter(|c| Some(&c.dedup_key) != m1_top1_key.as_ref())
-                .map(|c| c.dedup_key.clone())
-                .collect();
+                // Ablation dedup_keys (the merge with M1 top-1 removed).
+                let ablation_dedup_keys: Vec<String> = assembled
+                    .candidates
+                    .iter()
+                    .filter(|c| Some(&c.dedup_key) != m1_top1_key.as_ref())
+                    .map(|c| c.dedup_key.clone())
+                    .collect();
 
-            // Partition merged candidates by kind. Order within each kind is
-            // preserved, so the first Chunk == M1's top-1 (when M1 fired).
-            let mut chunks: Vec<super::search::SearchResult> = Vec::new();
-            let mut fs: Vec<FactHit> = Vec::new();
-            let mut m1_is_chunk = false;
-            for cand in assembled.candidates {
-                let is_m1_top1 =
-                    Some(&cand.dedup_key) == m1_top1_key.as_ref();
-                match cand.kind {
-                    super::assemble::CandidateKind::Chunk(c) => {
-                        if is_m1_top1 {
-                            m1_is_chunk = true;
+                // Partition merged candidates by kind. Order within each kind is
+                // preserved, so the first Chunk == M1's top-1 (when M1 fired).
+                let mut chunks: Vec<super::search::SearchResult> = Vec::new();
+                let mut fs: Vec<FactHit> = Vec::new();
+                let mut m1_is_chunk = false;
+                for cand in assembled.candidates {
+                    let is_m1_top1 = Some(&cand.dedup_key) == m1_top1_key.as_ref();
+                    match cand.kind {
+                        super::assemble::CandidateKind::Chunk(c) => {
+                            if is_m1_top1 {
+                                m1_is_chunk = true;
+                            }
+                            chunks.push(c);
                         }
-                        chunks.push(c);
+                        super::assemble::CandidateKind::Fact(f) => fs.push(f),
                     }
-                    super::assemble::CandidateKind::Fact(f) => fs.push(f),
                 }
+
+                // Render ablation context block to measure total_chars. M1 only
+                // produces chunks today, so dropping its top-1 = drop chunks[0].
+                let ablation_chars = if m1_is_chunk && !chunks.is_empty() {
+                    format_context_v2(&chunks[1..], &fs).len()
+                } else {
+                    format_context_v2(&chunks, &fs).len()
+                };
+
+                let extras = LogExtras {
+                    per_move_stats,
+                    ablation: json!({
+                        "dedup_keys": ablation_dedup_keys,
+                        "total_chars": ablation_chars,
+                    }),
+                };
+                (chunks, fs, extras)
             }
-
-            // Render ablation context block to measure total_chars. M1 only
-            // produces chunks today, so dropping its top-1 = drop chunks[0].
-            let ablation_chars = if m1_is_chunk && !chunks.is_empty() {
-                format_context_v2(&chunks[1..], &fs).len()
-            } else {
-                format_context_v2(&chunks, &fs).len()
-            };
-
-            let extras = LogExtras {
-                per_move_stats,
-                ablation: json!({
-                    "dedup_keys": ablation_dedup_keys,
-                    "total_chars": ablation_chars,
-                }),
-            };
-            (chunks, fs, extras)
-        }
-        Err(e) => {
-            eprintln!("[memory recall] cannot open {}: {e}", db.display());
-            (vec![], vec![], LogExtras::default())
-        }
-    };
+            Err(e) => {
+                eprintln!("[memory recall] cannot open {}: {e}", db.display());
+                (vec![], vec![], LogExtras::default())
+            }
+        };
 
     let injected = !filtered.is_empty() || !facts.is_empty();
     let outcome = if injected {
@@ -337,9 +346,13 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
         }
     } else {
         RecallOutcome {
-            injected: false, gated: false, result_count: 0,
-            facts_injected: 0, chunks_injected: 0,
-            latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
+            injected: false,
+            gated: false,
+            result_count: 0,
+            facts_injected: 0,
+            chunks_injected: 0,
+            latency_ms: t0.elapsed().as_millis() as u64,
+            context: String::new(),
         }
     };
     log_recall(hex_root, &outcome, &extras);
@@ -415,7 +428,9 @@ fn log_recall(hex_root: &Path, o: &RecallOutcome, extras: &LogExtras) {
     let dir = hex_root.join(".hex/memory");
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true).append(true).open(dir.join("recall-log.jsonl"))
+        .create(true)
+        .append(true)
+        .open(dir.join("recall-log.jsonl"))
     {
         let _ = writeln!(
             f,
@@ -430,7 +445,6 @@ fn log_recall(hex_root: &Path, o: &RecallOutcome, extras: &LogExtras) {
             })
         );
     }
-
 }
 
 /// `hex memory recall <query>` — prints the context block to stdout.
@@ -465,7 +479,11 @@ mod tests {
     fn missing_index_fails_soft() {
         let tmp = tempfile::TempDir::new().unwrap();
         // Non-trivial query, but no DB — must not panic, must not inject.
-        let o = recall(tmp.path(), "what did we decide about the memory schema", false);
+        let o = recall(
+            tmp.path(),
+            "what did we decide about the memory schema",
+            false,
+        );
         assert!(!o.injected);
     }
 }
@@ -679,7 +697,9 @@ mod plan2_tests {
             "FTS hit must survive fusion"
         );
         assert!(
-            fused.iter().any(|f| f.subject == "person:bob" && f.object == "zzqx qqzz"),
+            fused
+                .iter()
+                .any(|f| f.subject == "person:bob" && f.object == "zzqx qqzz"),
             "KNN arm must surface the semantically-near fact, got {:?}",
             fused.iter().map(|f| &f.subject).collect::<Vec<_>>()
         );
@@ -794,7 +814,11 @@ mod injection_tax_tests {
     #[test]
     fn injection_respects_3k_budget() {
         let tmp = seeded_root();
-        let o = recall(tmp.path(), "what did we decide about the memory pipeline", false);
+        let o = recall(
+            tmp.path(),
+            "what did we decide about the memory pipeline",
+            false,
+        );
         assert!(o.injected, "seeded DB must produce an injection");
         assert!(
             o.context.len() <= 3_000,
@@ -807,7 +831,11 @@ mod injection_tax_tests {
     #[test]
     fn injection_renders_at_most_two_chunks() {
         let tmp = seeded_root();
-        let o = recall(tmp.path(), "what did we decide about the memory pipeline", false);
+        let o = recall(
+            tmp.path(),
+            "what did we decide about the memory pipeline",
+            false,
+        );
         let chunk_headers = o.context.matches("\n#### ").count()
             + if o.context.starts_with("#### ") { 1 } else { 0 };
         assert!(
@@ -834,7 +862,11 @@ mod injection_tax_tests {
             assert!(!o.injected, "machine prompt must not inject: {p}");
         }
         // A real user question still injects.
-        let o = recall(tmp.path(), "what did we decide about the memory pipeline", false);
+        let o = recall(
+            tmp.path(),
+            "what did we decide about the memory pipeline",
+            false,
+        );
         assert!(o.injected, "real user prompts must still inject");
     }
 }
@@ -915,8 +947,7 @@ mod embedder_contract_tests {
         let query = "what did we decide about the memory pipeline architecture";
         let _outcome = recall(tmp.path(), query, false);
 
-        let count =
-            crate::memory::embed::EMBEDDER_CONSTRUCTIONS_THREAD.with(|c| c.get());
+        let count = crate::memory::embed::EMBEDDER_CONSTRUCTIONS_THREAD.with(|c| c.get());
         assert_eq!(
             count, 0,
             "UserPromptSubmit recall path must construct zero Embedders \

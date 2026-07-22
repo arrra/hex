@@ -21,10 +21,8 @@ fn workspace_root() -> PathBuf {
 
 #[test]
 fn cargo_toml_pins_daemon_green_at_expected_rev() {
-    let cargo = std::fs::read_to_string(
-        workspace_root().join("system/harness/Cargo.toml"),
-    )
-    .expect("read system/harness/Cargo.toml");
+    let cargo = std::fs::read_to_string(workspace_root().join("system/harness/Cargo.toml"))
+        .expect("read system/harness/Cargo.toml");
     assert!(
         cargo.contains("daemon-green"),
         "system/harness/Cargo.toml must depend on daemon-green; got:\n{cargo}"
@@ -37,10 +35,8 @@ fn cargo_toml_pins_daemon_green_at_expected_rev() {
 
 #[test]
 fn main_rs_uses_daemon_green_and_drops_handrolled_plist_helpers() {
-    let main = std::fs::read_to_string(
-        workspace_root().join("system/harness/src/main.rs"),
-    )
-    .expect("read system/harness/src/main.rs");
+    let main = std::fs::read_to_string(workspace_root().join("system/harness/src/main.rs"))
+        .expect("read system/harness/src/main.rs");
     assert!(
         main.contains("daemon_green"),
         "main.rs must reference daemon_green (e.g. daemon_green::native()); got body without it"

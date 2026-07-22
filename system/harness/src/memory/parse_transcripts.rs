@@ -124,10 +124,7 @@ pub fn run(hex_root: &Path, args: &ParseArgs) -> i32 {
             let first_ts = &session.messages[0].timestamp;
             let time_str = first_ts.format("%H:%M").to_string();
             let id_prefix = &session.id[..session.id.len().min(8)];
-            content.push_str(&format!(
-                "### Session {}... — {}\n",
-                id_prefix, time_str
-            ));
+            content.push_str(&format!("### Session {}... — {}\n", id_prefix, time_str));
             content.push('\n');
 
             let mut msg_num = 0usize;
@@ -198,12 +195,20 @@ pub fn run(hex_root: &Path, args: &ParseArgs) -> i32 {
         "parse-transcripts: {} session(s) written, {} skipped (already parsed), {} error(s)",
         written, skipped, errors
     );
-    if errors > 0 { 1 } else { 0 }
+    if errors > 0 {
+        1
+    } else {
+        0
+    }
 }
 
 fn load_tracking(path: &Path) -> HashSet<String> {
     match fs::read_to_string(path) {
-        Ok(content) => content.lines().map(|l| l.trim().to_string()).filter(|l| !l.is_empty()).collect(),
+        Ok(content) => content
+            .lines()
+            .map(|l| l.trim().to_string())
+            .filter(|l| !l.is_empty())
+            .collect(),
         Err(_) => HashSet::new(),
     }
 }
@@ -214,7 +219,10 @@ fn append_tracking(path: &Path, entries: &[String]) {
         .append(true)
         .open(path)
         .unwrap_or_else(|e| {
-            eprintln!("hex memory parse-transcripts: cannot update tracking file: {}", e);
+            eprintln!(
+                "hex memory parse-transcripts: cannot update tracking file: {}",
+                e
+            );
             std::process::exit(1);
         });
     for entry in entries {
@@ -239,8 +247,7 @@ fn collect_jsonl_files(dir: &Path) -> Vec<PathBuf> {
 }
 
 fn parse_jsonl(path: &Path) -> Result<Session, String> {
-    let content = fs::read_to_string(path)
-        .map_err(|e| format!("read error: {e}"))?;
+    let content = fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
 
     let stem = path
         .file_stem()

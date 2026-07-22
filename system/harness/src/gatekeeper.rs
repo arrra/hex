@@ -183,10 +183,10 @@ pub fn parse_proposal(md: &str) -> Result<Proposal, GateError> {
         .ok_or_else(|| GateError::Malformed("missing ```toml proposal``` block".into()))?;
     let sb = fenced_toml_block(md, "selftest")
         .ok_or_else(|| GateError::Malformed("missing ```toml selftest``` block".into()))?;
-    let proposal: ProposalBlock = toml::from_str(&pb)
-        .map_err(|e| GateError::Malformed(format!("proposal block: {e}")))?;
-    let selftest: SelftestBlock = toml::from_str(&sb)
-        .map_err(|e| GateError::Malformed(format!("selftest block: {e}")))?;
+    let proposal: ProposalBlock =
+        toml::from_str(&pb).map_err(|e| GateError::Malformed(format!("proposal block: {e}")))?;
+    let selftest: SelftestBlock =
+        toml::from_str(&sb).map_err(|e| GateError::Malformed(format!("selftest block: {e}")))?;
     Ok(Proposal { proposal, selftest })
 }
 
@@ -222,7 +222,12 @@ pub fn load_canaries(src: &str) -> Result<CanaryRegistry, GateError> {
     let reg: CanaryRegistry = serde_json::from_str(src)
         .map_err(|e| GateError::Malformed(format!("canary registry parse: {e}")))?;
     for (i, c) in reg.canaries.iter().enumerate() {
-        if c.id_hash.len() != 64 || !c.id_hash.chars().all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase()) {
+        if c.id_hash.len() != 64
+            || !c
+                .id_hash
+                .chars()
+                .all(|ch| ch.is_ascii_hexdigit() && !ch.is_ascii_uppercase())
+        {
             return Err(GateError::Malformed(format!(
                 "canary[{i}]: id_hash must be 64 lowercase hex chars (got {:?})",
                 c.id_hash
@@ -326,10 +331,7 @@ pub struct PipelineContext {
     pub auditor_verdicts: Vec<(AuditorVerdictBlock, Option<String>)>,
 }
 
-pub fn apply_pipeline_context(
-    v: &mut Verdict,
-    ctx: &PipelineContext,
-) -> Vec<serde_json::Value> {
+pub fn apply_pipeline_context(v: &mut Verdict, ctx: &PipelineContext) -> Vec<serde_json::Value> {
     let mut alerts = Vec::new();
     for (av, voided) in &ctx.auditor_verdicts {
         if let Some(why) = voided {
@@ -356,9 +358,8 @@ pub fn apply_pipeline_context(
 
     if let Some(c) = &ctx.canary {
         if v.verdict != VerdictKind::Reject {
-            v.reasons.push(
-                "canary: registered canary — never eligible for accept".into(),
-            );
+            v.reasons
+                .push("canary: registered canary — never eligible for accept".into());
             v.verdict = VerdictKind::Reject;
         }
         for (av, _) in &ctx.auditor_verdicts {
@@ -511,7 +512,9 @@ pub fn judge(
             ("kill-rule", _) => VerdictKind::AcceptFlagged,
             (_, Some((prec, tp, _, _))) => {
                 if tp == 0 {
-                    reasons.push("grounded: zero true-positive fires on held-out — unscoreable".into());
+                    reasons.push(
+                        "grounded: zero true-positive fires on held-out — unscoreable".into(),
+                    );
                     VerdictKind::InsufficientData
                 } else if prec < floor {
                     reasons.push(format!(
@@ -583,10 +586,22 @@ mod tests {
 
     fn held() -> Vec<CorpusRecord> {
         vec![
-            CorpusRecord { command: "cargo test 2>/dev/null".into(), label: 1 },
-            CorpusRecord { command: "cargo test 2>/dev/null && echo ok".into(), label: 1 },
-            CorpusRecord { command: "test -f Cargo.toml".into(), label: 0 },
-            CorpusRecord { command: "grep -q foo bar.txt".into(), label: 0 },
+            CorpusRecord {
+                command: "cargo test 2>/dev/null".into(),
+                label: 1,
+            },
+            CorpusRecord {
+                command: "cargo test 2>/dev/null && echo ok".into(),
+                label: 1,
+            },
+            CorpusRecord {
+                command: "test -f Cargo.toml".into(),
+                label: 0,
+            },
+            CorpusRecord {
+                command: "grep -q foo bar.txt".into(),
+                label: 0,
+            },
         ]
     }
 
@@ -602,9 +617,18 @@ mod tests {
     fn gk_kill_gate_unknown_type_rejects() {
         let md = proposal_md("nuke-everything", "x", &["x"], &["y"]);
         let p = parse_proposal(&md).unwrap();
-        let v = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
+        let v = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
         assert_eq!(v.verdict, VerdictKind::Reject);
-        assert!(v.reasons.iter().any(|r| r.contains("unknown proposal type")));
+        assert!(v
+            .reasons
+            .iter()
+            .any(|r| r.contains("unknown proposal type")));
     }
 
     #[test]
@@ -612,7 +636,13 @@ mod tests {
         let mut md = proposal_md("modify-rule", "x", &["x"], &["y"]);
         md = md.replace("stderr-swallow-2", "ledger-schema");
         let p = parse_proposal(&md).unwrap();
-        let v = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
+        let v = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
         assert_eq!(v.verdict, VerdictKind::Reject);
         assert!(v.reasons.iter().any(|r| r.contains("constitution-class")));
     }
@@ -622,7 +652,13 @@ mod tests {
         // Pattern misses its own fire case.
         let md = proposal_md("add-rule", "2>/dev/null", &["echo clean"], &["ok"]);
         let p = parse_proposal(&md).unwrap();
-        let v = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
+        let v = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
         assert_eq!(v.verdict, VerdictKind::Reject);
         assert!(v.reasons.iter().any(|r| r.contains("selftest")));
     }
@@ -631,7 +667,12 @@ mod tests {
     fn gk_below_floor_never_accepts() {
         // A perfect-selftest rule with held-out precision 1.0 still rejects
         // when the floor is set above it — the floor rule is absolute.
-        let md = proposal_md("add-rule", "2>/dev/null", &["x 2>/dev/null"], &["plain command"]);
+        let md = proposal_md(
+            "add-rule",
+            "2>/dev/null",
+            &["x 2>/dev/null"],
+            &["plain command"],
+        );
         let p = parse_proposal(&md).unwrap();
         let v = judge(&p, &held(), 1.01, "UNAVAILABLE".into(), None);
         assert_eq!(v.verdict, VerdictKind::Reject);
@@ -640,9 +681,20 @@ mod tests {
 
     #[test]
     fn gk_zero_tp_is_insufficient_data() {
-        let md = proposal_md("add-rule", "zzz-never-matches", &["zzz-never-matches"], &["ok"]);
+        let md = proposal_md(
+            "add-rule",
+            "zzz-never-matches",
+            &["zzz-never-matches"],
+            &["ok"],
+        );
         let p = parse_proposal(&md).unwrap();
-        let v = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
+        let v = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
         assert_eq!(v.verdict, VerdictKind::InsufficientData);
     }
 
@@ -650,7 +702,13 @@ mod tests {
     fn gk_good_rule_accept_flagged_never_plain_accept() {
         let md = proposal_md("add-rule", "2>/dev/null", &["x 2>/dev/null"], &["plain"]);
         let p = parse_proposal(&md).unwrap();
-        let v = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
+        let v = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
         assert_eq!(v.verdict, VerdictKind::AcceptFlagged);
         assert_eq!(v.precision, Some(1.0));
         assert_eq!(v.tp, Some(2));
@@ -658,9 +716,20 @@ mod tests {
 
     #[test]
     fn gk_kill_rule_flags_for_human() {
-        let md = proposal_md("kill-rule", "", &["the rule misfires here"], &["and not here"]);
+        let md = proposal_md(
+            "kill-rule",
+            "",
+            &["the rule misfires here"],
+            &["and not here"],
+        );
         let p = parse_proposal(&md).unwrap();
-        let v = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
+        let v = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
         assert_eq!(v.verdict, VerdictKind::AcceptFlagged);
         assert!(v.precision.is_none(), "kill-rule has no pattern metrics");
     }
@@ -669,8 +738,20 @@ mod tests {
     fn gk_determinism_byte_identical() {
         let md = proposal_md("add-rule", "2>/dev/null", &["x 2>/dev/null"], &["plain"]);
         let p = parse_proposal(&md).unwrap();
-        let v1 = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
-        let v2 = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
+        let v1 = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
+        let v2 = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
         assert_eq!(verdict_json(&v1), verdict_json(&v2));
     }
 
@@ -767,8 +848,18 @@ mod tests {
         // A canary crafted well enough to pass every gate still REJECTs.
         let md = proposal_md("add-rule", "2>/dev/null", &["x 2>/dev/null"], &["plain"]);
         let p = parse_proposal(&md).unwrap();
-        let mut v = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
-        assert_eq!(v.verdict, VerdictKind::AcceptFlagged, "precondition: passes gates");
+        let mut v = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
+        assert_eq!(
+            v.verdict,
+            VerdictKind::AcceptFlagged,
+            "precondition: passes gates"
+        );
         let ctx = PipelineContext {
             canary: Some(canary_for("p-test")),
             auditor_verdicts: vec![],
@@ -776,14 +867,23 @@ mod tests {
         let alerts = apply_pipeline_context(&mut v, &ctx);
         assert_eq!(v.verdict, VerdictKind::Reject);
         assert!(alerts.is_empty(), "no auditor approval, no alert");
-        assert!(v.reasons.iter().any(|r| r.contains("never eligible for accept")));
+        assert!(v
+            .reasons
+            .iter()
+            .any(|r| r.contains("never eligible for accept")));
     }
 
     #[test]
     fn gk_canary_approval_voids_and_alerts() {
         let md = proposal_md("add-rule", "2>/dev/null", &["x 2>/dev/null"], &["plain"]);
         let p = parse_proposal(&md).unwrap();
-        let mut v = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
+        let mut v = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
         let ctx = PipelineContext {
             canary: Some(canary_for("p-test")),
             auditor_verdicts: vec![(
@@ -799,14 +899,23 @@ mod tests {
         assert_eq!(v.verdict, VerdictKind::Reject);
         assert_eq!(alerts.len(), 1);
         assert_eq!(alerts[0]["auditor"], "auditor");
-        assert!(v.reasons.iter().any(|r| r.contains("APPROVED a registered canary")));
+        assert!(v
+            .reasons
+            .iter()
+            .any(|r| r.contains("APPROVED a registered canary")));
     }
 
     #[test]
     fn gk_canary_cleared_by_expected_verdict_stays_quiet() {
         let md = proposal_md("add-rule", "2>/dev/null", &["x 2>/dev/null"], &["plain"]);
         let p = parse_proposal(&md).unwrap();
-        let mut v = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
+        let mut v = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
         let ctx = PipelineContext {
             canary: Some(canary_for("p-test")),
             auditor_verdicts: vec![(
@@ -827,8 +936,17 @@ mod tests {
     fn gk_organic_proposal_untouched_by_pipeline_context() {
         let md = proposal_md("add-rule", "2>/dev/null", &["x 2>/dev/null"], &["plain"]);
         let p = parse_proposal(&md).unwrap();
-        let mut v = judge(&p, &held(), DEFAULT_PRECISION_FLOOR, "UNAVAILABLE".into(), None);
-        let ctx = PipelineContext { canary: None, auditor_verdicts: vec![] };
+        let mut v = judge(
+            &p,
+            &held(),
+            DEFAULT_PRECISION_FLOOR,
+            "UNAVAILABLE".into(),
+            None,
+        );
+        let ctx = PipelineContext {
+            canary: None,
+            auditor_verdicts: vec![],
+        };
         let alerts = apply_pipeline_context(&mut v, &ctx);
         assert_eq!(v.verdict, VerdictKind::AcceptFlagged);
         assert!(alerts.is_empty());
@@ -909,7 +1027,10 @@ pub fn cli_judge(
     let md = match std::fs::read_to_string(proposal_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("hex gatekeeper judge: cannot read {}: {e}", proposal_path.display());
+            eprintln!(
+                "hex gatekeeper judge: cannot read {}: {e}",
+                proposal_path.display()
+            );
             return 2;
         }
     };
@@ -930,7 +1051,10 @@ pub fn cli_judge(
     let corpus_src = match std::fs::read_to_string(corpus_path) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("hex gatekeeper judge: cannot read corpus {}: {e}", corpus_path.display());
+            eprintln!(
+                "hex gatekeeper judge: cannot read corpus {}: {e}",
+                corpus_path.display()
+            );
             return 2;
         }
     };
@@ -980,7 +1104,10 @@ pub fn cli_judge(
             ) {
                 Ok(c) => c,
                 Err(e) => {
-                    eprintln!("hex gatekeeper judge: cannot open boi db {} read-only: {e}", db.display());
+                    eprintln!(
+                        "hex gatekeeper judge: cannot open boi db {} read-only: {e}",
+                        db.display()
+                    );
                     return 2;
                 }
             };
@@ -999,16 +1126,14 @@ pub fn cli_judge(
         }
     };
 
-    let auditor_verdicts: Vec<(AuditorVerdictBlock, Option<String>)> =
-        parse_auditor_verdicts(&md)
-            .into_iter()
-            .map(|(av, parse_void)| {
-                let why = parse_void.or_else(|| {
-                    void_reason(&av, &prop.proposal.agent, boi_specs.as_ref())
-                });
-                (av, why)
-            })
-            .collect();
+    let auditor_verdicts: Vec<(AuditorVerdictBlock, Option<String>)> = parse_auditor_verdicts(&md)
+        .into_iter()
+        .map(|(av, parse_void)| {
+            let why =
+                parse_void.or_else(|| void_reason(&av, &prop.proposal.agent, boi_specs.as_ref()));
+            (av, why)
+        })
+        .collect();
 
     // Dial consult is computed by the main.rs glue (it owns the ledger->
     // OutcomeRow loader) and passed in — recorded, never upgrades (P1).
@@ -1022,7 +1147,10 @@ pub fn cli_judge(
 
     if let Some(out_path) = out {
         if let Err(e) = std::fs::write(out_path, &json) {
-            eprintln!("hex gatekeeper judge: write {} failed: {e}", out_path.display());
+            eprintln!(
+                "hex gatekeeper judge: write {} failed: {e}",
+                out_path.display()
+            );
             return 1;
         }
     }
@@ -1061,9 +1189,7 @@ pub fn cli_judge(
                 eprintln!("hex gatekeeper judge: ledger append failed: {e}");
             }
             for alert in &alerts {
-                eprintln!(
-                    "hex gatekeeper judge: CANARY APPROVED — {alert} (approvals voided)"
-                );
+                eprintln!("hex gatekeeper judge: CANARY APPROVED — {alert} (approvals voided)");
                 if let Err(e) = l.append("gatekeeper", "canary.approved", "alert", alert) {
                     eprintln!("hex gatekeeper judge: canary alert append failed: {e}");
                 }
@@ -1082,7 +1208,10 @@ pub fn cli_judge(
 /// ledger alert + exit 1, loudly.
 pub fn cli_probe(store_dir: &std::path::Path, hex_dir: &std::path::Path) -> i32 {
     if let Err(e) = std::fs::create_dir_all(store_dir) {
-        eprintln!("hex gatekeeper probe: create {} failed: {e}", store_dir.display());
+        eprintln!(
+            "hex gatekeeper probe: create {} failed: {e}",
+            store_dir.display()
+        );
         return 2;
     }
     if let Err(e) = set_mode(store_dir, 0o555) {

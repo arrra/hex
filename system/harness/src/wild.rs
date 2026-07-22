@@ -370,12 +370,7 @@ mod tests {
     use crate::ledger::Ledger;
     use serde_json::json;
 
-    fn seed(
-        l: &Ledger,
-        agent: &str,
-        kind: &str,
-        payload: serde_json::Value,
-    ) {
+    fn seed(l: &Ledger, agent: &str, kind: &str, payload: serde_json::Value) {
         l.append(agent, "verify-gate", kind, &payload).unwrap();
     }
 
@@ -417,14 +412,37 @@ mod tests {
         seed(&l, "lint-gates", "intent", intent("g-fp", "fail"));
         seed(&l, "lint-gates", "intent", intent("g-fn", "pass"));
         seed(&l, "lint-gates", "intent", intent("g-tn", "pass"));
-        seed(&l, "reconciler", "outcome", outcome("g-tp", false, "2026-06-10T01:00:00+00:00"));
-        seed(&l, "reconciler", "outcome", outcome("g-fp", true, "2026-06-10T01:00:00+00:00"));
-        seed(&l, "reconciler", "outcome", outcome("g-fn", false, "2026-06-10T01:00:00+00:00"));
-        seed(&l, "reconciler", "outcome", outcome("g-tn", true, "2026-06-10T01:00:00+00:00"));
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-tp", false, "2026-06-10T01:00:00+00:00"),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-fp", true, "2026-06-10T01:00:00+00:00"),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-fn", false, "2026-06-10T01:00:00+00:00"),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-tn", true, "2026-06-10T01:00:00+00:00"),
+        );
         let r = wild_report(&p, None, None).unwrap();
         assert_eq!(r.summary.distinct_gates, 4);
         assert_eq!(r.summary.joined, 4);
-        assert_eq!((r.summary.tp, r.summary.fp, r.summary.fn_, r.summary.tn), (1, 1, 1, 1));
+        assert_eq!(
+            (r.summary.tp, r.summary.fp, r.summary.fn_, r.summary.tn),
+            (1, 1, 1, 1)
+        );
         assert_eq!(r.summary.precision, Some(0.5));
         assert_eq!(r.summary.misses, 1);
         let miss_gate = r.gates.iter().find(|g| g.gate_hash == "g-fn").unwrap();
@@ -437,7 +455,12 @@ mod tests {
         let l = Ledger::open(&p).unwrap();
         // The idempotency debt: same outcome re-appended 3 times.
         for _ in 0..3 {
-            seed(&l, "reconciler", "outcome", outcome("g-dup", false, "2026-06-10T01:00:00+00:00"));
+            seed(
+                &l,
+                "reconciler",
+                "outcome",
+                outcome("g-dup", false, "2026-06-10T01:00:00+00:00"),
+            );
         }
         let r = wild_report(&p, None, None).unwrap();
         assert_eq!(r.summary.distinct_gates, 1);
@@ -447,13 +470,31 @@ mod tests {
     fn wild_latest_event_wins_per_gate() {
         let (_d, p) = tmpdb();
         let l = Ledger::open(&p).unwrap();
-        seed(&l, "reconciler", "outcome", outcome("g-re", false, "2026-06-10T01:00:00+00:00"));
-        seed(&l, "reconciler", "outcome", outcome("g-re", true, "2026-06-10T05:00:00+00:00"));
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-re", false, "2026-06-10T01:00:00+00:00"),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-re", true, "2026-06-10T05:00:00+00:00"),
+        );
         // An older re-append AFTER the newer event must not regress it.
-        seed(&l, "reconciler", "outcome", outcome("g-re", false, "2026-06-10T01:00:00+00:00"));
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-re", false, "2026-06-10T01:00:00+00:00"),
+        );
         let r = wild_report(&p, None, None).unwrap();
         assert_eq!(r.summary.distinct_gates, 1);
-        assert!(r.gates[0].success, "latest wild event (success=true) must win");
+        assert!(
+            r.gates[0].success,
+            "latest wild event (success=true) must win"
+        );
     }
 
     #[test]
@@ -461,8 +502,18 @@ mod tests {
         let (_d, p) = tmpdb();
         let l = Ledger::open(&p).unwrap();
         // Both rows APPENDED now, but their wild events are 1h apart.
-        seed(&l, "reconciler", "outcome", outcome("g-old", false, "2026-06-10T01:00:00+00:00"));
-        seed(&l, "reconciler", "outcome", outcome("g-new", false, "2026-06-10T03:00:00+00:00"));
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-old", false, "2026-06-10T01:00:00+00:00"),
+        );
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-new", false, "2026-06-10T03:00:00+00:00"),
+        );
         let since = chrono::DateTime::parse_from_rfc3339("2026-06-10T02:00:00+00:00")
             .unwrap()
             .timestamp();
@@ -476,7 +527,12 @@ mod tests {
     fn wild_unjoined_gate_excluded_from_matrix() {
         let (_d, p) = tmpdb();
         let l = Ledger::open(&p).unwrap();
-        seed(&l, "reconciler", "outcome", outcome("g-unseen", false, "2026-06-10T01:00:00+00:00"));
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-unseen", false, "2026-06-10T01:00:00+00:00"),
+        );
         let r = wild_report(&p, None, None).unwrap();
         assert_eq!(r.summary.distinct_gates, 1);
         assert_eq!(r.summary.joined, 0);
@@ -490,7 +546,12 @@ mod tests {
         let (_d, p) = tmpdb();
         let l = Ledger::open(&p).unwrap();
         seed(&l, "lint-gates", "intent", intent("g-a", "pass"));
-        seed(&l, "reconciler", "outcome", outcome("g-a", true, "2026-06-10T01:00:00+00:00"));
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-a", true, "2026-06-10T01:00:00+00:00"),
+        );
         let r = wild_report(&p, None, None).unwrap();
         assert_eq!(r.summary.precision, None);
     }
@@ -500,7 +561,12 @@ mod tests {
         let (_d, p) = tmpdb();
         let l = Ledger::open(&p).unwrap();
         seed(&l, "reconciler", "outcome", json!({"not_a_gate": true}));
-        seed(&l, "reconciler", "outcome", outcome("g-ok", true, "2026-06-10T01:00:00+00:00"));
+        seed(
+            &l,
+            "reconciler",
+            "outcome",
+            outcome("g-ok", true, "2026-06-10T01:00:00+00:00"),
+        );
         let r = wild_report(&p, None, None).unwrap();
         assert_eq!(r.summary.distinct_gates, 1);
         assert_eq!(r.summary.malformed_skipped, 1);

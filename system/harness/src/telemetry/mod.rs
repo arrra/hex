@@ -105,7 +105,6 @@ pub fn db_exists() -> bool {
     db_path().map(|p| p.exists()).unwrap_or(false)
 }
 
-
 /// Append one event. ts is stamped at call time (UTC RFC3339).
 pub fn record(ev: &TelemetryEvent) -> rusqlite::Result<()> {
     let conn = open()?;

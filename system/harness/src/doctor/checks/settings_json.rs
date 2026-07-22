@@ -5,8 +5,12 @@ use std::fs;
 pub struct SettingsJsonValid;
 
 impl DoctorCheck for SettingsJsonValid {
-    fn name(&self) -> &str { "settings-json" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "settings-json"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let path = ctx.hex_dir.join(".hex/settings.json");
         if !path.is_file() {

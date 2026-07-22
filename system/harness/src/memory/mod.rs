@@ -1,3 +1,4 @@
+pub mod assemble;
 pub mod claude_cli;
 pub mod consolidate;
 pub mod distill;
@@ -8,9 +9,8 @@ pub mod maintain_facts;
 pub mod parse_transcripts;
 pub mod predicates;
 pub mod provider;
-pub mod recent;
-pub mod assemble;
 pub mod recall;
+pub mod recent;
 pub mod rrf;
 pub mod schema;
 pub mod search;

@@ -165,31 +165,25 @@ pub fn run_env_command(command: EnvCommands) {
             }
         },
         EnvCommands::Path { hex_dir } => {
-            let hd = hex_dir
-                .or_else(|| detect_hex_dir(None))
-                .unwrap_or_else(|| {
-                    eprintln!("ERROR: cannot determine HEX_DIR for PATH composition");
-                    std::process::exit(1);
-                });
+            let hd = hex_dir.or_else(|| detect_hex_dir(None)).unwrap_or_else(|| {
+                eprintln!("ERROR: cannot determine HEX_DIR for PATH composition");
+                std::process::exit(1);
+            });
             println!("{}", compose_path(&hd));
         }
         EnvCommands::Tz { hex_dir } => {
-            let hd = hex_dir
-                .or_else(|| detect_hex_dir(None))
-                .unwrap_or_else(|| {
-                    eprintln!("ERROR: cannot determine HEX_DIR for TZ lookup");
-                    std::process::exit(1);
-                });
+            let hd = hex_dir.or_else(|| detect_hex_dir(None)).unwrap_or_else(|| {
+                eprintln!("ERROR: cannot determine HEX_DIR for TZ lookup");
+                std::process::exit(1);
+            });
             // No trailing newline — shim uses $(...) interpolation
             print!("{}", lookup_tz(&hd));
         }
         EnvCommands::Show { hex_dir } => {
-            let hd = hex_dir
-                .or_else(|| detect_hex_dir(None))
-                .unwrap_or_else(|| {
-                    eprintln!("ERROR: cannot determine HEX_DIR");
-                    std::process::exit(1);
-                });
+            let hd = hex_dir.or_else(|| detect_hex_dir(None)).unwrap_or_else(|| {
+                eprintln!("ERROR: cannot determine HEX_DIR");
+                std::process::exit(1);
+            });
             println!("HEX_DIR   = {}", hd.display());
             println!("AGENT_DIR = {}", hd.display());
             println!("HEX_ROOT  = {}", hd.display());

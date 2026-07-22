@@ -145,7 +145,14 @@ pub fn run_on_file(
                     "[distill] POISON SLICE SKIP: file={} bytes={}..{} strikes={} budget_tokens={} reason={}",
                     path, offset, slice_end_offset, new_strikes, budget, e
                 );
-                telemetry_slice(path, offset, cap_len as i64, est_tokens, "skipped", new_strikes);
+                telemetry_slice(
+                    path,
+                    offset,
+                    cap_len as i64,
+                    est_tokens,
+                    "skipped",
+                    new_strikes,
+                );
                 let tx = conn.transaction()?;
                 watermark::advance_offset(&tx, path, slice_end_offset)?;
                 watermark::set_strikes(&tx, path, 0)?;
@@ -155,7 +162,14 @@ pub fn run_on_file(
                     "[distill] extract failed (strike {} of {}): file={} budget_tokens={} err={}",
                     new_strikes, STRIKE_LIMIT, path, budget, e
                 );
-                telemetry_slice(path, offset, cap_len as i64, est_tokens, "failed", new_strikes);
+                telemetry_slice(
+                    path,
+                    offset,
+                    cap_len as i64,
+                    est_tokens,
+                    "failed",
+                    new_strikes,
+                );
                 watermark::set_strikes(conn, path, new_strikes)?;
             }
             return Ok(report);

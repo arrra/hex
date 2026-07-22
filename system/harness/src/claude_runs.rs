@@ -248,8 +248,7 @@ fn known_profile_names() -> Vec<String> {
 /// `hex_dir` is the workspace root (where `.hex/config/claude-runs.toml`
 /// lives). Pass `None` to skip the config file entirely (built-ins only).
 pub fn resolve(profile: &str, hex_dir: Option<&Path>) -> Result<ResolvedRun, ClaudeRunsError> {
-    let config_path =
-        hex_dir.map(|d| d.join(".hex").join("config").join("claude-runs.toml"));
+    let config_path = hex_dir.map(|d| d.join(".hex").join("config").join("claude-runs.toml"));
 
     // If the config file exists, parse it.
     let parsed = match &config_path {
@@ -469,9 +468,9 @@ fn parse_str_list(val: &str, line_no: usize) -> Result<Vec<String>, String> {
 /// eval-style substitution: `claude $(hex claude-flags X) -p ...`.
 pub fn shell_quote(arg: &str) -> String {
     if !arg.is_empty()
-        && arg
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | ',' | '=' | ':'))
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | ',' | '=' | ':')
+        })
     {
         return arg.to_string();
     }

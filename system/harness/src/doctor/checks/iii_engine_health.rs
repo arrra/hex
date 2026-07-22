@@ -24,17 +24,19 @@ const HARNESS_LABEL: &str = "com.hex.harness";
 pub struct IiiEngineHealth;
 
 impl DoctorCheck for IiiEngineHealth {
-    fn name(&self) -> &str { "iii-engine-health" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "iii-engine-health"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, _ctx: &Context) -> CheckResult {
         // The engine runs inside com.hex.harness, installed as a per-user
         // service (launchd LaunchAgent on macOS, systemd user unit on Linux).
         // daemon-green owns that distinction — ask it, don't probe plists.
         match daemon_green::native().status(HARNESS_LABEL) {
             Ok(daemon_green::ServiceStatus::NotInstalled) => {
-                return CheckResult::skip(
-                    "com.hex.harness not installed — engine check skipped",
-                );
+                return CheckResult::skip("com.hex.harness not installed — engine check skipped");
             }
             Ok(_) => {
                 // Installed (running, stopped, or failed) — the liveness probe
@@ -72,7 +74,11 @@ mod tests {
     use std::path::PathBuf;
 
     fn ctx() -> Context {
-        Context { hex_dir: PathBuf::from("/tmp/fake-hex"), home: PathBuf::from("/tmp"), fix: false }
+        Context {
+            hex_dir: PathBuf::from("/tmp/fake-hex"),
+            home: PathBuf::from("/tmp"),
+            fix: false,
+        }
     }
 
     #[test]

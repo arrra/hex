@@ -142,7 +142,13 @@ fn append_row(hex_dir: &Path, payload: &serde_json::Value) -> Result<()> {
 
 /// Register a charter file: the genesis row anchoring its CURRENT content.
 /// Refuses if the name is already registered (use `amend`/`rebaseline`).
-pub fn register(hex_dir: &Path, name: &str, rel_path: &str, by: &str, why: &str) -> Result<CharterState> {
+pub fn register(
+    hex_dir: &Path,
+    name: &str,
+    rel_path: &str,
+    by: &str,
+    why: &str,
+) -> Result<CharterState> {
     if latest_states(hex_dir)?.contains_key(name) {
         return Err(anyhow!(
             "charter: '{name}' is already registered — use amend (or rebaseline after drift)"
@@ -158,13 +164,25 @@ pub fn register(hex_dir: &Path, name: &str, rel_path: &str, by: &str, why: &str)
         }),
     )?;
     set_readonly(&path, true);
-    Ok(CharterState { name: name.into(), path: rel_path.into(), version: 1, sha256: sha, ts: 0 })
+    Ok(CharterState {
+        name: name.into(),
+        path: rel_path.into(),
+        version: 1,
+        sha256: sha,
+        ts: 0,
+    })
 }
 
 /// Amend a registered charter: the ONLY sanctioned write path. Refuses if the
 /// on-disk file has drifted from the last recorded hash — reconcile first
 /// (rebaseline) so the trail never silently absorbs an out-of-band edit.
-pub fn amend(hex_dir: &Path, name: &str, new_content_file: &Path, by: &str, why: &str) -> Result<CharterState> {
+pub fn amend(
+    hex_dir: &Path,
+    name: &str,
+    new_content_file: &Path,
+    by: &str,
+    why: &str,
+) -> Result<CharterState> {
     let states = latest_states(hex_dir)?;
     let cur = states
         .get(name)
@@ -180,11 +198,18 @@ pub fn amend(hex_dir: &Path, name: &str, new_content_file: &Path, by: &str, why:
             cur.sha256
         ));
     }
-    let new_body = std::fs::read_to_string(new_content_file)
-        .map_err(|e| anyhow!("charter: read new content {}: {e}", new_content_file.display()))?;
+    let new_body = std::fs::read_to_string(new_content_file).map_err(|e| {
+        anyhow!(
+            "charter: read new content {}: {e}",
+            new_content_file.display()
+        )
+    })?;
     let new_sha = sha256_hex(&new_body);
     if new_sha == cur.sha256 {
-        return Err(anyhow!("charter: '{name}' new content is identical to v{} — nothing to amend", cur.version));
+        return Err(anyhow!(
+            "charter: '{name}' new content is identical to v{} — nothing to amend",
+            cur.version
+        ));
     }
     set_readonly(&path, false);
     std::fs::write(&path, &new_body)
@@ -198,7 +223,13 @@ pub fn amend(hex_dir: &Path, name: &str, new_content_file: &Path, by: &str, why:
             "sha256_before": cur.sha256, "sha256_after": new_sha, "by": by, "why": why,
         }),
     )?;
-    Ok(CharterState { name: name.into(), path: cur.path.clone(), version, sha256: new_sha, ts: 0 })
+    Ok(CharterState {
+        name: name.into(),
+        path: cur.path.clone(),
+        version,
+        sha256: new_sha,
+        ts: 0,
+    })
 }
 
 /// Accept an out-of-band edit into the trail, explicitly and loudly. The row
@@ -212,7 +243,9 @@ pub fn rebaseline(hex_dir: &Path, name: &str, by: &str, why: &str) -> Result<Cha
     let path = abs_path(hex_dir, &cur.path);
     let on_disk = file_sha256(&path)?;
     if on_disk == cur.sha256 {
-        return Err(anyhow!("charter: '{name}' has not drifted — nothing to rebaseline"));
+        return Err(anyhow!(
+            "charter: '{name}' has not drifted — nothing to rebaseline"
+        ));
     }
     let version = cur.version + 1;
     append_row(
@@ -224,7 +257,13 @@ pub fn rebaseline(hex_dir: &Path, name: &str, by: &str, why: &str) -> Result<Cha
         }),
     )?;
     set_readonly(&path, true);
-    Ok(CharterState { name: name.into(), path: cur.path.clone(), version, sha256: on_disk, ts: 0 })
+    Ok(CharterState {
+        name: name.into(),
+        path: cur.path.clone(),
+        version,
+        sha256: on_disk,
+        ts: 0,
+    })
 }
 
 /// Verify every registered charter against the ledger. Returns the drifted
@@ -249,7 +288,9 @@ pub fn verify(hex_dir: &Path, alert: bool) -> Result<Vec<Drift>> {
                 d.name,
                 d.version,
                 d.expected_sha256,
-                d.actual_sha256.as_deref().unwrap_or("<file missing/unreadable>"),
+                d.actual_sha256
+                    .as_deref()
+                    .unwrap_or("<file missing/unreadable>"),
             );
             if alert {
                 append_row_kind(
@@ -277,16 +318,16 @@ pub fn log(hex_dir: &Path, name: Option<&str>) -> Result<Vec<(i64, serde_json::V
         return Ok(Vec::new());
     }
     let conn = open_ro(&db)?;
-    let mut stmt = conn.prepare(
-        "SELECT ts, payload FROM ledger WHERE action_class = ?1 ORDER BY id ASC",
-    )?;
+    let mut stmt =
+        conn.prepare("SELECT ts, payload FROM ledger WHERE action_class = ?1 ORDER BY id ASC")?;
     let rows = stmt.query_map([ACTION_CLASS], |r| {
         Ok((r.get::<_, i64>(0)?, r.get::<_, String>(1)?))
     })?;
     let mut out = Vec::new();
     for row in rows {
         let (ts, raw) = row?;
-        let v: serde_json::Value = serde_json::from_str(&raw).unwrap_or(serde_json::json!({"malformed": raw}));
+        let v: serde_json::Value =
+            serde_json::from_str(&raw).unwrap_or(serde_json::json!({"malformed": raw}));
         if let Some(n) = name {
             if v.get("name").and_then(|x| x.as_str()) != Some(n) {
                 continue;
@@ -312,12 +353,26 @@ mod tests {
     #[test]
     fn register_amend_verify_log_roundtrip() {
         let (_g, hex_dir) = setup();
-        let st = register(&hex_dir, "proposer", "charters/proposer.md", "test", "genesis").unwrap();
+        let st = register(
+            &hex_dir,
+            "proposer",
+            "charters/proposer.md",
+            "test",
+            "genesis",
+        )
+        .unwrap();
         assert_eq!(st.version, 1);
         // Clean right after register.
         assert!(verify(&hex_dir, false).unwrap().is_empty());
         // Double-register refused.
-        assert!(register(&hex_dir, "proposer", "charters/proposer.md", "test", "again").is_err());
+        assert!(register(
+            &hex_dir,
+            "proposer",
+            "charters/proposer.md",
+            "test",
+            "again"
+        )
+        .is_err());
 
         // Sanctioned amend: new content via the CLI path only.
         let new = hex_dir.join("new.md");
@@ -344,7 +399,14 @@ mod tests {
     #[test]
     fn out_of_band_edit_is_drift_and_blocks_amend() {
         let (_g, hex_dir) = setup();
-        register(&hex_dir, "proposer", "charters/proposer.md", "test", "genesis").unwrap();
+        register(
+            &hex_dir,
+            "proposer",
+            "charters/proposer.md",
+            "test",
+            "genesis",
+        )
+        .unwrap();
         // Tamper out-of-band (flip writable first, as any editor would).
         let p = hex_dir.join("charters/proposer.md");
         set_readonly(&p, false);
@@ -375,7 +437,14 @@ mod tests {
     #[test]
     fn missing_file_is_drift_and_alert_rows_land() {
         let (_g, hex_dir) = setup();
-        register(&hex_dir, "proposer", "charters/proposer.md", "test", "genesis").unwrap();
+        register(
+            &hex_dir,
+            "proposer",
+            "charters/proposer.md",
+            "test",
+            "genesis",
+        )
+        .unwrap();
         let p = hex_dir.join("charters/proposer.md");
         set_readonly(&p, false);
         std::fs::remove_file(&p).unwrap();

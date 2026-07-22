@@ -213,7 +213,10 @@ pub fn generate(
     })?;
 
     if envelope.get("is_error").and_then(|v| v.as_bool()) == Some(true) {
-        let result_text = envelope.get("result").and_then(|v| v.as_str()).unwrap_or("");
+        let result_text = envelope
+            .get("result")
+            .and_then(|v| v.as_str())
+            .unwrap_or("");
         let combined = format!(
             "claude -p reported is_error=true; result={result_text}; envelope={envelope}; stderr_tail={}",
             tail(&stderr, 800),
@@ -236,8 +239,18 @@ pub fn generate(
             .and_then(|v| v.as_f64())
             .unwrap_or(0.0);
         eprintln!("claude-cli[{use_case}]: in={in_tok} out={out_tok} cost_usd={cost}");
-        let model_str = envelope.get("model").and_then(|v| v.as_str()).unwrap_or(model);
-        crate::llm_cost::record_llm_cost("claude-cli", use_case, in_tok, out_tok, cost, Some(model_str));
+        let model_str = envelope
+            .get("model")
+            .and_then(|v| v.as_str())
+            .unwrap_or(model);
+        crate::llm_cost::record_llm_cost(
+            "claude-cli",
+            use_case,
+            in_tok,
+            out_tok,
+            cost,
+            Some(model_str),
+        );
     }
 
     let result = envelope
@@ -287,9 +300,7 @@ fn build_command(args: &[String], cwd: &Path) -> Command {
 /// stderr/stdout tail (S6 — no quiet failures).
 fn classify_error(stdout: &str, stderr: &str, combined: &str) -> ProviderError {
     let lower = format!("{stdout}\n{stderr}").to_lowercase();
-    if lower.contains("not logged in")
-        || lower.contains("invalid api key")
-        || lower.contains("401")
+    if lower.contains("not logged in") || lower.contains("invalid api key") || lower.contains("401")
     {
         ProviderError::Deferred(combined.to_string())
     } else {
@@ -366,8 +377,12 @@ fn run_with_timeout(
                     // and the read threads would block forever on EOF.
                     kill_process_tree(&mut child);
                     let _ = child.wait();
-                    let so = stdout_handle.and_then(|h| h.join().ok()).unwrap_or_default();
-                    let se = stderr_handle.and_then(|h| h.join().ok()).unwrap_or_default();
+                    let so = stdout_handle
+                        .and_then(|h| h.join().ok())
+                        .unwrap_or_default();
+                    let se = stderr_handle
+                        .and_then(|h| h.join().ok())
+                        .unwrap_or_default();
                     return Err(ProviderError::Upstream(format!(
                         "claude -p timed out after {}s; stdout_tail={}; stderr_tail={}",
                         timeout.as_secs(),
@@ -427,7 +442,8 @@ mod tests {
         assert_eq!(args[0], "-p");
         assert_eq!(args[1], "--strict-mcp-config");
         assert!(
-            args.iter().all(|a| a.starts_with("--") || a == "-p" || !a.contains(' ')),
+            args.iter()
+                .all(|a| a.starts_with("--") || a == "-p" || !a.contains(' ')),
             "no argv element may carry free prompt text"
         );
         assert!(args.iter().any(|a| a == "--strict-mcp-config"));
@@ -473,8 +489,7 @@ mod tests {
         let dir = tempfile::tempdir().unwrap();
         let p = dir.path().join("settings.json");
         std::fs::write(&p, "{}").unwrap();
-        let v =
-            settings_arg_value(Some(p.to_str().unwrap())).expect("existing file path ok");
+        let v = settings_arg_value(Some(p.to_str().unwrap())).expect("existing file path ok");
         assert_eq!(v, p.to_str().unwrap());
     }
 
@@ -609,8 +624,8 @@ JSON
         .expect("shim should succeed");
         assert_eq!(out, "shim-says-hello");
 
-        let dump = std::fs::read_to_string(dump_dir.path().join("dump.txt"))
-            .expect("shim wrote dump");
+        let dump =
+            std::fs::read_to_string(dump_dir.path().join("dump.txt")).expect("shim wrote dump");
         // Args must include the verified flags — and the prompt must arrive
         // on STDIN, never in argv (mrap/hex#7: argv is capped at 128 KB per
         // string on Linux; default distill slices are ~168 KB).
@@ -618,7 +633,9 @@ JSON
         assert!(dump.contains("ARGV[2]=--strict-mcp-config"));
         assert!(dump.contains("STDIN=hello-prompt"));
         assert!(
-            !dump.lines().any(|l| l.starts_with("ARGV[") && l.contains("hello-prompt")),
+            !dump
+                .lines()
+                .any(|l| l.starts_with("ARGV[") && l.contains("hello-prompt")),
             "prompt must not appear in any argv element, dump: {dump}"
         );
         assert!(dump.contains("=--strict-mcp-config"));
@@ -650,7 +667,9 @@ JSON
             .expect("PWD line present");
         let pwd = pwd_line.trim_start_matches("PWD=");
         assert_ne!(
-            PathBuf::from(pwd).canonicalize().unwrap_or_else(|_| pwd.into()),
+            PathBuf::from(pwd)
+                .canonicalize()
+                .unwrap_or_else(|_| pwd.into()),
             shim_dir
                 .path()
                 .canonicalize()
@@ -817,12 +836,9 @@ sleep 30
         std::env::set_var("PATH", &new_path);
 
         let cwd_guard = tempfile::tempdir().unwrap();
-        let child = build_command(
-            &build_args("{}", "claude-sonnet-4-5"),
-            cwd_guard.path(),
-        )
-        .spawn()
-        .expect("spawn shim");
+        let child = build_command(&build_args("{}", "claude-sonnet-4-5"), cwd_guard.path())
+            .spawn()
+            .expect("spawn shim");
         let start = std::time::Instant::now();
         let result = run_with_timeout(child, Duration::from_millis(250));
         let elapsed = start.elapsed();

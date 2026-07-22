@@ -5,8 +5,12 @@ use std::fs;
 pub struct TodoMdExists;
 
 impl DoctorCheck for TodoMdExists {
-    fn name(&self) -> &str { "todo-md" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "todo-md"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let path = ctx.hex_dir.join("todo.md");
         if path.is_file() {

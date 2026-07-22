@@ -30,7 +30,11 @@ pub enum Mode {
 /// that were really lint findings taught us this (2026-06-11 assessment).
 fn exit_code_for(l1_findings: i32, any_error: bool) -> i32 {
     let _ = l1_findings; // reported in summary + artifacts, never exit-fatal
-    if any_error { 1 } else { 0 }
+    if any_error {
+        1
+    } else {
+        0
+    }
 }
 
 const LOCK_POLL_INTERVAL: std::time::Duration = std::time::Duration::from_secs(15);
@@ -149,27 +153,30 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
                 any_error = true;
             }
             match crate::memory::consolidate::run(&mut conn) {
-            Ok(report) => {
-                println!(
-                    "Layer 2 ok={} failed={}",
-                    report.ok.len(),
-                    report.failed.len()
-                );
-                for (name, err) in &report.failed {
-                    eprintln!("Layer 2 op '{name}' FAILED: {err}");
+                Ok(report) => {
+                    println!(
+                        "Layer 2 ok={} failed={}",
+                        report.ok.len(),
+                        report.failed.len()
+                    );
+                    for (name, err) in &report.failed {
+                        eprintln!("Layer 2 op '{name}' FAILED: {err}");
+                    }
+                    if !report.failed.is_empty() {
+                        any_error = true;
+                    }
                 }
-                if !report.failed.is_empty() {
+                Err(e) => {
+                    eprintln!("Layer 2 hard-failed: {e}");
                     any_error = true;
                 }
             }
-            Err(e) => {
-                eprintln!("Layer 2 hard-failed: {e}");
-                any_error = true;
-            }
-            }
         }
         Err(e) => {
-            eprintln!("Layer 2 hard-failed: cannot open memory.db at {}: {e}", db_path.display());
+            eprintln!(
+                "Layer 2 hard-failed: cannot open memory.db at {}: {e}",
+                db_path.display()
+            );
             any_error = true;
         }
     }
@@ -289,8 +296,7 @@ pub(crate) fn write_audit_artifact(hex_dir: &Path, body: &str) -> Result<PathBuf
     if !audit.ends_with('\n') {
         audit.push('\n');
     }
-    fs::write(&audit_path, &audit)
-        .with_context(|| format!("write {}", audit_path.display()))?;
+    fs::write(&audit_path, &audit).with_context(|| format!("write {}", audit_path.display()))?;
 
     let mut log = fs::OpenOptions::new()
         .create(true)
@@ -426,7 +432,10 @@ mod tests {
         let code = run(Mode::Quick, true, dir.path());
         assert!(code == 0 || code == 1, "unexpected exit code {code}");
         assert!(
-            dir.path().join("evolution").join("consolidation-latest.log").exists(),
+            dir.path()
+                .join("evolution")
+                .join("consolidation-latest.log")
+                .exists(),
             "Layer 1 must write consolidation-latest.log"
         );
     }
@@ -440,8 +449,7 @@ mod tests {
         // NEVER modifies CLAUDE.md or me/learnings.md.
         let dir = fake_hex_dir();
         let claude_before = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
-        let learn_before =
-            fs::read_to_string(dir.path().join("me").join("learnings.md")).unwrap();
+        let learn_before = fs::read_to_string(dir.path().join("me").join("learnings.md")).unwrap();
 
         let body = "## Audit\n- REMOVE: stale rule\n- MERGE: duplicate rule\n";
         let audit_path = super::write_audit_artifact(dir.path(), body)
@@ -479,14 +487,16 @@ mod tests {
             .path()
             .join("evolution")
             .join(format!("consolidation-log-{date_part}.md"));
-        assert!(log_path.exists(), "consolidation-log-{date_part}.md must exist");
+        assert!(
+            log_path.exists(),
+            "consolidation-log-{date_part}.md must exist"
+        );
         let log = fs::read_to_string(&log_path).unwrap();
         assert!(!log.trim().is_empty(), "log entry must be appended");
 
         // Source operating-model files must NOT be modified.
         let claude_after = fs::read_to_string(dir.path().join("CLAUDE.md")).unwrap();
-        let learn_after =
-            fs::read_to_string(dir.path().join("me").join("learnings.md")).unwrap();
+        let learn_after = fs::read_to_string(dir.path().join("me").join("learnings.md")).unwrap();
         assert_eq!(claude_before, claude_after, "CLAUDE.md must not be edited");
         assert_eq!(learn_before, learn_after, "learnings.md must not be edited");
     }

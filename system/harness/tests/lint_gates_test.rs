@@ -21,9 +21,7 @@ use hex::lint_gates;
 fn lint_flags_stderr_swallow_footgun() {
     // `2>/dev/null` hides stderr and is one of the CLAUDE.md verify-gate
     // footguns — the rule MUST fire and the prediction MUST be Fail.
-    let v = lint_gates::analyze_command(
-        "cargo test --quiet 2>/dev/null && grep -q foo src/bar.rs",
-    );
+    let v = lint_gates::analyze_command("cargo test --quiet 2>/dev/null && grep -q foo src/bar.rs");
     assert!(
         matches!(v.predicted, lint_gates::Prediction::Fail),
         "stderr-swallowing footgun must predict Fail, got {:?}",
@@ -60,8 +58,15 @@ fn lint_normalize_collapses_whitespace_for_hash() {
 
     let ha = lint_gates::content_hash("  cargo   test   --quiet   ");
     let hb = lint_gates::content_hash("cargo test --quiet");
-    assert_eq!(ha, hb, "content_hash must be invariant under whitespace normalization");
-    assert_eq!(ha.len(), 64, "content_hash must be a 64-char sha256 hex digest");
+    assert_eq!(
+        ha, hb,
+        "content_hash must be invariant under whitespace normalization"
+    );
+    assert_eq!(
+        ha.len(),
+        64,
+        "content_hash must be a 64-char sha256 hex digest"
+    );
 }
 
 #[test]
