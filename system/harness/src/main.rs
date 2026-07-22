@@ -130,6 +130,13 @@ enum Commands {
         #[command(subcommand)]
         command: MessagesCommands,
     },
+    /// Pending human-action queue: file items agents are blocked on, ping the
+    /// operator by urgency over iMessage, and roll everything into a daily digest.
+    #[command(display_order = 4)]
+    Hitl {
+        #[command(subcommand)]
+        command: HitlCommands,
+    },
     /// Print resolved `claude -p` flags for a lean-run profile (spec Sf5bj7y1d).
     ///
     /// Reads built-in profiles plus optional
@@ -630,6 +637,62 @@ enum TelemetryCommands {
 }
 
 #[derive(Subcommand)]
+enum HitlCommands {
+    /// File a new pending-human-action item. Prints the new id.
+    Add {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        title: String,
+        /// Urgency: P1 | P2 | P3
+        #[arg(long)]
+        priority: String,
+        /// Optional deadline (YYYY-MM-DD)
+        #[arg(long)]
+        deadline: Option<String>,
+        /// Optional estimate in minutes
+        #[arg(long)]
+        est: Option<u32>,
+        /// Optional comma-separated ids this item is blocked by
+        #[arg(long = "depends-on")]
+        depends_on: Option<String>,
+        /// Markdown body (exact steps + links). `--body -` reads stdin.
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// List open + snoozed items (default); `--all` includes closed.
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show one item in full, including its body.
+    Show { id: u64 },
+    /// Close an item as done.
+    Done {
+        id: u64,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Close an item as skipped.
+    Skip {
+        id: u64,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Snooze an item until a date (YYYY-MM-DD): silent until then.
+    Snooze {
+        id: u64,
+        #[arg(long)]
+        until: String,
+    },
+    /// Idempotent hourly entry point (launchd): send pings due now, plus the
+    /// daily digest when the hour matches and it has not gone out yet today.
+    Nudge,
+    /// Compose + send the digest unconditionally, right now.
+    Digest,
+}
+
+#[derive(Subcommand)]
 enum ResourcesCommands {
     /// One sampler tick: df (+du when due), evaluate rules, alert+emit on breach.
     Sample,
@@ -1121,6 +1184,9 @@ fn main() {
         },
         Commands::Messages { command } => {
             std::process::exit(run_messages(command));
+        }
+        Commands::Hitl { command } => {
+            std::process::exit(run_hitl(command));
         }
         Commands::Hook { command } => hook::run(command),
         Commands::Usage { command } => std::process::exit(usage::run(command)),
@@ -2435,6 +2501,415 @@ fn print_event_json(rows: &[telemetry::EventRow]) {
         })
         .collect();
     println!("{}", serde_json::to_string_pretty(&items).unwrap());
+}
+
+/// Resolve the hex workspace for the HITL queue.
+///
+/// Unlike [`get_hex_dir`], this does NOT require a `CLAUDE.md` marker: the queue
+/// is a self-contained set of files under `$HEX_DIR/.hex/hitl/` and must work in
+/// any directory the operator points `HEX_DIR` at (e.g. a scratch dir). Loud
+/// error only when there is nowhere at all to resolve.
+fn hitl_hex_dir() -> PathBuf {
+    if let Ok(v) = std::env::var("HEX_DIR") {
+        return PathBuf::from(v);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join("hex");
+    }
+    eprintln!("hex hitl: neither HEX_DIR nor HOME is set");
+    std::process::exit(1);
+}
+
+fn hitl_parse_id_list(s: Option<&str>) -> Result<Vec<u64>, String> {
+    let Some(s) = s else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    for part in s.split(',') {
+        let t = part.trim();
+        if t.is_empty() {
+            continue;
+        }
+        out.push(
+            t.parse::<u64>()
+                .map_err(|_| format!("invalid id {t:?} in --depends-on (want integers)"))?,
+        );
+    }
+    Ok(out)
+}
+
+fn hitl_resolve_body(body: Option<String>) -> Result<String, String> {
+    match body.as_deref() {
+        Some("-") => {
+            use std::io::Read;
+            let mut s = String::new();
+            io::stdin()
+                .read_to_string(&mut s)
+                .map_err(|e| format!("cannot read body from stdin: {e}"))?;
+            Ok(s)
+        }
+        Some(b) => Ok(b.to_string()),
+        None => Ok(String::new()),
+    }
+}
+
+fn hitl_is_blocked(it: &hex::hitl::store::Item, all: &[hex::hitl::store::Item]) -> bool {
+    it.depends_on.iter().any(|dep| {
+        all.iter()
+            .find(|o| o.id == *dep)
+            .map(|o| !o.status.is_closed())
+            .unwrap_or(false)
+    })
+}
+
+fn hitl_truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{t}…")
+    }
+}
+
+fn hitl_state_file(hex_dir: &std::path::Path, name: &str) -> PathBuf {
+    hex::hitl::store::state_dir(hex_dir).join(name)
+}
+
+fn hitl_ping_count(hex_dir: &std::path::Path, day: &str) -> u32 {
+    std::fs::read_to_string(hitl_state_file(hex_dir, &format!("pings-{day}")))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+fn hitl_incr_ping_count(hex_dir: &std::path::Path, day: &str) {
+    let dir = hex::hitl::store::state_dir(hex_dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("hex hitl: cannot create {}: {e}", dir.display());
+        return;
+    }
+    let next = hitl_ping_count(hex_dir, day) + 1;
+    let p = hitl_state_file(hex_dir, &format!("pings-{day}"));
+    if let Err(e) = std::fs::write(&p, next.to_string()) {
+        eprintln!("hex hitl: cannot write {}: {e}", p.display());
+    }
+}
+
+fn hitl_digest_sent(hex_dir: &std::path::Path, day: &str) -> bool {
+    hitl_state_file(hex_dir, &format!("digest-sent-{day}")).exists()
+}
+
+fn hitl_mark_digest_sent(hex_dir: &std::path::Path, day: &str) {
+    let dir = hex::hitl::store::state_dir(hex_dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("hex hitl: cannot create {}: {e}", dir.display());
+        return;
+    }
+    let p = hitl_state_file(hex_dir, &format!("digest-sent-{day}"));
+    if let Err(e) = std::fs::write(&p, b"") {
+        eprintln!("hex hitl: cannot write {}: {e}", p.display());
+    }
+}
+
+/// Send the pings due right now. When `only_id` is set (the `add` path), restrict
+/// to that freshly-filed item so filing one item never fires unrelated pings.
+fn hitl_process_pings(
+    hex_dir: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+    only_id: Option<u64>,
+) -> Result<(), String> {
+    use hex::hitl::{policy, store, transport};
+
+    let cfg = store::load_config(hex_dir)?;
+
+    // Durably wake lapsed snoozes so the policy/digest treat them as open.
+    let items = store::load_items(hex_dir)?;
+    for it in &items {
+        if it.status == store::Status::Snoozed {
+            if let Some(until) = it.snooze_until {
+                if now.date_naive() >= until {
+                    let _ = store::reopen(hex_dir, it.id, now);
+                }
+            }
+        }
+    }
+    let items = store::load_items(hex_dir)?;
+
+    let day = now.format("%Y-%m-%d").to_string();
+    let sent_today = hitl_ping_count(hex_dir, &day);
+    let digest_done = hitl_digest_sent(hex_dir, &day);
+
+    let mut actions = policy::pings_due(&items, &cfg, now, sent_today, digest_done);
+    if let Some(id) = only_id {
+        actions.retain(|a| a.item_id == id);
+    }
+
+    let sender = transport::OsascriptSender;
+    for a in actions {
+        let Some(it) = items.iter().find(|i| i.id == a.item_id) else {
+            continue;
+        };
+        let text = format!(
+            "HITL {} — [{}] {} · {} (hex hitl show {})",
+            a.reason.as_str(),
+            it.priority,
+            it.title,
+            it.project,
+            it.id
+        );
+        transport::send(hex_dir, &cfg, &sender, Some(it.id), "ping", &text);
+        let _ = store::mark_pinged(hex_dir, it.id, now);
+        hitl_incr_ping_count(hex_dir, &day);
+    }
+    Ok(())
+}
+
+/// Compose + send the digest now. Returns the open count if a digest was sent.
+fn hitl_send_digest(
+    hex_dir: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<usize>, String> {
+    use hex::hitl::{policy, store, transport};
+    let cfg = store::load_config(hex_dir)?;
+    let items = store::load_items(hex_dir)?;
+    match policy::compose_digest(&items, now) {
+        Some(digest) => {
+            let sender = transport::OsascriptSender;
+            transport::send(hex_dir, &cfg, &sender, None, "digest", &digest.render());
+            let day = now.format("%Y-%m-%d").to_string();
+            hitl_mark_digest_sent(hex_dir, &day);
+            Ok(Some(digest.total_open))
+        }
+        None => Ok(None),
+    }
+}
+
+fn hitl_close(
+    hex_dir: &std::path::Path,
+    id: u64,
+    status: hex::hitl::store::Status,
+    note: Option<String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> i32 {
+    match hex::hitl::store::close(hex_dir, id, status, note, now) {
+        Ok(it) => {
+            println!("hitl: item {} {}", it.id, it.status);
+            0
+        }
+        Err(e) => {
+            eprintln!("hex hitl: {e}");
+            1
+        }
+    }
+}
+
+fn run_hitl(command: HitlCommands) -> i32 {
+    use chrono::Timelike;
+    use hex::hitl::store;
+
+    let hex_dir = hitl_hex_dir();
+    let now = chrono::Utc::now();
+
+    match command {
+        HitlCommands::Add {
+            project,
+            title,
+            priority,
+            deadline,
+            est,
+            depends_on,
+            body,
+        } => {
+            let priority = match priority.parse::<store::Priority>() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("hex hitl add: {e}");
+                    return 2;
+                }
+            };
+            let deadline = match deadline {
+                Some(s) => match s.parse::<chrono::NaiveDate>() {
+                    Ok(d) => Some(d),
+                    Err(_) => {
+                        eprintln!("hex hitl add: invalid --deadline {s:?} (want YYYY-MM-DD)");
+                        return 2;
+                    }
+                },
+                None => None,
+            };
+            let depends_on = match hitl_parse_id_list(depends_on.as_deref()) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("hex hitl add: {e}");
+                    return 2;
+                }
+            };
+            let body = match hitl_resolve_body(body) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("hex hitl add: {e}");
+                    return 1;
+                }
+            };
+            let new = store::NewItem {
+                title,
+                project,
+                body,
+                priority: Some(priority),
+                deadline,
+                est_minutes: est,
+                depends_on,
+            };
+            let item = match store::create(&hex_dir, new, now) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("hex hitl add: {e}");
+                    return 1;
+                }
+            };
+            println!("{}", item.id);
+            if let Err(e) = hitl_process_pings(&hex_dir, now, Some(item.id)) {
+                eprintln!("hex hitl add: ping failed: {e}");
+            }
+            0
+        }
+        HitlCommands::List { all } => {
+            let items = match store::load_items(&hex_dir) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("hex hitl list: {e}");
+                    return 1;
+                }
+            };
+            let rows: Vec<&store::Item> = items
+                .iter()
+                .filter(|i| all || !i.status.is_closed())
+                .collect();
+            if rows.is_empty() {
+                println!("(no items)");
+                return 0;
+            }
+            println!(
+                "{:>3}  {:<3}  {:<14}  {:<32}  {:<10}  {}",
+                "id", "pri", "project", "title", "deadline", "blocked?"
+            );
+            for it in rows {
+                let blocked = if hitl_is_blocked(it, &items) {
+                    "blocked"
+                } else {
+                    ""
+                };
+                let deadline = it.deadline.map(|d| d.to_string()).unwrap_or_default();
+                println!(
+                    "{:>3}  {:<3}  {:<14}  {:<32}  {:<10}  {}",
+                    it.id,
+                    it.priority,
+                    hitl_truncate(&it.project, 14),
+                    hitl_truncate(&it.title, 32),
+                    deadline,
+                    blocked
+                );
+            }
+            0
+        }
+        HitlCommands::Show { id } => {
+            let it = match store::load_item(&hex_dir, id) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("hex hitl show: {e}");
+                    return 1;
+                }
+            };
+            println!("id:       {}", it.id);
+            println!("title:    {}", it.title);
+            println!("project:  {}", it.project);
+            println!("priority: {}", it.priority);
+            println!("status:   {}", it.status);
+            if let Some(d) = it.deadline {
+                println!("deadline: {d}");
+            }
+            if let Some(m) = it.est_minutes {
+                println!("est:      {m} min");
+            }
+            if !it.depends_on.is_empty() {
+                println!("depends:  {:?}", it.depends_on);
+            }
+            println!("created:  {}", it.created.to_rfc3339());
+            if let Some(s) = it.snooze_until {
+                println!("snoozed:  until {s}");
+            }
+            if let Some(c) = it.closed_at {
+                println!("closed:   {}", c.to_rfc3339());
+            }
+            if let Some(n) = &it.note {
+                println!("note:     {n}");
+            }
+            println!();
+            println!("{}", it.body);
+            0
+        }
+        HitlCommands::Done { id, note } => hitl_close(&hex_dir, id, store::Status::Done, note, now),
+        HitlCommands::Skip { id, note } => {
+            hitl_close(&hex_dir, id, store::Status::Skipped, note, now)
+        }
+        HitlCommands::Snooze { id, until } => {
+            let d = match until.parse::<chrono::NaiveDate>() {
+                Ok(d) => d,
+                Err(_) => {
+                    eprintln!("hex hitl snooze: invalid --until {until:?} (want YYYY-MM-DD)");
+                    return 2;
+                }
+            };
+            match store::snooze(&hex_dir, id, d, now) {
+                Ok(it) => {
+                    println!("hitl: item {} snoozed until {}", it.id, d);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("hex hitl snooze: {e}");
+                    1
+                }
+            }
+        }
+        HitlCommands::Nudge => {
+            if let Err(e) = hitl_process_pings(&hex_dir, now, None) {
+                eprintln!("hex hitl nudge: {e}");
+                return 1;
+            }
+            let cfg = match store::load_config(&hex_dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("hex hitl nudge: {e}");
+                    return 1;
+                }
+            };
+            let day = now.format("%Y-%m-%d").to_string();
+            if now.hour() == cfg.digest_hour && !hitl_digest_sent(&hex_dir, &day) {
+                match hitl_send_digest(&hex_dir, now) {
+                    Ok(Some(n)) => println!("hitl nudge: digest sent ({n} open)"),
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("hex hitl nudge: digest failed: {e}");
+                        return 1;
+                    }
+                }
+            }
+            println!("hitl nudge: done");
+            0
+        }
+        HitlCommands::Digest => match hitl_send_digest(&hex_dir, now) {
+            Ok(Some(n)) => {
+                println!("hitl digest: sent ({n} open)");
+                0
+            }
+            Ok(None) => {
+                println!("hitl digest: queue empty, nothing sent");
+                0
+            }
+            Err(e) => {
+                eprintln!("hex hitl digest: {e}");
+                1
+            }
+        },
+    }
 }
 
 fn run_messages(command: MessagesCommands) -> i32 {

@@ -19,6 +19,8 @@
 
 pub mod policy;
 pub mod store;
+pub mod transport;
 
 pub use policy::{compose_digest, pings_due, Digest, PingAction, PingReason};
 pub use store::{Config, Item, Mode, NewItem, Priority, Status};
+pub use transport::{Outcome, Sender};
