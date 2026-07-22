@@ -123,7 +123,12 @@ pub fn run(hex_root: &Path, args: &ParseArgs) -> i32 {
             content.push('\n');
             let first_ts = &session.messages[0].timestamp;
             let time_str = first_ts.format("%H:%M").to_string();
-            let id_prefix = &session.id[..session.id.len().min(8)];
+            // Char-safe truncation: `session.id` comes from the transcript
+            // filename stem (see `parse_jsonl`), which carries no ASCII
+            // guarantee, so a byte slice at offset 8 can land mid-char and
+            // panic. Taking 8 chars is boundary-safe and identical for the
+            // ASCII UUID stems produced in practice.
+            let id_prefix: String = session.id.chars().take(8).collect();
             content.push_str(&format!("### Session {}... — {}\n", id_prefix, time_str));
             content.push('\n');
 
@@ -249,6 +254,9 @@ fn collect_jsonl_files(dir: &Path) -> Vec<PathBuf> {
 fn parse_jsonl(path: &Path) -> Result<Session, String> {
     let content = fs::read_to_string(path).map_err(|e| format!("read error: {e}"))?;
 
+    // `Session.id` is whatever the transcript filename stem happens to be —
+    // in practice an ASCII UUID, but nothing here enforces that, so consumers
+    // must not byte-index it (see the char-safe truncation in `run`).
     let stem = path
         .file_stem()
         .unwrap_or_default()
@@ -356,5 +364,63 @@ fn extract_assistant_text(message: &Value) -> String {
             parts.join("\n\n")
         }
         _ => String::new(),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// Regression test for the char-boundary truncation audit (spec Sxx8h8nh8,
+    /// task T0c29fwfv). `Session.id` is built from `path.file_stem()` — an
+    /// untyped `String` with no enforced ASCII invariant — and then sliced at
+    /// `&session.id[..session.id.len().min(8)]` when rendering the markdown
+    /// header. If a transcript filename's stem contains a multi-byte char
+    /// spanning byte offset 8, that byte-index slice panics. Session ids are
+    /// ASCII UUIDs in every real transcript today, but nothing enforces that
+    /// at construction, so a specially named file can still crash
+    /// `hex memory parse-transcripts`.
+    #[test]
+    fn session_id_with_multibyte_char_does_not_panic() {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let transcript_dir = hex_root.join("raw/transcripts");
+        fs::create_dir_all(&transcript_dir).unwrap();
+
+        // 7 ASCII bytes + one 2-byte char ('é') = 9 bytes total, 8 chars.
+        // Byte offset 8 falls inside the 2-byte char, so it is not a char
+        // boundary — exactly the condition that panics the current slice.
+        let stem = "1234567é";
+        assert_eq!(stem.len(), 9, "fixture must be 9 bytes to hit offset 8");
+        assert!(
+            !stem.is_char_boundary(8),
+            "fixture must NOT be char-boundary-safe at byte 8"
+        );
+
+        let jsonl_path = transcript_dir.join(format!("{stem}.jsonl"));
+        fs::write(
+            &jsonl_path,
+            r#"{"type":"user","timestamp":"2026-01-01T00:00:00Z","message":{"content":"hello"}}"#,
+        )
+        .unwrap();
+
+        let args = ParseArgs {
+            file: None,
+            dry_run: false,
+            force: false,
+        };
+
+        // Must not panic while formatting the session header from a
+        // multi-byte session id.
+        let code = run(hex_root, &args);
+        assert_eq!(code, 0);
+
+        // And the truncation must be char-based: the whole 8-char stem is
+        // emitted intact, with no replacement chars or split code points.
+        let md = fs::read_to_string(transcript_dir.join("2026-01-01.md")).unwrap();
+        assert!(
+            md.contains("### Session 1234567é..."),
+            "expected char-safe session header, got:\n{md}"
+        );
     }
 }
