@@ -2016,6 +2016,14 @@ fn run_failures(window: i64, alert: bool) -> i32 {
             }
         }
     }
+    if report.malformed_rows > 0 {
+        // S6: corrupt events.db rows must be loud — they silently weaken the
+        // downtime analysis this whole probe exists for.
+        println!(
+            "\nMALFORMED ROWS ({}): events.db rows dropped from the downtime timeline (unreadable or bad ts) — inspect the telemetry store",
+            report.malformed_rows
+        );
+    }
     if !report.never_ran.is_empty() {
         bad = true; // visible during grace by design (proposal: defaults chosen)
         println!("\nNEVER-RAN cron fids ({}) — loud until first fire (note: core fids were renamed by the named-trigger change; old history lives under positional fids):",

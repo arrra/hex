@@ -95,6 +95,11 @@ pub struct Report {
     pub missed: Vec<Missed>,
     pub never_ran: Vec<CronExpectation>,
     pub downtime: Vec<Downtime>,
+    /// events.db rows dropped from the downtime timeline because the row
+    /// failed to read or its `ts` failed RFC3339 parsing. Nonzero means the
+    /// store has corrupt rows — surfaced loudly by the caller (S6); never
+    /// silently swallowed (2026-07-16 audit, finding hex:23).
+    pub malformed_rows: usize,
 }
 
 /// Evaluate expectations against events.db at `now`. `extra_excused` lets
@@ -121,15 +126,18 @@ pub fn evaluate(
         .unwrap_or(900);
     let lookback = (now - chrono::Duration::hours(36)).to_rfc3339();
     let mut stmt = conn.prepare("SELECT ts FROM events WHERE ts >= ?1 ORDER BY ts")?;
-    let times: Vec<DateTime<Utc>> = stmt
-        .query_map([&lookback], |r| r.get::<_, String>(0))?
-        .filter_map(|r| r.ok())
-        .filter_map(|s| {
-            DateTime::parse_from_rfc3339(&s)
-                .ok()
-                .map(|d| d.with_timezone(&Utc))
-        })
-        .collect();
+    let mut malformed_rows = 0usize;
+    let mut times: Vec<DateTime<Utc>> = Vec::new();
+    for r in stmt.query_map([&lookback], |r| r.get::<_, String>(0))? {
+        match r {
+            Ok(s) => match DateTime::parse_from_rfc3339(&s) {
+                Ok(d) => times.push(d.with_timezone(&Utc)),
+                Err(_) => malformed_rows += 1,
+            },
+            Err(_) => malformed_rows += 1,
+        }
+    }
+    report.malformed_rows = malformed_rows;
     let mut downtimes: Vec<(DateTime<Utc>, DateTime<Utc>)> = Vec::new();
     for pair in times.windows(2) {
         if (pair[1] - pair[0]).num_seconds() > 2 * shortest {
@@ -356,7 +364,7 @@ pub(crate) mod testutil {
         })
         .unwrap();
     }
-    fn conn() -> rusqlite::Connection {
+    pub fn conn() -> rusqlite::Connection {
         rusqlite::Connection::open(
             std::path::PathBuf::from(std::env::var("HEX_DIR").unwrap())
                 .join(".hex/telemetry/events.db"),
@@ -400,6 +408,29 @@ mod missed_tests {
         let report = evaluate(&exp, now, &[]).unwrap();
         assert_eq!(report.missed.len(), 1, "{:?}", report.missed);
         assert_eq!(report.missed[0].fid, "a::daily");
+    }
+
+    #[test]
+    fn malformed_event_rows_are_counted_not_silently_dropped() {
+        let (_t, _g) = crate::telemetry::test_support::isolate();
+        seed_schema();
+        let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
+        row("a::daily", now - Duration::hours(1), "ok", 1000);
+        // A corrupt ts must be COUNTED (S6), not silently vanish from the
+        // downtime timeline — audit 2026-07-16 finding hex:23.
+        conn()
+            .execute(
+                "INSERT INTO events (ts, source, event, status) VALUES (?1,?2,?3,?4)",
+                rusqlite::params!["not-a-timestamp", "w", "a::daily", "ok"],
+            )
+            .unwrap();
+        let exp = vec![CronExpectation {
+            worker: "a".into(),
+            fid: "a::daily".into(),
+            expr: "0 0 4 * * * *".into(),
+        }];
+        let report = evaluate(&exp, now, &[]).unwrap();
+        assert_eq!(report.malformed_rows, 1, "corrupt ts row must be counted");
     }
 
     #[test]
