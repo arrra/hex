@@ -373,12 +373,13 @@ fn parse_reflections(dir: &Path, stops: &HashSet<&'static str>) -> Vec<Entry> {
             continue;
         }
         let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
-        let date =
-            if fname.len() >= 10 && fname[..10].chars().all(|c| c.is_ascii_digit() || c == '-') {
-                Some(fname[..10].to_string())
-            } else {
-                None
-            };
+        // `get(..10)` returns None when byte 10 is not a char boundary, so a
+        // filename with a multi-byte char straddling that offset yields no
+        // date instead of panicking on the slice.
+        let date = fname
+            .get(..10)
+            .filter(|p| p.chars().all(|c| c.is_ascii_digit() || c == '-'))
+            .map(|p| p.to_string());
 
         let Ok(text) = fs::read_to_string(&path) else {
             continue;
@@ -723,4 +724,39 @@ pub fn run_promote(hex_dir: &Path, dry_run: bool) {
         new_count,
         if dry_run { " (dry-run)" } else { "" }
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // Regression test for a char-boundary panic in `parse_reflections`:
+    // the date-prefix check used `fname[..10]`, guarded only by
+    // `fname.len() >= 10` (a byte-length check). A filename with a
+    // multi-byte character straddling byte offset 10 panics on the slice
+    // even though the length guard passes. This filename places a 2-byte
+    // 'é' (U+00E9, UTF-8 bytes 0xC3 0xA9) at byte offsets 9..11, so byte
+    // index 10 lands mid-character.
+    #[test]
+    fn parse_reflections_handles_multibyte_char_at_byte_10() {
+        let dir = tempfile::tempdir().unwrap();
+        let fname = "202607-01é-note.md";
+        assert!(fname.len() >= 10, "fixture must exercise the len guard");
+        assert!(
+            !fname.is_char_boundary(10),
+            "fixture must place byte 10 mid-character"
+        );
+        fs::write(
+            dir.path().join(fname),
+            "## Reflection\n- something happened (2026-07-01)\n",
+        )
+        .unwrap();
+
+        let stops = stop_words();
+        // Must not panic, and since the byte-10 prefix isn't a clean
+        // ASCII date, the entry should carry no reflection-filename date.
+        let entries = parse_reflections(dir.path(), &stops);
+        assert_eq!(entries.len(), 1);
+        assert!(entries[0].dates.is_empty());
+    }
 }
