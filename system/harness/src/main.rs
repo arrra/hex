@@ -1847,11 +1847,22 @@ fn main() {
     }
 }
 
+/// Open the ledger DB with a bounded busy_timeout, mirroring
+/// `memory::open_db`'s rationale: the applier holds an fs2 flock across its
+/// write sequence, and SQLite's default busy_timeout of 0 makes a concurrent
+/// read fail instantly with SQLITE_BUSY instead of waiting out the writer
+/// (2026-07-16 audit, finding hex:24).
+fn open_ledger(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
+    let conn = rusqlite::Connection::open(path).map_err(|e| format!("open: {e}"))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("busy_timeout: {e}"))?;
+    Ok(conn)
+}
+
 /// Load every `outcome`-kind row from the ledger into [`hex::dial::OutcomeRow`]s.
 /// Errors loudly per S6 — no silent skip on a malformed row.
 fn load_outcome_rows(path: &std::path::Path) -> Result<Vec<hex::dial::OutcomeRow>, String> {
-    use rusqlite::Connection;
-    let conn = Connection::open(path).map_err(|e| format!("open: {e}"))?;
+    let conn = open_ledger(path)?;
     let mut stmt = conn
         .prepare("SELECT ts, agent, action_class, payload FROM ledger WHERE kind='outcome'")
         .map_err(|e| format!("prepare: {e}"))?;
@@ -2776,6 +2787,19 @@ fn module_set_enabled(name: &str, enable: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn open_ledger_sets_bounded_busy_timeout() {
+        // SQLite reports the effective timeout via PRAGMA busy_timeout; the
+        // default 0 is exactly the audit finding this guards against.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let conn = super::open_ledger(&db).expect("open");
+        let ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ms, 5000, "ledger opens must wait out a mid-write applier");
+    }
+
     use super::*;
     use clap::CommandFactory;
     use clap_complete::Shell;
