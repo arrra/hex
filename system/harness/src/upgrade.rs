@@ -958,6 +958,39 @@ fn setup_shell(hex_dir: &Path) {
         dirty = true;
     }
 
+    // Session launcher. The `hex-new` guard doubles as an opt-out: users who
+    // define their own hex-new in the rc keep their version.
+    if !content.contains("hex-new") {
+        lines.push(String::new());
+        lines.push("# hex session launcher — hex-new [name] [claude args...]".to_string());
+        lines.push(
+            "# Launches a hex session from $HEX_DIR with Remote Control enabled".to_string(),
+        );
+        lines.push(
+            "# (drive it from claude.ai/code or the mobile app; the client gates RC".to_string(),
+        );
+        lines.push(
+            "# off when unsupported). A name labels the session and its RC entry.".to_string(),
+        );
+        lines.push("# hex is session-less — context loads via hooks on attach.".to_string());
+        lines.push("hex-new() {".to_string());
+        lines.push(r#"  cd "$HEX_DIR" || return"#.to_string());
+        lines.push(r#"  if [ -n "$1" ] && [ "${1#-}" = "$1" ]; then"#.to_string());
+        lines.push(r#"    local name="$1"; shift"#.to_string());
+        lines.push(
+            r#"    command claude --dangerously-skip-permissions --name "$name" --remote-control "$name" "$@""#
+                .to_string(),
+        );
+        lines.push("  else".to_string());
+        lines.push(
+            r#"    command claude --dangerously-skip-permissions --remote-control "$@""#
+                .to_string(),
+        );
+        lines.push("  fi".to_string());
+        lines.push("}".to_string());
+        dirty = true;
+    }
+
     // Shell completions — sourced from the binary so they always match the
     // installed version. Self-contained (no fpath/compinit ordering deps).
     if !content.contains("hex completions") {
