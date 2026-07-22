@@ -276,10 +276,20 @@ fn is_generation_name(name: &str) -> bool {
     if bytes.len() != 23 || name.ends_with(".tmp") {
         return false;
     }
-    let (ts, rest) = name.split_at(16);
+    // Names come from `read_dir` on an on-disk workspace, so they are
+    // arbitrary UTF-8, not just our own generated names: a 23-byte name may
+    // have a multi-byte char straddling byte 16. `split_at_checked` returns
+    // `None` there instead of panicking.
+    let Some((ts, rest)) = name.split_at_checked(16) else {
+        return false;
+    };
     let Some(hex) = rest.strip_prefix('-') else {
         return false;
     };
+    // `ts` is exactly 16 bytes, so index 8 is in bounds. The remaining slices
+    // are boundary-safe because `&&` short-circuits: `ts[..8]` is only reached
+    // once byte 8 is the ASCII 'T', and `ts[9..15]` only once the final char is
+    // the ASCII 'Z' at byte 15 — both ends are then char boundaries.
     ts.as_bytes()[8] == b'T'
         && ts.ends_with('Z')
         && ts[..8].bytes().all(|b| b.is_ascii_digit())
@@ -328,6 +338,35 @@ mod tests {
         assert!(is_generation_name(&name), "bad generation name: {name}");
         let name2 = store.begin_generation().unwrap().name().to_string();
         assert_ne!(name, name2, "two generations in flight must not collide");
+    }
+
+    #[test]
+    fn is_generation_name_rejects_multibyte_name_without_panicking() {
+        // 23 bytes total (matches the required length) but a 2-byte UTF-8
+        // char (é) straddles byte offset 16, where `split_at(16)` would
+        // otherwise panic on a non-char-boundary index.
+        let name = "123456789012345\u{e9}abcdez";
+        assert_eq!(name.len(), 23, "fixture must match generation-name byte length");
+        assert!(!is_generation_name(name));
+    }
+
+    #[test]
+    fn is_generation_name_rejects_multibyte_names_at_every_byte_index() {
+        // Each fixture is a 23-byte name that clears `split_at_checked(16)`
+        // but puts a multi-byte char on one of the remaining byte indexes
+        // (`as_bytes()[8]`, `ts[..8]`, `ts[9..15]`). Every one must return
+        // false via the short-circuiting guards, never panic.
+        for name in [
+            // 'é' straddles bytes 7..9, so `as_bytes()[8]` is a continuation
+            // byte (never b'T') and `ts[..8]` is never reached.
+            "1234567\u{e9}890123Z-abcdef",
+            // 'é' occupies bytes 14..16, so `ts` does not end with 'Z' and
+            // `ts[9..15]` (which would split it) is never reached.
+            "12345678T90123\u{e9}-abcdef",
+        ] {
+            assert_eq!(name.len(), 23, "fixture must be 23 bytes: {name}");
+            assert!(!is_generation_name(name), "must reject: {name}");
+        }
     }
 
     #[test]

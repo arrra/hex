@@ -161,17 +161,44 @@ const SUMMARY_HEADINGS: &[&str] = &[
     "stats",
 ];
 
+/// Case-insensitive substring search returning a byte offset into `haystack`.
+///
+/// `needle_lower` must already be lowercase. Unlike searching a separately
+/// lowercased copy of the haystack, every offset returned here is a real char
+/// boundary in `haystack` itself, so it is always safe to slice with. Case
+/// folding can change UTF-8 byte length (e.g. 'İ' U+0130 is 2 bytes but
+/// lowercases to 3), which is exactly why offsets must never be carried across
+/// from a `to_lowercase()` copy.
+fn find_ci(haystack: &str, needle_lower: &str) -> Option<usize> {
+    if needle_lower.is_empty() {
+        return Some(0);
+    }
+    haystack.char_indices().find_map(|(i, _)| {
+        let mut hay = haystack[i..].chars().flat_map(char::to_lowercase);
+        let mut needle = needle_lower.chars();
+        loop {
+            match (needle.next(), hay.next()) {
+                (None, _) => return Some(i),
+                (Some(_), None) => return None,
+                (Some(n), Some(h)) if n == h => continue,
+                _ => return None,
+            }
+        }
+    })
+}
+
 /// Extract ECC:SUMMARY blocks and named heading sections from a transcript.
 pub fn extract_summaries(content: &str) -> String {
     let mut extracted: Vec<String> = Vec::new();
 
-    // ECC:SUMMARY block extraction (state machine — avoids regex dep)
-    let cl = content.to_lowercase();
+    // ECC:SUMMARY block extraction (state machine — avoids regex dep).
+    // All offsets below index into `content` directly; nothing is derived from
+    // a lowercased copy, whose byte offsets can desync from the original.
     let start_kw = "ecc:summary:start";
     let end_kw = "ecc:summary:end";
     let mut search_from = 0;
-    while search_from < cl.len() {
-        let Some(s_off) = cl[search_from..].find(start_kw) else {
+    while search_from < content.len() {
+        let Some(s_off) = find_ci(&content[search_from..], start_kw) else {
             break;
         };
         let abs_s = search_from + s_off;
@@ -182,17 +209,29 @@ pub fn extract_summaries(content: &str) -> String {
         let body_start = abs_s + comment_end_off + 3;
 
         // Find end marker
-        let Some(e_off) = cl[body_start..].find(end_kw) else {
+        let Some(e_off) = find_ci(&content[body_start..], end_kw) else {
             break;
         };
         let abs_e = body_start + e_off;
-        // Walk back to find <!-- that opens the end comment
-        let comment_open = content[..abs_e].rfind("<!--").unwrap_or(abs_e);
+        // Walk back to find <!-- that opens the end comment. Ignore any opener
+        // that precedes the block body (an END marker not wrapped in a comment)
+        // so the slice below can never have start > end.
+        let comment_open = content[..abs_e]
+            .rfind("<!--")
+            .filter(|&o| o >= body_start)
+            .unwrap_or(abs_e);
         let block_text = content[body_start..comment_open].trim();
         if !block_text.is_empty() {
             extracted.push(block_text.to_string());
         }
-        search_from = abs_e + end_kw.len() + 4; // skip past -->
+        // Skip past the end marker's `-->`. The keyword's lowercase byte length
+        // may not match its length in `content`, so clamp forward to the next
+        // char boundary. `abs_e > search_from` always, so this makes progress.
+        let mut next = (abs_e + end_kw.len() + 4).min(content.len());
+        while next < content.len() && !content.is_char_boundary(next) {
+            next += 1;
+        }
+        search_from = next;
     }
 
     // Heading-based extraction
@@ -1288,6 +1327,26 @@ mod tests {
             0.5
         );
         assert_eq!(get_source_weight("misc/unknown.md", false), 1.0);
+    }
+
+    #[test]
+    fn test_extract_summaries_handles_case_folding_length_change() {
+        // 'İ' (U+0130, Latin Capital Letter I with Dot Above) is 2 bytes in UTF-8.
+        // Rust's `to_lowercase()` turns it into "i" + a combining dot above
+        // (U+0307) — 3 bytes total, one byte longer per occurrence.
+        //
+        // Regression guard: extract_summaries() used to find the ECC:SUMMARY
+        // marker offsets in `content.to_lowercase()` and then reuse those
+        // offsets to slice the ORIGINAL `content`. Enough of these chars ahead
+        // of a marker desyncs the byte offsets between the two strings, so the
+        // slice landed on the wrong span (or out of bounds / mid-char,
+        // panicking). Offsets must now come from `content` itself via find_ci.
+        let prefix = "İ".repeat(30);
+        let content = format!(
+            "{prefix}\n<!-- ECC:SUMMARY:START -->\nThe actual summary text.\n<!-- ECC:SUMMARY:END -->\n"
+        );
+        let result = extract_summaries(&content);
+        assert_eq!(result.trim(), "The actual summary text.");
     }
 
     #[test]
