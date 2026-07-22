@@ -983,7 +983,9 @@ fn setup_shell(hex_dir: &Path) {
     // Guard on the function signature, not the flag: other managed blocks
     // (hex-new) embed --dangerously-skip-permissions in their bodies, which
     // would false-positive here and silently skip installing the wrapper.
-    if !content.contains("claude() {") {
+    // "function claude" catches the keyword-style definition so a user's
+    // hand-rolled wrapper still opts out.
+    if !content.contains("claude() {") && !content.contains("function claude") {
         lines.push(String::new());
         lines.push("# Claude Code — skip permission prompts".to_string());
         lines.push("unalias claude 2>/dev/null".to_string());
@@ -1281,8 +1283,8 @@ mod tests {
         let block = hex_new_block().join("\n");
         assert!(block.contains("hex-new"), "must contain its own guard marker");
         assert!(
-            !block.contains("claude() {"),
-            "must not contain the claude() wrapper's guard marker"
+            !block.contains("claude() {") && !block.contains("function claude"),
+            "must not contain the claude() wrapper's guard markers"
         );
         assert!(
             !block.contains("hex completions"),
