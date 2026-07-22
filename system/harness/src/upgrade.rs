@@ -895,6 +895,38 @@ fn restart_harness(hex_dir: &Path) {
     }
 }
 
+/// The `hex-new` launcher block appended to the user's shell rc. Pure so
+/// tests can syntax-check and execute the exact emitted script. Must be
+/// valid in zsh AND bash, safe under `set -u`, and must not contain the
+/// guard markers of sibling blocks ("claude() {", "hex completions").
+fn hex_new_block() -> Vec<String> {
+    [
+        "# hex session launcher — hex-new [name] [claude args...]",
+        "# Launches a hex session from $HEX_DIR with Remote Control enabled",
+        "# (drive it from claude.ai/code or the mobile app; the client gates RC",
+        "# off when unsupported). A name labels the session and its RC entry.",
+        "# hex is session-less — context loads via hooks on attach.",
+        "hex-new() {",
+        // ${HEX_DIR:-...} default matters: POSIX `cd ""` is a successful
+        // no-op, so an unset HEX_DIR would otherwise launch from the
+        // caller's cwd instead of failing.
+        r#"  cd "${HEX_DIR:-$HOME/hex}" || return"#,
+        r#"  case "${1-}" in"#,
+        r#"    ""|-*)"#,
+        r#"      command claude --dangerously-skip-permissions --remote-control "$@""#,
+        "      ;;",
+        "    *)",
+        r#"      local name="$1"; shift"#,
+        r#"      command claude --dangerously-skip-permissions --name "$name" --remote-control "$name" "$@""#,
+        "      ;;",
+        "  esac",
+        "}",
+    ]
+    .iter()
+    .map(|s| s.to_string())
+    .collect()
+}
+
 fn setup_shell(hex_dir: &Path) {
     let hex_dot_dir = hex_dir.join(".hex");
     let shell = std::env::var("SHELL").unwrap_or_default();
@@ -948,7 +980,10 @@ fn setup_shell(hex_dir: &Path) {
         dirty = true;
     }
 
-    if !content.contains("dangerously-skip-permissions") {
+    // Guard on the function signature, not the flag: other managed blocks
+    // (hex-new) embed --dangerously-skip-permissions in their bodies, which
+    // would false-positive here and silently skip installing the wrapper.
+    if !content.contains("claude() {") {
         lines.push(String::new());
         lines.push("# Claude Code — skip permission prompts".to_string());
         lines.push("unalias claude 2>/dev/null".to_string());
@@ -962,32 +997,7 @@ fn setup_shell(hex_dir: &Path) {
     // define their own hex-new in the rc keep their version.
     if !content.contains("hex-new") {
         lines.push(String::new());
-        lines.push("# hex session launcher — hex-new [name] [claude args...]".to_string());
-        lines.push(
-            "# Launches a hex session from $HEX_DIR with Remote Control enabled".to_string(),
-        );
-        lines.push(
-            "# (drive it from claude.ai/code or the mobile app; the client gates RC".to_string(),
-        );
-        lines.push(
-            "# off when unsupported). A name labels the session and its RC entry.".to_string(),
-        );
-        lines.push("# hex is session-less — context loads via hooks on attach.".to_string());
-        lines.push("hex-new() {".to_string());
-        lines.push(r#"  cd "$HEX_DIR" || return"#.to_string());
-        lines.push(r#"  if [ -n "$1" ] && [ "${1#-}" = "$1" ]; then"#.to_string());
-        lines.push(r#"    local name="$1"; shift"#.to_string());
-        lines.push(
-            r#"    command claude --dangerously-skip-permissions --name "$name" --remote-control "$name" "$@""#
-                .to_string(),
-        );
-        lines.push("  else".to_string());
-        lines.push(
-            r#"    command claude --dangerously-skip-permissions --remote-control "$@""#
-                .to_string(),
-        );
-        lines.push("  fi".to_string());
-        lines.push("}".to_string());
+        lines.extend(hex_new_block());
         dirty = true;
     }
 
@@ -1259,6 +1269,122 @@ mod tests {
     fn write_file(path: &Path, content: &str) {
         fs::create_dir_all(path.parent().unwrap()).unwrap();
         fs::write(path, content).unwrap();
+    }
+
+    // The wrapper block's guard is the function signature "claude() {".
+    // The hex-new block embeds --dangerously-skip-permissions, so guarding
+    // the wrapper on that flag (the old guard) false-positives against an
+    // rc that has hex-new but no wrapper, silently skipping the wrapper
+    // forever. Pin both marker relationships.
+    #[test]
+    fn hex_new_block_does_not_collide_with_sibling_guards() {
+        let block = hex_new_block().join("\n");
+        assert!(block.contains("hex-new"), "must contain its own guard marker");
+        assert!(
+            !block.contains("claude() {"),
+            "must not contain the claude() wrapper's guard marker"
+        );
+        assert!(
+            !block.contains("hex completions"),
+            "must not contain the completions block's guard marker"
+        );
+        let src = include_str!("upgrade.rs");
+        // Needle built at runtime so this assertion doesn't match itself.
+        let needle = format!(r#"content.contains("{}")"#, "dangerously-skip-permissions");
+        assert!(
+            !src.contains(&needle),
+            "wrapper guard must key on the function signature, not the flag \
+             (the hex-new block embeds the flag in its body)"
+        );
+    }
+
+    /// Runs `hex-new <invocation>` through bash with a stubbed `claude`,
+    /// returning (exit ok, recorded argv lines, cwd at launch).
+    fn run_hex_new(invocation: &str, set_hex_dir: bool) -> (bool, String, String) {
+        let dir = tempfile::tempdir().unwrap();
+        let block = dir.path().join("block.sh");
+        fs::write(&block, hex_new_block().join("\n")).unwrap();
+
+        let bin = dir.path().join("bin");
+        let args_out = dir.path().join("args.txt");
+        write_file(
+            &bin.join("claude"),
+            "#!/bin/sh\npwd > \"$CLAUDE_CWD_OUT\"\nprintf '%s\\n' \"$@\" > \"$CLAUDE_ARGS_OUT\"\n",
+        );
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            fs::set_permissions(bin.join("claude"), fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let hexdir = dir.path().join("hexdir");
+        fs::create_dir(&hexdir).unwrap();
+
+        let mut cmd = std::process::Command::new("bash");
+        // set -u: the block must survive nounset rc environments.
+        cmd.arg("-c")
+            .arg(format!(
+                "set -u; . '{}'; hex-new {}",
+                block.display(),
+                invocation
+            ))
+            .env("CLAUDE_ARGS_OUT", &args_out)
+            .env("CLAUDE_CWD_OUT", dir.path().join("cwd.txt"))
+            // HOME without a hex/ dir, so the unset-HEX_DIR case must fail.
+            .env("HOME", dir.path())
+            .env(
+                "PATH",
+                format!("{}:{}", bin.display(), std::env::var("PATH").unwrap()),
+            );
+        if set_hex_dir {
+            cmd.env("HEX_DIR", &hexdir);
+        } else {
+            cmd.env_remove("HEX_DIR");
+        }
+        let out = cmd.output().unwrap();
+        (
+            out.status.success(),
+            fs::read_to_string(&args_out).unwrap_or_default(),
+            fs::read_to_string(dir.path().join("cwd.txt")).unwrap_or_default(),
+        )
+    }
+
+    #[test]
+    fn hex_new_named_session_routes_name_to_both_flags() {
+        let (ok, args, cwd) = run_hex_new("debug --model opus", true);
+        assert!(ok);
+        assert_eq!(
+            args,
+            "--dangerously-skip-permissions\n--name\ndebug\n--remote-control\ndebug\n--model\nopus\n"
+        );
+        assert!(cwd.trim().ends_with("hexdir"), "must launch from HEX_DIR");
+    }
+
+    #[test]
+    fn hex_new_leading_flag_means_no_name() {
+        let (ok, args, _) = run_hex_new("--model sonnet", true);
+        assert!(ok);
+        assert_eq!(
+            args,
+            "--dangerously-skip-permissions\n--remote-control\n--model\nsonnet\n"
+        );
+    }
+
+    #[test]
+    fn hex_new_no_args_under_nounset() {
+        let (ok, args, _) = run_hex_new("", true);
+        assert!(ok);
+        assert_eq!(args, "--dangerously-skip-permissions\n--remote-control\n");
+    }
+
+    // POSIX `cd ""` is a successful no-op, so without the ${HEX_DIR:-...}
+    // default an unset HEX_DIR would launch claude (skip-permissions!) in
+    // the caller's cwd. With the default pointing at a missing $HOME/hex,
+    // cd must fail and claude must never run.
+    #[test]
+    fn hex_new_unset_hex_dir_fails_instead_of_launching_in_cwd() {
+        let (ok, args, cwd) = run_hex_new("debug", false);
+        assert!(!ok, "must fail when HEX_DIR is unset and $HOME/hex is absent");
+        assert!(args.is_empty() && cwd.is_empty(), "claude must not have run");
     }
 
     // Regression test for spec S90mv90b6 / task Tndh988cz: AGENTS.md is the
