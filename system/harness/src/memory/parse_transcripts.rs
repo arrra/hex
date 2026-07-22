@@ -123,12 +123,8 @@ pub fn run(hex_root: &Path, args: &ParseArgs) -> i32 {
             content.push('\n');
             let first_ts = &session.messages[0].timestamp;
             let time_str = first_ts.format("%H:%M").to_string();
-            // Char-safe truncation: `session.id` comes from the transcript
-            // filename stem (see `parse_jsonl`), which carries no ASCII
-            // guarantee, so a byte slice at offset 8 can land mid-char and
-            // panic. Taking 8 chars is boundary-safe and identical for the
-            // ASCII UUID stems produced in practice.
-            let id_prefix: String = session.id.chars().take(8).collect();
+            // TEMP-REVERT-FOR-RED-TEST-PROOF (restored immediately after)
+            let id_prefix = &session.id[..session.id.len().min(8)];
             content.push_str(&format!("### Session {}... — {}\n", id_prefix, time_str));
             content.push('\n');
 
