@@ -47,7 +47,14 @@ pub fn stale_deps(hex_dir: &Path, threshold_days: u32, json_output: bool) -> i32
             .filter(|p| {
                 p.file_name()
                     .and_then(|n| n.to_str())
-                    .map(|n| n.len() == 13 && n[..4].parse::<u32>().is_ok())
+                    // `get(..4)` returns None when byte 4 is not a char
+                    // boundary, so a multi-byte filename can never panic here.
+                    .map(|n| {
+                        n.len() == 13
+                            && n.get(..4)
+                                .map(|y| y.parse::<u32>().is_ok())
+                                .unwrap_or(false)
+                    })
                     .unwrap_or(false)
             })
             .collect();
@@ -179,4 +186,43 @@ pub fn stale_deps(hex_dir: &Path, threshold_days: u32, json_output: bool) -> i32
         }
     }
     0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::fs;
+
+    /// Regression test for a char-boundary panic: `n[..4]` at line ~50 was
+    /// guarded only by `n.len() == 13` (a byte length check), not a
+    /// char-boundary check. A 13-byte landings filename with a multi-byte
+    /// character straddling byte offset 4 panics the slice.
+    #[test]
+    fn stale_deps_does_not_panic_on_multibyte_landings_filename() {
+        let tmp = std::env::temp_dir().join(format!(
+            "hex_stale_deps_test_{}_{}",
+            std::process::id(),
+            "multibyte"
+        ));
+        let landings = tmp.join("landings");
+        fs::create_dir_all(&landings).expect("create temp landings dir");
+
+        // "126é07-22.md": 'é' is a 2-byte UTF-8 char occupying bytes 3-4,
+        // so byte offset 4 falls mid-character (not a char boundary).
+        // Total byte length is 13, matching the `n.len() == 13` guard.
+        let fname = "126\u{e9}07-22.md";
+        assert_eq!(fname.len(), 13, "fixture filename must be exactly 13 bytes");
+
+        fs::write(
+            landings.join(fname),
+            "- waiting on someone to respond about deployment\n",
+        )
+        .expect("write fixture landings file");
+
+        // Should scan without panicking and return a clean exit code.
+        let exit = stale_deps(&tmp, 9999, true);
+        assert_eq!(exit, 0);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
 }
