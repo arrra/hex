@@ -82,7 +82,7 @@ const DEFAULT_API_KEY_ENV: &str = "OPENROUTER_API_KEY";
 fn builtin(use_case: &str) -> Option<BuiltIn> {
     match use_case {
         "memory_extract" => Some(BuiltIn {
-            model: "anthropic/claude-sonnet-4.5",
+            model: "anthropic/claude-sonnet-5",
             max_tokens: 16384,
             // 48k input cap leaves comfortable headroom under the model's
             // input limit alongside the 16384-token output cap. Anything
@@ -90,12 +90,12 @@ fn builtin(use_case: &str) -> Option<BuiltIn> {
             max_input_tokens: Some(48_000),
         }),
         "memory_judge" => Some(BuiltIn {
-            model: "anthropic/claude-sonnet-4.5",
+            model: "anthropic/claude-sonnet-5",
             max_tokens: 256,
             max_input_tokens: None,
         }),
         "consolidate_audit" => Some(BuiltIn {
-            model: "anthropic/claude-sonnet-4.5",
+            model: "anthropic/claude-sonnet-5",
             max_tokens: 4096,
             max_input_tokens: None,
         }),
@@ -346,15 +346,15 @@ mod tests {
         let _td = setup_hex_dir();
 
         let r = resolve("memory_extract").expect("resolve ok");
-        assert_eq!(r.model, "anthropic/claude-sonnet-4.5");
+        assert_eq!(r.model, "anthropic/claude-sonnet-5");
         assert_eq!(r.max_tokens, 16384);
 
         let r = resolve("memory_judge").expect("resolve ok");
-        assert_eq!(r.model, "anthropic/claude-sonnet-4.5");
+        assert_eq!(r.model, "anthropic/claude-sonnet-5");
         assert_eq!(r.max_tokens, 256);
 
         let r = resolve("consolidate_audit").expect("resolve ok");
-        assert_eq!(r.model, "anthropic/claude-sonnet-4.5");
+        assert_eq!(r.model, "anthropic/claude-sonnet-5");
         assert_eq!(r.max_tokens, 4096);
 
         let r = resolve("health_check").expect("resolve ok");
