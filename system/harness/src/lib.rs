@@ -17,6 +17,7 @@ pub mod doctor;
 pub mod failures;
 pub mod gatekeeper;
 pub mod harness;
+pub mod hitl;
 pub mod ledger;
 pub mod lint_gates;
 pub mod llm_config;
