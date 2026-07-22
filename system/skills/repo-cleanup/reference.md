@@ -42,6 +42,8 @@ Key the auto-apply-vs-review boundary off the tool's OWN designation — don't i
 
 Never invoke an unsafe/opt-in tier in an unattended batch without a human decision.
 
+**No-smuggling proof for a format commit** (stronger and cheaper than eyeballing or `diff -w`): restore the pre-commit tree for the formatted paths, re-run the exact formatter, and diff against the commit — an empty diff proves the commit is byte-identical to pure tool output. `git checkout <fmt-sha>^ -- <paths> && <formatter> && git diff <fmt-sha> -- <paths>` must print nothing. Proven in the 2026-07-22 acceptance campaign.
+
 ## 3. Dead-code deletion protocol
 
 Conjunctive AND — all four before deletion:

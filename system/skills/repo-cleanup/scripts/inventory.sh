@@ -47,7 +47,7 @@ if command -v scc >/dev/null 2>&1; then
 elif command -v tokei >/dev/null 2>&1; then
   tokei 2>/dev/null
 else
-  echo "Neither scc nor tokei found — install one for the Phase 1 snapshot; raw line count fallback:"
+  echo "Neither scc nor tokei found (brew install scc). Raw line count fallback:"
   find . -path ./.git -prune -o -type f -print 2>/dev/null | xargs wc -l 2>/dev/null | tail -1
 fi
 echo
@@ -65,6 +65,12 @@ echo "Build+test red: fixing that IS the Phase 0 deliverable. Lint red: expected
 echo
 
 # --- 5. Existing lint/dead-code config ---
+echo "## Cleanup toolchain availability"
+for t in scc jscpd ast-grep cargo-machete; do
+  command -v "$t" >/dev/null 2>&1 && echo "- $t: available" || echo "- $t: MISSING (scc/jscpd: brew install; cargo-machete: cargo install cargo-machete; ast-grep: brew install ast-grep) — affected passes must be skipped LOUDLY, not faked"
+done
+echo
+
 echo "## Existing lint/dead-code config"
 for cfg in .eslintrc* biome.json knip.json knip.jsonc .ruff.toml ruff.toml pyproject.toml .golangci.yml .golangci.yaml clippy.toml; do
   [ -e "$cfg" ] && echo "- $cfg present"
