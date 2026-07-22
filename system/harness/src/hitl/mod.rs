@@ -17,6 +17,8 @@
 //! decisions) and `transport` (iMessage send) land alongside it and are
 //! declared here once they exist.
 
+pub mod policy;
 pub mod store;
 
+pub use policy::{compose_digest, pings_due, Digest, PingAction, PingReason};
 pub use store::{Config, Item, Mode, NewItem, Priority, Status};
