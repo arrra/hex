@@ -76,7 +76,9 @@ pub fn lock_path(home: &Path) -> PathBuf {
 pub enum BindError {
     /// A live daemon already answers on the socket — second daemon must
     /// refuse loudly (plan Task 1).
-    AlreadyRunning { socket: PathBuf },
+    AlreadyRunning {
+        socket: PathBuf,
+    },
     Io(std::io::Error),
 }
 
@@ -240,7 +242,10 @@ impl<B: LiveBackend + 'static> Daemon<B> {
                 }
             }
         }
-        eprintln!("scipd: shutdown requested; removing {}", self.socket.display());
+        eprintln!(
+            "scipd: shutdown requested; removing {}",
+            self.socket.display()
+        );
         if let Err(e) = std::fs::remove_file(&self.socket) {
             eprintln!("scipd: removing socket on shutdown: {e}");
         }
@@ -319,7 +324,14 @@ pub fn dispatch<B: LiveBackend>(line: &str, pool: &Pool<B>) -> Reply {
     match req.op {
         Op::Ping => Reply::pong(req.id),
         Op::Status => Reply::status(req.id, pool.status()),
-        Op::Query { verb, worktree, path, line, col, name: _ } => {
+        Op::Query {
+            verb,
+            worktree,
+            path,
+            line,
+            col,
+            name: _,
+        } => {
             let root = match resolve_worktree(req.id, &worktree) {
                 Ok(root) => root,
                 Err(reply) => return *reply,
@@ -335,7 +347,13 @@ pub fn dispatch<B: LiveBackend>(line: &str, pool: &Pool<B>) -> Reply {
                 Ok(Reply::results(req.id, results))
             })
         }
-        Op::Rename { worktree, path, line, col, new_name } => {
+        Op::Rename {
+            worktree,
+            path,
+            line,
+            col,
+            new_name,
+        } => {
             let root = match resolve_worktree(req.id, &worktree) {
                 Ok(root) => root,
                 Err(reply) => return *reply,
@@ -458,7 +476,9 @@ mod tests {
             match self.state() {
                 InstanceState::Warming => return Err(LiveError::Warming { elapsed_secs: 42 }),
                 InstanceState::Dead => {
-                    return Err(LiveError::Dead { reason: "fake died".into() })
+                    return Err(LiveError::Dead {
+                        reason: "fake died".into(),
+                    })
                 }
                 InstanceState::Ready => {}
             }
@@ -498,7 +518,12 @@ mod tests {
 
     impl Harness {
         fn worktree_str(&self) -> String {
-            self.worktree.path().canonicalize().unwrap().display().to_string()
+            self.worktree
+                .path()
+                .canonicalize()
+                .unwrap()
+                .display()
+                .to_string()
         }
     }
 
@@ -524,7 +549,12 @@ mod tests {
             "pub fn double(x: i32) -> i32 { x * 2 }\n",
         )
         .unwrap();
-        Harness { pool, state, responses, worktree }
+        Harness {
+            pool,
+            state,
+            responses,
+            worktree,
+        }
     }
 
     fn query_line(id: u64, verb: &str, worktree: &str) -> String {
@@ -575,7 +605,10 @@ mod tests {
         assert!(!reply.ok);
         let warming = reply.warming.expect("warming section");
         assert_eq!(warming.elapsed_secs, 42);
-        assert_eq!(warming.workspace.as_deref(), Some(h.worktree_str().as_str()));
+        assert_eq!(
+            warming.workspace.as_deref(),
+            Some(h.worktree_str().as_str())
+        );
         // The spawn proceeded: the instance is resident in the pool.
         assert_eq!(h.pool.status().instances.len(), 1);
     }
@@ -649,7 +682,10 @@ mod tests {
         let err = reply.error.expect("error section");
         assert_eq!(err.code, "BAD_WORKTREE");
         assert!(err.message.contains("/nonexistent/worktree/xyz"));
-        assert!(h.pool.status().instances.is_empty(), "nothing may be spawned");
+        assert!(
+            h.pool.status().instances.is_empty(),
+            "nothing may be spawned"
+        );
     }
 
     #[test]
@@ -677,7 +713,10 @@ mod tests {
         let h = harness(InstanceState::Ready);
         dispatch(&query_line(11, "def", &h.worktree_str()), &h.pool);
         assert_eq!(h.pool.status().instances.len(), 1);
-        let line = format!(r#"{{"id":12,"op":"evict","worktree":"{}"}}"#, h.worktree_str());
+        let line = format!(
+            r#"{{"id":12,"op":"evict","worktree":"{}"}}"#,
+            h.worktree_str()
+        );
         let reply = dispatch(&line, &h.pool);
         assert!(reply.ok);
         assert!(h.pool.status().instances.is_empty());
@@ -746,7 +785,10 @@ mod tests {
             let d = Daemon::bind(home.path(), test_pool()).unwrap();
             drop(d);
         }
-        assert!(socket_path(home.path()).exists(), "dropped daemon leaves the file");
+        assert!(
+            socket_path(home.path()).exists(),
+            "dropped daemon leaves the file"
+        );
         let d = Daemon::bind(home.path(), test_pool()).unwrap();
         drop(d);
     }

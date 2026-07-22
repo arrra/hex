@@ -69,7 +69,9 @@ impl Store {
     /// A store rooted at `<home>/<workspace_id>/`. Does not touch the
     /// filesystem until a write operation needs to.
     pub fn new(home: impl AsRef<Path>, workspace_id: &str) -> Self {
-        Store { ws_dir: home.as_ref().join(workspace_id) }
+        Store {
+            ws_dir: home.as_ref().join(workspace_id),
+        }
     }
 
     /// The workspace directory `<home>/<workspace-id>/`.
@@ -92,16 +94,27 @@ impl Store {
     pub fn publish(&self, generation: Generation) -> Result<String> {
         let Generation { name, tmp_dir } = generation;
         if !tmp_dir.is_dir() {
-            bail!("generation tmp dir vanished before publish: {}", tmp_dir.display());
+            bail!(
+                "generation tmp dir vanished before publish: {}",
+                tmp_dir.display()
+            );
         }
         let final_dir = self.ws_dir.join(&name);
         if final_dir.exists() {
-            bail!("generation {} already published at {}", name, final_dir.display());
+            bail!(
+                "generation {} already published at {}",
+                name,
+                final_dir.display()
+            );
         }
 
         fsync_dir(&tmp_dir)?;
         fs::rename(&tmp_dir, &final_dir).with_context(|| {
-            format!("publishing {} -> {}", tmp_dir.display(), final_dir.display())
+            format!(
+                "publishing {} -> {}",
+                tmp_dir.display(),
+                final_dir.display()
+            )
         })?;
         fsync_dir(&self.ws_dir)?;
 
@@ -129,12 +142,16 @@ impl Store {
     /// Directory of the current generation. Errors when there is no current
     /// generation or its directory is missing (callers map this to NO_INDEX).
     pub fn current_dir(&self) -> Result<PathBuf> {
-        let name = self.current()?.with_context(|| {
-            format!("no published generation under {}", self.ws_dir.display())
-        })?;
+        let name = self
+            .current()?
+            .with_context(|| format!("no published generation under {}", self.ws_dir.display()))?;
         let dir = self.ws_dir.join(&name);
         if !dir.is_dir() {
-            bail!("CURRENT names {} but {} does not exist", name, dir.display());
+            bail!(
+                "CURRENT names {} but {} does not exist",
+                name,
+                dir.display()
+            );
         }
         Ok(dir)
     }
@@ -146,14 +163,14 @@ impl Store {
         let entries = match fs::read_dir(&self.ws_dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(names),
-            Err(e) => {
-                return Err(e).with_context(|| format!("listing {}", self.ws_dir.display()))
-            }
+            Err(e) => return Err(e).with_context(|| format!("listing {}", self.ws_dir.display())),
         };
         for entry in entries {
             let entry = entry.with_context(|| format!("listing {}", self.ws_dir.display()))?;
             let file_name = entry.file_name();
-            let Some(name) = file_name.to_str() else { continue };
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
             if is_generation_name(name) && entry.path().is_dir() {
                 names.push(name.to_string());
             }
@@ -168,14 +185,15 @@ impl Store {
     pub fn prune(&self) -> Result<Vec<String>> {
         let current = self.current()?;
         let mut generations = self.generations()?; // newest first
-        // Same-second publishes share a timestamp prefix and tie-break by
-        // random suffix, which can rank CURRENT below older generations and
-        // make prune keep 3. Within a timestamp tie, CURRENT is by
-        // definition the newest; distinct timestamps keep pure name order.
+                                                   // Same-second publishes share a timestamp prefix and tie-break by
+                                                   // random suffix, which can rank CURRENT below older generations and
+                                                   // make prune keep 3. Within a timestamp tie, CURRENT is by
+                                                   // definition the newest; distinct timestamps keep pure name order.
         let is_current = |n: &str| Some(n) == current.as_deref();
         let ts = |n: &str| n.split('-').next().unwrap_or(n).to_string();
         generations.sort_by(|a, b| {
-            ts(b).cmp(&ts(a))
+            ts(b)
+                .cmp(&ts(a))
                 .then_with(|| is_current(b).cmp(&is_current(a)))
                 .then_with(|| b.cmp(a))
         });
@@ -259,7 +277,9 @@ fn is_generation_name(name: &str) -> bool {
         return false;
     }
     let (ts, rest) = name.split_at(16);
-    let Some(hex) = rest.strip_prefix('-') else { return false };
+    let Some(hex) = rest.strip_prefix('-') else {
+        return false;
+    };
     ts.as_bytes()[8] == b'T'
         && ts.ends_with('Z')
         && ts[..8].bytes().all(|b| b.is_ascii_digit())
@@ -270,7 +290,8 @@ fn is_generation_name(name: &str) -> bool {
 /// Best-effort directory fsync (durability of renames within it).
 fn fsync_dir(dir: &Path) -> Result<()> {
     let f = File::open(dir).with_context(|| format!("opening {} for fsync", dir.display()))?;
-    f.sync_all().with_context(|| format!("fsyncing {}", dir.display()))
+    f.sync_all()
+        .with_context(|| format!("fsyncing {}", dir.display()))
 }
 
 #[cfg(test)]
@@ -325,7 +346,10 @@ mod tests {
         store.prune().unwrap();
         let kept = store.generations().unwrap();
         assert_eq!(kept.len(), 2, "prune must keep exactly 2 of 3: {kept:?}");
-        assert!(kept.contains(&current), "CURRENT generation must survive prune");
+        assert!(
+            kept.contains(&current),
+            "CURRENT generation must survive prune"
+        );
         assert!(store.current_dir().unwrap().join("index.sqlite").exists());
     }
 
@@ -352,7 +376,11 @@ mod tests {
         let kept = store.generations().unwrap();
         assert_eq!(
             kept,
-            vec![names[3].to_string(), names[2].to_string(), names[0].to_string()],
+            vec![
+                names[3].to_string(),
+                names[2].to_string(),
+                names[0].to_string()
+            ],
             "2 newest + CURRENT survive, newest first"
         );
     }
@@ -382,8 +410,14 @@ mod tests {
         assert!(guard.is_some(), "first lock must succeed");
         // Second handle (separate fd, same process: flock is per open file
         // description, so this models a second `cq index` invocation).
-        assert!(store.try_lock().unwrap().is_none(), "second lock must be refused");
+        assert!(
+            store.try_lock().unwrap().is_none(),
+            "second lock must be refused"
+        );
         drop(guard);
-        assert!(store.try_lock().unwrap().is_some(), "lock must be released on drop");
+        assert!(
+            store.try_lock().unwrap().is_some(),
+            "lock must be released on drop"
+        );
     }
 }

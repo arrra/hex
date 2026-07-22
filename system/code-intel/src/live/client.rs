@@ -105,8 +105,14 @@ impl LiveClient {
         stream
             .set_write_timeout(Some(WRITE_TIMEOUT))
             .map_err(|e| io_err("setting write timeout", e))?;
-        let writer = stream.try_clone().map_err(|e| io_err("cloning stream", e))?;
-        Ok(LiveClient { reader: BufReader::new(stream), writer, next_id: 1 })
+        let writer = stream
+            .try_clone()
+            .map_err(|e| io_err("cloning stream", e))?;
+        Ok(LiveClient {
+            reader: BufReader::new(stream),
+            writer,
+            next_id: 1,
+        })
     }
 
     /// `{"op":"ping"}` round-trip; `Ok(())` iff the daemon answered ok.
@@ -115,7 +121,9 @@ impl LiveClient {
         if reply.ok {
             Ok(())
         } else {
-            Err(ClientError::Protocol { reason: format!("ping answered not-ok: {reply:?}") })
+            Err(ClientError::Protocol {
+                reason: format!("ping answered not-ok: {reply:?}"),
+            })
         }
     }
 
@@ -169,8 +177,10 @@ impl LiveClient {
     fn request(&mut self, op: Op) -> Result<Reply, ClientError> {
         let id = self.next_id;
         self.next_id += 1;
-        let mut line = serde_json::to_string(&Request { id, op })
-            .map_err(|e| ClientError::Protocol { reason: format!("serializing request: {e}") })?;
+        let mut line =
+            serde_json::to_string(&Request { id, op }).map_err(|e| ClientError::Protocol {
+                reason: format!("serializing request: {e}"),
+            })?;
         line.push('\n');
         let io_err = |what: &str, e: std::io::Error| ClientError::Unavailable {
             reason: format!("{what}: {e}"),
@@ -178,7 +188,9 @@ impl LiveClient {
         self.writer
             .write_all(line.as_bytes())
             .map_err(|e| io_err("writing request", e))?;
-        self.writer.flush().map_err(|e| io_err("flushing request", e))?;
+        self.writer
+            .flush()
+            .map_err(|e| io_err("flushing request", e))?;
 
         let mut reply_line = String::new();
         let n = self
@@ -190,9 +202,10 @@ impl LiveClient {
                 reason: "daemon closed the connection before replying".into(),
             });
         }
-        let reply: Reply = serde_json::from_str(reply_line.trim()).map_err(|e| {
-            ClientError::Protocol { reason: format!("unparseable reply: {e}: {reply_line:?}") }
-        })?;
+        let reply: Reply =
+            serde_json::from_str(reply_line.trim()).map_err(|e| ClientError::Protocol {
+                reason: format!("unparseable reply: {e}: {reply_line:?}"),
+            })?;
         if reply.id != id {
             return Err(ClientError::Protocol {
                 reason: format!("reply id {} does not match request id {id}", reply.id),
@@ -217,7 +230,9 @@ mod tests {
         let listener = UnixListener::bind(socket_path(home)).unwrap();
         std::thread::spawn(move || {
             // One connection per fake daemon is enough for tests.
-            let Ok((stream, _addr)) = listener.accept() else { return };
+            let Ok((stream, _addr)) = listener.accept() else {
+                return;
+            };
             let mut writer = stream.try_clone().unwrap();
             let reader = BufReader::new(stream);
             for line in reader.lines() {
@@ -328,7 +343,10 @@ mod tests {
                     assert_eq!(v["path"], "src/a.rs");
                     assert_eq!(v["line"], 3);
                     assert_eq!(v["col"], 9);
-                    format!(r#"{{"id":{},"ok":true,"source":"live","results":[]}}"#, v["id"])
+                    format!(
+                        r#"{{"id":{},"ok":true,"source":"live","results":[]}}"#,
+                        v["id"]
+                    )
                 }
                 "rename" => {
                     assert_eq!(v["new_name"], "twice");
@@ -343,7 +361,9 @@ mod tests {
             .unwrap();
         assert!(reply.ok);
         assert_eq!(reply.source.as_deref(), Some("live"));
-        let reply = client.rename(Path::new("/w"), "src/a.rs", 3, 9, "twice").unwrap();
+        let reply = client
+            .rename(Path::new("/w"), "src/a.rs", 3, 9, "twice")
+            .unwrap();
         assert!(reply.ok);
         assert!(reply.edits.is_some());
     }

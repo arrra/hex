@@ -232,7 +232,13 @@ pub fn live_refs(
         .context("live definition request (for refs role classification)")?;
     let def_keys: BTreeSet<(String, u32, u32)> = lsp::definition_locations(&def_result)?
         .iter()
-        .map(|loc| (loc.uri.clone(), loc.range.start.line, loc.range.start.character))
+        .map(|loc| {
+            (
+                loc.uri.clone(),
+                loc.range.start.line,
+                loc.range.start.character,
+            )
+        })
         .collect();
 
     let params = lsp::ReferenceParams {
@@ -251,7 +257,11 @@ pub fn live_refs(
     };
     let mut out = Vec::new();
     for loc in &locations {
-        let key = (loc.uri.clone(), loc.range.start.line, loc.range.start.character);
+        let key = (
+            loc.uri.clone(),
+            loc.range.start.line,
+            loc.range.start.character,
+        );
         let role = if def_keys.contains(&key) {
             "definition"
         } else {
@@ -407,7 +417,8 @@ fn workspace_edit_to_renames(
         };
         let file = FileText::read(worktree_root, &rel)?;
         for te in edits {
-            let (line1, col1) = from_lsp_pos(file.line(te.range.start.line as usize)?, te.range.start);
+            let (line1, col1) =
+                from_lsp_pos(file.line(te.range.start.line as usize)?, te.range.start);
             let (end_line1, end_col1) =
                 from_lsp_pos(file.line(te.range.end.line as usize)?, te.range.end);
             out.push(RenameEdit {
@@ -462,8 +473,8 @@ fn position_params(
 /// into the standard library, which the worktree-relative A1 shape cannot
 /// express. Non-file URIs are hard errors.
 fn relativize(worktree_root: &Path, uri: &str) -> Result<Option<String>> {
-    let abs: PathBuf = lsp::uri_to_path(uri)
-        .ok_or_else(|| anyhow!("non-file URI in live result: {uri}"))?;
+    let abs: PathBuf =
+        lsp::uri_to_path(uri).ok_or_else(|| anyhow!("non-file URI in live result: {uri}"))?;
     match abs.strip_prefix(worktree_root) {
         Ok(rel) => Ok(Some(rel.to_string_lossy().into_owned())),
         Err(_) => {
@@ -544,7 +555,13 @@ mod tests {
         let line = "pub fn double(x: i32) -> i32 { x * 2 }";
         // `double` starts at byte 7 → cq col 8 → LSP character 7.
         let pos = to_lsp_pos(line, 1, 8).unwrap();
-        assert_eq!(pos, Position { line: 0, character: 7 });
+        assert_eq!(
+            pos,
+            Position {
+                line: 0,
+                character: 7
+            }
+        );
         assert_eq!(from_lsp_pos(line, pos), (1, 8));
         // End-of-line position (after last char) is valid both ways.
         let end = to_lsp_pos(line, 1, line.len() as u32 + 1).unwrap();
@@ -559,7 +576,13 @@ mod tests {
         let byte_col = line.find("double").unwrap() as u32 + 1; // 1-based byte col
         let pos = to_lsp_pos(line, 3, byte_col).unwrap();
         // bytes before "double": "let é_x = " = 11 bytes, 10 UTF-16 units.
-        assert_eq!(pos, Position { line: 2, character: 10 });
+        assert_eq!(
+            pos,
+            Position {
+                line: 2,
+                character: 10
+            }
+        );
         assert_eq!(from_lsp_pos(line, pos), (3, byte_col));
     }
 
@@ -569,7 +592,10 @@ mod tests {
         let line = "let 🦀 = twice(2);";
         let byte_col = line.find("twice").unwrap() as u32 + 1;
         let pos = to_lsp_pos(line, 1, byte_col).unwrap();
-        assert_eq!(pos.character, "let 🦀 = ".chars().map(char::len_utf16).sum::<usize>() as u32);
+        assert_eq!(
+            pos.character,
+            "let 🦀 = ".chars().map(char::len_utf16).sum::<usize>() as u32
+        );
         assert_eq!(from_lsp_pos(line, pos), (1, byte_col));
     }
 
@@ -589,12 +615,27 @@ mod tests {
         assert!(err.to_string().contains("past the end"), "{err}");
         // LSP → cq clamps past-end columns (LSP spec semantics).
         assert_eq!(
-            from_lsp_pos("abc", Position { line: 0, character: 99 }),
+            from_lsp_pos(
+                "abc",
+                Position {
+                    line: 0,
+                    character: 99
+                }
+            ),
             (1, 4)
         );
         // Inside a surrogate pair: round down to the char start, loudly.
         let line = "🦀x";
-        assert_eq!(from_lsp_pos(line, Position { line: 0, character: 1 }), (1, 1));
+        assert_eq!(
+            from_lsp_pos(
+                line,
+                Position {
+                    line: 0,
+                    character: 1
+                }
+            ),
+            (1, 1)
+        );
     }
 
     // ---- old_text extraction (FileText::span), incl. multi-line ----
@@ -612,14 +653,26 @@ mod tests {
         let file = FileText::read(dir.path(), "a.rs").unwrap();
         // single-line: "double" on line 0, chars 3..9
         let r = lsp::Range {
-            start: Position { line: 0, character: 3 },
-            end: Position { line: 0, character: 9 },
+            start: Position {
+                line: 0,
+                character: 3,
+            },
+            end: Position {
+                line: 0,
+                character: 9,
+            },
         };
         assert_eq!(file.span(&r).unwrap(), "double");
         // multi-line: from "{"  through the closing "}" — newlines preserved.
         let r = lsp::Range {
-            start: Position { line: 0, character: 12 },
-            end: Position { line: 2, character: 1 },
+            start: Position {
+                line: 0,
+                character: 12,
+            },
+            end: Position {
+                line: 2,
+                character: 1,
+            },
         };
         assert_eq!(file.span(&r).unwrap(), "{\n    body\n}");
     }
@@ -630,13 +683,25 @@ mod tests {
         write_file(dir.path(), "a.rs", "one line\n");
         let file = FileText::read(dir.path(), "a.rs").unwrap();
         let past = lsp::Range {
-            start: Position { line: 5, character: 0 },
-            end: Position { line: 5, character: 1 },
+            start: Position {
+                line: 5,
+                character: 0,
+            },
+            end: Position {
+                line: 5,
+                character: 1,
+            },
         };
         assert!(file.span(&past).is_err());
         let inverted = lsp::Range {
-            start: Position { line: 0, character: 4 },
-            end: Position { line: 0, character: 1 },
+            start: Position {
+                line: 0,
+                character: 4,
+            },
+            end: Position {
+                line: 0,
+                character: 1,
+            },
         };
         let err = file.span(&inverted).unwrap_err();
         assert!(err.to_string().contains("inverted"), "{err}");
@@ -648,8 +713,16 @@ mod tests {
     fn workspace_edit_normalizes_with_old_text_sorted() {
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
-        write_file(&root, "src/ops.rs", "pub fn double(x: i32) -> i32 { x * 2 }\n");
-        write_file(&root, "src/lib.rs", "fn t(x: i32) -> i32 { ops::double(x) }\n");
+        write_file(
+            &root,
+            "src/ops.rs",
+            "pub fn double(x: i32) -> i32 { x * 2 }\n",
+        );
+        write_file(
+            &root,
+            "src/lib.rs",
+            "fn t(x: i32) -> i32 { ops::double(x) }\n",
+        );
         let ops_uri = lsp::path_to_uri(&root.join("src/ops.rs"));
         let lib_uri = lsp::path_to_uri(&root.join("src/lib.rs"));
         let edit: lsp::WorkspaceEdit = serde_json::from_value(json!({
@@ -667,7 +740,12 @@ mod tests {
         assert_eq!(edits.len(), 2);
         // Sorted by (path, line, col): lib.rs before ops.rs.
         assert_eq!(
-            (edits[0].path.as_str(), edits[0].line, edits[0].col, edits[0].end_col),
+            (
+                edits[0].path.as_str(),
+                edits[0].line,
+                edits[0].col,
+                edits[0].end_col
+            ),
             ("src/lib.rs", 1, 28, 34)
         );
         assert_eq!(edits[0].old_text, "double");
@@ -685,7 +763,11 @@ mod tests {
         // 2026-06-11): documentChanges + TextDocumentEdit entries.
         let dir = tempfile::tempdir().unwrap();
         let root = dir.path().canonicalize().unwrap();
-        write_file(&root, "src/ops.rs", "pub fn double(x: i32) -> i32 { x * 2 }\n");
+        write_file(
+            &root,
+            "src/ops.rs",
+            "pub fn double(x: i32) -> i32 { x * 2 }\n",
+        );
         let uri = lsp::path_to_uri(&root.join("src/ops.rs"));
         let edit: lsp::WorkspaceEdit = serde_json::from_value(json!({
             "documentChanges": [{
@@ -791,12 +873,21 @@ mod tests {
             responses: HashMap::from([
                 (lsp::methods::DEFINITION.to_string(), Ok(Value::Null)),
                 (lsp::methods::REFERENCES.to_string(), Ok(Value::Null)),
-                (lsp::methods::PREPARE_CALL_HIERARCHY.to_string(), Ok(Value::Null)),
+                (
+                    lsp::methods::PREPARE_CALL_HIERARCHY.to_string(),
+                    Ok(Value::Null),
+                ),
             ]),
         };
-        assert!(live_def(&backend, &root, "src/lib.rs", 1, 4).unwrap().is_empty());
-        assert!(live_refs(&backend, &root, "src/lib.rs", 1, 4).unwrap().is_empty());
-        assert!(live_callers(&backend, &root, "src/lib.rs", 1, 4).unwrap().is_empty());
+        assert!(live_def(&backend, &root, "src/lib.rs", 1, 4)
+            .unwrap()
+            .is_empty());
+        assert!(live_refs(&backend, &root, "src/lib.rs", 1, 4)
+            .unwrap()
+            .is_empty());
+        assert!(live_callers(&backend, &root, "src/lib.rs", 1, 4)
+            .unwrap()
+            .is_empty());
         // rename → null is NOT silently empty: nothing would be renamed.
         let backend = FakeBackend {
             responses: HashMap::from([(lsp::methods::RENAME.to_string(), Ok(Value::Null))]),
@@ -848,7 +939,16 @@ mod tests {
         run_cmd(
             dir.path(),
             "git",
-            &["-c", "user.email=cq@test", "-c", "user.name=cq-test", "commit", "-q", "-m", "golden"],
+            &[
+                "-c",
+                "user.email=cq@test",
+                "-c",
+                "user.name=cq-test",
+                "commit",
+                "-q",
+                "-m",
+                "golden",
+            ],
         );
         dir
     }
@@ -992,7 +1092,11 @@ mod tests {
         for e in &edits {
             assert_eq!(e.old_text, "double", "{e:?}");
             assert_eq!(e.new_text, "twice", "{e:?}");
-            assert_eq!((e.end_line, e.end_col - e.col), (e.line, 6), "single-token edit: {e:?}");
+            assert_eq!(
+                (e.end_line, e.end_col - e.col),
+                (e.line, 6),
+                "single-token edit: {e:?}"
+            );
         }
         let edit_sites: BTreeSet<(String, u32, u32)> = edits
             .iter()
