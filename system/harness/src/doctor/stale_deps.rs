@@ -97,7 +97,11 @@ pub fn stale_deps(hex_dir: &Path, threshold_days: u32, json_output: bool) -> i32
 
     let mut current_keys: std::collections::HashSet<String> = std::collections::HashSet::new();
     for (text, source) in &all_items {
-        let key: String = text[..text.len().min(80)]
+        // Truncate to the first 80 chars for the dedup key. `chars().take(80)` is
+        // char-boundary safe (a byte slice `text[..80]` panics when a multi-byte
+        // char straddles offset 80); for ASCII text this is identical to 80 bytes.
+        let truncated: String = text.chars().take(80).collect();
+        let key: String = truncated
             .to_lowercase()
             .split_whitespace()
             .collect::<Vec<_>>()
@@ -218,6 +222,44 @@ mod tests {
             "- waiting on someone to respond about deployment\n",
         )
         .expect("write fixture landings file");
+
+        // Should scan without panicking and return a clean exit code.
+        let exit = stale_deps(&tmp, 9999, true);
+        assert_eq!(exit, 0);
+
+        let _ = fs::remove_dir_all(&tmp);
+    }
+
+    /// Regression test for a char-boundary panic: `text[..text.len().min(80)]`
+    /// (the dedup-key truncation) is guarded only by a byte-length `.min()`,
+    /// not a char-boundary check. A todo.md item whose cleaned text is longer
+    /// than 80 bytes and has a multi-byte character straddling byte offset 80
+    /// panics the slice.
+    #[test]
+    fn stale_deps_does_not_panic_on_multibyte_item_text() {
+        let tmp = std::env::temp_dir().join(format!(
+            "hex_stale_deps_test_{}_{}",
+            std::process::id(),
+            "multibyte_text"
+        ));
+        fs::create_dir_all(&tmp).expect("create temp hex dir");
+
+        // "waiting on " (11 bytes) + 68 'a' bytes = 79 bytes, then 'é'
+        // (2-byte UTF-8, occupying byte offsets 79-80) so byte offset 80
+        // falls mid-character (not a char boundary), then trailing text so
+        // the cleaned item is well over 80 bytes total.
+        let item_text = format!("waiting on {}\u{e9}{}", "a".repeat(68), "b".repeat(20));
+        assert!(
+            item_text.len() > 80,
+            "fixture item text must exceed 80 bytes"
+        );
+        assert!(
+            !item_text.is_char_boundary(80),
+            "fixture must place a multi-byte char straddling byte offset 80"
+        );
+
+        fs::write(tmp.join("todo.md"), format!("- {item_text}\n"))
+            .expect("write fixture todo.md");
 
         // Should scan without panicking and return a clean exit code.
         let exit = stale_deps(&tmp, 9999, true);

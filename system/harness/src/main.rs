@@ -2454,6 +2454,9 @@ fn parse_since(s: &str) -> Result<chrono::Duration, String> {
     if s.is_empty() {
         return Err("empty --since value".into());
     }
+    // Boundary proof: the slice arm runs only when the last char is ASCII 'h' or
+    // 'd' (1 byte), so s.len() - 1 lands exactly at its start, a char boundary.
+    #[allow(clippy::string_slice)]
     let (num_str, unit) = match s.chars().last().unwrap() {
         'h' | 'd' => (&s[..s.len() - 1], s.chars().last().unwrap()),
         _ => (s, 'h'),

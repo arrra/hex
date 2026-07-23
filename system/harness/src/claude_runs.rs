@@ -407,6 +407,9 @@ fn parse_config_str(raw: &str) -> Result<ParsedConfig, String> {
     Ok(cfg)
 }
 
+// Boundary proof: the only slice, `&line[..i]`, uses `i` from char_indices(),
+// which yields byte offsets at char boundaries — never mid-character.
+#[allow(clippy::string_slice)]
 fn strip_comment(line: &str) -> &str {
     // Naive: '#' starts a comment unless inside a string. The schema uses
     // simple strings only and the parser is internal; we avoid quoted '#'.
