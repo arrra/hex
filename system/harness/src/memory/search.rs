@@ -870,6 +870,32 @@ mod tests {
     }
 
     #[test]
+    fn test_highlight_term_multibyte_casefold_mismatch() {
+        // Case-folding can change UTF-8 byte length: 'İ' (U+0130, LATIN
+        // CAPITAL LETTER I WITH DOT ABOVE) is 2 bytes but lowercases to
+        // "i\u{307}" (3 bytes). highlight_term() searches for the match
+        // position in `lower_text` (the case-folded copy) but then slices
+        // into the *original* `text` at that same byte offset. Once a
+        // byte-length-changing char precedes another multibyte char, the
+        // offset from `lower_text` desyncs from `text`'s char boundaries and
+        // can land mid-character, panicking on the old code:
+        // "İÉhello" (İ=2 bytes, É=2 bytes) lowercases to "i\u{307}éhello"
+        // (i\u{307}=3 bytes, é=2 bytes) — searching for "É" finds it at byte
+        // offset 3 in the lowercased copy, but byte offset 3 in the original
+        // text falls inside É's own 2-byte encoding (bytes 2..4).
+        let text = "İÉhello";
+        let out = highlight_term(text, "É");
+        // No panic, valid UTF-8 (guaranteed by returning a String), and the
+        // matched term is still present in the output, wrapped for highlight.
+        assert!(
+            out.contains('É'),
+            "expected matched char preserved in output, got: {:?}",
+            out
+        );
+        assert!(out.contains("hello"), "expected trailing text preserved, got: {:?}", out);
+    }
+
+    #[test]
     fn test_output_format_compact() {
         // Smoke test: format_results doesn't panic on empty.
         let args = SearchArgs {
