@@ -203,12 +203,18 @@ fn stem(word: &str) -> String {
     for (suffix, min_len) in rules {
         if word.ends_with(suffix) && word.len() > *min_len {
             if *suffix == "ies" {
+                // "ies" (3 ASCII bytes) was just matched by ends_with ⇒ len-3 is a char boundary.
+                #[allow(clippy::string_slice)]
                 return format!("{}y", &word[..word.len() - 3]);
             }
+            // `suffix` (all-ASCII) was just matched by ends_with ⇒ len-suffix.len() is a char boundary.
+            #[allow(clippy::string_slice)]
             return word[..word.len() - suffix.len()].to_string();
         }
     }
     if word.ends_with('s') && !word.ends_with("ss") && word.len() > 3 {
+        // trailing 's' (1 ASCII byte) was just matched by ends_with ⇒ len-1 is a char boundary.
+        #[allow(clippy::string_slice)]
         return word[..word.len() - 1].to_string();
     }
     word.to_string()
@@ -268,6 +274,8 @@ fn regex_lite_strip_dates(s: &str) -> String {
                 j += 1;
             }
             if j < bytes.len() {
+                // start indexes b'(' and j indexes b')' (both ASCII byte scans) ⇒ start+1 and j are char boundaries.
+                #[allow(clippy::string_slice)]
                 let inner = &s[start + 1..j];
                 if inner
                     .chars()
@@ -349,8 +357,13 @@ fn parse_learnings(path: &Path, stops: &HashSet<&'static str>) -> Vec<Entry> {
     for line in text.lines() {
         let stripped = line.trim();
         if stripped.starts_with("## ") {
-            category = stripped[3..].trim().to_string();
+            // "## " (3 ASCII bytes) was just matched by starts_with ⇒ byte 3 is a char boundary.
+            #[allow(clippy::string_slice)]
+            let cat = stripped[3..].trim().to_string();
+            category = cat;
         } else if stripped.starts_with("- ") && !category.is_empty() {
+            // "- " (2 ASCII bytes) was just matched by starts_with ⇒ byte 2 is a char boundary.
+            #[allow(clippy::string_slice)]
             let text = stripped[2..].trim().to_string();
             let dates = extract_dates(&text);
             entries.push(Entry::new(text, category.clone(), dates, stops));
@@ -388,8 +401,13 @@ fn parse_reflections(dir: &Path, stops: &HashSet<&'static str>) -> Vec<Entry> {
         for line in text.lines() {
             let s = line.trim();
             if s.starts_with("## ") {
-                cat = s[3..].trim().to_string();
+                // "## " (3 ASCII bytes) was just matched by starts_with ⇒ byte 3 is a char boundary.
+                #[allow(clippy::string_slice)]
+                let c = s[3..].trim().to_string();
+                cat = c;
             } else if s.starts_with("- ") && s.len() > 10 {
+                // "- " (2 ASCII bytes) was just matched by starts_with ⇒ byte 2 is a char boundary.
+                #[allow(clippy::string_slice)]
                 let t = s[2..].trim();
                 if t.starts_with('_') || t.starts_with("Auto-generated") {
                     continue;
@@ -406,8 +424,12 @@ fn extract_dates(text: &str) -> Vec<String> {
     let mut dates = Vec::new();
     // Find all YYYY-MM-DD patterns inside the last parenthesised group
     if let Some(open) = text.rfind('(') {
+        // open indexes the ASCII '(' found by rfind ⇒ open+1 is a char boundary.
+        #[allow(clippy::string_slice)]
         let tail = &text[open + 1..];
         if let Some(close) = tail.find(')') {
+            // close indexes the ASCII ')' found by find ⇒ it is a char boundary.
+            #[allow(clippy::string_slice)]
             let inner = &tail[..close];
             if inner
                 .chars()
@@ -537,13 +559,18 @@ fn strip_trailing_dates(text: &str) -> String {
     loop {
         if s.ends_with(')') {
             if let Some(open) = s.rfind('(') {
+                // open indexes ASCII '(' (rfind) and s ends_with ')' so s.len()-1 indexes that ASCII byte ⇒ both are char boundaries.
+                #[allow(clippy::string_slice)]
                 let inner = &s[open + 1..s.len() - 1];
                 if inner
                     .chars()
                     .all(|c| c.is_ascii_digit() || c == '-' || c == ',' || c == ' ')
                     || inner.trim() == "imported"
                 {
-                    s = s[..open].trim_end().to_string();
+                    // open indexes the ASCII '(' found by rfind ⇒ it is a char boundary.
+                    #[allow(clippy::string_slice)]
+                    let head = s[..open].trim_end().to_string();
+                    s = head;
                     continue;
                 }
             }
