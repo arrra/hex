@@ -233,6 +233,10 @@ fn extract_relative_links(content: &str) -> Vec<String> {
                 }
             }
             if depth == 0 && end > start {
+                // Boundary proof: `start` is one past an ASCII '(' and `end` sits at
+                // an ASCII ')' (or content.len()). ASCII bytes never occur inside a
+                // multi-byte UTF-8 sequence, so both bounds are char boundaries.
+                #[allow(clippy::string_slice)]
                 let candidate = &content[start..end];
                 // Strip trailing anchors
                 let candidate = candidate.split('#').next().unwrap_or(candidate).trim();

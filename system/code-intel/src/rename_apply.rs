@@ -87,7 +87,18 @@ fn apply_to_content(path: &str, content: &str, edits: &[&RenameEdit]) -> Result<
                 edit.col
             );
         }
-        let found = &content[start..end];
+        // Byte columns come from the rename PLAN, computed against plan-time
+        // content; if the file drifted (e.g. a multi-byte char inserted) the
+        // offsets can land inside a UTF-8 sequence. `get` returns `None` there
+        // instead of panicking, and we abort the whole plan loudly.
+        let found = content.get(start..end).ok_or_else(|| CqError::RenameAborted {
+            path: path.to_string(),
+            detail: format!(
+                "edit at {}:{} spans a non-char-boundary byte range {start}..{end} \
+                 (stale or malformed plan)",
+                edit.line, edit.col
+            ),
+        })?;
         if found != edit.old_text {
             return Err(CqError::RenameAborted {
                 path: path.to_string(),
@@ -327,6 +338,32 @@ mod tests {
         assert_eq!(
             std::fs::read_to_string(wt.path().join("a.rs")).unwrap(),
             "alpXYta\ngamma\n"
+        );
+    }
+
+    #[test]
+    fn multibyte_offset_landing_inside_a_char_is_loud_not_a_panic() {
+        // Regression (string_slice class-kill, code-intel site rename_apply.rs:90):
+        // a rename plan's byte columns are computed against the content that
+        // existed at PLAN time. If the file changes upstream of the edit
+        // before APPLY time — e.g. a multibyte char gets inserted — the same
+        // byte columns can land inside a multi-byte UTF-8 sequence instead of
+        // on a char boundary. `offset`/`apply_to_content` must report this as
+        // a loud error (malformed/stale edit), never index into the middle of
+        // a UTF-8 sequence and panic.
+        let wt = worktree(&[("a.rs", "abc\u{20ac}def\n")]); // '€' is 3 bytes: 3..6
+                                                             // 1-based col 5 -> byte offset 4, which is INSIDE the 3-byte '€'
+                                                             // (bytes 3..6) -- not a char boundary.
+        let bad = edit("a.rs", 1, 5, 6, "x", "y");
+        let err = apply(wt.path(), &[bad]).unwrap_err();
+        assert!(
+            !err.to_string().is_empty(),
+            "must return a loud error, not panic, on a non-char-boundary edit offset"
+        );
+        // Nothing written.
+        assert_eq!(
+            std::fs::read_to_string(wt.path().join("a.rs")).unwrap(),
+            "abc\u{20ac}def\n"
         );
     }
 }

@@ -63,7 +63,12 @@ fn list_installed(hex_dir: &Path) -> Vec<String> {
         for entry in entries.flatten() {
             let n = entry.file_name().to_string_lossy().to_string();
             if n.ends_with(".json") && !n.starts_with('.') && !n.starts_with('_') {
-                names.push(n[..n.len() - 5].to_string());
+                // Boundary proof: ".json" is a 5-byte ASCII suffix (verified by
+                // ends_with), so n.len() - 5 lands exactly at its start, a char
+                // boundary.
+                #[allow(clippy::string_slice)]
+                let stem = n[..n.len() - 5].to_string();
+                names.push(stem);
             }
         }
     }
@@ -534,6 +539,9 @@ pub fn update(
 
     if dry_run {
         if !quiet {
+            // Boundary proof: current_hash is a SHA-256 hex digest
+            // (format!("{hash:x}"), all ASCII), so byte offset 8 is a char boundary.
+            #[allow(clippy::string_slice)]
             let short = &current_hash[..8.min(current_hash.len())];
             eprintln!("[update] [DRY RUN] Would update {name} (hash {short})");
         }

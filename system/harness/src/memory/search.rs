@@ -36,32 +36,79 @@ fn truncate(text: &str, max_chars: usize) -> String {
         .nth(max_chars)
         .map(|(i, _)| i)
         .unwrap_or(text.len());
+    // SAFETY(string_slice): `end` is a byte index from char_indices().nth(),
+    // so it is a UTF-8 char boundary — slicing there cannot split a char.
+    #[allow(clippy::string_slice)]
     let slice = &text[..end];
     match slice.rfind(' ') {
+        // SAFETY(string_slice): `pos` is the byte index of an ASCII space
+        // (rfind(' ')), always a char boundary.
+        #[allow(clippy::string_slice)]
         Some(pos) => format!("{}...", &slice[..pos]),
         None => format!("{}...", slice),
     }
 }
 
 // Case-insensitive highlight of a single term with ANSI bold-yellow.
+//
+// Matches against the ORIGINAL `text` (never a `to_lowercase()` copy): case
+// folding can change UTF-8 byte length (e.g. 'İ' U+0130 is 2 bytes but folds to
+// "i\u{307}", 3 bytes), so byte offsets found in a lowercased copy can land
+// mid-character in `text` and panic. `ci_prefix_match_len` folds on the fly and
+// only ever returns offsets that are char boundaries in `text` itself.
 fn highlight_term(text: &str, term: &str) -> String {
-    let lower_text = text.to_lowercase();
     let lower_term = term.to_lowercase();
     if lower_term.is_empty() {
         return text.to_string();
     }
     let mut result = String::with_capacity(text.len() + 32);
-    let mut start = 0;
-    while let Some(pos) = lower_text[start..].find(lower_term.as_str()) {
-        let abs = start + pos;
-        result.push_str(&text[start..abs]);
-        result.push_str("\x1b[1;33m");
-        result.push_str(&text[abs..abs + lower_term.len()]);
-        result.push_str("\x1b[0m");
-        start = abs + lower_term.len();
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        // SAFETY(string_slice): `cursor` starts at 0 and only ever advances by
+        // a whole matched span (`n`, a char-boundary length) or a whole char
+        // (`len_utf8()`), so it is always a UTF-8 char boundary in `text`.
+        #[allow(clippy::string_slice)]
+        let rest = &text[cursor..];
+        match ci_prefix_match_len(rest, &lower_term) {
+            Some(n) => {
+                result.push_str("\x1b[1;33m");
+                // SAFETY(string_slice): `n` is a char-boundary byte length
+                // within `rest` returned by ci_prefix_match_len.
+                #[allow(clippy::string_slice)]
+                result.push_str(&rest[..n]);
+                result.push_str("\x1b[0m");
+                cursor += n;
+            }
+            None => {
+                let ch = rest.chars().next().unwrap();
+                result.push(ch);
+                cursor += ch.len_utf8();
+            }
+        }
     }
-    result.push_str(&text[start..]);
     result
+}
+
+/// If `hay` case-insensitively starts with `lower_term` (already lowercased),
+/// return the number of `hay` bytes the match consumes — always ending on a
+/// char boundary in `hay`. Folds each source char of `hay` on the fly and
+/// compares against `lower_term`'s char stream, so it never carries a byte
+/// offset from a separately-lowercased copy (which could desync and panic).
+fn ci_prefix_match_len(hay: &str, lower_term: &str) -> Option<usize> {
+    let mut needle = lower_term.chars();
+    let mut nc = needle.next()?;
+    for (off, ch) in hay.char_indices() {
+        for f in ch.to_lowercase() {
+            if f != nc {
+                return None;
+            }
+            match needle.next() {
+                Some(n) => nc = n,
+                None => return Some(off + ch.len_utf8()),
+            }
+        }
+    }
+    None
 }
 
 // Mirror Python's highlight_terms(): iterates query words, applies each.
@@ -867,6 +914,32 @@ mod tests {
 
         // Strings short enough must be returned unchanged (no '...').
         assert_eq!(truncate("hi", 10), "hi");
+    }
+
+    #[test]
+    fn test_highlight_term_multibyte_casefold_mismatch() {
+        // Case-folding can change UTF-8 byte length: 'İ' (U+0130, LATIN
+        // CAPITAL LETTER I WITH DOT ABOVE) is 2 bytes but lowercases to
+        // "i\u{307}" (3 bytes). highlight_term() searches for the match
+        // position in `lower_text` (the case-folded copy) but then slices
+        // into the *original* `text` at that same byte offset. Once a
+        // byte-length-changing char precedes another multibyte char, the
+        // offset from `lower_text` desyncs from `text`'s char boundaries and
+        // can land mid-character, panicking on the old code:
+        // "İÉhello" (İ=2 bytes, É=2 bytes) lowercases to "i\u{307}éhello"
+        // (i\u{307}=3 bytes, é=2 bytes) — searching for "É" finds it at byte
+        // offset 3 in the lowercased copy, but byte offset 3 in the original
+        // text falls inside É's own 2-byte encoding (bytes 2..4).
+        let text = "İÉhello";
+        let out = highlight_term(text, "É");
+        // No panic, valid UTF-8 (guaranteed by returning a String), and the
+        // matched term is still present in the output, wrapped for highlight.
+        assert!(
+            out.contains('É'),
+            "expected matched char preserved in output, got: {:?}",
+            out
+        );
+        assert!(out.contains("hello"), "expected trailing text preserved, got: {:?}", out);
     }
 
     #[test]

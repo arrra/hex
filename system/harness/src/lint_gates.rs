@@ -84,6 +84,8 @@ fn rule_pipe_tail_exitcode(cmd: &str) -> bool {
     let mut i = 0;
     while i < bytes.len() {
         if bytes[i] == b'|' && bytes.get(i + 1) != Some(&b'|') {
+            // i indexes the ASCII '|' byte ⇒ i+1 is a char boundary.
+            #[allow(clippy::string_slice)]
             let rest = &cmd[i + 1..].trim_start();
             if rest.starts_with("tail ")
                 || rest.starts_with("tail\t")
@@ -123,6 +125,8 @@ fn command_segments(cmd: &str) -> Vec<&str> {
                 || (bytes[i] == b'|' && bytes[i + 1] == b'|'));
         let is_one = matches!(bytes[i], b';' | b'|' | b'&' | b'\n' | b'(' | b')');
         if is_two || is_one {
+            // start and i both index ASCII separator bytes (byte-scan) ⇒ both are char boundaries.
+            #[allow(clippy::string_slice)]
             let seg = cmd[start..i].trim();
             if !seg.is_empty() {
                 out.push(seg);
@@ -133,6 +137,8 @@ fn command_segments(cmd: &str) -> Vec<&str> {
             i += 1;
         }
     }
+    // start indexes 0 or an ASCII separator byte (byte-scan) ⇒ it is a char boundary.
+    #[allow(clippy::string_slice)]
     let seg = cmd[start..].trim();
     if !seg.is_empty() {
         out.push(seg);
@@ -181,10 +187,14 @@ fn rule_macos_wc_whitespace(cmd: &str) -> bool {
     let Some(wc_idx) = cmd.find("wc -l") else {
         return false;
     };
+    // wc_idx is the byte index of the ASCII literal "wc -l" found by find ⇒ char boundary.
+    #[allow(clippy::string_slice)]
     let after = &cmd[wc_idx..];
     let Some(pipe_idx) = after.find('|') else {
         return false;
     };
+    // pipe_idx indexes the ASCII '|' found by find ⇒ pipe_idx+1 is a char boundary.
+    #[allow(clippy::string_slice)]
     let tail = &after[pipe_idx + 1..];
     // Allow any whitespace between `|` and `grep`.
     let tail = tail.trim_start();
@@ -203,15 +213,21 @@ fn rule_python_c_indent(cmd: &str) -> bool {
     else {
         return false;
     };
+    // idx is the byte index of an ASCII literal ("python3 -c \"" / "python -c \"") from find ⇒ char boundary.
+    #[allow(clippy::string_slice)]
     let rest = &cmd[idx..];
     let body_start = match rest.find('"') {
         Some(p) => p + 1,
         None => return false,
     };
+    // body_start is one past an ASCII '"' ⇒ a char boundary.
+    #[allow(clippy::string_slice)]
     let body_end = match rest[body_start..].find('"') {
         Some(p) => p,
         None => return false,
     };
+    // body_start is a boundary (above); body_start+body_end indexes the closing ASCII '"' found by find ⇒ char boundary.
+    #[allow(clippy::string_slice)]
     let body = &rest[body_start..body_start + body_end];
     // The body uses literal `\n` between lines in shell-source form.
     let mut parts = body.split("\\n");

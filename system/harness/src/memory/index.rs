@@ -85,8 +85,14 @@ fn parse_heading(line: &str) -> Option<(usize, &str)> {
     if level > 4 {
         return None;
     }
+    // SAFETY(string_slice): `level` counts leading ASCII '#' chars (each 1
+    // byte), so byte offset `level` is a char boundary right after the '#'s.
+    #[allow(clippy::string_slice)]
     let rest = &line[level..];
     if rest.starts_with(' ') && rest.len() > 1 {
+        // SAFETY(string_slice): guarded by `rest.starts_with(' ')`, so byte 0
+        // is an ASCII space; slicing at 1 lands on a char boundary.
+        #[allow(clippy::string_slice)]
         let text = rest[1..].trim();
         if !text.is_empty() {
             return Some((level, text));
@@ -174,6 +180,9 @@ fn find_ci(haystack: &str, needle_lower: &str) -> Option<usize> {
         return Some(0);
     }
     haystack.char_indices().find_map(|(i, _)| {
+        // SAFETY(string_slice): `i` comes from haystack.char_indices(), so it
+        // is always a char boundary in `haystack`.
+        #[allow(clippy::string_slice)]
         let mut hay = haystack[i..].chars().flat_map(char::to_lowercase);
         let mut needle = needle_lower.chars();
         loop {
@@ -198,17 +207,26 @@ pub fn extract_summaries(content: &str) -> String {
     let end_kw = "ecc:summary:end";
     let mut search_from = 0;
     while search_from < content.len() {
+        // SAFETY(string_slice): `search_from` is 0 or a value clamped up to a
+        // char boundary below (the `is_char_boundary` loop); always a boundary.
+        #[allow(clippy::string_slice)]
         let Some(s_off) = find_ci(&content[search_from..], start_kw) else {
             break;
         };
         let abs_s = search_from + s_off;
         // Find end of the <!-- ... --> comment that contains START
+        // SAFETY(string_slice): `abs_s` = boundary `search_from` + `s_off`
+        // (find_ci returns a boundary in the slice), so it is a char boundary.
+        #[allow(clippy::string_slice)]
         let Some(comment_end_off) = content[abs_s..].find("-->") else {
             break;
         };
         let body_start = abs_s + comment_end_off + 3;
 
         // Find end marker
+        // SAFETY(string_slice): `body_start` = `abs_s` + byte offset of the
+        // ASCII "-->" + 3, all char boundaries.
+        #[allow(clippy::string_slice)]
         let Some(e_off) = find_ci(&content[body_start..], end_kw) else {
             break;
         };
@@ -216,10 +234,16 @@ pub fn extract_summaries(content: &str) -> String {
         // Walk back to find <!-- that opens the end comment. Ignore any opener
         // that precedes the block body (an END marker not wrapped in a comment)
         // so the slice below can never have start > end.
+        // SAFETY(string_slice): `abs_e` = boundary `body_start` + `e_off`
+        // (find_ci returns a boundary), so it is a char boundary.
+        #[allow(clippy::string_slice)]
         let comment_open = content[..abs_e]
             .rfind("<!--")
             .filter(|&o| o >= body_start)
             .unwrap_or(abs_e);
+        // SAFETY(string_slice): `body_start` and `comment_open` are both char
+        // boundaries (comment_open is a rfind byte offset or `abs_e`).
+        #[allow(clippy::string_slice)]
         let block_text = content[body_start..comment_open].trim();
         if !block_text.is_empty() {
             extracted.push(block_text.to_string());

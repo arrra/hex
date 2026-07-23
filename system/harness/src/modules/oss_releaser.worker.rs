@@ -508,12 +508,16 @@ fn watch_repo(
                 repo.display()
             ),
         );
-        return Ok(Some(format!(
-            "triggered finish ceremony for {branch}@{} ({} deferred, {} pruned)",
-            &sha[..sha.len().min(12)],
-            plan.deferred.len(),
-            plan.prune.len()
-        )));
+        // `sha` is `git rev-parse` output — hex ASCII, every byte a char boundary.
+        #[allow(clippy::string_slice)]
+        {
+            return Ok(Some(format!(
+                "triggered finish ceremony for {branch}@{} ({} deferred, {} pruned)",
+                &sha[..sha.len().min(12)],
+                plan.deferred.len(),
+                plan.prune.len()
+            )));
+        }
     }
 
     if plan.deferred.is_empty() && plan.unfinishable.is_empty() && plan.prune.is_empty() {
@@ -589,27 +593,35 @@ fn develop_sync_repo(profile: &hex::release::ReleaseProfile) -> Result<Option<St
                     repo.display()
                 ),
             );
-            Ok(Some(format!(
-                "pushed {develop} {}..{}",
-                &from[..from.len().min(12)],
-                &to[..to.len().min(12)]
-            )))
+            // `from`/`to` are git rev-parse SHAs — hex ASCII, every byte a char boundary.
+            #[allow(clippy::string_slice)]
+            {
+                Ok(Some(format!(
+                    "pushed {develop} {}..{}",
+                    &from[..from.len().min(12)],
+                    &to[..to.len().min(12)]
+                )))
+            }
         }
         Sync::Diverged { local, origin } => {
             // Divergence is an operator problem — alert (deduped macOS
             // notification + stderr + telemetry via alert::notify), then
             // fail the repo loudly. NEVER auto-resolved.
-            hex::alert::notify(
-                &format!("release-develop-sync-diverged-{name}"),
-                "oss-releaser: develop diverged",
-                &format!(
-                    "{name}: local {develop} ({}) and origin/{develop} ({}) have \
-                     diverged — reconcile by hand in {}",
-                    &local[..local.len().min(12)],
-                    &origin[..origin.len().min(12)],
-                    repo.display()
-                ),
-            );
+            // `local`/`origin` are git rev-parse SHAs — hex ASCII, every byte a char boundary.
+            #[allow(clippy::string_slice)]
+            {
+                hex::alert::notify(
+                    &format!("release-develop-sync-diverged-{name}"),
+                    "oss-releaser: develop diverged",
+                    &format!(
+                        "{name}: local {develop} ({}) and origin/{develop} ({}) have \
+                         diverged — reconcile by hand in {}",
+                        &local[..local.len().min(12)],
+                        &origin[..origin.len().min(12)],
+                        repo.display()
+                    ),
+                );
+            }
             anyhow::bail!(
                 "profile `{name}`: local {develop} ({local}) and origin/{develop} \
                  ({origin}) have DIVERGED — each side has commits the other lacks; \

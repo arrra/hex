@@ -954,6 +954,9 @@ fn doctor_carveout(combined: &str, exit_code: i32) -> GateResult {
 /// Last `n` chars of `s`, newline-flattened, char-boundary safe — the
 /// diagnostic tail for gate failures (heads are usually build noise; tails
 /// carry the death rattle).
+// `start` is walked back to a char boundary (is_char_boundary loop below), so
+// `&flat[start..]` is valid even when `flat` carries non-ASCII gate output.
+#[allow(clippy::string_slice)]
 fn output_tail(s: &str, n: usize) -> String {
     let flat = s.trim().replace('\n', " | ");
     if flat.len() <= n {
@@ -1369,6 +1372,8 @@ fn rev_parse(repo_root: &Path, refname: &str) -> Result<String> {
         .to_string())
 }
 
+// `sha` is a git rev-parse SHA — hex ASCII, every byte is a char boundary.
+#[allow(clippy::string_slice)]
 fn short_sha(sha: &str) -> &str {
     &sha[..sha.len().min(8)]
 }
