@@ -99,6 +99,10 @@ pub fn run_on_file(
     if offset >= len_i64 {
         return Ok(report);
     }
+    // SAFETY(string_slice): `offset` was rounded down to a char boundary above
+    // (the is_char_boundary loop) and `offset >= len_i64` returned early, so it
+    // is a valid char boundary within `full`.
+    #[allow(clippy::string_slice)]
     let span = &full[offset as usize..];
 
     // Small-delta short-circuit (semantics unchanged: a span under min_tokens
@@ -131,6 +135,10 @@ pub fn run_on_file(
             strikes
         );
     }
+    // SAFETY(string_slice): `cap::cap_span` returns a char-boundary byte length
+    // (either a boundary from char_indices, an index right after an ASCII '\n',
+    // `span.len()`, or 0) — never a mid-char offset.
+    #[allow(clippy::string_slice)]
     let slice = &span[..cap_len];
 
     // --- Extract (with deterministic test seam) ---

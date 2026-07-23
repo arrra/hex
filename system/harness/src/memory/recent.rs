@@ -166,7 +166,11 @@ fn todo_now_top3(hex_dir: &Path) -> Vec<Pointer> {
                 while !item.is_char_boundary(end) {
                     end -= 1;
                 }
-                format!("{}…", &item[..end])
+                // SAFETY(string_slice): `end` was floored to a char boundary by
+                // the is_char_boundary loop above.
+                #[allow(clippy::string_slice)]
+                let head = &item[..end];
+                format!("{}…", head)
             } else {
                 item
             };

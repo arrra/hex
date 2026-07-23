@@ -340,7 +340,11 @@ fn tail(s: &str, n: usize) -> String {
         while start > 0 && !s.is_char_boundary(start) {
             start -= 1;
         }
-        format!("...{}", &s[start..])
+        // SAFETY(string_slice): `start` was floored to a char boundary by the
+        // is_char_boundary loop above.
+        #[allow(clippy::string_slice)]
+        let tail = &s[start..];
+        format!("...{}", tail)
     }
 }
 
