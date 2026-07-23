@@ -356,10 +356,8 @@ fn parse_learnings(path: &Path, stops: &HashSet<&'static str>) -> Vec<Entry> {
 
     for line in text.lines() {
         let stripped = line.trim();
-        if stripped.starts_with("## ") {
-            // "## " (3 ASCII bytes) was just matched by starts_with ⇒ byte 3 is a char boundary.
-            #[allow(clippy::string_slice)]
-            let cat = stripped[3..].trim().to_string();
+        if let Some(rest) = stripped.strip_prefix("## ") {
+            let cat = rest.trim().to_string();
             category = cat;
         } else if stripped.starts_with("- ") && !category.is_empty() {
             // "- " (2 ASCII bytes) was just matched by starts_with ⇒ byte 2 is a char boundary.
@@ -400,10 +398,8 @@ fn parse_reflections(dir: &Path, stops: &HashSet<&'static str>) -> Vec<Entry> {
         let mut cat = "Reflection".to_string();
         for line in text.lines() {
             let s = line.trim();
-            if s.starts_with("## ") {
-                // "## " (3 ASCII bytes) was just matched by starts_with ⇒ byte 3 is a char boundary.
-                #[allow(clippy::string_slice)]
-                let c = s[3..].trim().to_string();
+            if let Some(rest) = s.strip_prefix("## ") {
+                let c = rest.trim().to_string();
                 cat = c;
             } else if s.starts_with("- ") && s.len() > 10 {
                 // "- " (2 ASCII bytes) was just matched by starts_with ⇒ byte 2 is a char boundary.

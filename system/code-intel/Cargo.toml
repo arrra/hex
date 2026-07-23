@@ -36,3 +36,10 @@ signal-hook = "0.3"
 
 [dev-dependencies]
 tempfile = "3"
+
+# Deny raw string indexing (`s[a..b]`) that panics on non-char-boundary offsets.
+# Every slice of a string that may carry non-ASCII (file content, paths, symbol
+# names, model/git/JSON data) must use a boundary-safe form (get/chars/split_at_checked)
+# or carry a targeted #[allow] with a proof that the offset is ASCII by construction.
+[lints.clippy]
+string_slice = "warn"
