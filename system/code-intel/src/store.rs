@@ -271,6 +271,10 @@ fn random_hex6() -> String {
 }
 
 /// `YYYYMMDDTHHMMSSZ-xxxxxx`, published (no `.tmp` suffix).
+// string_slice allow: `ts[..8]`/`ts[9..15]` are reached only after the `&&`
+// guards below match ASCII 'T' at byte 8 and 'Z' at byte 15, so bytes 8/9/15
+// are proven char boundaries — the slice ends can never split a multi-byte char.
+#[allow(clippy::string_slice)]
 fn is_generation_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.len() != 23 || name.ends_with(".tmp") {
