@@ -116,6 +116,9 @@ impl Default for Ctx {
 
 /// First `head` + last `tail` chars with an ellipsis marker — error heads
 /// carry file paths, tails carry exit reasons; keep both.
+// `head_end`/`tail_start` are produced by `char_indices()` below, so both are
+// valid char boundaries even when `flat` carries non-ASCII input.
+#[allow(clippy::string_slice)]
 fn head_tail(s: &str, head: usize, tail: usize) -> String {
     let flat = s.replace('\n', " ");
     if flat.len() <= head + tail {

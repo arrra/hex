@@ -517,7 +517,11 @@ fn record_upgrade_sha(config_file: &Path, source_dir: &Path, repo_url: &str) {
     if let Ok(s) = serde_json::to_string_pretty(&data) {
         if fs::write(&tmp, s + "\n").is_ok() {
             let _ = fs::rename(&tmp, config_file);
-            println!("  → Recorded upgrade SHA: {}...", &sha[..sha.len().min(8)]);
+            // `sha` is `git rev-parse HEAD` output — hex ASCII, every byte a char boundary.
+            #[allow(clippy::string_slice)]
+            {
+                println!("  → Recorded upgrade SHA: {}...", &sha[..sha.len().min(8)]);
+            }
         }
     }
 }
@@ -798,10 +802,14 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                             let sha_tmp = installed_sha_file.with_extension("tmp");
                             if fs::write(&sha_tmp, sha).is_ok() {
                                 let _ = fs::rename(&sha_tmp, &installed_sha_file);
-                                println!(
-                                    "  → Recorded installed SHA: {}...",
-                                    &sha[..sha.len().min(8)]
-                                );
+                                // `sha` is `git rev-parse HEAD` output — hex ASCII, every byte a char boundary.
+                                #[allow(clippy::string_slice)]
+                                {
+                                    println!(
+                                        "  → Recorded installed SHA: {}...",
+                                        &sha[..sha.len().min(8)]
+                                    );
+                                }
                             }
                         }
                         // The binary changed, but the long-running harness
