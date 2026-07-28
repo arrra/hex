@@ -1,0 +1,53 @@
+# .github/workflows/ci.yml
+#
+# Blocking CI gate for the Rust workspace: formatting, lints, and tests.
+# Runs on every push to develop/main and on every pull request. Every job is a
+# hard gate — any failing job blocks the merge.
+#
+# Complements core-e2e.yml, which is an advisory (non-required) clean-room
+# signal, not a merge gate. This workflow is the required check for
+# fmt + clippy + test.
+name: ci
+
+on:
+  push:
+    branches: [develop, main]
+  pull_request:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+jobs:
+  fmt:
+    name: cargo fmt --check
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: rustfmt
+      - run: cargo fmt --check
+
+  clippy:
+    name: cargo clippy -D warnings
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo clippy --all-targets --locked -- -D warnings
+
+  test:
+    name: cargo test --workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - uses: Swatinem/rust-cache@v2
+      - run: cargo test --workspace

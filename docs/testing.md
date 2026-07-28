@@ -18,7 +18,7 @@ This document describes the test suite, what each test verifies, and how to run 
 
 Auto-discovers all `tests/core-e2e/suites/*.sh` files and runs them. Non-BOI suites run inside the `tests/core-e2e/Dockerfile` container; BOI integration suites run on the host (they need Docker access to spin up their own containers).
 
-CI runs both jobs on every PR and blocks merges on failure (see `.github/workflows/core-e2e.yml`).
+The blocking merge gate is `.github/workflows/ci.yml`, which runs `cargo fmt --check`, `cargo clippy --all-targets --locked -- -D warnings`, and `cargo test --workspace` on every push to develop/main and on every pull request. The Core E2E workflow (`.github/workflows/core-e2e.yml`) runs these suites on every PR too, but it is advisory/non-blocking — not a required status check — exactly as its own header comment states.
 
 ```bash
 # All suites (host must have Docker)
