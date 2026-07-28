@@ -40,10 +40,8 @@ impl DoctorCheck for NoStaleLlmPreference {
         if !stale.exists() {
             return CheckResult::pass("no stale root llm-preference");
         }
-        if ctx.fix {
-            if fs::remove_file(&stale).is_ok() {
-                return CheckResult::fixed("Removed stale root llm-preference");
-            }
+        if ctx.fix && fs::remove_file(&stale).is_ok() {
+            return CheckResult::fixed("Removed stale root llm-preference");
         }
         CheckResult::warn(format!(
             "stale llm-preference at root: {} — remove it",

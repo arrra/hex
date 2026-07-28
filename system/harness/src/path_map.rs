@@ -1,5 +1,5 @@
-/// Source-repo layout detection for the upgrade flow.
-/// Translates paths for the v2 (system/ + templates/) layout.
+//! Source-repo layout detection for the upgrade flow.
+//! Translates paths for the v2 (system/ + templates/) layout.
 
 /// Detect the source repo layout.
 /// Returns "v2" or "unknown".

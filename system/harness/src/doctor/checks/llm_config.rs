@@ -136,13 +136,11 @@ impl DoctorCheck for StaleLlmPreferenceCheck {
         if !path.exists() {
             return CheckResult::pass("no stale .hex/llm-preference");
         }
-        if ctx.fix {
-            if std::fs::remove_file(&path).is_ok() {
-                return CheckResult::fixed(format!(
-                    "removed stale {} (no longer used)",
-                    path.display()
-                ));
-            }
+        if ctx.fix && std::fs::remove_file(&path).is_ok() {
+            return CheckResult::fixed(format!(
+                "removed stale {} (no longer used)",
+                path.display()
+            ));
         }
         CheckResult::warn(format!(
             "stale {} present — file is unused; remove it",

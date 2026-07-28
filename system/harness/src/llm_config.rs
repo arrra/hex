@@ -429,8 +429,7 @@ model = "file/model"
         write_llm_toml(td.path(), "this is = = not valid toml [[[");
 
         let err = resolve("memory_extract")
-            .err()
-            .expect("malformed TOML must be a loud error, not a silent fallback");
+            .expect_err("malformed TOML must be a loud error, not a silent fallback");
         let msg = format!("{err:#}");
         assert!(
             msg.to_lowercase().contains("llm.toml") || msg.to_lowercase().contains("toml"),

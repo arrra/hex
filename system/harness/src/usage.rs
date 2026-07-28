@@ -252,7 +252,7 @@ mod tests {
     fn duplicate_request_ids_counted_once() {
         let tmp = tempfile::TempDir::new().unwrap();
         let t = turn("same-req", 20, "claude-fable-5", 25.0);
-        write_jsonl(&tmp.path().join("-proj/a.jsonl"), &[t.clone()]);
+        write_jsonl(&tmp.path().join("-proj/a.jsonl"), std::slice::from_ref(&t));
         write_jsonl(&tmp.path().join("-proj/b.jsonl"), &[t]);
         let s = window_spend(tmp.path(), now(), Duration::minutes(60));
         assert_eq!(s.turns, 1);

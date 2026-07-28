@@ -80,12 +80,12 @@ mod tests {
 
     #[test]
     fn should_throttle_max_true_is_false() {
-        assert_eq!(should_throttle(true), false);
+        assert!(!should_throttle(true));
     }
 
     #[test]
     fn should_throttle_max_false_is_true() {
-        assert_eq!(should_throttle(false), true);
+        assert!(should_throttle(false));
     }
 
     #[test]

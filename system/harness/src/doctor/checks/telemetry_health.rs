@@ -31,7 +31,7 @@ impl DoctorCheck for TelemetryHealth {
         let failures = match telemetry::failures(since) {
             Ok(rows) => rows,
             Err(e) => {
-                return CheckResult::warn(&format!(
+                return CheckResult::warn(format!(
                     "telemetry store unreadable: {e} — inspect .hex/telemetry/events.db"
                 ));
             }
@@ -39,7 +39,7 @@ impl DoctorCheck for TelemetryHealth {
 
         if !failures.is_empty() {
             let last = &failures[0];
-            return CheckResult::warn(&format!(
+            return CheckResult::warn(format!(
                 "{} telemetry failure(s) in last 24h (most recent: {}). \
                  Run `hex failures` (digest) or `hex telemetry failures` (raw rows) to inspect",
                 failures.len(),
@@ -55,7 +55,7 @@ impl DoctorCheck for TelemetryHealth {
                     .count()
             })
             .unwrap_or(0);
-        CheckResult::pass(&format!(
+        CheckResult::pass(format!(
             "telemetry store healthy ({total} events, 0 failures/24h)"
         ))
     }

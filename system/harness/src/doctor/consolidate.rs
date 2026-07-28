@@ -259,52 +259,6 @@ fn extract_relative_links(content: &str) -> Vec<String> {
     links
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn consolidate_prose_parens_not_extracted() {
-        let content = "git tag must match (enforced by release.sh) here";
-        let links = extract_relative_links(content);
-        assert!(
-            links.is_empty(),
-            "prose parens should not be extracted: {links:?}"
-        );
-    }
-
-    #[test]
-    fn consolidate_real_link_is_extracted() {
-        let content = "See [the guide](docs/guide.md) for details.";
-        let links = extract_relative_links(content);
-        assert_eq!(links, vec!["docs/guide.md"]);
-    }
-
-    #[test]
-    fn consolidate_https_url_is_skipped() {
-        let content = "See [external](https://example.com/page.md) link.";
-        let links = extract_relative_links(content);
-        assert!(links.is_empty(), "https URLs should be skipped: {links:?}");
-    }
-
-    #[test]
-    fn consolidate_http_url_is_skipped() {
-        let content = "See [external](http://example.com/page.md) link.";
-        let links = extract_relative_links(content);
-        assert!(links.is_empty(), "http URLs should be skipped: {links:?}");
-    }
-
-    #[test]
-    fn consolidate_anchor_only_is_skipped() {
-        let content = "See [section](#heading) here.";
-        let links = extract_relative_links(content);
-        assert!(
-            links.is_empty(),
-            "anchor-only links should be skipped: {links:?}"
-        );
-    }
-}
-
 fn normalize_path(path: &Path) -> PathBuf {
     // Resolve .. and . without hitting the filesystem
     let mut components = Vec::new();
@@ -360,5 +314,51 @@ fn check_audit_freshness(hex_dir: &Path) -> Result<String, String> {
             Err("LLM consolidation stale — run hex memory consolidate full".to_string())
         }
         Some(_) => Ok("OK: LLM consolidation audit is fresh".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consolidate_prose_parens_not_extracted() {
+        let content = "git tag must match (enforced by release.sh) here";
+        let links = extract_relative_links(content);
+        assert!(
+            links.is_empty(),
+            "prose parens should not be extracted: {links:?}"
+        );
+    }
+
+    #[test]
+    fn consolidate_real_link_is_extracted() {
+        let content = "See [the guide](docs/guide.md) for details.";
+        let links = extract_relative_links(content);
+        assert_eq!(links, vec!["docs/guide.md"]);
+    }
+
+    #[test]
+    fn consolidate_https_url_is_skipped() {
+        let content = "See [external](https://example.com/page.md) link.";
+        let links = extract_relative_links(content);
+        assert!(links.is_empty(), "https URLs should be skipped: {links:?}");
+    }
+
+    #[test]
+    fn consolidate_http_url_is_skipped() {
+        let content = "See [external](http://example.com/page.md) link.";
+        let links = extract_relative_links(content);
+        assert!(links.is_empty(), "http URLs should be skipped: {links:?}");
+    }
+
+    #[test]
+    fn consolidate_anchor_only_is_skipped() {
+        let content = "See [section](#heading) here.";
+        let links = extract_relative_links(content);
+        assert!(
+            links.is_empty(),
+            "anchor-only links should be skipped: {links:?}"
+        );
     }
 }

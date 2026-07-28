@@ -126,9 +126,9 @@ pub fn parse_worker_json(s: &str) -> Result<WorkerOutput, String> {
 /// and CI-safe without a live LLM:
 ///   - unset            → live `claude --json-schema` (production)
 ///   - `echo`           → returns Answer(input) verbatim, so an e2e can assert the
-///                        pinned option *description* actually reached the worker
+///     pinned option *description* actually reached the worker
 ///   - `<path-to-json>` → returns parse_worker_json(file contents); point it at a
-///                        prompt fixture to deterministically make hex "ask".
+///     prompt fixture to deterministically make hex "ask".
 pub fn run_worker(input: &str) -> Result<WorkerOutput, String> {
     match std::env::var("HEX_QUESTION_WORKER").ok().as_deref() {
         Some("echo") => return Ok(WorkerOutput::Answer(input.to_string())),

@@ -275,10 +275,7 @@ fn atomic_install_binary(src: &Path, dst: &Path) -> io::Result<()> {
             .arg(&tmp)
             .status()?;
         if !cs.success() {
-            return Err(io::Error::new(
-                io::ErrorKind::Other,
-                "codesign failed on temp binary",
-            ));
+            return Err(io::Error::other("codesign failed on temp binary"));
         }
         fs::rename(&tmp, dst)
     })();
@@ -558,8 +555,8 @@ fn binary_is_stale(hex_dir: &Path, source_dir: &Path) -> bool {
     let cargo_ver = fs::read_to_string(&cargo_toml).ok().and_then(|c| {
         c.lines()
             .find(|l| l.starts_with("version"))
-            .and_then(|l| l.splitn(2, '"').nth(1))
-            .and_then(|s| s.splitn(2, '"').next())
+            .and_then(|l| l.split_once('"').map(|x| x.1))
+            .and_then(|s| s.split('"').next())
             .map(|s| s.to_string())
     });
     let Some(cargo_ver) = cargo_ver else {
@@ -627,8 +624,8 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
     let cargo_ver = cargo_content
         .lines()
         .find(|l| l.starts_with("version"))
-        .and_then(|l| l.splitn(2, '"').nth(1))
-        .and_then(|s| s.splitn(2, '"').next())
+        .and_then(|l| l.split_once('"').map(|x| x.1))
+        .and_then(|s| s.split('"').next())
         .map(|s| s.to_string());
 
     let Some(cargo_ver) = cargo_ver else {
@@ -740,7 +737,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
             let dst_sub = harness_dst.join(sub);
             let src_sub = harness_src.join(sub);
             if dst_sub.exists() && src_sub.exists() {
-                if let Err(e) = deletion_pass(&dst_sub, &src_sub, &backup_dir) {
+                if let Err(e) = deletion_pass(&dst_sub, &src_sub, backup_dir) {
                     eprintln!("  [WARN] Harness deletion pass on {sub}/ failed: {e}");
                 }
             }
@@ -763,7 +760,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                 let dst_sub = codeintel_dst.join(sub);
                 let src_sub = codeintel_src.join(sub);
                 if dst_sub.exists() && src_sub.exists() {
-                    if let Err(e) = deletion_pass(&dst_sub, &src_sub, &backup_dir) {
+                    if let Err(e) = deletion_pass(&dst_sub, &src_sub, backup_dir) {
                         eprintln!("  [WARN] code-intel deletion pass on {sub}/ failed: {e}");
                     }
                 }
@@ -827,7 +824,6 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                     }
                     Err(e) => {
                         eprintln!("  [FAIL] atomic binary install failed: {e}");
-                        return;
                     }
                 }
             }

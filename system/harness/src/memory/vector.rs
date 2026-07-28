@@ -15,7 +15,17 @@ static VEC_INIT: Once = Once::new();
 /// idempotent: every `Connection` opened afterwards has vec0 available.
 pub fn register_sqlite_vec() {
     VEC_INIT.call_once(|| unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(sqlite3_vec_init as *const ())));
+        // Explicit transmute annotations (clippy::missing_transmute_annotations):
+        // reinterpret the extension entry point as the C ABI fn pointer that
+        // `sqlite3_auto_extension` expects.
+        sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *const i8,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(sqlite3_vec_init as *const ())));
     });
 }
 

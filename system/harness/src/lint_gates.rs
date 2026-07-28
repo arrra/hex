@@ -250,9 +250,12 @@ fn rule_stderr_swallow(cmd: &str) -> bool {
         || cmd.contains(">/dev/null 2>&1")
 }
 
+/// A footgun rule: a stable id paired with a predicate over a command string.
+pub type FootgunRule = (&'static str, fn(&str) -> bool);
+
 /// Static list of `(rule_id, predicate)` pairs. Order is the canonical
 /// reporting order in `rules_fired`.
-pub fn footgun_rules() -> Vec<(&'static str, fn(&str) -> bool)> {
+pub fn footgun_rules() -> Vec<FootgunRule> {
     vec![
         ("path-127", rule_path_127 as fn(&str) -> bool),
         ("pipe-tail-exitcode", rule_pipe_tail_exitcode),
@@ -758,7 +761,7 @@ verifications = [{ intent = "it really works" }]
 
     #[test]
     fn lint_shadow_summary_single_line_no_advice() {
-        let s = shadow_summary(&vec![
+        let s = shadow_summary(&[
             "cargo test 2>/dev/null".to_string(),
             "test -f Cargo.toml".to_string(),
         ]);

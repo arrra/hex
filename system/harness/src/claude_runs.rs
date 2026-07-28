@@ -361,6 +361,7 @@ fn parse_config_file(path: &Path) -> Result<ParsedConfig, ClaudeRunsError> {
 ///   - `key = "string"` (string)
 ///   - `key = ["a", "b"]` (list of strings, on one line)
 ///   - `# ...` line comments
+///
 /// Anything else is a parse error (loud, with line number).
 fn parse_config_str(raw: &str) -> Result<ParsedConfig, String> {
     let mut cfg = ParsedConfig::default();

@@ -119,7 +119,7 @@ impl Embedder {
     /// Embed corpus chunks (document side).
     pub fn embed_documents(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
         let prefixed: Vec<String> = texts.iter().map(|t| format!("{DOC_PREFIX}{t}")).collect();
-        Ok(self.model.embed(prefixed, None)?)
+        self.model.embed(prefixed, None)
     }
 
     /// Embed a single search query (query side).

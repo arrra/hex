@@ -5,6 +5,13 @@ use chrono::{NaiveDate, Utc};
 use regex::Regex;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::LazyLock;
+
+/// Leading list-marker prefix (`- `, `* `, `[ ]`, `[x]`) stripped from a todo
+/// or landing line. Hoisted to a `LazyLock` static so it compiles once instead
+/// of once per scanned line (clippy::regex_creation_in_loops).
+static CLEAN_PREFIX: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"^[-*\[\]x ]+").expect("regex compiles"));
 
 pub fn stale_deps(hex_dir: &Path, threshold_days: u32, json_output: bool) -> i32 {
     let dependency_markers = Regex::new(
@@ -22,11 +29,7 @@ pub fn stale_deps(hex_dir: &Path, threshold_days: u32, json_output: bool) -> i32
                     continue;
                 }
                 if dependency_markers.is_match(stripped) {
-                    let clean = Regex::new(r"^[-*\[\]x ]+")
-                        .unwrap()
-                        .replace(stripped, "")
-                        .trim()
-                        .to_string();
+                    let clean = CLEAN_PREFIX.replace(stripped, "").trim().to_string();
                     if clean.len() > 10 {
                         all_items.push((clean, "todo.md".to_string()));
                     }
@@ -68,11 +71,7 @@ pub fn stale_deps(hex_dir: &Path, threshold_days: u32, json_output: bool) -> i32
                         continue;
                     }
                     if dependency_markers.is_match(stripped) {
-                        let clean = Regex::new(r"^[-*\[\]x ]+")
-                            .unwrap()
-                            .replace(stripped, "")
-                            .trim()
-                            .to_string();
+                        let clean = CLEAN_PREFIX.replace(stripped, "").trim().to_string();
                         if clean.len() > 10 {
                             all_items.push((clean, src.clone()));
                         }

@@ -16,10 +16,8 @@ impl DoctorCheck for HexExists {
         if hex.is_dir() {
             return CheckResult::pass(".hex/ exists");
         }
-        if ctx.fix {
-            if fs::create_dir_all(&hex).is_ok() {
-                return CheckResult::fixed(".hex/ created");
-            }
+        if ctx.fix && fs::create_dir_all(&hex).is_ok() {
+            return CheckResult::fixed(".hex/ created");
         }
         CheckResult::fail(".hex/ directory missing — run bootstrap to fix")
     }

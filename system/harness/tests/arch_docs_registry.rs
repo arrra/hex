@@ -59,9 +59,11 @@ fn registry_rows(readme: &str) -> Vec<String> {
 fn doc_link(row: &str) -> Option<String> {
     let mut rest = row;
     while let Some(open) = rest.find("](") {
-        let tail = &rest[open + 2..];
+        // `open` + 2 skips the ASCII `](`, so it is always a char boundary;
+        // `.get()` keeps the slice panic-free regardless (clippy::string_slice).
+        let tail = rest.get(open + 2..).unwrap_or("");
         let close = tail.find(')')?;
-        let mut target = tail[..close].trim();
+        let mut target = tail.get(..close).unwrap_or("").trim();
         if let Some(stripped) = target.strip_prefix("./") {
             target = stripped;
         }
@@ -69,7 +71,7 @@ fn doc_link(row: &str) -> Option<String> {
         if target.ends_with(".md") && !target.contains('/') {
             return Some(target.to_string());
         }
-        rest = &tail[close + 1..];
+        rest = tail.get(close + 1..).unwrap_or("");
     }
     None
 }

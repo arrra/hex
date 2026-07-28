@@ -9,9 +9,9 @@ use std::path::Path;
 /// first; only facts missing a vector get embedded (idempotent). Returns the
 /// number of facts embedded this run.
 ///
-/// The embedder is only constructed when there is pending work, so the sweep
-/// + no-op path never pays the model cold-load. `hex_dir` resolves the
-/// fastembed cache (`hex_dir/.fastembed_cache`).
+/// The embedder is only constructed when there is pending work, so the
+/// sweep + no-op path never pays the model cold-load. `hex_dir` resolves
+/// the fastembed cache (`hex_dir/.fastembed_cache`).
 pub fn backfill(conn: &Connection, hex_dir: &Path) -> anyhow::Result<usize> {
     // tombstoned (or deleted) facts must leave the index first
     conn.execute(

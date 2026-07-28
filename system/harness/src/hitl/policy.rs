@@ -624,7 +624,13 @@ mod tests {
             c
         };
         let it = item(1, Priority::P1);
-        let night = pings_due(&[it.clone()], &c, ts("2026-07-10T23:30:00Z"), 0, false);
+        let night = pings_due(
+            std::slice::from_ref(&it),
+            &c,
+            ts("2026-07-10T23:30:00Z"),
+            0,
+            false,
+        );
         assert!(night.is_empty(), "no ping at night");
         let morning = pings_due(&[it], &c, ts("2026-07-11T08:30:00Z"), 0, false);
         assert_eq!(reasons(&morning), vec![(1, PingReason::OnFile)]);

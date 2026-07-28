@@ -76,7 +76,7 @@ fn all_shellout_targets_exist() {
     for entry in WalkDir::new(&src_dir)
         .into_iter()
         .filter_map(|e| e.ok())
-        .filter(|e| e.path().extension().map_or(false, |x| x == "rs"))
+        .filter(|e| e.path().extension().is_some_and(|x| x == "rs"))
     {
         let rel_src = entry
             .path()

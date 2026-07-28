@@ -189,8 +189,8 @@ pub fn reconcile_from_boi_db<P: AsRef<Path>>(
     Ok((records, summary))
 }
 
-/// Write reconciler outputs into the ledger: one `outcome` row per record
-/// + one `heartbeat` row with the run summary. If `records` is empty AND
+/// Write reconciler outputs into the ledger: one `outcome` row per record +
+/// one `heartbeat` row with the run summary. If `records` is empty AND
 /// `summary.skipped_malformed > 0`, also write an `alert` row LOUDLY (S6)
 /// — silence is a bug when the source has data we couldn't parse.
 pub fn write_reconcile_to_ledger(

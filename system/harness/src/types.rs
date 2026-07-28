@@ -58,13 +58,14 @@ impl<'de> Deserialize<'de> for TriggerSpec {
 impl Serialize for TriggerSpec {
     fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
         use serde::ser::SerializeStruct;
-        if self.condition.is_none() {
-            s.serialize_str(&self.event)
-        } else {
-            let mut st = s.serialize_struct("TriggerSpec", 2)?;
-            st.serialize_field("event", &self.event)?;
-            st.serialize_field("condition", self.condition.as_ref().unwrap())?;
-            st.end()
+        match &self.condition {
+            None => s.serialize_str(&self.event),
+            Some(condition) => {
+                let mut st = s.serialize_struct("TriggerSpec", 2)?;
+                st.serialize_field("event", &self.event)?;
+                st.serialize_field("condition", condition)?;
+                st.end()
+            }
         }
     }
 }

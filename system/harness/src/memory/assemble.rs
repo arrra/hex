@@ -131,7 +131,7 @@ fn detect_entity_subjects(conn: &Connection, query: &str) -> Vec<String> {
         if toks.contains(&lower) {
             hit = true;
         } else if let Some(slug) = lower.split(':').nth(1) {
-            for piece in slug.split(|c: char| c == '-' || c == '_' || c == '/') {
+            for piece in slug.split(['-', '_', '/']) {
                 if piece.len() >= 3 && toks.contains(piece) {
                     hit = true;
                     break;
@@ -183,11 +183,11 @@ fn m1_content(
     let mut out: Vec<Candidate> = Vec::new();
 
     let chunks = search_fts_public(conn, query, TOP_K_PER_MOVE * 3, None).unwrap_or_default();
-    let mut rank = 0usize;
-    for c in chunks
+    for (rank, c) in chunks
         .into_iter()
         .filter(|r| !(for_agent && r.private))
         .take(TOP_K_PER_MOVE)
+        .enumerate()
     {
         let native = c.score;
         let dedup_key = format!("chunk:{}", c.rowid);
@@ -202,7 +202,6 @@ fn m1_content(
             confidence,
             dedup_key,
         });
-        rank += 1;
     }
 
     // Vector arm — caller-decided embedder policy. `None` = FTS-only (the
@@ -450,10 +449,10 @@ pub fn assemble(
     ];
 
     // Floor: take the first available from each queue, M1 first.
-    for i in 0..queues.len() {
+    for (move_id, queue) in &mut queues {
         // Skip non-fired moves on the floor — they get the 0.3 demotion and
         // do not warrant a guaranteed slot. M1 always fires.
-        let fired = match queues[i].0 {
+        let fired = match move_id {
             MoveId::M1ContentMatch => true,
             MoveId::M2EntityFilter => m2_f,
             MoveId::M3PredicateQuery => m3_f,
@@ -462,7 +461,7 @@ pub fn assemble(
         if !fired {
             continue;
         }
-        if let Some(cand) = queues[i].1.next() {
+        if let Some(cand) = queue.next() {
             let cost = cand_chars(&cand);
             if seen.insert(cand.dedup_key.clone()) {
                 if chars + cost > budget {

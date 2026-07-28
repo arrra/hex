@@ -58,10 +58,9 @@ fn db_path() -> std::io::Result<PathBuf> {
 /// Open the events.db, applying PRAGMA and creating schema if absent.
 fn open() -> rusqlite::Result<Connection> {
     let path = db_path().map_err(|e| {
-        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("telemetry: cannot resolve db path: {e}"),
-        )))
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(format!(
+            "telemetry: cannot resolve db path: {e}"
+        ))))
     })?;
     let conn = Connection::open(path)?;
     // journal_mode returns the new mode as a row, so use query_row not execute/pragma_update.
@@ -90,10 +89,9 @@ fn open() -> rusqlite::Result<Connection> {
 /// `immutable=1` would silently miss the WAL — never use it here.
 pub fn open_ro() -> rusqlite::Result<Connection> {
     let path = db_path().map_err(|e| {
-        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::new(
-            std::io::ErrorKind::Other,
-            format!("telemetry: cannot resolve db path: {e}"),
-        )))
+        rusqlite::Error::ToSqlConversionFailure(Box::new(std::io::Error::other(format!(
+            "telemetry: cannot resolve db path: {e}"
+        ))))
     })?;
     Connection::open_with_flags(path, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)
 }

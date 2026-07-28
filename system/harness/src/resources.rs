@@ -219,7 +219,7 @@ pub fn sample_tick(now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Breach>, St
             chrono::DateTime::parse_from_rfc3339(ts)
                 .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() >= DU_INTERVAL_HOURS)
                 .unwrap_or(true)
-                || last_df_free.map_or(false, |prev| prev - df.free_gb >= DU_DELTA_GB)
+                || last_df_free.is_some_and(|prev| prev - df.free_gb >= DU_DELTA_GB)
         }
     };
     if du_due {

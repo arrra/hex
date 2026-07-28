@@ -2225,10 +2225,11 @@ const HARNESS_LABEL: &str = "com.hex.harness";
 ///   - args              = ["harness", "serve"]
 ///   - working_dir       = $HEX_DIR
 ///   - env               = HEX_DIR, III_URL, PATH (homebrew prepended),
-///                         GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
+///     GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
 ///   - keep_alive        = true (restart on crash)
 ///   - run_at_load       = true (start at login)
 ///   - log_path          = $HEX_DIR/.hex/logs/com.hex.harness.log
+///
 /// daemon-green guarantees the rendered plist omits the launchd login-session
 /// detach key (verified 2026-06-05: when present, keychain reads fail rc=36;
 /// when absent, rc=0). We deliberately do NOT — and CANNOT — set it here.
@@ -2791,8 +2792,8 @@ fn run_hitl(command: HitlCommands) -> i32 {
                 return 0;
             }
             println!(
-                "{:>3}  {:<3}  {:<14}  {:<32}  {:<10}  {}",
-                "id", "pri", "project", "title", "deadline", "blocked?"
+                "{:>3}  {:<3}  {:<14}  {:<32}  {:<10}  blocked?",
+                "id", "pri", "project", "title", "deadline"
             );
             for it in rows {
                 let blocked = if hitl_is_blocked(it, &items) {
@@ -3291,7 +3292,7 @@ mod tests {
         assert!(
             output.contains("_hex"),
             "zsh completions must contain '_hex', got: {}",
-            &output[..200.min(output.len())]
+            output.get(..200.min(output.len())).unwrap_or(&output)
         );
     }
 }

@@ -119,7 +119,7 @@ fn decision_files(hex_dir: &Path, limit: usize) -> Vec<Pointer> {
         }
     }
 
-    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    out.sort_by_key(|b| std::cmp::Reverse(b.mtime));
     out.truncate(limit);
     out
 }
@@ -192,7 +192,7 @@ pub fn collect_text(hex_dir: &Path) -> String {
     all.extend(todo_now_top3(hex_dir));
 
     // Recency-ordered, newest first.
-    all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    all.sort_by_key(|b| std::cmp::Reverse(b.mtime));
     all.truncate(10);
 
     let now = SystemTime::now();
@@ -267,7 +267,7 @@ mod tests {
         all.extend(project_dir_mtimes(ws.path()));
         all.extend(decision_files(ws.path(), 10));
         all.extend(todo_now_top3(ws.path()));
-        all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        all.sort_by_key(|b| std::cmp::Reverse(b.mtime));
         all.truncate(10);
         assert!(!all.is_empty(), "must produce pointers");
 

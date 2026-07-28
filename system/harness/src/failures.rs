@@ -283,7 +283,7 @@ pub fn failure_signatures(
             s
         })
         .collect();
-    out.sort_by(|a, b| (b.is_new, b.count).cmp(&(a.is_new, a.count)));
+    out.sort_by_key(|b| std::cmp::Reverse((b.is_new, b.count)));
     Ok(out)
 }
 
@@ -295,7 +295,7 @@ pub struct DuplicateFire {
 }
 
 /// >1 row per expected-fire window = engine anomaly (observed: double-fires
-/// ~150ms apart). Checks the most recent expected fire per cron fid.
+/// > ~150ms apart). Checks the most recent expected fire per cron fid.
 pub fn duplicate_fires(
     exp: &[CronExpectation],
     now: DateTime<Utc>,
@@ -477,7 +477,7 @@ mod missed_tests {
             if !in_hole {
                 row("hb::quarter", t, "ok", 10);
             }
-            t = t + Duration::minutes(15);
+            t += Duration::minutes(15);
         }
         // Daily 04:00 fid (04:00 = now-8h, inside the hole), no row today.
         row(
@@ -627,7 +627,7 @@ fn collect_worker_files(dir: &std::path::Path, out: &mut Vec<std::path::PathBuf>
             collect_worker_files(&p, out);
         } else if p
             .file_name()
-            .map_or(false, |f| f.to_string_lossy().ends_with(".worker.rs"))
+            .is_some_and(|f| f.to_string_lossy().ends_with(".worker.rs"))
         {
             out.push(p);
         }

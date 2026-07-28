@@ -990,9 +990,12 @@ mod tests {
         }
     }
 
+    /// Shared, thread-safe log of branch names captured by the test spawner.
+    type SpawnLog = Arc<Mutex<Vec<String>>>;
+
     /// A spawner that records `(branch)` instead of spawning anything.
-    fn recorder() -> (Arc<Mutex<Vec<String>>>, impl Fn(&Path, &str) -> Result<()>) {
-        let log: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+    fn recorder() -> (SpawnLog, impl Fn(&Path, &str) -> Result<()>) {
+        let log: SpawnLog = Arc::new(Mutex::new(Vec::new()));
         let log2 = Arc::clone(&log);
         (log, move |_repo: &Path, branch: &str| {
             log2.lock().unwrap().push(branch.to_string());

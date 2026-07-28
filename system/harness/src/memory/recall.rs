@@ -589,8 +589,7 @@ mod plan2_tests {
             .expect("recall-log.jsonl must be written by log_recall");
         let last = raw
             .lines()
-            .filter(|l| !l.trim().is_empty())
-            .last()
+            .rfind(|l| !l.trim().is_empty())
             .expect("recall-log.jsonl must contain at least one line");
         let v: serde_json::Value =
             serde_json::from_str(last).expect("recall-log line must be valid JSON");

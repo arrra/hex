@@ -67,23 +67,20 @@ pub fn compose_path_dirs(hex_dir: &Path) -> Vec<PathBuf> {
 
     // env.sh prepends each dir (_add_to_path = PATH="$1:$PATH"), so the last
     // call wins (highest priority). Collect in add-order, then reverse.
-    let mut add_order: Vec<PathBuf> = Vec::new();
-
-    // User-local binaries (pip install --user, cargo install, go install)
-    add_order.push(home.join(".local/bin"));
-    add_order.push(home.join("bin"));
-    add_order.push(home.join(".cargo/bin"));
-    add_order.push(home.join("go/bin"));
-
-    // Homebrew macOS
-    add_order.push(PathBuf::from("/opt/homebrew/bin"));
-    add_order.push(PathBuf::from("/usr/local/bin"));
-
-    // Node.js / npm global (claude CLI installs here)
-    add_order.push(home.join(".npm-global/bin"));
-
-    // fnm + nvm (env.sh iterates these in a single for loop)
-    add_order.push(home.join(".fnm/aliases/default/bin"));
+    let mut add_order: Vec<PathBuf> = vec![
+        // User-local binaries (pip install --user, cargo install, go install)
+        home.join(".local/bin"),
+        home.join("bin"),
+        home.join(".cargo/bin"),
+        home.join("go/bin"),
+        // Homebrew macOS
+        PathBuf::from("/opt/homebrew/bin"),
+        PathBuf::from("/usr/local/bin"),
+        // Node.js / npm global (claude CLI installs here)
+        home.join(".npm-global/bin"),
+        // fnm + nvm (env.sh iterates these in a single for loop)
+        home.join(".fnm/aliases/default/bin"),
+    ];
     let nvm_base = home.join(".nvm/versions/node");
     if nvm_base.is_dir() {
         let mut nvm_dirs: Vec<PathBuf> = std::fs::read_dir(&nvm_base)

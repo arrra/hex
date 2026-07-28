@@ -16,10 +16,8 @@ impl DoctorCheck for TodoMdExists {
         if path.is_file() {
             return CheckResult::pass("todo.md exists");
         }
-        if ctx.fix {
-            if fs::write(&path, "# TODO\n").is_ok() {
-                return CheckResult::fixed("todo.md created");
-            }
+        if ctx.fix && fs::write(&path, "# TODO\n").is_ok() {
+            return CheckResult::fixed("todo.md created");
         }
         CheckResult::warn("todo.md missing")
     }

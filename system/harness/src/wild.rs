@@ -151,15 +151,16 @@ fn load_outcomes(conn: &Connection) -> Result<(BTreeMap<String, OutcomeRec>, usi
     Ok((outcomes, malformed))
 }
 
+/// Map of `gate_hash` → (`prediction`, `rules_fired`) for the latest intent row.
+type IntentMap = BTreeMap<String, (String, Vec<String>)>;
+
 /// Load every `lint-gates`/`intent` ledger row, keeping — per `gate_hash` —
 /// the LATEST prediction (`ORDER BY id ASC` + plain insert ⇒ last write
 /// wins). Shared by [`wild_report`] and [`rule_wild_stats`] — see
 /// [`load_outcomes`] doc for why this is extracted rather than duplicated.
-fn load_intents(
-    conn: &Connection,
-) -> Result<(BTreeMap<String, (String, Vec<String>)>, usize), String> {
+fn load_intents(conn: &Connection) -> Result<(IntentMap, usize), String> {
     let mut malformed = 0usize;
-    let mut intents: BTreeMap<String, (String, Vec<String>)> = BTreeMap::new();
+    let mut intents: IntentMap = BTreeMap::new();
     let mut stmt = conn
         .prepare(
             "SELECT id, payload FROM ledger \

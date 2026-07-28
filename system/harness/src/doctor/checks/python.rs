@@ -26,7 +26,7 @@ impl DoctorCheck for PythonVersion {
 
         for candidate in &candidates {
             // Try in explicit search dirs first, then rely on PATH (empty dir sentinel)
-            let bins: Vec<String> = if search_dirs[0] != "" {
+            let bins: Vec<String> = if !search_dirs[0].is_empty() {
                 search_dirs
                     .iter()
                     .filter(|d| !d.is_empty())

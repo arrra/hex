@@ -241,13 +241,13 @@ fn regex_lite_strip_quotes(s: &str) -> String {
     let mut chars = s.chars().peekable();
     while let Some(c) = chars.next() {
         if c == '"' {
-            while let Some(nc) = chars.next() {
+            for nc in chars.by_ref() {
                 if nc == '"' {
                     break;
                 }
             }
         } else if c == '\'' {
-            while let Some(nc) = chars.next() {
+            for nc in chars.by_ref() {
                 if nc == '\'' {
                     break;
                 }
@@ -501,9 +501,9 @@ fn find_clusters(entries: &[Entry]) -> Vec<Vec<usize>> {
         }
 
         let mut components: HashMap<usize, Vec<usize>> = HashMap::new();
-        for i in 0..n {
+        for (i, &orig_idx) in cat_indices.iter().enumerate() {
             let root = find(&mut parent, i);
-            components.entry(root).or_default().push(cat_indices[i]);
+            components.entry(root).or_default().push(orig_idx);
         }
 
         for cluster in components.into_values() {
