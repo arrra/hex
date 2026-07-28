@@ -127,7 +127,12 @@ fn is_blocked(item: &Item, all: &[Item]) -> bool {
 /// The single ping (if any) due for one item at `now`, ignoring quiet hours and
 /// the daily cap (those are global and applied by [`pings_due`]). Returns the
 /// most urgent applicable reason — never more than one.
-fn ping_for_item(item: &Item, all: &[Item], cfg: &Config, now: DateTime<Utc>) -> Option<PingReason> {
+fn ping_for_item(
+    item: &Item,
+    all: &[Item],
+    cfg: &Config,
+    now: DateTime<Utc>,
+) -> Option<PingReason> {
     if !is_live(item, now) {
         return None;
     }
@@ -398,7 +403,11 @@ mod tests {
     #[test]
     fn on_file_ping_fires_for_p1_and_p2_when_never_pinged() {
         // (priority, expected on-file ping?)
-        let cases = [(Priority::P1, true), (Priority::P2, true), (Priority::P3, false)];
+        let cases = [
+            (Priority::P1, true),
+            (Priority::P2, true),
+            (Priority::P3, false),
+        ];
         for (pri, expect) in cases {
             let it = item(1, pri);
             let got = pings_due(&[it], &cfg(), ts("2026-07-10T12:00:00Z"), 0, false);
@@ -418,7 +427,13 @@ mod tests {
     #[test]
     fn p1_repings_every_24h() {
         // (hours since last_pinged, expect a Recurring ping?)
-        let cases = [(0i64, false), (12, false), (23, false), (24, true), (48, true)];
+        let cases = [
+            (0i64, false),
+            (12, false),
+            (23, false),
+            (24, true),
+            (48, true),
+        ];
         let base = ts("2026-07-10T12:00:00Z");
         for (hrs, expect) in cases {
             let mut it = item(1, Priority::P1);
@@ -451,7 +466,7 @@ mod tests {
         // (now, expected reason)
         let last = ts("2026-07-05T09:00:00Z");
         let cases = [
-            ("2026-07-07T12:00:00Z", None),                     // before T-48h
+            ("2026-07-07T12:00:00Z", None), // before T-48h
             ("2026-07-08T01:00:00Z", Some(PingReason::Deadline48h)), // crossed T-48h
             ("2026-07-09T01:00:00Z", Some(PingReason::Deadline24h)), // crossed T-24h
         ];
@@ -477,7 +492,7 @@ mod tests {
         let mut it = item(1, Priority::P2);
         it.deadline = Some(day(2026, 7, 10));
         it.last_pinged = Some(ts("2026-07-08T06:00:00Z")); // after T-48h
-        // now between T-48h and T-24h → nothing new
+                                                           // now between T-48h and T-24h → nothing new
         let got = pings_due(&[it.clone()], &cfg(), ts("2026-07-08T12:00:00Z"), 0, false);
         assert!(got.is_empty(), "T-48h already covered, T-24h not reached");
         // now past T-24h → T-24h fires
@@ -493,7 +508,11 @@ mod tests {
         it.deadline = Some(day(2026, 7, 10));
         it.last_pinged = None;
         // On file, at deadline, long after — never an individual ping.
-        for now_s in ["2026-07-01T12:00:00Z", "2026-07-09T12:00:00Z", "2026-07-20T12:00:00Z"] {
+        for now_s in [
+            "2026-07-01T12:00:00Z",
+            "2026-07-09T12:00:00Z",
+            "2026-07-20T12:00:00Z",
+        ] {
             let got = pings_due(&[it.clone()], &cfg(), ts(now_s), 0, false);
             assert!(got.is_empty(), "P3 must never ping ({now_s})");
         }
@@ -539,7 +558,10 @@ mod tests {
                 .flat_map(|g| &g.items)
                 .find(|i| i.id == 2)
                 .unwrap();
-            assert_eq!(entry.blocked, blocks, "digest blocked flag for dep {dep_status:?}");
+            assert_eq!(
+                entry.blocked, blocks,
+                "digest blocked flag for dep {dep_status:?}"
+            );
         }
     }
 
@@ -636,7 +658,13 @@ mod tests {
         let mut c = cfg();
         c.max_pings_per_day = 3;
         // Two already sent today, cap 3 → only one more allowed.
-        let got = pings_due(&[a.clone(), b.clone()], &c, ts("2026-07-10T12:00:00Z"), 2, false);
+        let got = pings_due(
+            &[a.clone(), b.clone()],
+            &c,
+            ts("2026-07-10T12:00:00Z"),
+            2,
+            false,
+        );
         assert_eq!(got.len(), 1, "only one ping left in today's allowance");
         // Cap already reached → nothing.
         let got = pings_due(&[a, b], &c, ts("2026-07-10T12:00:00Z"), 3, false);

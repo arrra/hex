@@ -1289,7 +1289,10 @@ mod tests {
     #[test]
     fn hex_new_block_does_not_collide_with_sibling_guards() {
         let block = hex_new_block().join("\n");
-        assert!(block.contains("hex-new"), "must contain its own guard marker");
+        assert!(
+            block.contains("hex-new"),
+            "must contain its own guard marker"
+        );
         assert!(
             !block.contains("claude() {") && !block.contains("function claude"),
             "must not contain the claude() wrapper's guard markers"
@@ -1393,8 +1396,14 @@ mod tests {
     #[test]
     fn hex_new_unset_hex_dir_fails_instead_of_launching_in_cwd() {
         let (ok, args, cwd) = run_hex_new("debug", false);
-        assert!(!ok, "must fail when HEX_DIR is unset and $HOME/hex is absent");
-        assert!(args.is_empty() && cwd.is_empty(), "claude must not have run");
+        assert!(
+            !ok,
+            "must fail when HEX_DIR is unset and $HOME/hex is absent"
+        );
+        assert!(
+            args.is_empty() && cwd.is_empty(),
+            "claude must not have run"
+        );
     }
 
     // Regression test for spec S90mv90b6 / task Tndh988cz: AGENTS.md is the

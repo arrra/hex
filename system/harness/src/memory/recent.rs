@@ -300,7 +300,10 @@ mod tests {
         let ws = make_workspace();
         // 79 ASCII bytes followed by a 3-byte char: byte 80 falls mid-char,
         // so a naive byte slice at 80 panics.
-        let long = format!("{}✅ trailing text past the truncation point", "x".repeat(79));
+        let long = format!(
+            "{}✅ trailing text past the truncation point",
+            "x".repeat(79)
+        );
         fs::write(ws.path().join("todo.md"), format!("## Now\n- {}\n", long)).unwrap();
         let items = todo_now_top3(ws.path());
         assert_eq!(items.len(), 1);

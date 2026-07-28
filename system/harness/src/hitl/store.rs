@@ -311,8 +311,8 @@ fn read_item_file(path: &Path) -> Result<Item, String> {
 pub fn save_item(hex_dir: &Path, item: &Item) -> Result<(), String> {
     ensure_dir(&items_dir(hex_dir))?;
     let p = item_path(hex_dir, item.id);
-    let body = toml::to_string_pretty(item)
-        .map_err(|e| format!("hitl: encode item {}: {e}", item.id))?;
+    let body =
+        toml::to_string_pretty(item).map_err(|e| format!("hitl: encode item {}: {e}", item.id))?;
     std::fs::write(&p, body).map_err(|e| format!("hitl: cannot write {}: {e}", p.display()))
 }
 
@@ -372,7 +372,10 @@ pub fn create(hex_dir: &Path, new: NewItem, now: DateTime<Utc>) -> Result<Item, 
         now,
         Some(item.id),
         "created",
-        Some(format!("[{}] {} ({})", item.priority, item.title, item.project)),
+        Some(format!(
+            "[{}] {} ({})",
+            item.priority, item.title, item.project
+        )),
     )?;
     Ok(item)
 }
@@ -418,7 +421,10 @@ pub fn snooze(
 ) -> Result<Item, String> {
     let mut item = load_item(hex_dir, id)?;
     if item.status.is_closed() {
-        return Err(format!("hitl: item {id} is {} — cannot snooze", item.status));
+        return Err(format!(
+            "hitl: item {id} is {} — cannot snooze",
+            item.status
+        ));
     }
     item.status = Status::Snoozed;
     item.snooze_until = Some(until);
@@ -467,8 +473,7 @@ pub fn append_log(
         event: event.to_string(),
         detail,
     };
-    let line =
-        serde_json::to_string(&entry).map_err(|e| format!("hitl: encode log entry: {e}"))?;
+    let line = serde_json::to_string(&entry).map_err(|e| format!("hitl: encode log entry: {e}"))?;
     let p = log_path(hex_dir);
     let mut f = std::fs::OpenOptions::new()
         .create(true)
@@ -549,7 +554,12 @@ mod tests {
     fn create_persists_and_logs() {
         let tmp = tempfile::TempDir::new().unwrap();
         let hex = tmp.path();
-        let item = create(hex, new_item("sign the LLC docs"), ts("2026-07-22T10:00:00Z")).unwrap();
+        let item = create(
+            hex,
+            new_item("sign the LLC docs"),
+            ts("2026-07-22T10:00:00Z"),
+        )
+        .unwrap();
 
         assert!(item_path(hex, 1).exists());
         let loaded = load_item(hex, 1).unwrap();
@@ -803,8 +813,14 @@ mod tests {
     fn append_log_is_append_only_jsonl() {
         let tmp = tempfile::TempDir::new().unwrap();
         let hex = tmp.path();
-        append_log(hex, ts("2026-07-22T10:00:00Z"), Some(1), "ping", Some("imessage".into()))
-            .unwrap();
+        append_log(
+            hex,
+            ts("2026-07-22T10:00:00Z"),
+            Some(1),
+            "ping",
+            Some("imessage".into()),
+        )
+        .unwrap();
         append_log(hex, ts("2026-07-22T11:00:00Z"), None, "digest", None).unwrap();
         let raw = std::fs::read_to_string(log_path(hex)).unwrap();
         assert_eq!(raw.lines().count(), 2);

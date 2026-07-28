@@ -939,7 +939,11 @@ mod tests {
             "expected matched char preserved in output, got: {:?}",
             out
         );
-        assert!(out.contains("hello"), "expected trailing text preserved, got: {:?}", out);
+        assert!(
+            out.contains("hello"),
+            "expected trailing text preserved, got: {:?}",
+            out
+        );
     }
 
     #[test]

@@ -350,7 +350,11 @@ mod tests {
         // char (é) straddles byte offset 16, where `split_at(16)` would
         // otherwise panic on a non-char-boundary index.
         let name = "123456789012345\u{e9}abcdez";
-        assert_eq!(name.len(), 23, "fixture must match generation-name byte length");
+        assert_eq!(
+            name.len(),
+            23,
+            "fixture must match generation-name byte length"
+        );
         assert!(!is_generation_name(name));
     }
 

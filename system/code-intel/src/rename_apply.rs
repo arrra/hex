@@ -91,14 +91,16 @@ fn apply_to_content(path: &str, content: &str, edits: &[&RenameEdit]) -> Result<
         // content; if the file drifted (e.g. a multi-byte char inserted) the
         // offsets can land inside a UTF-8 sequence. `get` returns `None` there
         // instead of panicking, and we abort the whole plan loudly.
-        let found = content.get(start..end).ok_or_else(|| CqError::RenameAborted {
-            path: path.to_string(),
-            detail: format!(
-                "edit at {}:{} spans a non-char-boundary byte range {start}..{end} \
+        let found = content
+            .get(start..end)
+            .ok_or_else(|| CqError::RenameAborted {
+                path: path.to_string(),
+                detail: format!(
+                    "edit at {}:{} spans a non-char-boundary byte range {start}..{end} \
                  (stale or malformed plan)",
-                edit.line, edit.col
-            ),
-        })?;
+                    edit.line, edit.col
+                ),
+            })?;
         if found != edit.old_text {
             return Err(CqError::RenameAborted {
                 path: path.to_string(),
@@ -352,8 +354,8 @@ mod tests {
         // a loud error (malformed/stale edit), never index into the middle of
         // a UTF-8 sequence and panic.
         let wt = worktree(&[("a.rs", "abc\u{20ac}def\n")]); // '€' is 3 bytes: 3..6
-                                                             // 1-based col 5 -> byte offset 4, which is INSIDE the 3-byte '€'
-                                                             // (bytes 3..6) -- not a char boundary.
+                                                            // 1-based col 5 -> byte offset 4, which is INSIDE the 3-byte '€'
+                                                            // (bytes 3..6) -- not a char boundary.
         let bad = edit("a.rs", 1, 5, 6, "x", "y");
         let err = apply(wt.path(), &[bad]).unwrap_err();
         assert!(

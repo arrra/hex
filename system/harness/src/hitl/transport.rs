@@ -92,7 +92,13 @@ pub fn send(
     };
 
     // Record on EVERY path — log.jsonl + telemetry (spec).
-    let _ = store::append_log(hex_dir, Utc::now(), item_id, &log_event, Some(detail.clone()));
+    let _ = store::append_log(
+        hex_dir,
+        Utc::now(),
+        item_id,
+        &log_event,
+        Some(detail.clone()),
+    );
     let _ = crate::telemetry::record(&crate::telemetry::TelemetryEvent {
         source: "hitl".into(),
         event: log_event,

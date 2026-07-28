@@ -258,8 +258,7 @@ mod tests {
             "fixture must place a multi-byte char straddling byte offset 80"
         );
 
-        fs::write(tmp.join("todo.md"), format!("- {item_text}\n"))
-            .expect("write fixture todo.md");
+        fs::write(tmp.join("todo.md"), format!("- {item_text}\n")).expect("write fixture todo.md");
 
         // Should scan without panicking and return a clean exit code.
         let exit = stale_deps(&tmp, 9999, true);

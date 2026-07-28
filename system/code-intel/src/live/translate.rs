@@ -163,7 +163,12 @@ impl FileText {
         self.content
             .get(start..end)
             .map(|s| s.trim_end_matches('\r'))
-            .ok_or_else(|| anyhow!("line {} spans a non-char-boundary byte range (live/disk mismatch)", idx + 1))
+            .ok_or_else(|| {
+                anyhow!(
+                    "line {} spans a non-char-boundary byte range (live/disk mismatch)",
+                    idx + 1
+                )
+            })
     }
 
     /// Absolute byte offset of an LSP position within the file.
@@ -190,9 +195,9 @@ impl FileText {
         // Both offsets come from `byte_offset` -> `byte_col`, which walks whole
         // chars (accumulating `len_utf8`) and clamps to line ends, so each lands
         // on a char boundary; `get` stays panic-free on arbitrary UTF-8.
-        self.content
-            .get(start..end)
-            .ok_or_else(|| anyhow!("LSP range spans a non-char-boundary byte range (live/disk mismatch)"))
+        self.content.get(start..end).ok_or_else(|| {
+            anyhow!("LSP range spans a non-char-boundary byte range (live/disk mismatch)")
+        })
     }
 }
 
