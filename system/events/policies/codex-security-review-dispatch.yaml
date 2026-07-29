@@ -1,0 +1,43 @@
+name: codex-security-review-dispatch
+description: >
+  On github.pr.opened, invoke dispatch-codex-security-review.sh to post an o3
+  security review comment. Runs in parallel with the existing Opus 4.7 and gpt-5
+  reviewers to provide dedicated security analysis on every PR.
+
+requires:
+  events:
+    - github.pr.opened
+
+provides:
+  events:
+    - codex.security.review.posted
+    - codex.security.review.failed
+
+rules:
+  - name: dispatch-codex-security-review
+    trigger:
+      event: github.pr.opened
+    actions:
+      - type: shell
+        command: |
+          EVENT_REPO="{{ event.repo }}" \
+          EVENT_NUMBER="{{ event.number }}" \
+          EVENT_URL="{{ event.url }}" \
+          EVENT_TITLE="{{ event.title }}" \
+          bash "$HOME/.hex-events/scripts/dispatch-codex-security-review.sh"
+        timeout: 300
+        on_success:
+          - type: emit
+            event: codex.security.review.posted
+            payload:
+              repo: "{{ event.repo }}"
+              number: "{{ event.number }}"
+              status: success
+        on_failure:
+          - type: emit
+            event: codex.security.review.failed
+            payload:
+              repo: "{{ event.repo }}"
+              number: "{{ event.number }}"
+              status: failed
+              error: "dispatch-codex-security-review exited non-zero"
