@@ -233,12 +233,21 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
         LogExtras,
     ) = match super::open_db(&db) {
         Ok(conn) => {
-            // Route the hot path through the v1 ContextAssembler.
+            // Route the hot path through the v1 ContextAssembler. Passing
+            // `None` for `query_vec` is the load-bearing hot-path policy: the
+            // assembler runs in FTS-only mode and — by construction, not by
+            // env-var toggle — never constructs an `Embedder`. Per spec
+            // Tj0b203yv (finding 1 of the 2026-07-16 audit), this hook is a
+            // fresh OS process per user message; cold-loading the 522 MB nomic
+            // model here blew the latency budget (measured 1.33-1.9 s per
+            // recall). Offline CLI callers who want semantic search embed the
+            // query themselves and pass `Some(&qv)`.
             let assembled = super::assemble::assemble(
                 &conn,
                 query,
                 for_agent,
                 MAX_CONTEXT_CHARS,
+                None,
             );
 
             // Capture per-move stats for the recall-log (calibration seam —
@@ -827,5 +836,93 @@ mod injection_tax_tests {
         // A real user question still injects.
         let o = recall(tmp.path(), "what did we decide about the memory pipeline", false);
         assert!(o.injected, "real user prompts must still inject");
+    }
+}
+
+#[cfg(test)]
+mod embedder_contract_tests {
+    //! Contract test for spec Tj0b203yv (finding 1 of the 2026-07-16 audit):
+    //! the `UserPromptSubmit` recall path — a FRESH OS process per user
+    //! message — MUST NOT construct an `Embedder`. Loading the 522 MB nomic
+    //! model on every message blew the hook's latency budget (production
+    //! evidence: recall-log latency_ms=1916; live repro 1.33 s) and directly
+    //! contradicts this module's own doc comment ("No embedding model is
+    //! loaded ... keeps the UserPromptSubmit hook inside its latency
+    //! budget").
+    //!
+    //! Test seam: `crate::memory::embed::EMBEDDER_CONSTRUCTIONS_THREAD` is a
+    //! `#[cfg(test)]` thread-local counter incremented on every
+    //! `Embedder::new`. We assert the counter stays at 0 for the recall
+    //! path — NOT wall-clock timing, per the spec's "use a seam/probe" note.
+
+    use super::*;
+    use rusqlite::Connection;
+
+    fn seeded_root_with_fake_cache() -> tempfile::TempDir {
+        let tmp = tempfile::TempDir::new().unwrap();
+        let hex_root = tmp.path();
+
+        // Seed a minimal DB so `recall()` reaches `assemble::assemble` (the
+        // current construction site). Without a DB `open_db` errors early
+        // and the finding's code path isn't exercised.
+        let db_path = crate::memory::db_path(hex_root);
+        std::fs::create_dir_all(db_path.parent().unwrap()).unwrap();
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open(&db_path).unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        // One fact so retrieval has *something* to do, ensuring every arm
+        // (M1, M2, M3, M4) of assemble() runs.
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+             VALUES ('f1','project:memory','decided','use FTS only in the hook path',0.9,'2026-07-16','2026-07-16',0)",
+            [],
+        )
+        .unwrap();
+        drop(c);
+
+        // The finding notes: "the 522MB nomic model IS present at the cwd
+        // the hook resolves, so the load succeeds and the cost is paid on
+        // every non-trivial message." Simulate that by placing a
+        // `.fastembed_cache` marker at the cwd-relative path that
+        // `assemble::assemble`'s current `Embedder::new(Path::new("."))` call
+        // would resolve. The counter fires regardless of whether the load
+        // ultimately succeeds — the *construction* itself is the defect.
+        std::fs::create_dir_all(hex_root.join(".fastembed_cache")).unwrap();
+
+        tmp
+    }
+
+    /// RED (spec Tj0b203yv, finding 1): today, `recall()` routes through
+    /// `assemble::assemble`, which unconditionally calls
+    /// `Embedder::new(Path::new("."))` (system/harness/src/memory/assemble.rs:205).
+    /// The counter therefore increments once per non-trivial recall.
+    ///
+    /// After the fix (caller-decided embedder policy — the hot path opts out,
+    /// falling back to the existing FTS/keyword path), the counter must stay
+    /// at 0. This test is the structural guard the spec calls for.
+    #[test]
+    fn recall_path_constructs_no_embedder() {
+        let tmp = seeded_root_with_fake_cache();
+
+        // Baseline on THIS test's thread. Thread-local, so parallel tests in
+        // other threads that legitimately construct an Embedder (CLI search)
+        // do not perturb this assertion.
+        crate::memory::embed::EMBEDDER_CONSTRUCTIONS_THREAD.with(|c| c.set(0));
+
+        // A non-trivial, non-machine prompt — exactly the shape that
+        // triggers the hot path in production.
+        let query = "what did we decide about the memory pipeline architecture";
+        let _outcome = recall(tmp.path(), query, false);
+
+        let count =
+            crate::memory::embed::EMBEDDER_CONSTRUCTIONS_THREAD.with(|c| c.get());
+        assert_eq!(
+            count, 0,
+            "UserPromptSubmit recall path must construct zero Embedders \
+             (found {count}). The hook is a fresh OS process per user \
+             message; the 522 MB nomic model MUST NOT load here. See \
+             spec Tj0b203yv, finding 1 of the 2026-07-16 audit."
+        );
     }
 }

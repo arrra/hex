@@ -43,15 +43,15 @@ fn llm_config_resolution_layers() {
 
     // ---- 1. Missing llm.toml → built-in defaults ----------------------------
     let r = llm_config::resolve("memory_extract").expect("built-in default");
-    assert_eq!(r.model, "anthropic/claude-sonnet-4.5");
+    assert_eq!(r.model, "anthropic/claude-sonnet-5");
     assert_eq!(r.max_tokens, 16384);
 
     let r = llm_config::resolve("memory_judge").expect("built-in default");
-    assert_eq!(r.model, "anthropic/claude-sonnet-4.5");
+    assert_eq!(r.model, "anthropic/claude-sonnet-5");
     assert_eq!(r.max_tokens, 256);
 
     let r = llm_config::resolve("consolidate_audit").expect("built-in default");
-    assert_eq!(r.model, "anthropic/claude-sonnet-4.5");
+    assert_eq!(r.model, "anthropic/claude-sonnet-5");
     assert_eq!(r.max_tokens, 4096);
 
     let r = llm_config::resolve("health_check").expect("built-in default");

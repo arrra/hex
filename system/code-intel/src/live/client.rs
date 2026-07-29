@@ -249,8 +249,18 @@ mod tests {
     #[test]
     fn stale_socket_file_fails_fast() {
         // A socket file with no listener behind it: connect refused, fast.
+        //
+        // Deliberately a DATAGRAM socket, not a dropped `UnixListener`: on
+        // macOS, `UnixListener::bind`'s FD_CLOEXEC fcntl is not atomic with
+        // `socket(2)`, so a concurrently `posix_spawn`ed test subprocess can
+        // inherit the listener fd and keep the kernel socket accepting after
+        // the drop — the same race `Daemon::bind`'s flock probe defends
+        // against (see daemon.rs). A stream `connect(2)` to a datagram
+        // address fails immediately regardless of any inherited fd, so the
+        // "socket file exists, nothing serves it" scenario stays
+        // deterministic under parallel-suite load.
         let home = tempfile::tempdir().unwrap();
-        drop(UnixListener::bind(socket_path(home.path())).unwrap());
+        drop(std::os::unix::net::UnixDatagram::bind(socket_path(home.path())).unwrap());
         let t0 = Instant::now();
         let err = LiveClient::connect(home.path()).unwrap_err();
         assert!(

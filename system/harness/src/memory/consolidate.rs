@@ -26,7 +26,13 @@ pub fn run(conn: &mut Connection) -> anyhow::Result<ConsolidateReport> {
     iso!("catchup-distill",      op_catchup_distill(conn));
     iso!("dedup",                op_dedup(conn));
     iso!("contradiction-sweep",  op_contradiction_sweep(conn));
-    iso!("prune",                op_prune(conn));
+    // PAUSED (Mike, 2026-06-11 — me/decisions/fact-prune-paused-until-access-counter):
+    // prune tombstones on access_count=0 + age>60d, but NOTHING increments
+    // access_count yet, so expiry was effectively universal for non-exempt
+    // facts regardless of how often recall served them. Re-enable ONLY after
+    // recall/search bump access_count/last_accessed on facts they serve
+    // (FIX-013 follow-up). Deliberately not deleted: the re-enable is one line.
+    // iso!("prune",             op_prune(conn));
     iso!("topic-rollup",         op_topic_rollup(conn));
 
     // Record when consolidation last ran so `hex memory stats` can report it.
@@ -87,6 +93,9 @@ fn op_contradiction_sweep(_conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
+// PAUSED — see the op registration above. Kept compiled (not deleted) so the
+// re-enable diff is one line once the access counter ships.
+#[allow(dead_code)]
 fn op_prune(conn: &mut Connection) -> anyhow::Result<()> {
     // Tombstone-eligible: access_count=0 AND age>60 AND subject!='user' AND predicate!='decided'
     conn.execute(
@@ -227,6 +236,44 @@ mod tests {
         assert!(
             after.is_some(),
             "consolidate must stamp last_consolidated into metadata"
+        );
+    }
+
+    /// Pin the prune pause (Mike, 2026-06-11): until recall/search increment
+    /// access_count, consolidation must NOT tombstone old facts — and the op
+    /// must not appear in the run report.
+    #[test]
+    fn prune_is_paused_old_facts_survive() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.db");
+        let mut conn = memory::open_db(&db).unwrap();
+
+        conn.execute(
+            "INSERT INTO facts (subject, predicate, object, importance, access_count,
+                                created_at, updated_at, tombstone)
+             VALUES ('project:old', 'status', 'ancient but served daily', 0.7, 0,
+                     datetime('now','-70 days'), datetime('now','-70 days'), 0)",
+            [],
+        )
+        .unwrap();
+
+        let report = run(&mut conn).unwrap();
+        assert!(
+            !report.ok.iter().any(|n| n == "prune")
+                && !report.failed.iter().any(|(n, _)| n == "prune"),
+            "prune op must be absent from the run report while paused"
+        );
+
+        let tombstone: i64 = conn
+            .query_row(
+                "SELECT tombstone FROM facts WHERE subject='project:old'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            tombstone, 0,
+            "a 70-day-old non-exempt fact must survive consolidation while prune is paused"
         );
     }
 }

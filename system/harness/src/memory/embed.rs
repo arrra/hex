@@ -71,6 +71,18 @@ pub struct Embedder {
     model: TextEmbedding,
 }
 
+// Test-only construction probe. Increments on every `Embedder::new` call, per
+// calling thread. Used by `recall_path_constructs_no_embedder` (spec Tj0b203yv)
+// to assert the UserPromptSubmit hot path is *structurally* unable to construct
+// an Embedder — a counter, not wall-clock timing. Thread-local so parallel
+// tests that legitimately construct an embedder (e.g. CLI-search paths) do not
+// race with the hot-path assertion.
+#[cfg(test)]
+thread_local! {
+    pub static EMBEDDER_CONSTRUCTIONS_THREAD: std::cell::Cell<usize> =
+        const { std::cell::Cell::new(0) };
+}
+
 impl Embedder {
     /// Load the model. On first ever run fastembed downloads the ONNX weights
     /// (~hundreds of MB) into its cache; afterwards this is a local load.
@@ -84,6 +96,8 @@ impl Embedder {
     /// which OOM-killed the process in the 4 GB Docker test container.
     /// See evolution/obs-019-diagnosis.md for the full RSS trace.
     pub fn new(hex_root: &Path) -> anyhow::Result<Self> {
+        #[cfg(test)]
+        EMBEDDER_CONSTRUCTIONS_THREAD.with(|c| c.set(c.get() + 1));
         std::env::set_var("ORT_NUM_THREADS", "1");
         std::env::set_var("OMP_NUM_THREADS", "1");
         // Absolute cache dir under $HEX_DIR so embedding works from ANY cwd

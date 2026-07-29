@@ -644,29 +644,36 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
         return;
     };
 
+    // Preserve every existing line — comments, blank lines, and any
+    // KEY=VALUE we do not manage (BOI_VERSION, custom instance pins,
+    // repo overrides, etc.). Only update the managed keys we own in
+    // place, or append them if missing. Regression: previous behavior
+    // rewrote the file with only HEX_FOUNDATION_VERSION, destroying
+    // unmanaged pins like BOI_VERSION that install.sh parity reads
+    // (2026-07-16 audit).
     let existing = fs::read_to_string(&versions_file).unwrap_or_default();
-    let header: String = existing
-        .lines()
-        .filter(|l| l.starts_with('#'))
-        .collect::<Vec<_>>()
-        .join("\n");
-    let repo_overrides: String = existing
-        .lines()
-        .filter(|l| l.starts_with("HEX_") && l.contains("_REPO="))
-        .collect::<Vec<_>>()
-        .join("\n");
-
-    let mut new_content = String::new();
-    if !header.is_empty() {
-        new_content.push_str(&header);
-        new_content.push_str("\n\n");
+    let managed_key = "HEX_FOUNDATION_VERSION";
+    let managed_line = format!("{managed_key}=v{cargo_ver}");
+    let mut replaced = false;
+    let mut lines: Vec<String> = Vec::new();
+    for line in existing.lines() {
+        let key_prefix = format!("{managed_key}=");
+        if line.trim_start().starts_with(&key_prefix) {
+            if !replaced {
+                lines.push(managed_line.clone());
+                replaced = true;
+            }
+            // Drop duplicate managed lines silently — a rewrite should
+            // leave exactly one canonical managed line.
+        } else {
+            lines.push(line.to_string());
+        }
     }
-    new_content.push_str(&format!("HEX_FOUNDATION_VERSION=v{cargo_ver}\n"));
-    if !repo_overrides.is_empty() {
-        new_content.push('\n');
-        new_content.push_str(&repo_overrides);
-        new_content.push('\n');
+    if !replaced {
+        lines.push(managed_line.clone());
     }
+    let mut new_content = lines.join("\n");
+    new_content.push('\n');
 
     let tmp = versions_file.with_extension("tmp");
     if fs::write(&tmp, &new_content).is_ok() {
@@ -1641,6 +1648,93 @@ mod tests {
         assert!(
             !super::is_user_local(&bin),
             "binary files cannot contain UTF-8 marker; should not crash"
+        );
+    }
+
+    // Regression test for the 2026-07-16 audit finding: sync_versions_file
+    // rewrote the instance VERSIONS file with only HEX_FOUNDATION_VERSION,
+    // destroying every KEY=VALUE line it does not itself manage. Verified
+    // live: the production instance's VERSIONS lost its BOI_VERSION pin
+    // (which install.sh parity reads). The contract must be: preserve every
+    // existing KEY=VALUE line and comment we do not manage; only
+    // update/insert the keys we own (HEX_FOUNDATION_VERSION). Name is
+    // grep-anchored on `preserv|boi_version` so the spec's regression gate
+    // (grep -rqE 'fn [a-z_]*(preserv|boi_version)[a-z_]*') pins it.
+    #[cfg(unix)]
+    #[test]
+    fn sync_versions_file_preserves_boi_version_and_comments() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_dir = tmp.path().join("hex");
+        let source_dir = tmp.path().join("source");
+        let backup_dir = tmp.path().join("backup");
+        fs::create_dir_all(&hex_dir).unwrap();
+        fs::create_dir_all(&source_dir).unwrap();
+        fs::create_dir_all(&backup_dir).unwrap();
+
+        // Cargo.toml pins the foundation version at 1.0.0.
+        write_file(
+            &source_dir.join("system/harness/Cargo.toml"),
+            "[package]\nname = \"hex-harness\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        );
+
+        // Mock installed hex binary reporting the same version so
+        // binary_needs_rebuild returns false (no cargo build triggered by
+        // this unit test).
+        let bin_dir = hex_dir.join(".hex/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let mock_bin = bin_dir.join("hex");
+        fs::write(&mock_bin, "#!/bin/sh\necho hex 1.0.0\n").unwrap();
+        fs::set_permissions(&mock_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // VERSIONS with a comment block, the managed HEX_FOUNDATION_VERSION
+        // key (out of date), an UNMANAGED BOI_VERSION pin (parity with
+        // install.sh), and an unmanaged custom key. All non-managed lines
+        // must survive the sync — only HEX_FOUNDATION_VERSION should
+        // change.
+        let versions_path = hex_dir.join("VERSIONS");
+        let original = "\
+# hex-foundation instance pins
+# Managed section — edit via `hex upgrade`
+
+HEX_FOUNDATION_VERSION=v0.0.0
+BOI_VERSION=v0.5.0
+CUSTOM_INSTANCE_PIN=abc123
+";
+        fs::write(&versions_path, original).unwrap();
+
+        sync_versions_file(&hex_dir, &source_dir, &backup_dir);
+
+        let after = fs::read_to_string(&versions_path).unwrap();
+        assert!(
+            after.contains("HEX_FOUNDATION_VERSION=v1.0.0"),
+            "sync_versions_file must update the managed key. Got:\n{after}",
+        );
+        assert!(
+            after.contains("BOI_VERSION=v0.5.0"),
+            "sync_versions_file must PRESERVE the unmanaged BOI_VERSION pin \
+             (install.sh parity reads it). Got:\n{after}",
+        );
+        assert!(
+            after.contains("CUSTOM_INSTANCE_PIN=abc123"),
+            "sync_versions_file must preserve every unmanaged KEY=VALUE line, \
+             not just BOI_VERSION. Got:\n{after}",
+        );
+        assert!(
+            after.contains("# hex-foundation instance pins"),
+            "sync_versions_file must preserve comments. Got:\n{after}",
+        );
+        assert!(
+            after.contains("# Managed section — edit via `hex upgrade`"),
+            "sync_versions_file must preserve every comment line. Got:\n{after}",
+        );
+        // Guard against duplicate managed keys after a rewrite (would be a
+        // regression on the merge/update logic).
+        let hex_ver_count = after.matches("HEX_FOUNDATION_VERSION=").count();
+        assert_eq!(
+            hex_ver_count, 1,
+            "sync_versions_file must not duplicate the managed key. Got:\n{after}",
         );
     }
 }

@@ -1,10 +1,17 @@
 ---
 session: SDC75
 started_at: 2026-05-16T00:00:00-07:00
-last_updated: 2026-05-16T00:00:00-07:00
+last_updated: 2026-07-16T00:00:00-07:00
 focus: Harness critical path — AGENTS.md cold-start + PROGRESS.md schema (C1, C3)
-status: ACTIVE
+status: HISTORICAL
 ---
+
+> **Historical snapshot — superseded.** This file froze on 2026-05-16 and is
+> kept only as a record of the C1/C3 session. It is **not** the current session
+> state and is no longer updated. For freshness use `CHANGELOG.md` and
+> `git log` (plus `todo.md` for the live priority list). Do not treat any
+> "In Flight" / "Open Threads" entry below as current.
+
 
 ## In Flight
 
