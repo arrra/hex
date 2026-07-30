@@ -155,7 +155,9 @@ didn't cover this" claims correct?
 
 You are not reviewing the document's quality. You are trying to prove it wrong.
 
-Return: for each core claim, CONFIRMED or REFUTED, with file:line evidence. Read-only.
+Return: for each core claim, CONFIRMED or REFUTED, with file:line evidence, AND the exact
+document section heading the claim appears under — a refutation is routed back to the
+evidence lens that produced that section. Read-only.
 
 [DRAFT]
 ```
@@ -196,6 +198,22 @@ Keep the section contract. Do not pad. Return ONLY the final markdown document.
 **If Verifier 2 refuted a core claim:** do not finalize yet. Re-run the evidence reader
 whose lens covers the refutation, feeding it the refutation, then re-synthesize. Once
 only. A second refutation goes to the user.
+
+Route by the section the refuted claim sits under — the refuter interrogates prior-art
+and contract claims too, not only the mechanism, so re-running the code-path reader by
+reflex leaves those uncorrected:
+
+| Refuted section | Re-run |
+|---|---|
+| Mechanism | code path + contract |
+| Symptom & blast radius, Evidence appendix | forensics |
+| Why existing fixes didn't cover it, Existing machinery, Hard constraints | prior art |
+| Anything unrecognized | all four |
+
+**If Verifier 2 returns nothing usable** (no verdict, or a verdict with no claim list):
+that is UNVERIFIED, not verified-clean. Say so in the finalize prompt so the document
+records it — under Open design questions, and in the Evidence appendix as verification
+that did not complete.
 
 ---
 
