@@ -167,12 +167,21 @@ ${d}`, { label: 'verify:completeness', phase: 'Verify', model: 'sonnet' }),
 phase('Verify')
 let [citations, mechanism, completeness] = await verify(draft)
 
+// A schema'd agent() returns a parsed object, but it can also come back null/undefined
+// if the seat failed — every surveyed workflow guards with .filter(Boolean). An absent
+// verdict is NOT a clean verdict: say so loudly and let a human decide (SO S6).
+if (!mechanism || typeof mechanism.any_refuted !== 'boolean') {
+  log('WARNING: mechanism refuter returned no usable verdict. The core causal claims are UNVERIFIED — do not read this as confirmation. Re-run the refuter or stop and surface it.')
+}
+
 // Refutation loop — runs at most once. A refuted core claim means the evidence was
 // wrong, not that the prose needs editing: re-read, then re-synthesize.
-if (mechanism.any_refuted) {
+// Loop phases carry distinct labels rather than re-entering 'Evidence'/'Verify' — a
+// re-entered phase label is untested against the progress UI.
+if (mechanism && mechanism.any_refuted) {
   const refutations = mechanism.claims.filter(c => c.verdict === 'REFUTED')
   log(`mechanism refuted ${refutations.length} core claim(s) — looping Phase 1 once`)
-  phase('Evidence')
+  phase('Evidence (redo)')
   codePath = await agent(`${COMMON}
 
 A verifier REFUTED core claims in the draft problem document. Re-examine the code path with these refutations as your starting point and report what is ACTUALLY true, with file:line citations. Do not defend the earlier findings.
@@ -181,16 +190,16 @@ REFUTATIONS:
 ${JSON.stringify(refutations, null, 2)}
 
 PREVIOUS FINDINGS (may be wrong):
-${codePath}`, { label: 'read:code-path-redo', phase: 'Evidence', model: 'sonnet' })
+${codePath}`, { label: 'read:code-path-redo', phase: 'Evidence (redo)', model: 'sonnet' })
 
-  phase('Synthesize')
+  phase('Synthesize (redo)')
   draft = await synthesize(`
 A prior draft had core claims refuted. The code-path findings below are the CORRECTED
 ones. Do not restate the refuted claims.
 `)
-  phase('Verify')
+  phase('Verify (redo)')
   ;[citations, mechanism, completeness] = await verify(draft)
-  if (mechanism.any_refuted) {
+  if (mechanism && mechanism.any_refuted) {
     log('STILL REFUTED after one loop — surfacing to the user instead of looping again')
   }
 }
