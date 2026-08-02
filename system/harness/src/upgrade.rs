@@ -1387,7 +1387,7 @@ mod tests {
 
     // POSIX `cd ""` is a successful no-op, so without the ${HEX_DIR:-...}
     // default an unset HEX_DIR would launch claude (skip-permissions!) in
-    // the caller's cwd. With the default pointing at a missing $HOME/hex,
+    // the caller's cwd. With the default pointing at a missing HEX_DIR fallback,
     // cd must fail and claude must never run.
     #[test]
     fn hex_new_unset_hex_dir_fails_instead_of_launching_in_cwd() {

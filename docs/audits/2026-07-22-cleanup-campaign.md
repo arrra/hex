@@ -2,7 +2,7 @@
 
 **Skill:** repo-cleanup (first live campaign = acceptance test)
 **Base:** develop `120b48b1` · worktree `cleanup/audit-2026-07`
-**Consumes:** boi-hex audit 2026-07-16 (mrap-hex `projects/hex-ops/analysis/boi-hex-audit-2026-07-16/`)
+**Consumes:** boi-hex audit 2026-07-16 (personal instance, `projects/hex-ops/analysis/boi-hex-audit-2026-07-16/`)
 **Drift check:** audit was cut at `f59df59f`; the S4mewqp4c/Sn7drgcyk spec wave already fixed the recall CRITICAL, release Tests gate, VERSIONS pin, scipd race, and the docs batch — those audit items are CLOSED, not re-derived. Surviving items re-verified against live code below.
 
 ## Quality bar
