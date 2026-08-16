@@ -824,6 +824,23 @@ enum MemoryCommands {
         #[arg(long)]
         backfill_facts: bool,
     },
+    /// Rewind distill watermark(s): reset last_offset AND consecutive_failures
+    /// to 0 so the next quick tick reprocesses raw transcript slices from the
+    /// top. Operator recovery after a distill outage silently advanced past
+    /// unprocessed content. Raw transcript files are untouched.
+    #[command(name = "distill-rewind")]
+    DistillRewind {
+        /// Rewind exactly one transcript_files row (its path). Mutually
+        /// exclusive with --all; exactly one of the two is required.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Rewind every transcript_files row.
+        #[arg(long)]
+        all: bool,
+        /// Print what would change without modifying the database.
+        #[arg(long)]
+        dry_run: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1113,6 +1130,60 @@ fn main() {
                     vacuum,
                     backfill_facts,
                 } => memory::maintain::run(&hex_dir, *vacuum, *backfill_facts),
+                MemoryCommands::DistillRewind {
+                    file,
+                    all,
+                    dry_run,
+                } => {
+                    // Exactly one selector. Neither and both are loud usage
+                    // errors — never a quiet no-op (S6).
+                    let exit = if file.is_some() == *all {
+                        eprintln!(
+                            "distill-rewind: pass exactly one of --file <path> or --all"
+                        );
+                        2
+                    } else {
+                        let db_path = memory::db_path(&hex_dir);
+                        match memory::open_db(&db_path) {
+                            Ok(conn) => {
+                                // Thin printer over the testable planner: the
+                                // zero-match S6 guard and dry-run gate live in
+                                // watermark::rewind, not here.
+                                let file_str =
+                                    file.as_ref().map(|f| f.to_string_lossy().to_string());
+                                let target = match file_str.as_deref() {
+                                    Some(p) => memory::distill::watermark::RewindTarget::One(p),
+                                    None => memory::distill::watermark::RewindTarget::All,
+                                };
+                                match memory::distill::watermark::rewind(&conn, target, *dry_run) {
+                                    Ok(plan) => {
+                                        let action =
+                                            if plan.applied { "rewound" } else { "would rewind" };
+                                        for (p, old) in &plan.rows {
+                                            println!("{action}: {p}  offset {old} -> 0");
+                                        }
+                                        println!(
+                                            "distill-rewind: {} {} row(s)",
+                                            if plan.applied { "reset" } else { "would reset" },
+                                            plan.rows.len()
+                                        );
+                                        0
+                                    }
+                                    Err(e) => {
+                                        // Includes the loud zero-match message (S6).
+                                        eprintln!("{e}");
+                                        1
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("open_db error: {e}");
+                                1
+                            }
+                        }
+                    };
+                    exit
+                }
                 MemoryCommands::Consolidate { command } => {
                     let (mode, max) = match command {
                         ConsolidateCommands::Quick { max } => (consolidate::Mode::Quick, *max),
