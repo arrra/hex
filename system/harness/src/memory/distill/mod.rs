@@ -576,7 +576,7 @@ mod tests {
         std::env::remove_var("HEX_DIR");
     }
 
-    /// The pipeline's first happy-path E2E test: a fake `claude` binary on a
+    /// The pipeline's first golden-path E2E test: a fake `claude` binary on a
     /// prepended PATH (the claude_cli.rs shim pattern) plays the LLM, llm.toml
     /// routes memory_extract through the claude-cli transport, and
     /// `run_on_file` drives extract -> dedup -> write against a real seeded
@@ -584,7 +584,7 @@ mod tests {
     /// outcome CleanAdd, so no judge call happens and the single shim response
     /// is deterministic.
     #[test]
-    fn e2e_happy_path_extract_writes_facts_via_claude_cli_shim() {
+    fn e2e_golden_path_extract_writes_facts_via_claude_cli_shim() {
         let (hex_tmp, _g) = crate::telemetry::test_support::isolate();
         let hex_dir = hex_tmp.path();
 
@@ -639,7 +639,7 @@ mod tests {
         let file_len = std::fs::metadata(&transcript).unwrap().len() as i64;
 
         let mut conn = fixture_conn();
-        let report = run_on_file(&mut conn, &path_str, 1).expect("happy path must succeed");
+        let report = run_on_file(&mut conn, &path_str, 1).expect("golden path must succeed");
 
         // Restore PATH before asserting so a panic can't leak the shim.
         match old_path {
