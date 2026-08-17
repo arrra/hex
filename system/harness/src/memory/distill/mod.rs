@@ -575,4 +575,100 @@ mod tests {
         std::env::remove_var("HEX_DISTILL_FORCE_EXTRACT_FAIL");
         std::env::remove_var("HEX_DIR");
     }
+
+    /// The pipeline's first happy-path E2E test: a fake `claude` binary on a
+    /// prepended PATH (the claude_cli.rs shim pattern) plays the LLM, llm.toml
+    /// routes memory_extract through the claude-cli transport, and
+    /// `run_on_file` drives extract -> dedup -> write against a real seeded
+    /// transcript. Two candidates with distinct subjects keep every dedup
+    /// outcome CleanAdd, so no judge call happens and the single shim response
+    /// is deterministic.
+    #[test]
+    fn e2e_happy_path_extract_writes_facts_via_claude_cli_shim() {
+        let (hex_tmp, _g) = crate::telemetry::test_support::isolate();
+        let hex_dir = hex_tmp.path();
+
+        // Route memory_extract through the claude-cli transport (no http key).
+        std::fs::create_dir_all(hex_dir.join(".hex/config")).unwrap();
+        std::fs::write(
+            hex_dir.join(".hex/config/llm.toml"),
+            "[use_cases.memory_extract]\ntransport = \"claude-cli\"\n\n[use_cases.memory_judge]\ntransport = \"claude-cli\"\n",
+        )
+        .unwrap();
+
+        // Fake `claude`: drains stdin (the prompt arrives there), then emits a
+        // valid --output-format json envelope whose result is the candidates
+        // JSON. Distinct subjects => both classify as CleanAdd.
+        let candidates = r#"[{"subject":"Ada Lovelace","predicate":"prefers","object":"tables over prose in status reports","importance":0.8},{"subject":"Project Analytical Engine","predicate":"prefers","object":"weekly written updates over meetings","importance":0.5}]"#;
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": candidates,
+        })
+        .to_string();
+        let shim_dir = hex_dir.join("shim");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        let script = format!("#!/bin/sh\ncat > /dev/null\nprintf '%s' '{}'\n", envelope);
+        let shim = shim_dir.join("claude");
+        std::fs::write(&shim, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let old_path = std::env::var("PATH").ok();
+        std::env::set_var(
+            "PATH",
+            match &old_path {
+                Some(p) => format!("{}:{}", shim_dir.display(), p),
+                None => shim_dir.display().to_string(),
+            },
+        );
+
+        // A real transcript file under the isolated HEX_DIR.
+        std::fs::create_dir_all(hex_dir.join("raw/transcripts")).unwrap();
+        let transcript = hex_dir.join("raw/transcripts/2026-08-17.md");
+        std::fs::write(
+            &transcript,
+            "# session\n\nAda Lovelace said she prefers tables over prose in status \
+             reports. The Analytical Engine project runs on weekly written updates.\n",
+        )
+        .unwrap();
+        let path_str = transcript.to_string_lossy().to_string();
+        let file_len = std::fs::metadata(&transcript).unwrap().len() as i64;
+
+        let mut conn = fixture_conn();
+        let report = run_on_file(&mut conn, &path_str, 1).expect("happy path must succeed");
+
+        // Restore PATH before asserting so a panic can't leak the shim.
+        match old_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert_eq!(report.adds, 2, "both CleanAdd candidates must land: {report:?}");
+        let fact_count: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE source_ref = ?1 AND tombstone = 0",
+                [&path_str],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(fact_count, 2, "facts rows must carry the transcript as source_ref");
+        let add_history: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_history WHERE op = 'ADD'", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(add_history, 2, "each ADD must be recorded in fact_history");
+        assert_eq!(
+            watermark::last_offset(&conn, &path_str).unwrap(),
+            file_len,
+            "watermark must advance to the end of the processed slice"
+        );
+        assert_eq!(
+            watermark::strikes(&conn, &path_str).unwrap(),
+            0,
+            "a clean run must leave zero strikes"
+        );
+    }
 }

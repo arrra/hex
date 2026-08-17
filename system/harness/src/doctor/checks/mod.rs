@@ -4,6 +4,7 @@ pub mod claude_md;
 pub mod claude_runs_config;
 pub mod codex;
 pub mod codex_config;
+pub mod distill_readiness;
 pub mod distill_strikes;
 pub mod env_sh;
 pub mod git;
