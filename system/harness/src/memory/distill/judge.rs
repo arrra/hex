@@ -3,7 +3,8 @@ use serde::Deserialize;
 use std::path::Path;
 
 /// Embedded default judge prompt, checked into the repo at
-/// `system/memory/prompts/judge.txt` and compiled in via `include_str!`.
+/// `system/harness/src/memory/distill/prompts/judge.txt` — inside the harness
+/// source tree so the path survives every deploy layout (see extract.rs).
 ///
 /// Tradeoff (deliberate): `memory/` is NOT registered in `upgrade.rs`
 /// SourceDirs — its apply_sync would clobber a user-edited instance prompt — and
@@ -12,7 +13,7 @@ use std::path::Path;
 /// with this embedded fallback an already-deployed box needs no file at all. The
 /// missing-file `Deferred` that used to silently discard transcript slices is
 /// gone: a missing or empty instance prompt is the normal case, not an error.
-const JUDGE_PROMPT: &str = include_str!("../../../../memory/prompts/judge.txt");
+const JUDGE_PROMPT: &str = include_str!("prompts/judge.txt");
 
 /// Resolve the effective prompt template. A non-empty instance file wins (user
 /// override, read fresh per call); a missing or whitespace-only instance file
