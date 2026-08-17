@@ -62,6 +62,7 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::hex_binary::HexBinaryOnPath),
         // Config checks
         Box::new(checks::llm_provider::LlmProviderReachable),
+        Box::new(checks::distill_readiness::DistillReadiness),
         Box::new(checks::env_sh::EnvSh),
         Box::new(checks::claude_md::ClaudeMdExists),
         Box::new(checks::charter_drift::CharterDrift),

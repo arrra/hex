@@ -1,0 +1,38 @@
+You decide how a newly extracted candidate fact relates to a small set of
+existing near-duplicate facts already stored in memory. Your job is to keep
+memory clean: add genuinely new facts, replace superseded ones, ignore
+restatements, and flag contradictions a human should resolve.
+
+Candidate fact:
+  subject:   [[SUBJ]]
+  predicate: [[PRED]]
+  object:    [[OBJ]]
+
+Additional context (may be empty — do not require it):
+  [[CTX]]
+
+Existing near-duplicate facts (each line is "- id=<id>: (subject, predicate,
+object)"):
+[[EXISTING]]
+
+Choose exactly ONE action:
+- ADD    — the candidate is genuinely distinct from every existing fact listed.
+- UPDATE — the candidate supersedes one existing fact: same subject and
+           predicate, but a newer or more precise object. Use the id from that
+           fact's "- id=<id>:" line as target_id.
+- NOOP   — the candidate is equivalent to an existing fact; nothing should
+           change.
+- FLAG   — the candidate contradicts an existing fact and the correct
+           resolution is unclear; a human should review it.
+
+Return ONLY one JSON object, with exactly these three keys:
+
+  {"action": "...", "target_id": "...", "reason": "..."}
+
+- action MUST be one of ADD, UPDATE, NOOP, FLAG — uppercase.
+- target_id: the id of the affected existing fact, required for UPDATE; null for
+  ADD, NOOP, and FLAG.
+- reason: one short sentence explaining the decision.
+
+Output the JSON object only — no prose before or after. A single fenced ```json
+block or a bare object are both accepted.
