@@ -4,7 +4,10 @@ use serde::Deserialize;
 use std::path::Path;
 
 /// Embedded default extraction prompt, checked into the repo at
-/// `system/memory/prompts/extract.txt` and compiled in via `include_str!`.
+/// `system/harness/src/memory/distill/prompts/extract.txt` — INSIDE the harness
+/// source tree so the path survives every deploy layout that copies the tree
+/// (instance rebuilds compile from `.hex/harness/`; a repo-root-relative path
+/// broke the first v0.50.0 instance upgrade). Compiled in via `include_str!`.
 ///
 /// Tradeoff (deliberate): `memory/` is NOT registered in `upgrade.rs`
 /// SourceDirs — its apply_sync would clobber a user-edited instance prompt — and
@@ -13,7 +16,7 @@ use std::path::Path;
 /// with this embedded fallback an already-deployed box needs no file at all. The
 /// missing-file `Deferred` that used to silently discard transcript slices is
 /// gone: a missing or empty instance prompt is the normal case, not an error.
-const EXTRACT_PROMPT: &str = include_str!("../../../../memory/prompts/extract.txt");
+const EXTRACT_PROMPT: &str = include_str!("prompts/extract.txt");
 
 #[derive(Debug, Deserialize, PartialEq, Clone)]
 pub struct Candidate {
