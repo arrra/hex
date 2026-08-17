@@ -422,7 +422,7 @@ mod tests {
         std::fs::create_dir_all(td.path().join(".hex/memory/prompts")).unwrap();
         std::fs::write(
             td.path().join(".hex/memory/prompts/extract.txt"),
-            "extract predicates: {{PREDICATES}}\n",
+            "extract predicates: [[PREDICATES]]\n",
         )
         .unwrap();
         std::env::set_var("HEX_DIR", td.path());
