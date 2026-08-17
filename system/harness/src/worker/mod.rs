@@ -13,8 +13,7 @@ pub mod runtime;
 
 pub type Result<T> = std::result::Result<T, anyhow::Error>;
 
-pub type Handler =
-    Box<dyn Fn(event::Event, ctx::Ctx) -> Result<()> + Send + Sync + 'static>;
+pub type Handler = Box<dyn Fn(event::Event, ctx::Ctx) -> Result<()> + Send + Sync + 'static>;
 
 /// A trigger specification stored alongside a handler.
 ///
@@ -31,10 +30,7 @@ impl TriggerSpec {
     /// Map this spec to an iii `RegisterTriggerInput` bound to `function_id`.
     /// The single place the typed worker triggers cross into `iii_sdk` — same
     /// builtin_triggers surface the legacy YAML host used in `iii_worker.rs`.
-    pub fn to_register_input(
-        &self,
-        function_id: &str,
-    ) -> iii_sdk::protocol::RegisterTriggerInput {
+    pub fn to_register_input(&self, function_id: &str) -> iii_sdk::protocol::RegisterTriggerInput {
         use iii_sdk::builtin_triggers::{
             CronTriggerConfig, IIITrigger, QueueTriggerConfig, StateTriggerConfig,
         };
@@ -43,7 +39,9 @@ impl TriggerSpec {
                 IIITrigger::Cron(CronTriggerConfig::new(expression.clone()))
             }
             TriggerSpec::State { scope, key } => IIITrigger::State(
-                StateTriggerConfig::new().scope(scope.clone()).key(key.clone()),
+                StateTriggerConfig::new()
+                    .scope(scope.clone())
+                    .key(key.clone()),
             ),
             TriggerSpec::Queue { queue } => {
                 IIITrigger::Queue(QueueTriggerConfig::new(queue.clone()))
@@ -224,7 +222,12 @@ mod tests {
         let w = Worker::new("hex-test").on_cron_named("nightly", "0 0 3 * * * *", noop);
         let (name, spec, _h) = w.handlers.into_iter().next().expect("one handler");
         assert_eq!(name.as_deref(), Some("nightly"));
-        assert_eq!(spec, TriggerSpec::Cron { expression: "0 0 3 * * * *".to_string() });
+        assert_eq!(
+            spec,
+            TriggerSpec::Cron {
+                expression: "0 0 3 * * * *".to_string()
+            }
+        );
     }
 
     /// fid_for: named → worker::name; unnamed → worker::idx (legacy fallback).

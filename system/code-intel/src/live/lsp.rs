@@ -524,8 +524,14 @@ mod tests {
             },
         })
         .unwrap();
-        assert_eq!(refs.pointer("/textDocument/uri"), Some(&json!("file:///a.rs")));
-        assert_eq!(refs.pointer("/context/includeDeclaration"), Some(&json!(true)));
+        assert_eq!(
+            refs.pointer("/textDocument/uri"),
+            Some(&json!("file:///a.rs"))
+        );
+        assert_eq!(
+            refs.pointer("/context/includeDeclaration"),
+            Some(&json!(true))
+        );
 
         let ren = serde_json::to_value(RenameParams {
             position: pos,
@@ -534,7 +540,10 @@ mod tests {
         .unwrap();
         assert_eq!(ren.pointer("/newName"), Some(&json!("twice")));
         assert_eq!(ren.pointer("/position/line"), Some(&json!(0)));
-        assert_eq!(ren.pointer("/textDocument/uri"), Some(&json!("file:///a.rs")));
+        assert_eq!(
+            ren.pointer("/textDocument/uri"),
+            Some(&json!("file:///a.rs"))
+        );
     }
 
     #[test]
@@ -589,10 +598,7 @@ mod tests {
     fn definition_locations_accepts_all_response_shapes() {
         let loc = json!({"uri": "file:///x.rs", "range": r(0, 0)});
         assert_eq!(definition_locations(&loc).unwrap().len(), 1);
-        assert_eq!(
-            definition_locations(&json!([loc, loc])).unwrap().len(),
-            2
-        );
+        assert_eq!(definition_locations(&json!([loc, loc])).unwrap().len(), 2);
         let link = json!({
             "targetUri": "file:///y.rs",
             "targetRange": r(0, 0),

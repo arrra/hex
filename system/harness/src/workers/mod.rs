@@ -36,8 +36,8 @@ pub fn registry() -> Vec<Worker> {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
     use super::hex_modules;
+    use super::*;
     use crate::worker::TriggerSpec;
 
     fn cron_exprs(w: &Worker) -> Vec<String> {
@@ -66,7 +66,9 @@ mod tests {
             .find(|w| w.name == "hex-memory-maintenance")
             .expect("hex-memory-maintenance present");
         let exprs = cron_exprs(mm);
-        assert!(exprs.iter().any(|e| e == hex_modules::memory_maintenance::CRON_INDEX));
+        assert!(exprs
+            .iter()
+            .any(|e| e == hex_modules::memory_maintenance::CRON_INDEX));
         assert!(exprs
             .iter()
             .any(|e| e == hex_modules::memory_maintenance::CRON_CONSOLIDATE_FULL));
@@ -86,7 +88,9 @@ mod tests {
 
         // The quick-consolidate cron must be registered with a 15-min cadence.
         assert!(
-            exprs.iter().any(|e| e == hex_modules::memory_maintenance::CRON_CONSOLIDATE_QUICK),
+            exprs
+                .iter()
+                .any(|e| e == hex_modules::memory_maintenance::CRON_CONSOLIDATE_QUICK),
             "expected CRON_CONSOLIDATE_QUICK to be registered, got crons: {:?}",
             exprs
         );
@@ -103,7 +107,9 @@ mod tests {
 
         // The parse-transcripts cron must be registered with a 15-min cadence.
         assert!(
-            exprs.iter().any(|e| e == hex_modules::memory_maintenance::CRON_PARSE_TRANSCRIPTS),
+            exprs
+                .iter()
+                .any(|e| e == hex_modules::memory_maintenance::CRON_PARSE_TRANSCRIPTS),
             "expected CRON_PARSE_TRANSCRIPTS to be registered, got crons: {:?}",
             exprs
         );
@@ -137,7 +143,9 @@ mod tests {
             .expect("hex-backup-offsite present");
         let exprs = cron_exprs(off);
         assert!(
-            exprs.iter().any(|e| e == hex_modules::backup_offsite::CRON_OFFSITE),
+            exprs
+                .iter()
+                .any(|e| e == hex_modules::backup_offsite::CRON_OFFSITE),
             "offsite worker must register its 04:30 cron, got: {:?}",
             exprs
         );
@@ -188,7 +196,11 @@ mod tests {
         let reg = registry();
         let mut seen = std::collections::BTreeSet::new();
         for w in &reg {
-            assert!(seen.insert(w.name.clone()), "duplicate worker name: {}", w.name);
+            assert!(
+                seen.insert(w.name.clone()),
+                "duplicate worker name: {}",
+                w.name
+            );
         }
     }
 }

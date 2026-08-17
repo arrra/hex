@@ -5,8 +5,12 @@ use std::process::Command;
 pub struct GitInitialized;
 
 impl DoctorCheck for GitInitialized {
-    fn name(&self) -> &str { "git-initialized" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "git-initialized"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let git_dir = ctx.hex_dir.join(".git");
         if git_dir.exists() {

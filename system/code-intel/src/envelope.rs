@@ -171,7 +171,10 @@ mod tests {
         };
         let j: serde_json::Value =
             serde_json::from_str(&serde_json::to_string(&env).unwrap()).unwrap();
-        assert!(j.get("escalated").is_none(), "None escalated must be omitted: {j}");
+        assert!(
+            j.get("escalated").is_none(),
+            "None escalated must be omitted: {j}"
+        );
 
         env.escalated = Some(Escalated {
             reason: "warming".into(),

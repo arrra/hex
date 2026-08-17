@@ -38,21 +38,27 @@ pub fn run(hex_dir: &Path) -> i32 {
     crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
         source: "backup".into(),
         event: "backup::daily".into(),
-        status: if failures == 0 { "ok".into() } else { "error".into() },
+        status: if failures == 0 {
+            "ok".into()
+        } else {
+            "error".into()
+        },
         duration_ms: None,
         exit_code: Some(if failures == 0 { 0 } else { 1 }),
         detail: Some(format!("dir={} failures={failures}", out_dir.display())),
     });
-    if failures == 0 { 0 } else { 1 }
+    if failures == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 /// Online-safe snapshot via the sqlite backup API (correct under WAL with
 /// live writers — a plain fs::copy of a hot WAL db can capture a torn state).
 fn snapshot(src: &Path, dst: &Path) -> Result<(), Box<dyn std::error::Error>> {
-    let src_conn = rusqlite::Connection::open_with_flags(
-        src,
-        rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY,
-    )?;
+    let src_conn =
+        rusqlite::Connection::open_with_flags(src, rusqlite::OpenFlags::SQLITE_OPEN_READ_ONLY)?;
     let mut dst_conn = rusqlite::Connection::open(dst)?;
     let bk = rusqlite::backup::Backup::new(&src_conn, &mut dst_conn)?;
     bk.run_to_completion(100, std::time::Duration::from_millis(50), None)?;
@@ -160,9 +166,12 @@ pub fn run_offsite(hex_dir: &Path) -> i32 {
     // 2) retention
     let forget = vec![
         "forget".into(),
-        "--keep-daily".into(), KEEP_DAILY.into(),
-        "--keep-weekly".into(), KEEP_WEEKLY.into(),
-        "--keep-monthly".into(), KEEP_MONTHLY.into(),
+        "--keep-daily".into(),
+        KEEP_DAILY.into(),
+        "--keep-weekly".into(),
+        KEEP_WEEKLY.into(),
+        "--keep-monthly".into(),
+        KEEP_MONTHLY.into(),
         "--prune".into(),
     ];
     if let Err(e) = restic_step(&forget) {
@@ -182,7 +191,10 @@ pub fn run_offsite(hex_dir: &Path) -> i32 {
         exit_code: Some(0),
         detail: Some(format!("repo={repo} sources={}", existing.len())),
     });
-    println!("hex backup offsite: ok ({} source(s) → {repo})", existing.len());
+    println!(
+        "hex backup offsite: ok ({} source(s) → {repo})",
+        existing.len()
+    );
     0
 }
 
@@ -206,7 +218,9 @@ fn restic_step(args: &[String]) -> Result<(), String> {
     match status {
         Ok(s) if s.success() => Ok(()),
         Ok(s) => Err(format!("`restic {}` exited {}", args.join(" "), s)),
-        Err(e) => Err(format!("could not spawn restic (installed + on PATH?): {e}")),
+        Err(e) => Err(format!(
+            "could not spawn restic (installed + on PATH?): {e}"
+        )),
     }
 }
 
@@ -226,7 +240,9 @@ fn fail_offsite(reason: &str) -> i32 {
 }
 
 fn prune(backups_root: &Path) {
-    let Ok(entries) = std::fs::read_dir(backups_root) else { return };
+    let Ok(entries) = std::fs::read_dir(backups_root) else {
+        return;
+    };
     let mut dirs: Vec<_> = entries
         .filter_map(|e| e.ok())
         .filter(|e| e.path().is_dir())
@@ -254,17 +270,23 @@ mod tests {
         let hex = tmp.path();
         std::fs::create_dir_all(hex.join(".hex")).unwrap();
         let conn = rusqlite::Connection::open(hex.join(".hex/memory.db")).unwrap();
-        conn.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);").unwrap();
+        conn.execute_batch("CREATE TABLE t(x); INSERT INTO t VALUES(1);")
+            .unwrap();
         drop(conn);
         for i in 1..=9 {
             std::fs::create_dir_all(hex.join(format!(".hex/backups/2026-01-0{i}"))).unwrap();
         }
         assert_eq!(run(hex), 0);
-        let dirs: Vec<_> = std::fs::read_dir(hex.join(".hex/backups")).unwrap().collect();
+        let dirs: Vec<_> = std::fs::read_dir(hex.join(".hex/backups"))
+            .unwrap()
+            .collect();
         assert_eq!(dirs.len(), KEEP_DAYS);
         let today = chrono::Local::now().format("%Y-%m-%d").to_string();
-        let snap = rusqlite::Connection::open(hex.join(format!(".hex/backups/{today}/memory.db"))).unwrap();
-        let n: i64 = snap.query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0)).unwrap();
+        let snap = rusqlite::Connection::open(hex.join(format!(".hex/backups/{today}/memory.db")))
+            .unwrap();
+        let n: i64 = snap
+            .query_row("SELECT COUNT(*) FROM t", [], |r| r.get(0))
+            .unwrap();
         assert_eq!(n, 1);
     }
 
@@ -314,7 +336,10 @@ mod tests {
         std::env::remove_var("HEX_BACKUP_SOURCE");
         std::env::remove_var("RESTIC_REPOSITORY");
         std::env::remove_var("RESTIC_PASSWORD");
-        assert_eq!(rc, 1, "unusable repo / missing restic must be loud non-zero");
+        assert_eq!(
+            rc, 1,
+            "unusable repo / missing restic must be loud non-zero"
+        );
     }
 
     #[test]
@@ -332,8 +357,15 @@ mod tests {
         std::env::set_var("RESTIC_PASSWORD", "test");
         std::env::set_var("HEX_BACKUP_SOURCE", &src);
 
-        let init = std::process::Command::new("restic").arg("init").status().unwrap();
-        let rc = if init.success() { run_offsite(tmp.path()) } else { -1 };
+        let init = std::process::Command::new("restic")
+            .arg("init")
+            .status()
+            .unwrap();
+        let rc = if init.success() {
+            run_offsite(tmp.path())
+        } else {
+            -1
+        };
 
         let restore_dir = tmp.path().join("restore");
         let restored = std::process::Command::new("restic")

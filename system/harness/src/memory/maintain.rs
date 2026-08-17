@@ -54,9 +54,9 @@ pub fn run_maintain(conn: &Connection, hex_dir: &Path, backfill_facts: bool) -> 
     //    canonical row keeping the furthest watermark; rows that are not
     //    transcript-shaped at all (me/*.md etc.) are purged.
     match transcript_files_hygiene(conn, hex_dir) {
-        Ok((folded, purged)) => println!(
-            "maintain: transcript_files canonicalized ({folded} folded, {purged} purged)"
-        ),
+        Ok((folded, purged)) => {
+            println!("maintain: transcript_files canonicalized ({folded} folded, {purged} purged)")
+        }
         Err(e) => {
             eprintln!("maintain: transcript_files hygiene FAILED: {e}");
             failures += 1;
@@ -87,10 +87,7 @@ pub fn run_maintain(conn: &Connection, hex_dir: &Path, backfill_facts: bool) -> 
 ///   location) fold INTO the canonical row, keeping the furthest watermark,
 ///   then the non-canonical row is deleted.
 /// - Rows that are not transcript-shaped (me/learnings.md etc.) are purged.
-fn transcript_files_hygiene(
-    conn: &Connection,
-    hex_dir: &Path,
-) -> rusqlite::Result<(usize, usize)> {
+fn transcript_files_hygiene(conn: &Connection, hex_dir: &Path) -> rusqlite::Result<(usize, usize)> {
     let canon_dir = hex_dir.join("raw").join("transcripts");
     let canon_prefix = format!("{}/", canon_dir.display());
 
@@ -141,7 +138,10 @@ pub fn run(hex_dir: &Path, vacuum: bool, backfill_facts: bool) -> i32 {
     let conn = match super::open_db(&db_path) {
         Ok(c) => c,
         Err(e) => {
-            eprintln!("hex memory maintain: cannot open {}: {e}", db_path.display());
+            eprintln!(
+                "hex memory maintain: cannot open {}: {e}",
+                db_path.display()
+            );
             return 1;
         }
     };
@@ -166,7 +166,11 @@ pub fn run(hex_dir: &Path, vacuum: bool, backfill_facts: bool) -> i32 {
     crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
         source: "memory::maintain".into(),
         event: "maintain".into(),
-        status: if failures == 0 { "ok".into() } else { "error".into() },
+        status: if failures == 0 {
+            "ok".into()
+        } else {
+            "error".into()
+        },
         duration_ms: None,
         exit_code: Some(if failures == 0 { 0 } else { 1 }),
         detail: Some(format!(

@@ -235,10 +235,16 @@ mod tests {
         let dir = tempdir();
         let path = dir.join("outbox.jsonl");
         let ob = Outbox::new(&path);
-        ob.append(&Emission { event: "a".into(), data: json!({ "n": 1 }) })
-            .unwrap();
-        ob.append(&Emission { event: "b".into(), data: json!({ "n": 2 }) })
-            .unwrap();
+        ob.append(&Emission {
+            event: "a".into(),
+            data: json!({ "n": 1 }),
+        })
+        .unwrap();
+        ob.append(&Emission {
+            event: "b".into(),
+            data: json!({ "n": 2 }),
+        })
+        .unwrap();
 
         let first = ob.pop_front().unwrap().expect("first entry");
         assert_eq!(first.event, "a");
@@ -275,11 +281,7 @@ mod tests {
                 // At this point the entry MUST already be popped.
                 let on_disk = std::fs::read_to_string(&path).unwrap_or_default();
                 assert!(
-                    on_disk
-                        .lines()
-                        .filter(|l| !l.trim().is_empty())
-                        .next()
-                        .is_none(),
+                    on_disk.lines().find(|l| !l.trim().is_empty()).is_none(),
                     "entry must be popped from outbox BEFORE deliver is called; \
                      found on disk: {:?}",
                     on_disk

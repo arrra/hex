@@ -13,8 +13,12 @@ const THRESHOLD: Duration = Duration::from_secs(48 * 3600);
 pub struct ReflectionLogFresh;
 
 impl DoctorCheck for ReflectionLogFresh {
-    fn name(&self) -> &str { "consolidate-liveness" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "consolidate-liveness"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let db_path = ctx.hex_dir.join(".hex/memory.db");
         if !db_path.exists() {
@@ -65,7 +69,7 @@ impl DoctorCheck for ReflectionLogFresh {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::doctor::check::{Status, Context, DoctorCheck};
+    use crate::doctor::check::{Context, DoctorCheck, Status};
 
     fn ctx_with_db(tmp: &std::path::Path, value: Option<&str>) -> Context {
         std::fs::create_dir_all(tmp.join(".hex")).unwrap();
@@ -90,7 +94,12 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let ctx = ctx_with_db(tmp.path(), None);
         let res = ReflectionLogFresh.run(&ctx);
-        assert_eq!(res.status, Status::Fail, "missing key must FAIL, got {:?}", res);
+        assert_eq!(
+            res.status,
+            Status::Fail,
+            "missing key must FAIL, got {:?}",
+            res
+        );
     }
 
     #[test]
@@ -100,7 +109,12 @@ mod tests {
         let stale = chrono::Local::now() - chrono::Duration::hours(72);
         let ctx = ctx_with_db(tmp.path(), Some(&stale.to_rfc3339()));
         let res = ReflectionLogFresh.run(&ctx);
-        assert_eq!(res.status, Status::Fail, "stale stamp must FAIL, got {:?}", res);
+        assert_eq!(
+            res.status,
+            Status::Fail,
+            "stale stamp must FAIL, got {:?}",
+            res
+        );
     }
 
     #[test]
@@ -109,6 +123,11 @@ mod tests {
         let fresh = chrono::Local::now() - chrono::Duration::hours(2);
         let ctx = ctx_with_db(tmp.path(), Some(&fresh.to_rfc3339()));
         let res = ReflectionLogFresh.run(&ctx);
-        assert_eq!(res.status, Status::Pass, "fresh stamp must PASS, got {:?}", res);
+        assert_eq!(
+            res.status,
+            Status::Pass,
+            "fresh stamp must PASS, got {:?}",
+            res
+        );
     }
 }

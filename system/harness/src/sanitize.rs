@@ -67,8 +67,16 @@ impl Violation {
 /// embed tests download (tokenizer vocab blobs contain arbitrary English
 /// words, so extension-less full-tree checks would false-positive on it).
 const COMMON_EXCLUDE_DIRS: &[&str] = &[
-    ".git", "target", "node_modules", ".boi", "worktrees", "__pycache__",
-    "dist", ".hex", ".claude", ".fastembed_cache",
+    ".git",
+    "target",
+    "node_modules",
+    ".boi",
+    "worktrees",
+    "__pycache__",
+    "dist",
+    ".hex",
+    ".claude",
+    ".fastembed_cache",
 ];
 
 /// `--exclude-dir` set of the `/opt/homebrew` check (deliberately narrower).
@@ -158,8 +166,16 @@ fn registry() -> Vec<LineCheck> {
         pattern: re(r"mrap-hex|mrap-mrap|mike@mrap|mrap\.me|Mike Rapadas"), // personalization-audit: pattern registry
         include_ext: Some(TEXT_EXTS),
         exclude_dirs: &[
-            ".git", "target", "node_modules", ".boi", "worktrees",
-            "__pycache__", "dist", ".hex", ".claude", "projects",
+            ".git",
+            "target",
+            "node_modules",
+            ".boi",
+            "worktrees",
+            "__pycache__",
+            "dist",
+            ".hex",
+            ".claude",
+            "projects",
         ],
         filters: compile(COMMON_FILTERS),
         plain_suffix: "",
@@ -175,8 +191,16 @@ fn registry() -> Vec<LineCheck> {
         pattern: re(r"(\$HOME/hex|~/hex)([^a-zA-Z_/-]|$)"), // personalization-audit: pattern registry
         include_ext: Some(&["py", "sh", "yaml", "json", "toml", "rs"]),
         exclude_dirs: &[
-            ".git", "target", "node_modules", ".boi", "worktrees",
-            "__pycache__", "dist", ".hex", ".claude", "projects",
+            ".git",
+            "target",
+            "node_modules",
+            ".boi",
+            "worktrees",
+            "__pycache__",
+            "dist",
+            ".hex",
+            ".claude",
+            "projects",
         ],
         filters: compile(&[
             SELF_FILTER,
@@ -347,7 +371,10 @@ const CLAUDE_PATH_FILE_FILTERS: &[&str] = &[
 /// fallback guard; otherwise every `.claude/` line is a violation.
 fn claude_path_check_file(rel_path: &str, content: &str) -> Vec<Violation> {
     let path = format!("./{rel_path}");
-    if CLAUDE_PATH_FILE_FILTERS.iter().any(|f| re(f).is_match(&path)) {
+    if CLAUDE_PATH_FILE_FILTERS
+        .iter()
+        .any(|f| re(f).is_match(&path))
+    {
         return Vec::new();
     }
     if re(r"HEX_RUNTIME|\.codex|CLAUDE_PROJECT_MEMORY").is_match(content) {
@@ -435,7 +462,9 @@ fn walk_files(root: &Path, exclude_dirs: &[&str]) -> Vec<(String, PathBuf)> {
 /// Read a file as lossy UTF-8. Unreadable files are skipped, matching the
 /// bash's `grep ... 2>/dev/null`.
 fn read_lossy(path: &Path) -> Option<String> {
-    fs::read(path).ok().map(|b| String::from_utf8_lossy(&b).into_owned())
+    fs::read(path)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +627,11 @@ mod tests {
     #[test]
     fn users_path_fixture_is_flagged() {
         let fixture = "DATA=/Users/alice/hex-data/input.csv"; // personalization-audit: test fixture
-        let v = check_content(&check("hardcoded /Users/ path"), "system/scripts/foo.sh", fixture);
+        let v = check_content(
+            &check("hardcoded /Users/ path"),
+            "system/scripts/foo.sh",
+            fixture,
+        );
         assert_eq!(v.len(), 1);
         assert_eq!(v[0].path, "./system/scripts/foo.sh");
         assert_eq!(v[0].line, 1);
@@ -691,8 +724,9 @@ mod tests {
         let guarded = "DIR=.claude/\n[ \"$HEX_RUNTIME\" = codex ] && DIR=.codex/";
         assert!(claude_path_check_file("system/scripts/sync.sh", guarded).is_empty());
         // Allowlisted filename → allowed.
-        assert!(claude_path_check_file("system/scripts/env.sh", "cat .claude/settings.json")
-            .is_empty());
+        assert!(
+            claude_path_check_file("system/scripts/env.sh", "cat .claude/settings.json").is_empty()
+        );
     }
 
     // -- Clean content ---------------------------------------------------------
@@ -772,7 +806,7 @@ mod tests {
         // Excluded dir: common checks must not descend into .hex/.
         fs::create_dir_all(root.join(".hex")).unwrap();
         fs::write(root.join(".hex").join("skip.sh"), "X=/Users/alice/hidden\n").unwrap(); // personalization-audit: test fixture
-        // Extension not in the include set for the /Users/ check.
+                                                                                          // Extension not in the include set for the /Users/ check.
         fs::write(root.join("note.txt"), "/Users/alice/notes\n").unwrap(); // personalization-audit: test fixture
 
         let found = scan(root, false).unwrap();

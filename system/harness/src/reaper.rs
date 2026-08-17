@@ -38,7 +38,12 @@ fn orphaned(pid: i32) -> bool {
         .args(["-o", "ppid=", "-p", &pid.to_string()])
         .output()
         .ok()
-        .and_then(|o| String::from_utf8_lossy(&o.stdout).trim().parse::<i32>().ok())
+        .and_then(|o| {
+            String::from_utf8_lossy(&o.stdout)
+                .trim()
+                .parse::<i32>()
+                .ok()
+        })
         .map(|ppid| ppid == 1)
         .unwrap_or(false)
 }
@@ -65,16 +70,26 @@ fn command_line(pid: i32) -> Option<String> {
 /// `claude -p` children, so the candidate's command line must mention
 /// `claude` (covers both a native binary and `node …/claude` shims).
 fn is_claude_child(pid: i32) -> bool {
-    command_line(pid).map(|c| c.contains("claude")).unwrap_or(false)
+    command_line(pid)
+        .map(|c| c.contains("claude"))
+        .unwrap_or(false)
 }
 
 pub fn sweep(hex_dir: &Path) -> SweepReport {
-    let mut report = SweepReport { killed: 0, removed_stale: 0, kill_failed: 0 };
+    let mut report = SweepReport {
+        killed: 0,
+        removed_stale: 0,
+        kill_failed: 0,
+    };
     let dir = run_dir(hex_dir);
-    let Ok(entries) = std::fs::read_dir(&dir) else { return report };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return report;
+    };
     for entry in entries.filter_map(|e| e.ok()) {
         let name = entry.file_name().to_string_lossy().to_string();
-        let Some(pid) = pid_from_filename(&name) else { continue };
+        let Some(pid) = pid_from_filename(&name) else {
+            continue;
+        };
         if !alive(pid) {
             report.removed_stale += 1;
             let _ = std::fs::remove_file(entry.path());
@@ -170,7 +185,10 @@ mod tests {
             std::thread::sleep(std::time::Duration::from_millis(50));
             waited_ms += 50;
         }
-        assert!(orphaned(pid), "test setup: child {pid} never orphaned to ppid==1");
+        assert!(
+            orphaned(pid),
+            "test setup: child {pid} never orphaned to ppid==1"
+        );
         pid
     }
 
@@ -211,7 +229,10 @@ mod tests {
 
         let report = sweep(hex_tmp.path());
 
-        assert_eq!(report.killed, 0, "an innocent recycled PID must not be killed");
+        assert_eq!(
+            report.killed, 0,
+            "an innocent recycled PID must not be killed"
+        );
         assert!(
             alive(pid),
             "the innocent process must survive the sweep (PID-reuse guard)"

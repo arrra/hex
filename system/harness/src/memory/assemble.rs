@@ -117,9 +117,7 @@ fn detect_entity_subjects(conn: &Connection, query: &str) -> Vec<String> {
         return Vec::new();
     }
     let mut matched: Vec<String> = Vec::new();
-    let mut stmt = match conn.prepare(
-        "SELECT DISTINCT subject FROM facts WHERE tombstone = 0",
-    ) {
+    let mut stmt = match conn.prepare("SELECT DISTINCT subject FROM facts WHERE tombstone = 0") {
         Ok(s) => s,
         Err(_) => return matched,
     };
@@ -133,7 +131,7 @@ fn detect_entity_subjects(conn: &Connection, query: &str) -> Vec<String> {
         if toks.contains(&lower) {
             hit = true;
         } else if let Some(slug) = lower.split(':').nth(1) {
-            for piece in slug.split(|c: char| c == '-' || c == '_' || c == '/') {
+            for piece in slug.split(['-', '_', '/']) {
                 if piece.len() >= 3 && toks.contains(piece) {
                     hit = true;
                     break;
@@ -185,11 +183,11 @@ fn m1_content(
     let mut out: Vec<Candidate> = Vec::new();
 
     let chunks = search_fts_public(conn, query, TOP_K_PER_MOVE * 3, None).unwrap_or_default();
-    let mut rank = 0usize;
-    for c in chunks
+    for (rank, c) in chunks
         .into_iter()
         .filter(|r| !(for_agent && r.private))
         .take(TOP_K_PER_MOVE)
+        .enumerate()
     {
         let native = c.score;
         let dedup_key = format!("chunk:{}", c.rowid);
@@ -204,7 +202,6 @@ fn m1_content(
             confidence,
             dedup_key,
         });
-        rank += 1;
     }
 
     // Vector arm — caller-decided embedder policy. `None` = FTS-only (the
@@ -264,7 +261,11 @@ fn m1_content(
 }
 
 fn move_fired_relevance(fired: bool) -> f32 {
-    if fired { 1.0 } else { 0.3 }
+    if fired {
+        1.0
+    } else {
+        0.3
+    }
 }
 
 /// M2 — entity filter. Fires when at least one detected entity matches a
@@ -286,10 +287,10 @@ fn m2_entity(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<Cand
             Ok(s) => s,
             Err(_) => continue,
         };
-        let collected: Vec<(FactHit, f64)> = match stmt.query_map(
-            rusqlite::params![subj, TOP_K_PER_MOVE as i64],
-            |r| fact_from_row(r),
-        ) {
+        let collected: Vec<(FactHit, f64)> = match stmt
+            .query_map(rusqlite::params![subj, TOP_K_PER_MOVE as i64], |r| {
+                fact_from_row(r)
+            }) {
             Ok(rows) => rows.filter_map(Result::ok).collect(),
             Err(_) => Vec::new(),
         };
@@ -320,10 +321,10 @@ fn m3_predicate(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<C
             Ok(s) => s,
             Err(_) => continue,
         };
-        let collected: Vec<(FactHit, f64)> = match stmt.query_map(
-            rusqlite::params![pred, TOP_K_PER_MOVE as i64],
-            |r| fact_from_row(r),
-        ) {
+        let collected: Vec<(FactHit, f64)> = match stmt
+            .query_map(rusqlite::params![pred, TOP_K_PER_MOVE as i64], |r| {
+                fact_from_row(r)
+            }) {
             Ok(rows) => rows.filter_map(Result::ok).collect(),
             Err(_) => Vec::new(),
         };
@@ -356,11 +357,7 @@ fn m4_temporal(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<Ca
     (true, cands)
 }
 
-fn facts_to_candidates(
-    hits: Vec<(FactHit, f64)>,
-    move_id: MoveId,
-    fired: bool,
-) -> Vec<Candidate> {
+fn facts_to_candidates(hits: Vec<(FactHit, f64)>, move_id: MoveId, fired: bool) -> Vec<Candidate> {
     let mr = move_fired_relevance(fired);
     hits.into_iter()
         .enumerate()
@@ -388,15 +385,12 @@ fn cand_chars(c: &Candidate) -> usize {
             let snip = s.content.chars().take(600).count();
             snip + s.source_path.len() + s.heading.len() + 16
         }
-        CandidateKind::Fact(f) => {
-            f.subject.len() + f.predicate.len() + f.object.len() + 8
-        }
+        CandidateKind::Fact(f) => f.subject.len() + f.predicate.len() + f.object.len() + 8,
     }
 }
 
 fn move_stats(move_id: MoveId, fired: bool, cands: &[Candidate]) -> MoveStats {
-    let top_native_scores: Vec<f64> =
-        cands.iter().take(3).map(|c| c.native_score).collect();
+    let top_native_scores: Vec<f64> = cands.iter().take(3).map(|c| c.native_score).collect();
     MoveStats {
         move_id,
         fired,
@@ -423,7 +417,11 @@ pub fn assemble(
     budget: usize,
     query_vec: Option<&[f32]>,
 ) -> AssembledContext {
-    let budget = if budget == 0 { MAX_CONTEXT_CHARS } else { budget };
+    let budget = if budget == 0 {
+        MAX_CONTEXT_CHARS
+    } else {
+        budget
+    };
 
     // ── run the moves (sequential — local SQLite, the cost is dominated by
     // FTS5/index lookups; "parallel" in spec scope is logical, not threaded).
@@ -451,10 +449,10 @@ pub fn assemble(
     ];
 
     // Floor: take the first available from each queue, M1 first.
-    for i in 0..queues.len() {
+    for (move_id, queue) in &mut queues {
         // Skip non-fired moves on the floor — they get the 0.3 demotion and
         // do not warrant a guaranteed slot. M1 always fires.
-        let fired = match queues[i].0 {
+        let fired = match move_id {
             MoveId::M1ContentMatch => true,
             MoveId::M2EntityFilter => m2_f,
             MoveId::M3PredicateQuery => m3_f,
@@ -463,7 +461,7 @@ pub fn assemble(
         if !fired {
             continue;
         }
-        if let Some(cand) = queues[i].1.next() {
+        if let Some(cand) = queue.next() {
             let cost = cand_chars(&cand);
             if seen.insert(cand.dedup_key.clone()) {
                 if chars + cost > budget {
@@ -471,7 +469,10 @@ pub fn assemble(
                     // contract is honored, then stop (no further candidates
                     // are considered, so `chars` needs no update).
                     merged.push(cand);
-                    return AssembledContext { candidates: merged, per_move_stats };
+                    return AssembledContext {
+                        candidates: merged,
+                        per_move_stats,
+                    };
                 }
                 merged.push(cand);
                 chars += cost;
@@ -504,7 +505,10 @@ pub fn assemble(
             }
             let cost = cand_chars(&cand);
             if chars + cost > budget {
-                return AssembledContext { candidates: merged, per_move_stats };
+                return AssembledContext {
+                    candidates: merged,
+                    per_move_stats,
+                };
             }
             merged.push(cand);
             chars = chars.saturating_add(cost);
@@ -598,7 +602,13 @@ mod tests {
         // Entity in gazetteer should fire M2.
         insert_fact(&c, "f2", "person:alice", "prefers", "rust", false);
 
-        let r = assemble(&c, "what did alice decide about the schema", false, MAX_CONTEXT_CHARS, None);
+        let r = assemble(
+            &c,
+            "what did alice decide about the schema",
+            false,
+            MAX_CONTEXT_CHARS,
+            None,
+        );
 
         assert!(!r.candidates.is_empty(), "assembler returned no candidates");
         // First candidate must come from M1 (the floor).
@@ -629,7 +639,13 @@ mod tests {
         insert_fact(&c, "p1", "me/secret", "decided", "fire bob", true);
         insert_fact(&c, "p2", "project:hex", "decided", "use sqlite-vec", false);
 
-        let r = assemble(&c, "what did we decide recently", true, MAX_CONTEXT_CHARS, None);
+        let r = assemble(
+            &c,
+            "what did we decide recently",
+            true,
+            MAX_CONTEXT_CHARS,
+            None,
+        );
 
         for cand in &r.candidates {
             if let CandidateKind::Fact(f) = &cand.kind {

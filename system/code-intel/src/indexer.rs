@@ -115,7 +115,10 @@ fn run_inner(codeintel_home: &Path, dir: &Path, path_env: Option<&OsStr>) -> Res
         }
         Err(e) => {
             return Err(e).with_context(|| {
-                format!("spawning rust-analyzer scip in {}", ws.primary_root.display())
+                format!(
+                    "spawning rust-analyzer scip in {}",
+                    ws.primary_root.display()
+                )
             })
         }
     };
@@ -330,9 +333,8 @@ mod tests {
         register_workspace(home.path(), repo.path()).unwrap();
 
         let path_env = full_path_env();
-        let report = completed(
-            run_inner(home.path(), repo.path(), Some(path_env.as_ref())).unwrap(),
-        );
+        let report =
+            completed(run_inner(home.path(), repo.path(), Some(path_env.as_ref())).unwrap());
         assert_eq!(report.emit_exit_code, 0);
         assert!(report.emit_duration_secs > 0.0);
         assert!(report.file_count >= 3, "got {}", report.file_count);
@@ -350,11 +352,9 @@ mod tests {
         assert_eq!(report.commit_sha, head);
         let conn = rusqlite::Connection::open(current.join("index.sqlite")).unwrap();
         let meta_sha: String = conn
-            .query_row(
-                "SELECT value FROM meta WHERE key = 'commit_sha'",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT value FROM meta WHERE key = 'commit_sha'", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(meta_sha, head);
         for key in [
@@ -404,8 +404,7 @@ mod tests {
         );
 
         let path_env = full_path_env();
-        let report =
-            completed(run_inner(home.path(), &wt, Some(path_env.as_ref())).unwrap());
+        let report = completed(run_inner(home.path(), &wt, Some(path_env.as_ref())).unwrap());
         // Identity and indexed root are the PRIMARY checkout's, not the worktree's.
         let ws = Workspace::resolve(repo.path()).unwrap();
         assert_eq!(report.workspace_id, ws.id);

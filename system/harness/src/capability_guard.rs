@@ -30,9 +30,7 @@ pub fn check_body_safe(body: &str) -> Result<(), String> {
 
     // Secrets access
     if body.contains(".hex/secrets") {
-        return Err(
-            "script body rejected: accesses .hex/secrets".to_string(),
-        );
+        return Err("script body rejected: accesses .hex/secrets".to_string());
     }
 
     // Destructive: rm -rf (any variant of spacing)
@@ -100,7 +98,10 @@ fn contains_command_word(body: &str, word: &str) -> bool {
     // Also match if the word appears at the start of a line.
     for line in body.lines() {
         let trimmed = line.trim_start();
-        if trimmed == word || trimmed.starts_with(&format!("{word} ")) || trimmed.starts_with(&format!("{word}\t")) {
+        if trimmed == word
+            || trimmed.starts_with(&format!("{word} "))
+            || trimmed.starts_with(&format!("{word}\t"))
+        {
             return true;
         }
         // Also catch cases like "sudo curl" or "exec curl"
@@ -124,6 +125,10 @@ fn pipe_to_shell(body: &str) -> bool {
     false
 }
 
+// Boundary proof: `line[pos..]` and `line[abs_idx + 1..]` slice only at char
+// boundaries. `pos` is 0 or `abs_idx + 1`, and `abs_idx` is the byte index of an
+// ASCII '|' (from str::find), so one past it is always a char boundary.
+#[allow(clippy::string_slice)]
 fn pipe_to_cmd(line: &str, shell: &str) -> bool {
     // Find '|' and check if it's followed (after whitespace) by the shell command
     let mut pos = 0;

@@ -69,10 +69,7 @@ fn test_body_scan_rejects_secrets_access() {
 #[test]
 fn test_body_scan_rejects_rm_rf() {
     let body = "#!/bin/sh\nrm -rf /tmp/data";
-    assert!(
-        check_body_safe(body).is_err(),
-        "rm -rf must be rejected"
-    );
+    assert!(check_body_safe(body).is_err(), "rm -rf must be rejected");
 }
 
 #[test]
@@ -141,7 +138,10 @@ fn test_check_allowed_add_non_pilot_rejected() {
 fn test_check_allowed_add_no_allowlist_rejects_all() {
     let dir = TempDir::new().unwrap();
     let result = check_allowed(dir.path(), "any-agent", "add");
-    assert!(result.is_err(), "with no allowlist, all agents rejected for add");
+    assert!(
+        result.is_err(),
+        "with no allowlist, all agents rejected for add"
+    );
 }
 
 // ── Allowlist gating: call ────────────────────────────────────────────────────
@@ -195,7 +195,10 @@ fn test_check_immutable_rejects_existing() {
     make_fn_json(&dir, "existing-fn");
     let registry_dir = dir.path().join(".hex/registry");
     let result = check_immutable(&registry_dir, "existing-fn");
-    assert!(result.is_err(), "add must be rejected when functions/<id>.json already exists");
+    assert!(
+        result.is_err(),
+        "add must be rejected when functions/<id>.json already exists"
+    );
     assert!(
         result.unwrap_err().contains("existing-fn"),
         "error must name the duplicate id"

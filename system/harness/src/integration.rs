@@ -65,9 +65,6 @@ mod tests {
             content.contains("set -uo pipefail"),
             "template must embed set -uo pipefail"
         );
-        assert!(
-            content.contains("exit 0"),
-            "template must end with exit 0"
-        );
+        assert!(content.contains("exit 0"), "template must end with exit 0");
     }
 }

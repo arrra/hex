@@ -182,10 +182,7 @@ pub fn run(home: &Path) -> Result<(DoctorReport, i32)> {
     }
     match scipd.level.as_str() {
         "ok" => {
-            let instances = scipd
-                .status
-                .as_ref()
-                .map_or(0, |s| s.instances.len());
+            let instances = scipd.status.as_ref().map_or(0, |s| s.instances.len());
             eprintln!("doctor: OK  scipd answering ({instances} live instance(s))");
         }
         "warning" => eprintln!("doctor: WARN scipd — {}", scipd.detail),
@@ -215,7 +212,14 @@ pub fn run(home: &Path) -> Result<(DoctorReport, i32)> {
     }
 
     let exit = i32::from(red);
-    Ok((DoctorReport { workspaces, rust_analyzer, scipd }, exit))
+    Ok((
+        DoctorReport {
+            workspaces,
+            rust_analyzer,
+            scipd,
+        },
+        exit,
+    ))
 }
 
 /// Health of one workspace. Never errors out of the whole report: every
@@ -235,7 +239,9 @@ fn workspace_health(home: &Path, entry: &RegistryEntry) -> WorkspaceHealth {
     let store = Store::new(home, &entry.id);
     match store.generations() {
         Ok(generations) => health.generations = generations,
-        Err(e) => health.red_reasons.push(format!("generation listing failed: {e:#}")),
+        Err(e) => health
+            .red_reasons
+            .push(format!("generation listing failed: {e:#}")),
     }
 
     let generation_dir = match store.current() {
@@ -247,11 +253,15 @@ fn workspace_health(home: &Path, entry: &RegistryEntry) -> WorkspaceHealth {
             }
         },
         Ok(None) => {
-            health.red_reasons.push("no index: run `cq index`".to_string());
+            health
+                .red_reasons
+                .push("no index: run `cq index`".to_string());
             None
         }
         Err(e) => {
-            health.red_reasons.push(format!("CURRENT unreadable: {e:#}"));
+            health
+                .red_reasons
+                .push(format!("CURRENT unreadable: {e:#}"));
             None
         }
     };
@@ -284,7 +294,9 @@ fn workspace_health(home: &Path, entry: &RegistryEntry) -> WorkspaceHealth {
 
             match commit_lag(&entry.root, &meta.commit_sha) {
                 Ok(lag) => health.commit_lag = Some(lag),
-                Err(e) => health.red_reasons.push(format!("commit lag unavailable: {e:#}")),
+                Err(e) => health
+                    .red_reasons
+                    .push(format!("commit lag unavailable: {e:#}")),
             }
         }
     }
@@ -324,7 +336,9 @@ fn read_index_meta(db: &Path) -> Result<IndexMeta> {
 fn index_age_secs(created_at: &str) -> Result<u64> {
     let created = chrono::DateTime::parse_from_rfc3339(created_at)
         .with_context(|| format!("meta created_at {created_at:?} is not RFC3339"))?;
-    let age = chrono::Utc::now().signed_duration_since(created).num_seconds();
+    let age = chrono::Utc::now()
+        .signed_duration_since(created)
+        .num_seconds();
     Ok(u64::try_from(age).unwrap_or(0))
 }
 
@@ -357,7 +371,10 @@ fn rust_analyzer_health() -> RustAnalyzerHealth {
         },
         // Found but broken counts as not healthy; report it as missing with
         // no version rather than pretending it works.
-        Ok(_) | Err(_) => RustAnalyzerHealth { found: false, version: None },
+        Ok(_) | Err(_) => RustAnalyzerHealth {
+            found: false,
+            version: None,
+        },
     }
 }
 

@@ -1,5 +1,5 @@
-/// Source-repo layout detection for the upgrade flow.
-/// Translates paths for the v2 (system/ + templates/) layout.
+//! Source-repo layout detection for the upgrade flow.
+//! Translates paths for the v2 (system/ + templates/) layout.
 
 /// Detect the source repo layout.
 /// Returns "v2" or "unknown".
@@ -17,7 +17,10 @@ mod tests {
 
     #[test]
     fn detect_layout_unknown_for_missing_dir() {
-        assert_eq!(detect_layout("/tmp/does-not-exist-path-map-test"), "unknown");
+        assert_eq!(
+            detect_layout("/tmp/does-not-exist-path-map-test"),
+            "unknown"
+        );
     }
 
     #[test]

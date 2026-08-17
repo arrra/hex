@@ -8,8 +8,12 @@ use crate::memory::provider::{self, ProviderError};
 pub struct LlmProviderReachable;
 
 impl DoctorCheck for LlmProviderReachable {
-    fn name(&self) -> &str { "llm-provider" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "llm-provider"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, _ctx: &Context) -> CheckResult {
         match provider::health_check() {
             Ok(_) => CheckResult::pass("LLM provider reachable"),

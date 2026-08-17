@@ -32,7 +32,10 @@ fn test_evidence_git_tag_valid() {
         value: "v0.0.1-evidence-test".to_string(),
         repo: tmp.path().to_string_lossy().to_string(),
     };
-    assert!(act_evidence::verify(&ev).is_ok(), "existing tag should verify Ok");
+    assert!(
+        act_evidence::verify(&ev).is_ok(),
+        "existing tag should verify Ok"
+    );
 }
 
 #[test]
@@ -70,7 +73,10 @@ fn test_evidence_file_written_exists() {
     let ev = ActEvidence::FileWritten {
         path: path.to_string_lossy().to_string(),
     };
-    assert!(act_evidence::verify(&ev).is_ok(), "existing non-empty file should verify Ok");
+    assert!(
+        act_evidence::verify(&ev).is_ok(),
+        "existing non-empty file should verify Ok"
+    );
 }
 
 #[test]
@@ -131,4 +137,3 @@ fn test_evidence_no_evidence_field_means_no_verification() {
         "detail without evidence key should have no evidence"
     );
 }
-

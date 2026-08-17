@@ -69,7 +69,9 @@ impl Store {
     /// A store rooted at `<home>/<workspace_id>/`. Does not touch the
     /// filesystem until a write operation needs to.
     pub fn new(home: impl AsRef<Path>, workspace_id: &str) -> Self {
-        Store { ws_dir: home.as_ref().join(workspace_id) }
+        Store {
+            ws_dir: home.as_ref().join(workspace_id),
+        }
     }
 
     /// The workspace directory `<home>/<workspace-id>/`.
@@ -92,16 +94,27 @@ impl Store {
     pub fn publish(&self, generation: Generation) -> Result<String> {
         let Generation { name, tmp_dir } = generation;
         if !tmp_dir.is_dir() {
-            bail!("generation tmp dir vanished before publish: {}", tmp_dir.display());
+            bail!(
+                "generation tmp dir vanished before publish: {}",
+                tmp_dir.display()
+            );
         }
         let final_dir = self.ws_dir.join(&name);
         if final_dir.exists() {
-            bail!("generation {} already published at {}", name, final_dir.display());
+            bail!(
+                "generation {} already published at {}",
+                name,
+                final_dir.display()
+            );
         }
 
         fsync_dir(&tmp_dir)?;
         fs::rename(&tmp_dir, &final_dir).with_context(|| {
-            format!("publishing {} -> {}", tmp_dir.display(), final_dir.display())
+            format!(
+                "publishing {} -> {}",
+                tmp_dir.display(),
+                final_dir.display()
+            )
         })?;
         fsync_dir(&self.ws_dir)?;
 
@@ -129,12 +142,16 @@ impl Store {
     /// Directory of the current generation. Errors when there is no current
     /// generation or its directory is missing (callers map this to NO_INDEX).
     pub fn current_dir(&self) -> Result<PathBuf> {
-        let name = self.current()?.with_context(|| {
-            format!("no published generation under {}", self.ws_dir.display())
-        })?;
+        let name = self
+            .current()?
+            .with_context(|| format!("no published generation under {}", self.ws_dir.display()))?;
         let dir = self.ws_dir.join(&name);
         if !dir.is_dir() {
-            bail!("CURRENT names {} but {} does not exist", name, dir.display());
+            bail!(
+                "CURRENT names {} but {} does not exist",
+                name,
+                dir.display()
+            );
         }
         Ok(dir)
     }
@@ -146,14 +163,14 @@ impl Store {
         let entries = match fs::read_dir(&self.ws_dir) {
             Ok(e) => e,
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(names),
-            Err(e) => {
-                return Err(e).with_context(|| format!("listing {}", self.ws_dir.display()))
-            }
+            Err(e) => return Err(e).with_context(|| format!("listing {}", self.ws_dir.display())),
         };
         for entry in entries {
             let entry = entry.with_context(|| format!("listing {}", self.ws_dir.display()))?;
             let file_name = entry.file_name();
-            let Some(name) = file_name.to_str() else { continue };
+            let Some(name) = file_name.to_str() else {
+                continue;
+            };
             if is_generation_name(name) && entry.path().is_dir() {
                 names.push(name.to_string());
             }
@@ -168,14 +185,15 @@ impl Store {
     pub fn prune(&self) -> Result<Vec<String>> {
         let current = self.current()?;
         let mut generations = self.generations()?; // newest first
-        // Same-second publishes share a timestamp prefix and tie-break by
-        // random suffix, which can rank CURRENT below older generations and
-        // make prune keep 3. Within a timestamp tie, CURRENT is by
-        // definition the newest; distinct timestamps keep pure name order.
+                                                   // Same-second publishes share a timestamp prefix and tie-break by
+                                                   // random suffix, which can rank CURRENT below older generations and
+                                                   // make prune keep 3. Within a timestamp tie, CURRENT is by
+                                                   // definition the newest; distinct timestamps keep pure name order.
         let is_current = |n: &str| Some(n) == current.as_deref();
         let ts = |n: &str| n.split('-').next().unwrap_or(n).to_string();
         generations.sort_by(|a, b| {
-            ts(b).cmp(&ts(a))
+            ts(b)
+                .cmp(&ts(a))
                 .then_with(|| is_current(b).cmp(&is_current(a)))
                 .then_with(|| b.cmp(a))
         });
@@ -253,13 +271,29 @@ fn random_hex6() -> String {
 }
 
 /// `YYYYMMDDTHHMMSSZ-xxxxxx`, published (no `.tmp` suffix).
+// string_slice allow: `ts[..8]`/`ts[9..15]` are reached only after the `&&`
+// guards below match ASCII 'T' at byte 8 and 'Z' at byte 15, so bytes 8/9/15
+// are proven char boundaries — the slice ends can never split a multi-byte char.
+#[allow(clippy::string_slice)]
 fn is_generation_name(name: &str) -> bool {
     let bytes = name.as_bytes();
     if bytes.len() != 23 || name.ends_with(".tmp") {
         return false;
     }
-    let (ts, rest) = name.split_at(16);
-    let Some(hex) = rest.strip_prefix('-') else { return false };
+    // Names come from `read_dir` on an on-disk workspace, so they are
+    // arbitrary UTF-8, not just our own generated names: a 23-byte name may
+    // have a multi-byte char straddling byte 16. `split_at_checked` returns
+    // `None` there instead of panicking.
+    let Some((ts, rest)) = name.split_at_checked(16) else {
+        return false;
+    };
+    let Some(hex) = rest.strip_prefix('-') else {
+        return false;
+    };
+    // `ts` is exactly 16 bytes, so index 8 is in bounds. The remaining slices
+    // are boundary-safe because `&&` short-circuits: `ts[..8]` is only reached
+    // once byte 8 is the ASCII 'T', and `ts[9..15]` only once the final char is
+    // the ASCII 'Z' at byte 15 — both ends are then char boundaries.
     ts.as_bytes()[8] == b'T'
         && ts.ends_with('Z')
         && ts[..8].bytes().all(|b| b.is_ascii_digit())
@@ -270,7 +304,8 @@ fn is_generation_name(name: &str) -> bool {
 /// Best-effort directory fsync (durability of renames within it).
 fn fsync_dir(dir: &Path) -> Result<()> {
     let f = File::open(dir).with_context(|| format!("opening {} for fsync", dir.display()))?;
-    f.sync_all().with_context(|| format!("fsyncing {}", dir.display()))
+    f.sync_all()
+        .with_context(|| format!("fsyncing {}", dir.display()))
 }
 
 #[cfg(test)]
@@ -310,6 +345,39 @@ mod tests {
     }
 
     #[test]
+    fn is_generation_name_rejects_multibyte_name_without_panicking() {
+        // 23 bytes total (matches the required length) but a 2-byte UTF-8
+        // char (é) straddles byte offset 16, where `split_at(16)` would
+        // otherwise panic on a non-char-boundary index.
+        let name = "123456789012345\u{e9}abcdez";
+        assert_eq!(
+            name.len(),
+            23,
+            "fixture must match generation-name byte length"
+        );
+        assert!(!is_generation_name(name));
+    }
+
+    #[test]
+    fn is_generation_name_rejects_multibyte_names_at_every_byte_index() {
+        // Each fixture is a 23-byte name that clears `split_at_checked(16)`
+        // but puts a multi-byte char on one of the remaining byte indexes
+        // (`as_bytes()[8]`, `ts[..8]`, `ts[9..15]`). Every one must return
+        // false via the short-circuiting guards, never panic.
+        for name in [
+            // 'é' straddles bytes 7..9, so `as_bytes()[8]` is a continuation
+            // byte (never b'T') and `ts[..8]` is never reached.
+            "1234567\u{e9}890123Z-abcdef",
+            // 'é' occupies bytes 14..16, so `ts` does not end with 'Z' and
+            // `ts[9..15]` (which would split it) is never reached.
+            "12345678T90123\u{e9}-abcdef",
+        ] {
+            assert_eq!(name.len(), 23, "fixture must be 23 bytes: {name}");
+            assert!(!is_generation_name(name), "must reject: {name}");
+        }
+    }
+
+    #[test]
     fn prune_keeps_two_most_recent() {
         let home = tempfile::tempdir().unwrap();
         let store = Store::new(home.path(), WS);
@@ -325,7 +393,10 @@ mod tests {
         store.prune().unwrap();
         let kept = store.generations().unwrap();
         assert_eq!(kept.len(), 2, "prune must keep exactly 2 of 3: {kept:?}");
-        assert!(kept.contains(&current), "CURRENT generation must survive prune");
+        assert!(
+            kept.contains(&current),
+            "CURRENT generation must survive prune"
+        );
         assert!(store.current_dir().unwrap().join("index.sqlite").exists());
     }
 
@@ -352,7 +423,11 @@ mod tests {
         let kept = store.generations().unwrap();
         assert_eq!(
             kept,
-            vec![names[3].to_string(), names[2].to_string(), names[0].to_string()],
+            vec![
+                names[3].to_string(),
+                names[2].to_string(),
+                names[0].to_string()
+            ],
             "2 newest + CURRENT survive, newest first"
         );
     }
@@ -382,8 +457,14 @@ mod tests {
         assert!(guard.is_some(), "first lock must succeed");
         // Second handle (separate fd, same process: flock is per open file
         // description, so this models a second `cq index` invocation).
-        assert!(store.try_lock().unwrap().is_none(), "second lock must be refused");
+        assert!(
+            store.try_lock().unwrap().is_none(),
+            "second lock must be refused"
+        );
         drop(guard);
-        assert!(store.try_lock().unwrap().is_some(), "lock must be released on drop");
+        assert!(
+            store.try_lock().unwrap().is_some(),
+            "lock must be released on drop"
+        );
     }
 }

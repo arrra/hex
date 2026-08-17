@@ -29,7 +29,8 @@ Parsed as a position when the two trailing ':'-separated segments are both \
 positive integers (e.g. src/lib.rs:4:43); anything else (e.g. double, \
 Vec::new) is a symbol name";
 
-const WORKSPACE_HELP: &str = "Workspace path override (default: resolve from the current directory)";
+const WORKSPACE_HELP: &str =
+    "Workspace path override (default: resolve from the current directory)";
 
 #[derive(Parser)]
 #[command(
@@ -150,7 +151,11 @@ fn parse_target(target: &str) -> Selector {
     if let (Some(col), Some(line), Some(path)) = (tail.next(), tail.next(), tail.next()) {
         if let (Ok(line), Ok(col)) = (line.parse::<u32>(), col.parse::<u32>()) {
             if line >= 1 && col >= 1 && !path.is_empty() {
-                return Selector::Pos { path: path.to_string(), line, col };
+                return Selector::Pos {
+                    path: path.to_string(),
+                    line,
+                    col,
+                };
             }
         }
     }
@@ -167,7 +172,10 @@ fn resolve_registered(home: &Path, workspace: Option<PathBuf>) -> Result<Workspa
     let ws = Workspace::resolve(&dir)?;
     let registry = Registry::load(home)?;
     if !registry.contains(&ws.id) {
-        return Err(CqError::UnregisteredWorkspace { cwd: dir.display().to_string() }.into());
+        return Err(CqError::UnregisteredWorkspace {
+            cwd: dir.display().to_string(),
+        }
+        .into());
     }
     Ok(ws)
 }
@@ -211,9 +219,7 @@ fn run_rename(
     let home = codeintel_home()?;
     let ws = resolve_registered(&home, workspace)?;
     let Selector::Pos { path, line, col } = parse_target(target) else {
-        anyhow::bail!(
-            "rename target must be a FILE:LINE:COL position (1-based), got {target:?}"
-        );
+        anyhow::bail!("rename target must be a FILE:LINE:COL position (1-based), got {target:?}");
     };
 
     let unavailable = |reason: String| CqError::LiveUnavailable { reason };
@@ -231,9 +237,9 @@ fn run_rename(
     if let Some(error) = reply.error {
         return Err(unavailable(format!("{}: {}", error.code, error.message)).into());
     }
-    let edits = reply.edits.ok_or_else(|| {
-        unavailable("daemon reply carried neither edits nor an error".into())
-    })?;
+    let edits = reply
+        .edits
+        .ok_or_else(|| unavailable("daemon reply carried neither edits nor an error".into()))?;
 
     if apply {
         let files_modified = rename_apply::apply(&ws.query_root, &edits)?;
@@ -246,36 +252,68 @@ fn run_rename(
             })
         );
     } else {
-        println!("{}", serde_json::json!({ "edits": edits, "applied": false }));
+        println!(
+            "{}",
+            serde_json::json!({ "edits": edits, "applied": false })
+        );
     }
     Ok(0)
 }
 
 fn run(cli: Cli) -> Result<i32, anyhow::Error> {
     match cli.command {
-        Command::Def { target, strict, live, no_live, workspace } => {
-            run_query(workspace, Verb::Def(parse_target(&target)), strict, live_mode(live, no_live))
-        }
-        Command::Refs { target, strict, live, no_live, workspace } => {
-            run_query(workspace, Verb::Refs(parse_target(&target)), strict, live_mode(live, no_live))
-        }
-        Command::Callers { target, strict, live, no_live, workspace } => {
-            run_query(
-                workspace,
-                Verb::Callers(parse_target(&target)),
-                strict,
-                live_mode(live, no_live),
-            )
-        }
-        Command::Symbols { file, strict, workspace } => {
-            run_query(workspace, Verb::Symbols(file), strict, LiveMode::Disabled)
-        }
-        Command::Search { query, strict, workspace } => {
-            run_query(workspace, Verb::Search(query), strict, LiveMode::Disabled)
-        }
-        Command::Rename { target, new_name, apply, workspace } => {
-            run_rename(workspace, &target, &new_name, apply)
-        }
+        Command::Def {
+            target,
+            strict,
+            live,
+            no_live,
+            workspace,
+        } => run_query(
+            workspace,
+            Verb::Def(parse_target(&target)),
+            strict,
+            live_mode(live, no_live),
+        ),
+        Command::Refs {
+            target,
+            strict,
+            live,
+            no_live,
+            workspace,
+        } => run_query(
+            workspace,
+            Verb::Refs(parse_target(&target)),
+            strict,
+            live_mode(live, no_live),
+        ),
+        Command::Callers {
+            target,
+            strict,
+            live,
+            no_live,
+            workspace,
+        } => run_query(
+            workspace,
+            Verb::Callers(parse_target(&target)),
+            strict,
+            live_mode(live, no_live),
+        ),
+        Command::Symbols {
+            file,
+            strict,
+            workspace,
+        } => run_query(workspace, Verb::Symbols(file), strict, LiveMode::Disabled),
+        Command::Search {
+            query,
+            strict,
+            workspace,
+        } => run_query(workspace, Verb::Search(query), strict, LiveMode::Disabled),
+        Command::Rename {
+            target,
+            new_name,
+            apply,
+            workspace,
+        } => run_rename(workspace, &target, &new_name, apply),
         Command::Check { file, workspace } => {
             let home = codeintel_home()?;
             let ws = resolve_registered(&home, workspace)?;
@@ -354,12 +392,20 @@ mod tests {
     fn position_targets_need_two_trailing_numeric_segments() {
         assert_eq!(
             parse_target("src/lib.rs:4:43"),
-            Selector::Pos { path: "src/lib.rs".into(), line: 4, col: 43 }
+            Selector::Pos {
+                path: "src/lib.rs".into(),
+                line: 4,
+                col: 43
+            }
         );
         // Deep paths keep every leading segment.
         assert_eq!(
             parse_target("a/b:c/d.rs:12:1"),
-            Selector::Pos { path: "a/b:c/d.rs".into(), line: 12, col: 1 }
+            Selector::Pos {
+                path: "a/b:c/d.rs".into(),
+                line: 12,
+                col: 1
+            }
         );
     }
 
@@ -368,12 +414,12 @@ mod tests {
         for name in [
             "double",
             "Vec::new",
-            "ops::double",       // trailing segments not numeric
-            "src/lib.rs:4",      // only one numeric segment
-            "src/lib.rs:4:0",    // col 0 is not a 1-based position
-            "src/lib.rs:0:4",    // line 0 is not a 1-based position
-            ":4:5",              // empty path
-            "src/lib.rs:4:43x",  // non-numeric col
+            "ops::double",      // trailing segments not numeric
+            "src/lib.rs:4",     // only one numeric segment
+            "src/lib.rs:4:0",   // col 0 is not a 1-based position
+            "src/lib.rs:0:4",   // line 0 is not a 1-based position
+            ":4:5",             // empty path
+            "src/lib.rs:4:43x", // non-numeric col
         ] {
             assert_eq!(parse_target(name), Selector::Name(name.into()), "{name}");
         }

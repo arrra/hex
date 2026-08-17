@@ -77,7 +77,10 @@ impl<B: LiveBackend> Pool<B> {
     /// Pool on the real clock. `spawn` runs under the pool lock — the spawn
     /// returns while the instance is still Warming (SPEC-A2 §2), so this
     /// never holds the lock across a prime.
-    pub fn new(config: ScipdConfig, spawn: impl Fn(&Path) -> Result<B> + Send + Sync + 'static) -> Self {
+    pub fn new(
+        config: ScipdConfig,
+        spawn: impl Fn(&Path) -> Result<B> + Send + Sync + 'static,
+    ) -> Self {
         Self::with_clock(config, spawn, Instant::now)
     }
 
@@ -134,7 +137,10 @@ impl<B: LiveBackend> Pool<B> {
                 .min_by_key(|(path, entry)| (entry.last_used, path.to_path_buf()))
                 .map(|(path, _)| path.clone())
                 .expect("pool at cap ≥ 1 is non-empty");
-            let entry = inner.instances.remove(&victim).expect("victim just selected");
+            let entry = inner
+                .instances
+                .remove(&victim)
+                .expect("victim just selected");
             log_transition(
                 &mut inner,
                 format!(
@@ -148,13 +154,20 @@ impl<B: LiveBackend> Pool<B> {
 
         match (self.spawn)(&root) {
             Ok(backend) => {
-                log_transition(&mut inner, format!("spawned instance for {}", root.display()));
+                log_transition(
+                    &mut inner,
+                    format!("spawned instance for {}", root.display()),
+                );
                 // Watchdog red notes live until the next SUCCESSFUL spawn.
                 inner.red_notes.clear();
                 let backend = Arc::new(Mutex::new(backend));
                 inner.instances.insert(
                     root,
-                    Entry { backend: Arc::clone(&backend), spawned_at: now, last_used: now },
+                    Entry {
+                        backend: Arc::clone(&backend),
+                        spawned_at: now,
+                        last_used: now,
+                    },
                 );
                 Ok(backend)
             }
@@ -182,7 +195,10 @@ impl<B: LiveBackend> Pool<B> {
             if !path.exists() {
                 doomed.push((
                     path.clone(),
-                    format!("vanish-reaped {} (worktree no longer exists)", path.display()),
+                    format!(
+                        "vanish-reaped {} (worktree no longer exists)",
+                        path.display()
+                    ),
                 ));
                 continue;
             }
@@ -274,7 +290,10 @@ impl<B: LiveBackend> Pool<B> {
         let mut inner = self.inner.lock().unwrap();
         match inner.instances.remove(&key) {
             Some(entry) => {
-                log_transition(&mut inner, format!("evicted {} (operator request)", key.display()));
+                log_transition(
+                    &mut inner,
+                    format!("evicted {} (operator request)", key.display()),
+                );
                 entry.backend.lock().unwrap().shutdown();
                 true
             }
@@ -288,7 +307,10 @@ impl<B: LiveBackend> Pool<B> {
         let paths: Vec<PathBuf> = inner.instances.keys().cloned().collect();
         for path in paths {
             let entry = inner.instances.remove(&path).expect("key just listed");
-            log_transition(&mut inner, format!("shut down {} (pool shutdown)", path.display()));
+            log_transition(
+                &mut inner,
+                format!("shut down {} (pool shutdown)", path.display()),
+            );
             entry.backend.lock().unwrap().shutdown();
         }
     }
@@ -308,7 +330,10 @@ impl<B: LiveBackend> Pool<B> {
                 proto::InstanceStatus {
                     worktree: path.display().to_string(),
                     state: proto_state(backend.state()),
-                    rss_mb: backend.footprint_mb().or_else(|| backend.rss_mb()).unwrap_or(0),
+                    rss_mb: backend
+                        .footprint_mb()
+                        .or_else(|| backend.rss_mb())
+                        .unwrap_or(0),
                     age_secs: now.duration_since(entry.spawned_at).as_secs(),
                     idle_secs: now.duration_since(entry.last_used).as_secs(),
                 }
@@ -318,7 +343,11 @@ impl<B: LiveBackend> Pool<B> {
         let mut notes = inner.red_notes.clone();
         notes.extend(inner.alarm_note.clone());
         notes.extend(inner.ring.iter().cloned());
-        proto::PoolStatus { pool_cap: self.config.pool_cap, instances, notes }
+        proto::PoolStatus {
+            pool_cap: self.config.pool_cap,
+            instances,
+            notes,
+        }
     }
 }
 
@@ -393,7 +422,9 @@ mod tests {
             match self.state() {
                 InstanceState::Ready => Ok(Value::Null),
                 InstanceState::Warming => Err(LiveError::Warming { elapsed_secs: 0 }),
-                InstanceState::Dead => Err(LiveError::Dead { reason: "fake".into() }),
+                InstanceState::Dead => Err(LiveError::Dead {
+                    reason: "fake".into(),
+                }),
             }
         }
 
@@ -460,7 +491,10 @@ mod tests {
                     }
                     let h = FakeHandle::new();
                     spawned.lock().unwrap().push(h.clone());
-                    Ok(FakeBackend { h, created: Instant::now() })
+                    Ok(FakeBackend {
+                        h,
+                        created: Instant::now(),
+                    })
                 }
             },
             {
@@ -469,8 +503,18 @@ mod tests {
             },
         );
         let _dirs: Vec<TempDir> = (0..dirs).map(|_| tempfile::tempdir().unwrap()).collect();
-        let worktrees = _dirs.iter().map(|d| d.path().canonicalize().unwrap()).collect();
-        Harness { pool, spawned, clock, fail_spawns, _dirs, worktrees }
+        let worktrees = _dirs
+            .iter()
+            .map(|d| d.path().canonicalize().unwrap())
+            .collect();
+        Harness {
+            pool,
+            spawned,
+            clock,
+            fail_spawns,
+            _dirs,
+            worktrees,
+        }
     }
 
     fn config(cap: usize) -> ScipdConfig {
@@ -487,7 +531,10 @@ mod tests {
     /// Memory-policy tests tick past the 180s grace; a huge idle TTL keeps
     /// the idle reaper from stealing their kills.
     fn mem_config(cap: usize) -> ScipdConfig {
-        ScipdConfig { idle_ttl_secs: 1_000_000, ..config(cap) }
+        ScipdConfig {
+            idle_ttl_secs: 1_000_000,
+            ..config(cap)
+        }
     }
 
     #[test]
@@ -507,13 +554,20 @@ mod tests {
         let sub = h.wt(0).join("sub");
         std::fs::create_dir(&sub).unwrap();
         h.pool.get_or_spawn(&sub.join("..")).unwrap();
-        assert_eq!(h.spawn_count(), 1, "path spellings of one root must share an instance");
+        assert_eq!(
+            h.spawn_count(),
+            1,
+            "path spellings of one root must share an instance"
+        );
     }
 
     #[test]
     fn missing_worktree_is_loud_error() {
         let h = harness(config(2), 0);
-        let err = h.pool.get_or_spawn(Path::new("/nonexistent/worktree/xyz")).unwrap_err();
+        let err = h
+            .pool
+            .get_or_spawn(Path::new("/nonexistent/worktree/xyz"))
+            .unwrap_err();
         assert!(format!("{err:#}").contains("/nonexistent/worktree/xyz"));
         assert_eq!(h.spawn_count(), 0);
     }
@@ -536,15 +590,30 @@ mod tests {
         h.tick(1);
         h.pool.get_or_spawn(h.wt(2)).unwrap(); // C → evicts B, not A
 
-        assert_eq!(h.handle(1).shutdowns(), 1, "LRU instance (B) must be shut down");
-        assert_eq!(h.handle(0).shutdowns(), 0, "recently-touched A must survive");
+        assert_eq!(
+            h.handle(1).shutdowns(),
+            1,
+            "LRU instance (B) must be shut down"
+        );
+        assert_eq!(
+            h.handle(0).shutdowns(),
+            0,
+            "recently-touched A must survive"
+        );
         let status = h.pool.status();
-        let roots: Vec<&str> = status.instances.iter().map(|i| i.worktree.as_str()).collect();
+        let roots: Vec<&str> = status
+            .instances
+            .iter()
+            .map(|i| i.worktree.as_str())
+            .collect();
         assert_eq!(status.instances.len(), 2);
         assert!(roots.contains(&h.wt(0).to_str().unwrap()));
         assert!(roots.contains(&h.wt(2).to_str().unwrap()));
         assert!(
-            status.notes.iter().any(|n| n.contains("evicted") && n.contains("LRU")),
+            status
+                .notes
+                .iter()
+                .any(|n| n.contains("evicted") && n.contains("LRU")),
             "eviction must be visible in status notes: {:?}",
             status.notes
         );
@@ -558,7 +627,11 @@ mod tests {
         h.tick(99); // ttl is 100
         h.pool.get_or_spawn(h.wt(1)).unwrap(); // touch B only
         h.pool.sweep();
-        assert_eq!(h.handle(0).shutdowns(), 0, "99s idle < 100s ttl must survive");
+        assert_eq!(
+            h.handle(0).shutdowns(),
+            0,
+            "99s idle < 100s ttl must survive"
+        );
 
         h.tick(99); // A now idle 198s; B idle 99s
         h.pool.sweep();
@@ -580,7 +653,11 @@ mod tests {
         h.pool.get_or_spawn(h.wt(1)).unwrap();
         std::fs::remove_dir_all(h.wt(0)).unwrap();
         h.pool.sweep();
-        assert_eq!(h.handle(0).shutdowns(), 1, "vanished worktree's instance must die");
+        assert_eq!(
+            h.handle(0).shutdowns(),
+            1,
+            "vanished worktree's instance must die"
+        );
         assert_eq!(h.handle(1).shutdowns(), 0);
         let status = h.pool.status();
         assert_eq!(status.instances.len(), 1);
@@ -598,14 +675,25 @@ mod tests {
         h.handle(0).set_footprint(Some(5000)); // way over the 1000MB limit
         h.tick(179); // grace is 180s
         h.pool.sweep();
-        assert_eq!(h.handle(0).shutdowns(), 0, "no mem kill within the post-spawn grace");
+        assert_eq!(
+            h.handle(0).shutdowns(),
+            0,
+            "no mem kill within the post-spawn grace"
+        );
 
         h.tick(2); // past grace
         h.pool.sweep();
-        assert_eq!(h.handle(0).shutdowns(), 1, "over-limit instance must die after grace");
+        assert_eq!(
+            h.handle(0).shutdowns(),
+            1,
+            "over-limit instance must die after grace"
+        );
         let status = h.pool.status();
         assert!(
-            status.notes.iter().any(|n| n.contains("mem-watchdog killed")),
+            status
+                .notes
+                .iter()
+                .any(|n| n.contains("mem-watchdog killed")),
             "mem kill must be a red note in status: {:?}",
             status.notes
         );
@@ -623,12 +711,22 @@ mod tests {
         let red = |s: &proto::PoolStatus| {
             // Red notes are surfaced FIRST, before the ring; the kill also
             // appears once in the ring — count > 1 proves retention.
-            s.notes.iter().filter(|n| n.contains("mem-watchdog killed")).count()
+            s.notes
+                .iter()
+                .filter(|n| n.contains("mem-watchdog killed"))
+                .count()
         };
-        assert!(red(&h.pool.status()) > 1, "red note must persist across sweeps");
+        assert!(
+            red(&h.pool.status()) > 1,
+            "red note must persist across sweeps"
+        );
         // ...and clears on the next successful spawn (ring copy remains).
         h.pool.get_or_spawn(h.wt(1)).unwrap();
-        assert_eq!(red(&h.pool.status()), 1, "successful spawn must clear the red note");
+        assert_eq!(
+            red(&h.pool.status()),
+            1,
+            "successful spawn must clear the red note"
+        );
     }
 
     #[test]
@@ -643,9 +741,17 @@ mod tests {
         h.tick(181);
         h.pool.sweep();
         assert_eq!(h.handle(1).shutdowns(), 1, "worst offender dies");
-        assert_eq!(h.handle(0).shutdowns(), 0, "lesser offender survives this sweep");
+        assert_eq!(
+            h.handle(0).shutdowns(),
+            0,
+            "lesser offender survives this sweep"
+        );
         h.pool.sweep();
-        assert_eq!(h.handle(0).shutdowns(), 1, "next sweep takes the next offender");
+        assert_eq!(
+            h.handle(0).shutdowns(),
+            1,
+            "next sweep takes the next offender"
+        );
     }
 
     #[test]
@@ -658,7 +764,11 @@ mod tests {
         h.handle(1).set_footprint(Some(800));
         h.tick(181); // past grace — proves the alarm itself never kills
         h.pool.sweep();
-        assert_eq!(h.handle(0).shutdowns() + h.handle(1).shutdowns(), 0, "alarm must not kill");
+        assert_eq!(
+            h.handle(0).shutdowns() + h.handle(1).shutdowns(),
+            0,
+            "alarm must not kill"
+        );
         let status = h.pool.status();
         assert!(
             status.notes.iter().any(|n| n.contains("POOL ALARM")),
@@ -669,7 +779,11 @@ mod tests {
         h.handle(0).set_footprint(Some(100));
         h.pool.sweep();
         assert!(
-            !h.pool.status().notes.iter().any(|n| n.contains("POOL ALARM")),
+            !h.pool
+                .status()
+                .notes
+                .iter()
+                .any(|n| n.contains("POOL ALARM")),
             "cleared alarm must leave status"
         );
     }
@@ -692,18 +806,29 @@ mod tests {
         h.pool.sweep();
         let status = h.pool.status();
         assert_eq!(status.instances.len(), 0);
-        assert!(status.notes.iter().any(|n| n.contains("reaped dead instance")));
+        assert!(status
+            .notes
+            .iter()
+            .any(|n| n.contains("reaped dead instance")));
     }
 
     #[test]
     fn evict_op_drops_instance_and_reports_absence() {
         let h = harness(config(2), 1);
-        assert!(!h.pool.evict(h.wt(0)), "evicting a non-resident worktree returns false");
+        assert!(
+            !h.pool.evict(h.wt(0)),
+            "evicting a non-resident worktree returns false"
+        );
         h.pool.get_or_spawn(h.wt(0)).unwrap();
         assert!(h.pool.evict(h.wt(0)));
         assert_eq!(h.handle(0).shutdowns(), 1);
         assert_eq!(h.pool.status().instances.len(), 0);
-        assert!(h.pool.status().notes.iter().any(|n| n.contains("operator request")));
+        assert!(h
+            .pool
+            .status()
+            .notes
+            .iter()
+            .any(|n| n.contains("operator request")));
     }
 
     #[test]
@@ -713,7 +838,11 @@ mod tests {
         let err = h.pool.get_or_spawn(h.wt(0)).unwrap_err();
         assert!(format!("{err:#}").contains("fake spawn failure"));
         assert!(
-            h.pool.status().notes.iter().any(|n| n.contains("spawn FAILED")),
+            h.pool
+                .status()
+                .notes
+                .iter()
+                .any(|n| n.contains("spawn FAILED")),
             "spawn failure must be visible in status notes"
         );
         // Pool stays usable.
@@ -765,7 +894,11 @@ mod tests {
             h.tick(1);
         }
         let notes = h.pool.status().notes;
-        assert!(notes.len() <= RING_CAP, "ring must stay bounded, got {}", notes.len());
+        assert!(
+            notes.len() <= RING_CAP,
+            "ring must stay bounded, got {}",
+            notes.len()
+        );
         assert!(notes.iter().any(|n| n.contains("evicted")));
     }
 }

@@ -5,17 +5,19 @@ use std::fs;
 pub struct HexExists;
 
 impl DoctorCheck for HexExists {
-    fn name(&self) -> &str { "hex-dir-exists" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "hex-dir-exists"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let hex = ctx.hex_dir.join(".hex");
         if hex.is_dir() {
             return CheckResult::pass(".hex/ exists");
         }
-        if ctx.fix {
-            if fs::create_dir_all(&hex).is_ok() {
-                return CheckResult::fixed(".hex/ created");
-            }
+        if ctx.fix && fs::create_dir_all(&hex).is_ok() {
+            return CheckResult::fixed(".hex/ created");
         }
         CheckResult::fail(".hex/ directory missing — run bootstrap to fix")
     }
@@ -25,8 +27,12 @@ impl DoctorCheck for HexExists {
 pub struct HexSkillsExists;
 
 impl DoctorCheck for HexSkillsExists {
-    fn name(&self) -> &str { "hex-skills-dir" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "hex-skills-dir"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let skills = ctx.hex_dir.join(".hex/skills");
         if skills.is_dir() {
@@ -41,8 +47,12 @@ impl DoctorCheck for HexSkillsExists {
 pub struct HexSkillsPopulated;
 
 impl DoctorCheck for HexSkillsPopulated {
-    fn name(&self) -> &str { "hex-skills-populated" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "hex-skills-populated"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let skills = ctx.hex_dir.join(".hex/skills");
         if !skills.is_dir() {

@@ -15,8 +15,12 @@ fn codex_on_path() -> bool {
 pub struct CodexCliOnPath;
 
 impl DoctorCheck for CodexCliOnPath {
-    fn name(&self) -> &str { "codex.cli-on-path" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "codex.cli-on-path"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, _ctx: &Context) -> CheckResult {
         if let Ok(output) = Command::new("which").arg("codex").output() {
             if output.status.success() {
@@ -32,8 +36,12 @@ impl DoctorCheck for CodexCliOnPath {
 pub struct CodexVersionOk;
 
 impl DoctorCheck for CodexVersionOk {
-    fn name(&self) -> &str { "codex.version-ok" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "codex.version-ok"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, _ctx: &Context) -> CheckResult {
         if !codex_on_path() {
             return CheckResult::skip("skipped (codex not on PATH)");
@@ -57,10 +65,17 @@ impl DoctorCheck for CodexVersionOk {
 pub struct CodexApiKey;
 
 impl DoctorCheck for CodexApiKey {
-    fn name(&self) -> &str { "codex.api-key" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "codex.api-key"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
-        if std::env::var("OPENAI_API_KEY").map(|v| !v.is_empty()).unwrap_or(false) {
+        if std::env::var("OPENAI_API_KEY")
+            .map(|v| !v.is_empty())
+            .unwrap_or(false)
+        {
             return CheckResult::pass("OPENAI_API_KEY found via environment variable");
         }
         let hex_test_env = ctx.home.join(".hex-test.env");
@@ -71,8 +86,9 @@ impl DoctorCheck for CodexApiKey {
                 }
             }
         }
-        CheckResult::warn("OPENAI_API_KEY not set — Codex will fail at runtime")
-            .with_details("Fix: export OPENAI_API_KEY=sk-... in ~/.hex/scripts/env.sh or add to ~/.hex-test.env")
+        CheckResult::warn("OPENAI_API_KEY not set — Codex will fail at runtime").with_details(
+            "Fix: export OPENAI_API_KEY=sk-... in ~/.hex/scripts/env.sh or add to ~/.hex-test.env",
+        )
     }
 }
 
@@ -80,8 +96,12 @@ impl DoctorCheck for CodexApiKey {
 pub struct CodexAgentsMdExists;
 
 impl DoctorCheck for CodexAgentsMdExists {
-    fn name(&self) -> &str { "codex.agents-md-exists" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "codex.agents-md-exists"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let agents_md = ctx.hex_dir.join("AGENTS.md");
         if agents_md.is_file() {
@@ -100,8 +120,12 @@ impl DoctorCheck for CodexAgentsMdExists {
 pub struct CodexAgentsMdComplete;
 
 impl DoctorCheck for CodexAgentsMdComplete {
-    fn name(&self) -> &str { "codex.agents-md-complete" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "codex.agents-md-complete"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let agents_md = ctx.hex_dir.join("AGENTS.md");
         if !agents_md.is_file() {
@@ -121,11 +145,14 @@ impl DoctorCheck for CodexAgentsMdComplete {
         if missing.is_empty() {
             CheckResult::pass("all required sections present")
         } else {
-            CheckResult::warn(format!("AGENTS.md missing sections: {}", missing.join(", ")))
-                .with_details(format!(
-                    "Required sections: {}",
-                    AGENTS_MD_REQUIRED_SECTIONS.join(", ")
-                ))
+            CheckResult::warn(format!(
+                "AGENTS.md missing sections: {}",
+                missing.join(", ")
+            ))
+            .with_details(format!(
+                "Required sections: {}",
+                AGENTS_MD_REQUIRED_SECTIONS.join(", ")
+            ))
         }
     }
 }

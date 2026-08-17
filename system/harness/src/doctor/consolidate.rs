@@ -48,10 +48,14 @@ pub fn run(hex_dir: &Path) -> i32 {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if !path.is_dir() { continue; }
+                    if !path.is_dir() {
+                        continue;
+                    }
                     let name = entry.file_name();
                     let name_str = name.to_string_lossy();
-                    if name_str == "_archive" { continue; }
+                    if name_str == "_archive" {
+                        continue;
+                    }
                     let has_context = path.join("context.md").exists();
                     let has_checkpoint = path.join("checkpoint.md").exists();
                     // charter.yaml is no longer required: the agent fleet and per-project
@@ -112,7 +116,11 @@ pub fn run(hex_dir: &Path) -> i32 {
         }
     }
 
-    if issue_count == 0 { 0 } else { 1 }
+    if issue_count == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 fn chrono_utc_now() -> String {
@@ -125,7 +133,7 @@ fn chrono_utc_now() -> String {
     let m = (secs / 60) % 60;
     let h = (secs / 3600) % 24;
     let days = secs / 86400; // days since epoch
-    // Compute year/month/day from days-since-epoch (Gregorian)
+                             // Compute year/month/day from days-since-epoch (Gregorian)
     let (year, month, day) = days_to_ymd(days);
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
 }
@@ -158,7 +166,9 @@ fn stale_ref_scan_targets(hex_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    if !dir.is_dir() { return; }
+    if !dir.is_dir() {
+        return;
+    }
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let p = entry.path();
@@ -174,7 +184,9 @@ fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn find_stale_refs(hex_dir: &Path, targets: &[PathBuf]) -> Vec<String> {
     let mut stale = Vec::new();
     for file in targets {
-        if !file.exists() { continue; }
+        if !file.exists() {
+            continue;
+        }
         let content = match fs::read_to_string(file) {
             Ok(c) => c,
             Err(_) => continue,
@@ -216,9 +228,15 @@ fn extract_relative_links(content: &str) -> Vec<String> {
                     b')' => depth -= 1,
                     _ => {}
                 }
-                if depth > 0 { end += 1; }
+                if depth > 0 {
+                    end += 1;
+                }
             }
             if depth == 0 && end > start {
+                // Boundary proof: `start` is one past an ASCII '(' and `end` sits at
+                // an ASCII ')' (or content.len()). ASCII bytes never occur inside a
+                // multi-byte UTF-8 sequence, so both bounds are char boundaries.
+                #[allow(clippy::string_slice)]
                 let candidate = &content[start..end];
                 // Strip trailing anchors
                 let candidate = candidate.split('#').next().unwrap_or(candidate).trim();
@@ -241,52 +259,14 @@ fn extract_relative_links(content: &str) -> Vec<String> {
     links
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn consolidate_prose_parens_not_extracted() {
-        let content = "git tag must match (enforced by release.sh) here";
-        let links = extract_relative_links(content);
-        assert!(links.is_empty(), "prose parens should not be extracted: {links:?}");
-    }
-
-    #[test]
-    fn consolidate_real_link_is_extracted() {
-        let content = "See [the guide](docs/guide.md) for details.";
-        let links = extract_relative_links(content);
-        assert_eq!(links, vec!["docs/guide.md"]);
-    }
-
-    #[test]
-    fn consolidate_https_url_is_skipped() {
-        let content = "See [external](https://example.com/page.md) link.";
-        let links = extract_relative_links(content);
-        assert!(links.is_empty(), "https URLs should be skipped: {links:?}");
-    }
-
-    #[test]
-    fn consolidate_http_url_is_skipped() {
-        let content = "See [external](http://example.com/page.md) link.";
-        let links = extract_relative_links(content);
-        assert!(links.is_empty(), "http URLs should be skipped: {links:?}");
-    }
-
-    #[test]
-    fn consolidate_anchor_only_is_skipped() {
-        let content = "See [section](#heading) here.";
-        let links = extract_relative_links(content);
-        assert!(links.is_empty(), "anchor-only links should be skipped: {links:?}");
-    }
-}
-
 fn normalize_path(path: &Path) -> PathBuf {
     // Resolve .. and . without hitting the filesystem
     let mut components = Vec::new();
     for c in path.components() {
         match c {
-            std::path::Component::ParentDir => { components.pop(); }
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
             std::path::Component::CurDir => {}
             other => components.push(other),
         }
@@ -334,5 +314,51 @@ fn check_audit_freshness(hex_dir: &Path) -> Result<String, String> {
             Err("LLM consolidation stale — run hex memory consolidate full".to_string())
         }
         Some(_) => Ok("OK: LLM consolidation audit is fresh".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consolidate_prose_parens_not_extracted() {
+        let content = "git tag must match (enforced by release.sh) here";
+        let links = extract_relative_links(content);
+        assert!(
+            links.is_empty(),
+            "prose parens should not be extracted: {links:?}"
+        );
+    }
+
+    #[test]
+    fn consolidate_real_link_is_extracted() {
+        let content = "See [the guide](docs/guide.md) for details.";
+        let links = extract_relative_links(content);
+        assert_eq!(links, vec!["docs/guide.md"]);
+    }
+
+    #[test]
+    fn consolidate_https_url_is_skipped() {
+        let content = "See [external](https://example.com/page.md) link.";
+        let links = extract_relative_links(content);
+        assert!(links.is_empty(), "https URLs should be skipped: {links:?}");
+    }
+
+    #[test]
+    fn consolidate_http_url_is_skipped() {
+        let content = "See [external](http://example.com/page.md) link.";
+        let links = extract_relative_links(content);
+        assert!(links.is_empty(), "http URLs should be skipped: {links:?}");
+    }
+
+    #[test]
+    fn consolidate_anchor_only_is_skipped() {
+        let content = "See [section](#heading) here.";
+        let links = extract_relative_links(content);
+        assert!(
+            links.is_empty(),
+            "anchor-only links should be skipped: {links:?}"
+        );
     }
 }

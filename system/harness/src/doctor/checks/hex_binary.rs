@@ -5,8 +5,12 @@ use std::process::Command;
 pub struct HexBinaryOnPath;
 
 impl DoctorCheck for HexBinaryOnPath {
-    fn name(&self) -> &str { "hex-binary-on-path" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "hex-binary-on-path"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         // Check if hex is on PATH
         let which = Command::new("which").arg("hex").output();
@@ -18,7 +22,9 @@ impl DoctorCheck for HexBinaryOnPath {
                 let expected = ctx.hex_dir.join(".hex/bin/hex");
                 if expected.is_file() && path != expected.display().to_string() {
                     return CheckResult::warn(format!(
-                        "hex found at {} but expected {}", path, expected.display()
+                        "hex found at {} but expected {}",
+                        path,
+                        expected.display()
                     ));
                 }
                 CheckResult::pass(format!("hex on PATH: {}", path))
@@ -28,7 +34,8 @@ impl DoctorCheck for HexBinaryOnPath {
                 let expected = ctx.hex_dir.join(".hex/bin/hex");
                 if expected.is_file() {
                     CheckResult::warn(format!(
-                        "hex exists at {} but is not on PATH", expected.display()
+                        "hex exists at {} but is not on PATH",
+                        expected.display()
                     ))
                 } else {
                     CheckResult::fail("hex binary not found on PATH")

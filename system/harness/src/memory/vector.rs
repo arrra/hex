@@ -15,9 +15,17 @@ static VEC_INIT: Once = Once::new();
 /// idempotent: every `Connection` opened afterwards has vec0 available.
 pub fn register_sqlite_vec() {
     VEC_INIT.call_once(|| unsafe {
-        sqlite3_auto_extension(Some(std::mem::transmute(
-            sqlite3_vec_init as *const (),
-        )));
+        // Explicit transmute annotations (clippy::missing_transmute_annotations):
+        // reinterpret the extension entry point as the C ABI fn pointer that
+        // `sqlite3_auto_extension` expects.
+        sqlite3_auto_extension(Some(std::mem::transmute::<
+            *const (),
+            unsafe extern "C" fn(
+                *mut rusqlite::ffi::sqlite3,
+                *mut *const i8,
+                *const rusqlite::ffi::sqlite3_api_routines,
+            ) -> i32,
+        >(sqlite3_vec_init as *const ())));
     });
 }
 
@@ -150,7 +158,10 @@ mod tests {
     #[test]
     fn distance_floor_filters() {
         let hits = vec![(1i64, 0.4f64), (2, 0.9), (3, 1.4)];
-        assert_eq!(filter_by_distance(hits, KNN_MAX_DISTANCE), vec![(1, 0.4), (2, 0.9)]);
+        assert_eq!(
+            filter_by_distance(hits, KNN_MAX_DISTANCE),
+            vec![(1, 0.4), (2, 0.9)]
+        );
     }
 
     #[test]
@@ -170,7 +181,9 @@ mod tests {
         init_vec_table(&conn).unwrap();
 
         for id in 1..=5i64 {
-            let v: Vec<f32> = (0..EMBED_DIM).map(|i| (id as f32 + i as f32) * 0.001).collect();
+            let v: Vec<f32> = (0..EMBED_DIM)
+                .map(|i| (id as f32 + i as f32) * 0.001)
+                .collect();
             insert_vec(&conn, id, &v).unwrap();
         }
         let query: Vec<f32> = (0..EMBED_DIM).map(|i| (3.0 + i as f32) * 0.001).collect();
@@ -201,13 +214,24 @@ mod tests {
         insert_vec(&conn, 42, &fresh).unwrap();
 
         let count: i64 = conn
-            .query_row("SELECT COUNT(*) FROM vec_chunks WHERE rowid = 42", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM vec_chunks WHERE rowid = 42",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(count, 1, "exactly one vector at the rowid — no duplicate, no error");
+        assert_eq!(
+            count, 1,
+            "exactly one vector at the rowid — no duplicate, no error"
+        );
 
         // The stored vector is the FRESH one, not the stale one.
         let blob: Vec<u8> = conn
-            .query_row("SELECT embedding FROM vec_chunks WHERE rowid = 42", [], |r| r.get(0))
+            .query_row(
+                "SELECT embedding FROM vec_chunks WHERE rowid = 42",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         let first = f32::from_le_bytes([blob[0], blob[1], blob[2], blob[3]]);
         assert!(
@@ -231,7 +255,9 @@ mod tests {
                 params![id, format!("object {i}")],
             )
             .unwrap();
-            let v: Vec<f32> = (0..EMBED_DIM).map(|d| (i as f32 + d as f32) * 0.001).collect();
+            let v: Vec<f32> = (0..EMBED_DIM)
+                .map(|d| (i as f32 + d as f32) * 0.001)
+                .collect();
             insert_fact_vec(&conn, id, &v).unwrap();
         }
         let query: Vec<f32> = (0..EMBED_DIM).map(|d| (1.0 + d as f32) * 0.001).collect();
@@ -240,9 +266,16 @@ mod tests {
         // Nearest is fact B (index 1); knn_facts returns its facts.rowid.
         let nearest_rowid = hits[0].0;
         let nearest_id: String = conn
-            .query_row("SELECT id FROM facts WHERE rowid = ?1", [nearest_rowid], |r| r.get(0))
+            .query_row(
+                "SELECT id FROM facts WHERE rowid = ?1",
+                [nearest_rowid],
+                |r| r.get(0),
+            )
             .unwrap();
-        assert_eq!(nearest_id, "01HFACT-B", "join must map fact_id back to the facts rowid");
+        assert_eq!(
+            nearest_id, "01HFACT-B",
+            "join must map fact_id back to the facts rowid"
+        );
 
         // Tombstoned facts drop out of the KNN arm.
         conn.execute("UPDATE facts SET tombstone = 1 WHERE id = '01HFACT-B'", [])

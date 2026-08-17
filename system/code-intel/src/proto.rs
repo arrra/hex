@@ -57,7 +57,9 @@ pub enum Op {
         new_name: String,
     },
     /// Ops hatch: drop the live instance for a worktree.
-    Evict { worktree: String },
+    Evict {
+        worktree: String,
+    },
 }
 
 /// Warming payload: the daemon never queues behind a prime (SPEC-A2 §3).
@@ -150,34 +152,61 @@ pub struct Reply {
 impl Reply {
     /// `{"id":N,"ok":true}` — ping reply.
     pub fn pong(id: u64) -> Self {
-        Reply { id, ok: true, source: None, results: None, edits: None, warming: None, error: None, status: None }
+        Reply {
+            id,
+            ok: true,
+            source: None,
+            results: None,
+            edits: None,
+            warming: None,
+            error: None,
+            status: None,
+        }
     }
 
     /// `{"id":N,"ok":true,"status":{...}}` — status reply.
     pub fn status(id: u64, status: PoolStatus) -> Self {
-        Reply { status: Some(status), ..Reply::pong(id) }
+        Reply {
+            status: Some(status),
+            ..Reply::pong(id)
+        }
     }
 
     /// `{"id":N,"ok":true,"source":"live","results":[...]}` — query success.
     pub fn results(id: u64, results: Vec<QueryResult>) -> Self {
-        Reply { source: Some("live".into()), results: Some(results), ..Reply::pong(id) }
+        Reply {
+            source: Some("live".into()),
+            results: Some(results),
+            ..Reply::pong(id)
+        }
     }
 
     /// `{"id":N,"ok":true,"edits":[...]}` — rename success.
     pub fn edits(id: u64, edits: Vec<RenameEdit>) -> Self {
-        Reply { edits: Some(edits), ..Reply::pong(id) }
+        Reply {
+            edits: Some(edits),
+            ..Reply::pong(id)
+        }
     }
 
     /// `{"id":N,"ok":false,"warming":{...}}` — instance still priming.
     pub fn warming(id: u64, warming: Warming) -> Self {
-        Reply { ok: false, warming: Some(warming), ..Reply::pong(id) }
+        Reply {
+            ok: false,
+            warming: Some(warming),
+            ..Reply::pong(id)
+        }
     }
 
     /// `{"id":N,"ok":false,"error":{...}}` — structured failure.
     pub fn error(id: u64, code: &str, message: String, hint: &str) -> Self {
         Reply {
             ok: false,
-            error: Some(ReplyError { code: code.into(), message, hint: hint.into() }),
+            error: Some(ReplyError {
+                code: code.into(),
+                message,
+                hint: hint.into(),
+            }),
             ..Reply::pong(id)
         }
     }
@@ -212,7 +241,13 @@ mod tests {
     #[test]
     fn ping_request_matches_spec_wire_shape() {
         let req = parse_request(r#"{"id":1,"op":"ping"}"#).unwrap();
-        assert_eq!(req, Request { id: 1, op: Op::Ping });
+        assert_eq!(
+            req,
+            Request {
+                id: 1,
+                op: Op::Ping
+            }
+        );
         assert_eq!(roundtrip(&req), req);
     }
 
@@ -228,7 +263,14 @@ mod tests {
         let line = r#"{"id":3,"op":"query","verb":"def","worktree":"/abs","path":"src/a.rs","line":1,"col":1,"name":"foo"}"#;
         let req = parse_request(line).unwrap();
         match &req.op {
-            Op::Query { verb, worktree, path, line, col, name } => {
+            Op::Query {
+                verb,
+                worktree,
+                path,
+                line,
+                col,
+                name,
+            } => {
                 assert_eq!(*verb, QueryVerb::Def);
                 assert_eq!(worktree, "/abs");
                 assert_eq!(path, "src/a.rs");
@@ -299,7 +341,8 @@ mod tests {
     #[test]
     fn ok_results_reply_matches_spec_wire_shape() {
         let reply = Reply::results(3, vec![]);
-        let j: serde_json::Value = serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
+        let j: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
         assert_eq!(j["id"], 3);
         assert_eq!(j["ok"], true);
         assert_eq!(j["source"], "live");
@@ -310,8 +353,15 @@ mod tests {
 
     #[test]
     fn warming_reply_matches_spec_wire_shape() {
-        let reply = Reply::warming(3, Warming { elapsed_secs: 42, workspace: Some("/w".into()) });
-        let j: serde_json::Value = serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
+        let reply = Reply::warming(
+            3,
+            Warming {
+                elapsed_secs: 42,
+                workspace: Some("/w".into()),
+            },
+        );
+        let j: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
         assert_eq!(j["id"], 3);
         assert_eq!(j["ok"], false);
         assert_eq!(j["warming"]["elapsed_secs"], 42);
@@ -322,7 +372,8 @@ mod tests {
     #[test]
     fn error_reply_matches_spec_wire_shape() {
         let reply = Reply::error(3, "LIVE_UNAVAILABLE", "daemon thing".into(), "do X");
-        let j: serde_json::Value = serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
+        let j: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&reply).unwrap()).unwrap();
         assert_eq!(j["ok"], false);
         assert_eq!(j["error"]["code"], "LIVE_UNAVAILABLE");
         assert_eq!(j["error"]["message"], "daemon thing");
@@ -351,7 +402,8 @@ mod tests {
         );
         let parsed: Reply = serde_json::from_str(&serde_json::to_string(&status).unwrap()).unwrap();
         assert_eq!(parsed, status);
-        let j: serde_json::Value = serde_json::from_str(&serde_json::to_string(&status).unwrap()).unwrap();
+        let j: serde_json::Value =
+            serde_json::from_str(&serde_json::to_string(&status).unwrap()).unwrap();
         assert_eq!(j["status"]["pool_cap"], 2);
         assert_eq!(j["status"]["instances"][0]["state"], "ready");
     }

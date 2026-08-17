@@ -172,6 +172,48 @@ natively in the Rust harness.
 
 ---
 
+## Cron workers
+
+Recurring in-harness jobs registered in the foundation worker registry
+(`hex_modules::module_registry()`) and run in-process by the engine — never
+LaunchAgents. Each fire is auto-traced (telemetry row per run) and its cron
+expectation is checked by `hex failures` (MISSED/NEVER-RAN detection).
+
+| Worker | Schedule | Does |
+|---|---|---|
+| `hex-failures` | daily 13:30 UTC (≈06:30 PT) | unexpected-failure digest (see `hex failures` above) |
+| `resources` | hourly | disk sampler + pressure rules (see Resources above) |
+| `boi-spec-watch` | every 5 min (`0 */5 * * * * *`) | watches BOI spec/task state above phase level |
+
+### `boi-spec-watch`
+
+Every 5 minutes it opens `~/.boi/v2/boi.db` **read-only** (never writes, never
+holds a lock; bounded busy timeout; 14-day lookback), diffs the spec/task state
+against the prior tick's persisted snapshot, and alerts on exactly two
+transition classes:
+
+1. a **spec newly reaching a terminal status** (`completed` / `failed` / `canceled`)
+2. a **task newly entering `state='blocked'`** (any reason — every blocked task needs an operator)
+
+Alerts go through the shared operator path (`hex::alert::notify`: stderr +
+telemetry row + deduped macOS notification) — the same convention sibling
+workers use.
+
+**First tick baselines silently** — no alert storm on deploy; a spec first
+observed already-terminal is not alerted.
+
+**Failure stance (S6):**
+- `~/.boi/v2/boi.db` **absent** → quiet no-op (debug-level at most). This worker
+  ships in foundation and most instances never run BOI.
+- `boi.db` **present but unreadable** → **loud** failure through the worker's
+  normal failure path, so `hex failures` counts it.
+
+This supersedes any ad-hoc BOI watching (e.g. the reverted standalone
+`boi-spec-watch.py` launchd watcher) — recurring/scheduled work is a hex
+worker, never a new LaunchAgent.
+
+---
+
 ## LLM configuration (`llm.toml`)
 
 Every LLM-backed feature in hex — memory distill (extract + judge), memory

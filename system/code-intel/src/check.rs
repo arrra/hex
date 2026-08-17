@@ -57,7 +57,9 @@ pub fn run(worktree_root: &Path, file: Option<&str>) -> Result<(CheckReport, i32
         .current_dir(worktree_root)
         .env("CARGO_TARGET_DIR", worktree_root.join("target-cq"))
         .output()
-        .map_err(|e| CqError::CheckFailed { detail: format!("spawning cargo check: {e}") })?;
+        .map_err(|e| CqError::CheckFailed {
+            detail: format!("spawning cargo check: {e}"),
+        })?;
 
     let stdout = String::from_utf8_lossy(&out.stdout);
     let all = parse_diagnostics(&stdout)?;
@@ -71,7 +73,9 @@ pub fn run(worktree_root: &Path, file: Option<&str>) -> Result<(CheckReport, i32
         return Err(CqError::CheckFailed {
             detail: format!(
                 "cargo check exited {} with no diagnostics; stderr tail: {}",
-                out.status.code().map_or("by signal".to_string(), |c| c.to_string()),
+                out.status
+                    .code()
+                    .map_or("by signal".to_string(), |c| c.to_string()),
                 tail.join(" | ")
             ),
         }
@@ -97,11 +101,10 @@ pub fn run(worktree_root: &Path, file: Option<&str>) -> Result<(CheckReport, i32
 fn parse_diagnostics(stdout: &str) -> Result<Vec<Diagnostic>> {
     let mut set: BTreeSet<Diagnostic> = BTreeSet::new();
     for line in stdout.lines().filter(|l| !l.trim().is_empty()) {
-        let value: serde_json::Value = serde_json::from_str(line).map_err(|e| {
-            CqError::CheckFailed {
+        let value: serde_json::Value =
+            serde_json::from_str(line).map_err(|e| CqError::CheckFailed {
                 detail: format!("unparseable cargo JSON message: {e}: {line:?}"),
-            }
-        })?;
+            })?;
         if value["reason"] != "compiler-message" {
             continue;
         }
@@ -122,7 +125,10 @@ fn parse_diagnostics(stdout: &str) -> Result<Vec<Diagnostic>> {
             continue;
         };
         set.insert(Diagnostic {
-            path: span["file_name"].as_str().unwrap_or("<unknown>").to_string(),
+            path: span["file_name"]
+                .as_str()
+                .unwrap_or("<unknown>")
+                .to_string(),
             line: span["line_start"].as_u64().unwrap_or(0) as u32,
             col: span["column_start"].as_u64().unwrap_or(0) as u32,
             level,
@@ -162,7 +168,13 @@ mod tests {
             msg("error", "src/lib.rs", 4, Some("E0308"), "mismatched types"),
             // Same diagnostic re-emitted for a second compilation target.
             msg("error", "src/lib.rs", 4, Some("E0308"), "mismatched types"),
-            msg("warning", "src/ops.rs", 2, Some("unused_variables"), "unused variable: `x`"),
+            msg(
+                "warning",
+                "src/ops.rs",
+                2,
+                Some("unused_variables"),
+                "unused variable: `x`",
+            ),
             r#"{"reason":"build-finished","success":false}"#.to_string(),
         ]
         .join("\n");

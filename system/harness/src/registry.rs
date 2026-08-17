@@ -65,18 +65,17 @@ pub fn add_function(
         .map_err(|e| format!("stat bin/{}: {e}", cap.id))?
         .permissions();
     perms.set_mode(0o755);
-    fs::set_permissions(&bin_path, perms)
-        .map_err(|e| format!("chmod bin/{}: {e}", cap.id))?;
+    fs::set_permissions(&bin_path, perms).map_err(|e| format!("chmod bin/{}: {e}", cap.id))?;
 
     // Step 3: write JSON definition last (tmp + rename = atomic commit barrier)
     let fn_dir = registry_dir.join("functions");
     fs::create_dir_all(&fn_dir).map_err(|e| format!("create functions dir: {e}"))?;
     let fn_path = fn_dir.join(format!("{}.json", &cap.id));
     let tmp_path = fn_dir.join(format!(".{}.json.tmp", &cap.id));
-    let json =
-        serde_json::to_vec_pretty(cap).map_err(|e| format!("serialize capability: {e}"))?;
+    let json = serde_json::to_vec_pretty(cap).map_err(|e| format!("serialize capability: {e}"))?;
     fs::write(&tmp_path, &json).map_err(|e| format!("write tmp json: {e}"))?;
-    fs::rename(&tmp_path, &fn_path).map_err(|e| format!("rename to functions/{}.json: {e}", cap.id))?;
+    fs::rename(&tmp_path, &fn_path)
+        .map_err(|e| format!("rename to functions/{}.json: {e}", cap.id))?;
 
     Ok(())
 }
@@ -140,7 +139,9 @@ pub fn is_allowed(hex_dir: &Path, agent_id: &str) -> bool {
 /// Remove a capability by id: removes functions/<id>.json or triggers/<id>.json,
 /// the corresponding bin/<id> (if present), and the policies/registry-<id>.yaml (if present).
 pub fn remove_capability(registry_dir: &Path, cap_id: &str) -> Result<(), String> {
-    let fn_path = registry_dir.join("functions").join(format!("{cap_id}.json"));
+    let fn_path = registry_dir
+        .join("functions")
+        .join(format!("{cap_id}.json"));
     if fn_path.exists() {
         fs::remove_file(&fn_path).map_err(|e| format!("remove functions/{cap_id}.json: {e}"))?;
     }
@@ -185,10 +186,10 @@ pub fn check_reentrancy(
         if path.extension().and_then(|e| e.to_str()) != Some("json") {
             continue;
         }
-        let data = fs::read_to_string(&path)
-            .map_err(|e| format!("read {}: {e}", path.display()))?;
-        let val: serde_json::Value = serde_json::from_str(&data)
-            .map_err(|e| format!("parse {}: {e}", path.display()))?;
+        let data =
+            fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
+        let val: serde_json::Value =
+            serde_json::from_str(&data).map_err(|e| format!("parse {}: {e}", path.display()))?;
 
         let created_by = val["created_by"].as_str().unwrap_or("");
         let created_in_wake = val["created_in_wake"].as_u64().unwrap_or(0);
@@ -237,15 +238,14 @@ pub fn build_catalog(registry_dir: &Path) -> Result<Vec<CatalogEntry>, String> {
         if !dir.is_dir() {
             continue;
         }
-        let read_dir = fs::read_dir(&dir)
-            .map_err(|e| format!("read {subdir} dir: {e}"))?;
+        let read_dir = fs::read_dir(&dir).map_err(|e| format!("read {subdir} dir: {e}"))?;
         for entry in read_dir.flatten() {
             let path = entry.path();
             if path.extension().and_then(|e| e.to_str()) != Some("json") {
                 continue;
             }
-            let data = fs::read_to_string(&path)
-                .map_err(|e| format!("read {}: {e}", path.display()))?;
+            let data =
+                fs::read_to_string(&path).map_err(|e| format!("read {}: {e}", path.display()))?;
             let val: serde_json::Value = serde_json::from_str(&data)
                 .map_err(|e| format!("parse {}: {e}", path.display()))?;
 

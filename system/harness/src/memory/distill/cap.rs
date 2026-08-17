@@ -39,13 +39,11 @@ pub fn cap_span(span: &str, budget_tokens: u32) -> usize {
     // Find `limit` = largest byte index whose prefix has at most `max_chars`
     // chars. char_indices guarantees `limit` is a UTF-8 char boundary.
     let mut limit = span.len();
-    let mut char_count: usize = 0;
-    for (i, _c) in span.char_indices() {
+    for (char_count, (i, _c)) in span.char_indices().enumerate() {
         if char_count == max_chars {
             limit = i;
             break;
         }
-        char_count += 1;
     }
 
     // Scan for the latest heading or blank-line boundary at byte <= limit.
@@ -96,13 +94,16 @@ mod tests {
         // boundary, and must be <= byte length.
         assert!(cut > 0 && cut <= s.len(), "cut out of range: {}", cut);
         // The prefix should end exactly at a boundary (heading or paragraph).
-        let prefix = &s[..cut];
-        let ends_at_heading = prefix.ends_with("\n") && s[cut..].starts_with("##");
+        let prefix = s.get(..cut).expect("cut is a UTF-8 char boundary");
+        let ends_at_heading =
+            prefix.ends_with("\n") && s.get(cut..).is_some_and(|rest| rest.starts_with("##"));
         let ends_at_blankline = prefix.ends_with("\n\n");
         assert!(
             ends_at_heading || ends_at_blankline,
             "cut should land on a boundary; prefix tail = {:?}",
-            &prefix[prefix.len().saturating_sub(8)..]
+            prefix
+                .get(prefix.len().saturating_sub(8)..)
+                .unwrap_or(prefix)
         );
     }
 
@@ -145,7 +146,7 @@ mod tests {
         let cut = cap_span(&s, budget);
         assert!(cut > 0 && cut <= s.len());
         // Must be a valid char boundary — slicing must not panic.
-        let _prefix = &s[..cut];
+        let _prefix = s.get(..cut).expect("cut is a UTF-8 char boundary");
         assert!(s.is_char_boundary(cut), "cut={} not a char boundary", cut);
     }
 
@@ -155,14 +156,17 @@ mod tests {
         let budget = 15u32; // ~52 char budget
         let cut = cap_span(s, budget);
         assert!(cut > 0 && cut <= s.len());
-        let prefix = &s[..cut];
+        let prefix = s.get(..cut).expect("cut is a UTF-8 char boundary");
         // Must end at a blank-line paragraph boundary or a heading boundary.
         let ends_at_blankline = prefix.ends_with("\n\n");
-        let ends_at_heading = prefix.ends_with("\n") && s[cut..].starts_with('#');
+        let ends_at_heading =
+            prefix.ends_with("\n") && s.get(cut..).is_some_and(|rest| rest.starts_with('#'));
         assert!(
             ends_at_blankline || ends_at_heading,
             "expected paragraph or heading boundary; prefix tail = {:?}",
-            &prefix[prefix.len().saturating_sub(8)..]
+            prefix
+                .get(prefix.len().saturating_sub(8)..)
+                .unwrap_or(prefix)
         );
     }
 }

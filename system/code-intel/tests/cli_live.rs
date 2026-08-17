@@ -45,7 +45,11 @@ fn stale_query_escalates_to_live_after_warming() {
     assert_exit(&out, 2);
     let env = stdout_json(&out);
     assert_eq!(env["source"], "index", "{env}");
-    assert_eq!(env["stale_files"], serde_json::json!(["src/ops.rs"]), "{env}");
+    assert_eq!(
+        env["stale_files"],
+        serde_json::json!(["src/ops.rs"]),
+        "{env}"
+    );
     assert_eq!(env["escalated"]["reason"], "warming", "{env}");
     assert!(env["escalated"]["elapsed_secs"].is_u64(), "{env}");
 
@@ -84,7 +88,11 @@ fn stale_query_escalates_to_live_after_warming() {
     assert_eq!(env["source"], "index", "{env}");
     assert!(env.get("escalated").is_none(), "{env}");
     assert!(
-        !env["results"].as_array().unwrap().iter().any(|r| r["line"] == new_line),
+        !env["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["line"] == new_line),
         "--no-live must miss the brand-new call site: {env}"
     );
 }
@@ -117,10 +125,17 @@ fn daemon_down_degrades_loudly_and_fast() {
     assert_exit(&out, 2);
     let env = stdout_json(&out);
     assert_eq!(env["source"], "index", "{env}");
-    assert_eq!(env["stale_files"], serde_json::json!(["src/ops.rs"]), "{env}");
+    assert_eq!(
+        env["stale_files"],
+        serde_json::json!(["src/ops.rs"]),
+        "{env}"
+    );
     assert_eq!(env["escalated"]["reason"], "daemon-unavailable", "{env}");
     assert!(
-        env["escalated"]["detail"].as_str().unwrap().contains("scipd"),
+        env["escalated"]["detail"]
+            .as_str()
+            .unwrap()
+            .contains("scipd"),
         "{env}"
     );
 }
@@ -134,7 +149,10 @@ fn forced_live_with_daemon_down_exits_7() {
 
     let out = cq(home.path(), repo.path(), &["refs", "double", "--live"]);
     assert_exit(&out, 7);
-    assert!(out.stdout.is_empty(), "no envelope on a forced-live failure");
+    assert!(
+        out.stdout.is_empty(),
+        "no envelope on a forced-live failure"
+    );
     let err = stderr_json(&out);
     assert_eq!(err["error"]["code"], "LIVE_UNAVAILABLE", "{err}");
     assert!(!err["error"]["hint"].as_str().unwrap().is_empty(), "{err}");
@@ -153,7 +171,11 @@ fn rename_with_daemon_down_exits_7() {
 
     let (line, col) = find_pos(&repo.path().join("src/ops.rs"), "generic_max");
     let target = format!("src/ops.rs:{line}:{col}");
-    let out = cq(home.path(), repo.path(), &["rename", &target, "generic_maximum"]);
+    let out = cq(
+        home.path(),
+        repo.path(),
+        &["rename", &target, "generic_maximum"],
+    );
     assert_exit(&out, 7);
     assert_eq!(stderr_json(&out)["error"]["code"], "LIVE_UNAVAILABLE");
 }
@@ -177,14 +199,21 @@ fn rename_plan_then_apply_then_compiles() {
     // Poll through warming (exit 7 with a "warming" message) to the plan.
     let deadline = Instant::now() + READY_BUDGET;
     let plan = loop {
-        let out = cq(home.path(), repo.path(), &["rename", &target, "generic_maximum"]);
+        let out = cq(
+            home.path(),
+            repo.path(),
+            &["rename", &target, "generic_maximum"],
+        );
         match out.status.code() {
             Some(0) => break stdout_json(&out),
             Some(7) => {
                 let err = stderr_json(&out);
                 assert_eq!(err["error"]["code"], "LIVE_UNAVAILABLE", "{err}");
                 assert!(
-                    err["error"]["message"].as_str().unwrap().contains("warming"),
+                    err["error"]["message"]
+                        .as_str()
+                        .unwrap()
+                        .contains("warming"),
                     "daemon is up; only warming may defer the plan: {err}"
                 );
             }
@@ -288,7 +317,10 @@ fn check_clean_then_diagnostic_then_check_failed() {
     assert_eq!(error["line"], bad_line, "{report}");
     assert_eq!(error["code"], "E0308", "{report}");
     assert!(
-        error["message"].as_str().unwrap().contains("mismatched types"),
+        error["message"]
+            .as_str()
+            .unwrap()
+            .contains("mismatched types"),
         "{report}"
     );
 
@@ -296,9 +328,10 @@ fn check_clean_then_diagnostic_then_check_failed() {
     // filtered empty but the exit still says the worktree is not clean.
     let out = cq(home.path(), repo.path(), &["check", "src/ops.rs"]);
     assert_exit(&out, 1);
-    assert!(
-        !stdout_json(&out)["diagnostics"].as_array().unwrap().is_empty()
-    );
+    assert!(!stdout_json(&out)["diagnostics"]
+        .as_array()
+        .unwrap()
+        .is_empty());
     let out = cq(home.path(), repo.path(), &["check", "src/shapes.rs"]);
     assert_exit(&out, 1);
     assert_eq!(stdout_json(&out)["diagnostics"], serde_json::json!([]));

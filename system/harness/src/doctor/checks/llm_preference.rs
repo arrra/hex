@@ -13,8 +13,12 @@ use std::fs;
 pub struct LlmPreferenceExists;
 
 impl DoctorCheck for LlmPreferenceExists {
-    fn name(&self) -> &str { "llm-preference" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "llm-preference"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let _ = &ctx.hex_dir; // silence unused warning; behavior is intentionally a no-op
         CheckResult::pass("llm-preference placeholder no longer used (see llm-config check)")
@@ -25,20 +29,23 @@ impl DoctorCheck for LlmPreferenceExists {
 pub struct NoStaleLlmPreference;
 
 impl DoctorCheck for NoStaleLlmPreference {
-    fn name(&self) -> &str { "no-stale-llm-preference" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "no-stale-llm-preference"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let stale = ctx.hex_dir.join("llm-preference");
         if !stale.exists() {
             return CheckResult::pass("no stale root llm-preference");
         }
-        if ctx.fix {
-            if fs::remove_file(&stale).is_ok() {
-                return CheckResult::fixed("Removed stale root llm-preference");
-            }
+        if ctx.fix && fs::remove_file(&stale).is_ok() {
+            return CheckResult::fixed("Removed stale root llm-preference");
         }
         CheckResult::warn(format!(
-            "stale llm-preference at root: {} — remove it", stale.display()
+            "stale llm-preference at root: {} — remove it",
+            stale.display()
         ))
     }
 }

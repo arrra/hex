@@ -408,7 +408,10 @@ fn callers_gate_file_is_well_formed_and_resolved() {
         .iter()
         .map(|c| c.as_str().unwrap())
         .collect();
-    assert!(from_index.contains(&"fmt_user"), "macro-arg caller expected");
+    assert!(
+        from_index.contains(&"fmt_user"),
+        "macro-arg caller expected"
+    );
     assert!(
         !from_index.contains(&"macro_caller"),
         "macro-body caller must be gated, not expected from the index"

@@ -9,8 +9,12 @@ use crate::memory;
 pub struct VectorSearchHealthy;
 
 impl DoctorCheck for VectorSearchHealthy {
-    fn name(&self) -> &str { "vector-search" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "vector-search"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let db_path = memory::db_path(&ctx.hex_dir);
         if !db_path.exists() {
@@ -22,8 +26,12 @@ impl DoctorCheck for VectorSearchHealthy {
         };
         // open_db already called register_sqlite_vec(); if vec0 isn't available the
         // COUNT query fails with "no such module: vec0" or "no such table".
-        match conn.query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| r.get::<_, i64>(0)) {
-            Ok(0) => CheckResult::warn("vec_chunks empty — no vectors indexed (run `hex memory index --full`)"),
+        match conn.query_row("SELECT COUNT(*) FROM vec_chunks", [], |r| {
+            r.get::<_, i64>(0)
+        }) {
+            Ok(0) => CheckResult::warn(
+                "vec_chunks empty — no vectors indexed (run `hex memory index --full`)",
+            ),
             Ok(n) => CheckResult::pass(format!("sqlite-vec loadable, {n} vectors in vec_chunks")),
             Err(e) => {
                 let msg = e.to_string();

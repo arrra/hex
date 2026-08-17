@@ -6,8 +6,12 @@ use std::os::unix::fs::PermissionsExt;
 pub struct ScriptsExecutable;
 
 impl DoctorCheck for ScriptsExecutable {
-    fn name(&self) -> &str { "scripts-executable" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "scripts-executable"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let scripts_dir = ctx.hex_dir.join(".hex/scripts");
         if !scripts_dir.is_dir() {

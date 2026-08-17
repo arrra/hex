@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<!--
+  com.hex.hitl-nudge — hourly driver for the pending-human-action queue.
+
+  `hex hitl nudge` is idempotent and safe to run every hour: it sends the
+  individual pings that policy says are due right now (respecting quiet hours
+  and the daily ping cap) and, when the current hour matches `digest_hour` and
+  the digest has not already gone out today, sends the daily digest. All state
+  (ping counters, digest-sent stamp) lives under `$HEX_DIR/.hex/hitl/state/`,
+  so re-runs never double-send.
+
+  Install (instance-side deploy op; substitute placeholders first — the repo
+  sanitize gate forbids hardcoded /Users/ paths in templates):
+    HEXBIN_PLACEHOLDER -> $HEX_DIR/.hex/bin/hex
+    HEXDIR_PLACEHOLDER -> $HEX_DIR
+    LOG_PLACEHOLDER    -> $HEX_DIR/.hex/logs/hitl-nudge.log
+  then:
+    cp <rendered>.plist ~/Library/LaunchAgents/com.hex.hitl-nudge.plist
+    launchctl bootstrap gui/$(id -u) ~/Library/LaunchAgents/com.hex.hitl-nudge.plist
+-->
+<plist version="1.0">
+<dict>
+  <key>Label</key><string>com.hex.hitl-nudge</string>
+  <key>ProgramArguments</key>
+  <array>
+    <string>HEXBIN_PLACEHOLDER</string>
+    <string>hitl</string>
+    <string>nudge</string>
+  </array>
+  <key>EnvironmentVariables</key>
+  <dict><key>HEX_DIR</key><string>HEXDIR_PLACEHOLDER</string></dict>
+  <key>StartInterval</key><integer>3600</integer>
+  <key>StandardErrorPath</key><string>LOG_PLACEHOLDER</string>
+</dict>
+</plist>

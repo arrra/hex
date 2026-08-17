@@ -59,7 +59,11 @@ pub fn content_hash(text: &str) -> String {
 fn file_mtime(path: &Path) -> f64 {
     path.metadata()
         .and_then(|m| m.modified())
-        .map(|t| t.duration_since(UNIX_EPOCH).unwrap_or_default().as_secs_f64())
+        .map(|t| {
+            t.duration_since(UNIX_EPOCH)
+                .unwrap_or_default()
+                .as_secs_f64()
+        })
         .unwrap_or(0.0)
 }
 
@@ -81,8 +85,14 @@ fn parse_heading(line: &str) -> Option<(usize, &str)> {
     if level > 4 {
         return None;
     }
+    // SAFETY(string_slice): `level` counts leading ASCII '#' chars (each 1
+    // byte), so byte offset `level` is a char boundary right after the '#'s.
+    #[allow(clippy::string_slice)]
     let rest = &line[level..];
     if rest.starts_with(' ') && rest.len() > 1 {
+        // SAFETY(string_slice): guarded by `rest.starts_with(' ')`, so byte 0
+        // is an ASCII space; slicing at 1 lands on a char boundary.
+        #[allow(clippy::string_slice)]
         let text = rest[1..].trim();
         if !text.is_empty() {
             return Some((level, text));
@@ -157,38 +167,95 @@ const SUMMARY_HEADINGS: &[&str] = &[
     "stats",
 ];
 
+/// Case-insensitive substring search returning a byte offset into `haystack`.
+///
+/// `needle_lower` must already be lowercase. Unlike searching a separately
+/// lowercased copy of the haystack, every offset returned here is a real char
+/// boundary in `haystack` itself, so it is always safe to slice with. Case
+/// folding can change UTF-8 byte length (e.g. 'İ' U+0130 is 2 bytes but
+/// lowercases to 3), which is exactly why offsets must never be carried across
+/// from a `to_lowercase()` copy.
+fn find_ci(haystack: &str, needle_lower: &str) -> Option<usize> {
+    if needle_lower.is_empty() {
+        return Some(0);
+    }
+    haystack.char_indices().find_map(|(i, _)| {
+        // SAFETY(string_slice): `i` comes from haystack.char_indices(), so it
+        // is always a char boundary in `haystack`.
+        #[allow(clippy::string_slice)]
+        let mut hay = haystack[i..].chars().flat_map(char::to_lowercase);
+        let mut needle = needle_lower.chars();
+        loop {
+            match (needle.next(), hay.next()) {
+                (None, _) => return Some(i),
+                (Some(_), None) => return None,
+                (Some(n), Some(h)) if n == h => continue,
+                _ => return None,
+            }
+        }
+    })
+}
+
 /// Extract ECC:SUMMARY blocks and named heading sections from a transcript.
 pub fn extract_summaries(content: &str) -> String {
     let mut extracted: Vec<String> = Vec::new();
 
-    // ECC:SUMMARY block extraction (state machine — avoids regex dep)
-    let cl = content.to_lowercase();
+    // ECC:SUMMARY block extraction (state machine — avoids regex dep).
+    // All offsets below index into `content` directly; nothing is derived from
+    // a lowercased copy, whose byte offsets can desync from the original.
     let start_kw = "ecc:summary:start";
     let end_kw = "ecc:summary:end";
     let mut search_from = 0;
-    while search_from < cl.len() {
-        let Some(s_off) = cl[search_from..].find(start_kw) else {
+    while search_from < content.len() {
+        // SAFETY(string_slice): `search_from` is 0 or a value clamped up to a
+        // char boundary below (the `is_char_boundary` loop); always a boundary.
+        #[allow(clippy::string_slice)]
+        let Some(s_off) = find_ci(&content[search_from..], start_kw) else {
             break;
         };
         let abs_s = search_from + s_off;
         // Find end of the <!-- ... --> comment that contains START
+        // SAFETY(string_slice): `abs_s` = boundary `search_from` + `s_off`
+        // (find_ci returns a boundary in the slice), so it is a char boundary.
+        #[allow(clippy::string_slice)]
         let Some(comment_end_off) = content[abs_s..].find("-->") else {
             break;
         };
         let body_start = abs_s + comment_end_off + 3;
 
         // Find end marker
-        let Some(e_off) = cl[body_start..].find(end_kw) else {
+        // SAFETY(string_slice): `body_start` = `abs_s` + byte offset of the
+        // ASCII "-->" + 3, all char boundaries.
+        #[allow(clippy::string_slice)]
+        let Some(e_off) = find_ci(&content[body_start..], end_kw) else {
             break;
         };
         let abs_e = body_start + e_off;
-        // Walk back to find <!-- that opens the end comment
-        let comment_open = content[..abs_e].rfind("<!--").unwrap_or(abs_e);
+        // Walk back to find <!-- that opens the end comment. Ignore any opener
+        // that precedes the block body (an END marker not wrapped in a comment)
+        // so the slice below can never have start > end.
+        // SAFETY(string_slice): `abs_e` = boundary `body_start` + `e_off`
+        // (find_ci returns a boundary), so it is a char boundary.
+        #[allow(clippy::string_slice)]
+        let comment_open = content[..abs_e]
+            .rfind("<!--")
+            .filter(|&o| o >= body_start)
+            .unwrap_or(abs_e);
+        // SAFETY(string_slice): `body_start` and `comment_open` are both char
+        // boundaries (comment_open is a rfind byte offset or `abs_e`).
+        #[allow(clippy::string_slice)]
         let block_text = content[body_start..comment_open].trim();
         if !block_text.is_empty() {
             extracted.push(block_text.to_string());
         }
-        search_from = abs_e + end_kw.len() + 4; // skip past -->
+        // Skip past the end marker's `-->`. The keyword's lowercase byte length
+        // may not match its length in `content`, so clamp forward to the next
+        // char boundary. `abs_e > search_from` always, so this makes progress.
+        let mut next = (abs_e + end_kw.len() + 4).min(content.len());
+        while next < content.len() && !content.is_char_boundary(next) {
+            next += 1;
+        }
+        search_from = next;
     }
 
     // Heading-based extraction
@@ -315,7 +382,6 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
     // pragma_update fails for journal_mode because it returns a result row.
     // Use query_row instead and discard the result.
     let _ = conn.query_row::<String, _, _>("PRAGMA journal_mode=WAL", [], |r| r.get(0));
-
 
     conn.execute_batch(
         "
@@ -563,7 +629,11 @@ pub fn index_file(
     // `backfill_missing_vectors` on a later tick. `hex memory stats` surfaces any
     // residual vec/chunk gap.
     let contents: Vec<String> = chunks.iter().map(|c| c.content.clone()).collect();
-    super::embed::log_rss(&format!("pre-embed {} ({} chunks)", rel_path, contents.len()));
+    super::embed::log_rss(&format!(
+        "pre-embed {} ({} chunks)",
+        rel_path,
+        contents.len()
+    ));
     let stored = embed_and_store(conn, &rel_path, &chunk_rowids, &contents, |batch| {
         embedder.embed_documents(batch)
     });
@@ -779,7 +849,10 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
     {
         Ok(f) => f,
         Err(e) => {
-            eprintln!("hex memory index: cannot open lock {}: {e}", lock_path.display());
+            eprintln!(
+                "hex memory index: cannot open lock {}: {e}",
+                lock_path.display()
+            );
             return 1;
         }
     };
@@ -902,7 +975,9 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
             }
 
             // Actually re-index
-            match index_file(&conn, filepath, hex_root, &content, mtime, strategy, &embedder) {
+            match index_file(
+                &conn, filepath, hex_root, &content, mtime, strategy, &embedder,
+            ) {
                 Ok(n) => {
                     if n > 0 {
                         indexed += 1;
@@ -914,9 +989,7 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
                         };
                         println!("  Indexed: {rel_path} ({n} chunks{tag})");
                     } else if strategy == "summary" {
-                        println!(
-                            "  Indexed: {rel_path} (0 chunks, no summaries found [summary])"
-                        );
+                        println!("  Indexed: {rel_path} (0 chunks, no summaries found [summary])");
                     }
                 }
                 Err(e) => {
@@ -935,7 +1008,9 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
             if content.trim().is_empty() {
                 continue;
             }
-            match index_file(&conn, filepath, hex_root, &content, mtime, strategy, &embedder) {
+            match index_file(
+                &conn, filepath, hex_root, &content, mtime, strategy, &embedder,
+            ) {
                 Ok(n) => {
                     if n > 0 {
                         indexed += 1;
@@ -947,9 +1022,7 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
                         };
                         println!("  Indexed: {rel_path} ({n} chunks{tag})");
                     } else if strategy == "summary" {
-                        println!(
-                            "  Indexed: {rel_path} (0 chunks, no summaries found [summary])"
-                        );
+                        println!("  Indexed: {rel_path} (0 chunks, no summaries found [summary])");
                     }
                 }
                 Err(e) => {
@@ -964,7 +1037,11 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
     // tick resumes the remaining files. Files already indexed are committed.
     if over_budget {
         set_metadata(&conn, "last_run", &Local::now().to_rfc3339());
-        set_metadata(&conn, "last_run_mode", if full { "full" } else { "incremental" });
+        set_metadata(
+            &conn,
+            "last_run_mode",
+            if full { "full" } else { "incremental" },
+        );
         let elapsed = t0.elapsed().as_secs_f64();
         eprintln!(
             "hex memory index: BAILED after {elapsed:.1}s over budget — {indexed} indexed, \
@@ -977,7 +1054,11 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
     // Cleanup: remove DB records for files no longer on disk
     let all_paths: HashSet<String> = file_tuples
         .iter()
-        .filter_map(|(p, _)| p.strip_prefix(hex_root).ok().map(|r| r.to_string_lossy().to_string()))
+        .filter_map(|(p, _)| {
+            p.strip_prefix(hex_root)
+                .ok()
+                .map(|r| r.to_string_lossy().to_string())
+        })
         .collect();
 
     let mut removed = 0usize;
@@ -993,7 +1074,8 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
             if let Some(fid) = existing_id {
                 if let Err(e) = delete_chunks_for_file(&conn, fid) {
                     eprintln!("  ERROR removing chunks for {db_path_str}: {e}");
-                } else if let Err(e) = conn.execute("DELETE FROM files WHERE id = ?", params![fid]) {
+                } else if let Err(e) = conn.execute("DELETE FROM files WHERE id = ?", params![fid])
+                {
                     eprintln!("  ERROR removing file record {db_path_str}: {e}");
                 } else {
                     removed += 1;
@@ -1122,7 +1204,10 @@ pub fn show_stats(hex_root: &Path) -> i32 {
         )
         .unwrap_or(0);
 
-    let db_size_kb = db_path.metadata().map(|m| m.len() as f64 / 1024.0).unwrap_or(0.0);
+    let db_size_kb = db_path
+        .metadata()
+        .map(|m| m.len() as f64 / 1024.0)
+        .unwrap_or(0.0);
 
     println!("Database: {}", db_path.display());
     println!("Size: {db_size_kb:.1} KB");
@@ -1145,7 +1230,9 @@ pub fn show_stats(hex_root: &Path) -> i32 {
     println!();
 
     println!("By directory:");
-    let mut stmt = conn.prepare("
+    let mut stmt = conn
+        .prepare(
+            "
         SELECT
             CASE
                 WHEN source_path LIKE '%/%'
@@ -1157,10 +1244,18 @@ pub fn show_stats(hex_root: &Path) -> i32 {
         FROM chunks
         GROUP BY dir
         ORDER BY chunks DESC
-    ").unwrap();
-    let rows = stmt.query_map([], |r| {
-        Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?, r.get::<_, i64>(2)?))
-    }).unwrap();
+    ",
+        )
+        .unwrap();
+    let rows = stmt
+        .query_map([], |r| {
+            Ok((
+                r.get::<_, String>(0)?,
+                r.get::<_, i64>(1)?,
+                r.get::<_, i64>(2)?,
+            ))
+        })
+        .unwrap();
     for row in rows.flatten() {
         println!("  {}: {} files, {} chunks", row.0, row.1, row.2);
     }
@@ -1174,7 +1269,11 @@ pub fn run(hex_root: &Path, full: bool, stats: bool) -> i32 {
     if stats {
         show_stats(hex_root)
     } else {
-        let mode = if full { "Full reindex" } else { "Incremental index" };
+        let mode = if full {
+            "Full reindex"
+        } else {
+            "Incremental index"
+        };
         println!("{mode}...");
         run_index(hex_root, full)
     }
@@ -1243,9 +1342,35 @@ mod tests {
         assert_eq!(get_source_weight("landings/today.md", false), 1.0);
         assert_eq!(get_source_weight("raw/research/paper.md", false), 1.0);
         assert_eq!(get_source_weight("raw/captures/clip.md", false), 0.8);
-        assert_eq!(get_source_weight("raw/transcripts/2020-01-01.md", true), 0.3);
-        assert_eq!(get_source_weight("raw/transcripts/2026-05-01.md", false), 0.5);
+        assert_eq!(
+            get_source_weight("raw/transcripts/2020-01-01.md", true),
+            0.3
+        );
+        assert_eq!(
+            get_source_weight("raw/transcripts/2026-05-01.md", false),
+            0.5
+        );
         assert_eq!(get_source_weight("misc/unknown.md", false), 1.0);
+    }
+
+    #[test]
+    fn test_extract_summaries_handles_case_folding_length_change() {
+        // 'İ' (U+0130, Latin Capital Letter I with Dot Above) is 2 bytes in UTF-8.
+        // Rust's `to_lowercase()` turns it into "i" + a combining dot above
+        // (U+0307) — 3 bytes total, one byte longer per occurrence.
+        //
+        // Regression guard: extract_summaries() used to find the ECC:SUMMARY
+        // marker offsets in `content.to_lowercase()` and then reuse those
+        // offsets to slice the ORIGINAL `content`. Enough of these chars ahead
+        // of a marker desyncs the byte offsets between the two strings, so the
+        // slice landed on the wrong span (or out of bounds / mid-char,
+        // panicking). Offsets must now come from `content` itself via find_ci.
+        let prefix = "İ".repeat(30);
+        let content = format!(
+            "{prefix}\n<!-- ECC:SUMMARY:START -->\nThe actual summary text.\n<!-- ECC:SUMMARY:END -->\n"
+        );
+        let result = extract_summaries(&content);
+        assert_eq!(result.trim(), "The actual summary text.");
     }
 
     #[test]
@@ -1350,14 +1475,21 @@ mod tests {
         let mut calls = 0;
         let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
             calls += 1;
-            let n = if calls == 2 { batch.len() - 1 } else { batch.len() };
+            let n = if calls == 2 {
+                batch.len() - 1
+            } else {
+                batch.len()
+            };
             Ok((0..n)
                 .map(|_| vec![0.3f32; super::super::vector::EMBED_DIM])
                 .collect())
         });
 
         // Batches 1 (8) and 3 (4) stored; batch 2 skipped loudly → 12 total.
-        assert_eq!(stored, 12, "mismatched batch 2 skipped; batches 1 and 3 stored");
+        assert_eq!(
+            stored, 12,
+            "mismatched batch 2 skipped; batches 1 and 3 stored"
+        );
         assert_eq!(vec_count(&conn), 12);
     }
 
@@ -1465,7 +1597,8 @@ mod tests {
     fn reindex(conn: &Connection, path: &str, n: usize) {
         if let Some(fid) = existing_file_id(conn, path) {
             delete_chunks_for_file(conn, fid).unwrap();
-            conn.execute("DELETE FROM files WHERE id = ?", params![fid]).unwrap();
+            conn.execute("DELETE FROM files WHERE id = ?", params![fid])
+                .unwrap();
         }
         conn.execute(
             "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) \
@@ -1473,7 +1606,9 @@ mod tests {
             params![path, n as i64],
         )
         .unwrap();
-        let fid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap();
+        let fid: i64 = conn
+            .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
+            .unwrap();
         for i in 0..n {
             conn.execute(
                 "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
@@ -1481,7 +1616,9 @@ mod tests {
                 params![fid.to_string(), path, i.to_string(), format!("chunk {i} of {path}")],
             )
             .unwrap();
-            let rowid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0)).unwrap();
+            let rowid: i64 = conn
+                .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
+                .unwrap();
             conn.execute(
                 "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, 1.0)",
                 params![rowid],
@@ -1511,7 +1648,11 @@ mod tests {
         // Re-index A SHRUNK (5 → 2): frees its max rowids; new chunks reuse the
         // freed rowids. The old vecs must already be gone (delete-before-insert).
         reindex(&conn, "a.md", 2);
-        assert_eq!(orphan_vec_count(&conn), 0, "reindex-shrink stranded a vector");
+        assert_eq!(
+            orphan_vec_count(&conn),
+            0,
+            "reindex-shrink stranded a vector"
+        );
         assert_eq!(vec_count(&conn), 5);
 
         // Re-index A GROWN (2 → 6).
@@ -1523,8 +1664,13 @@ mod tests {
         // files for a path no longer on disk).
         let fid_b = existing_file_id(&conn, "b.md").unwrap();
         delete_chunks_for_file(&conn, fid_b).unwrap();
-        conn.execute("DELETE FROM files WHERE id = ?", params![fid_b]).unwrap();
-        assert_eq!(orphan_vec_count(&conn), 0, "file deletion stranded a vector");
+        conn.execute("DELETE FROM files WHERE id = ?", params![fid_b])
+            .unwrap();
+        assert_eq!(
+            orphan_vec_count(&conn),
+            0,
+            "file deletion stranded a vector"
+        );
         assert_eq!(vec_count(&conn), 6, "only A's six vectors remain");
     }
 
@@ -1533,7 +1679,10 @@ mod tests {
         assert_eq!(vec_gap_message(10, 10), None, "equal counts → no message");
 
         let deficit = vec_gap_message(10, 7).expect("deficit must report");
-        assert!(deficit.contains("3 chunk(s) without a vector"), "got: {deficit}");
+        assert!(
+            deficit.contains("3 chunk(s) without a vector"),
+            "got: {deficit}"
+        );
 
         // The real production shape: 16688 chunks, 18522 vecs → 1834 orphans.
         let surplus = vec_gap_message(16688, 18522).expect("surplus must report");
@@ -1546,11 +1695,19 @@ mod tests {
         // HEX_INDEX_BUDGET_SECS is read by no other test, so this set/remove is
         // isolated despite cargo's parallel test threads.
         std::env::remove_var("HEX_INDEX_BUDGET_SECS");
-        assert_eq!(run_budget(), Some(std::time::Duration::from_secs(600)), "default 10min");
+        assert_eq!(
+            run_budget(),
+            Some(std::time::Duration::from_secs(600)),
+            "default 10min"
+        );
         std::env::set_var("HEX_INDEX_BUDGET_SECS", "0");
         assert_eq!(run_budget(), None, "0 disables the cap");
         std::env::set_var("HEX_INDEX_BUDGET_SECS", "30");
-        assert_eq!(run_budget(), Some(std::time::Duration::from_secs(30)), "explicit value honored");
+        assert_eq!(
+            run_budget(),
+            Some(std::time::Duration::from_secs(30)),
+            "explicit value honored"
+        );
         std::env::set_var("HEX_INDEX_BUDGET_SECS", "notanumber");
         assert_eq!(
             run_budget(),
@@ -1574,14 +1731,21 @@ mod tests {
         for n in 0..20 {
             let mut f =
                 std::fs::File::create(hex_root.join(format!("me/decisions/d{n}.md"))).unwrap();
-            writeln!(f, "# Doc {n}\n\nContent about hex memory indexing.\n\n## More\nText.").unwrap();
+            writeln!(
+                f,
+                "# Doc {n}\n\nContent about hex memory indexing.\n\n## More\nText."
+            )
+            .unwrap();
         }
         // A 1s budget is below the cold model-load (~2s), so the very first
         // top-of-loop check is already over budget → loud bail, non-zero exit.
         std::env::set_var("HEX_INDEX_BUDGET_SECS", "1");
         let code = run_index(hex_root, true);
         std::env::remove_var("HEX_INDEX_BUDGET_SECS");
-        assert_eq!(code, 1, "an over-budget run must exit non-zero (S6 loud bail)");
+        assert_eq!(
+            code, 1,
+            "an over-budget run must exit non-zero (S6 loud bail)"
+        );
     }
 
     #[test]
@@ -1666,7 +1830,11 @@ mod tests {
         let db = Connection::open(hex_dir.join("memory.db")).unwrap();
         // test.md should have been indexed with at least 1 chunk
         let test_chunks: i64 = db
-            .query_row("SELECT chunk_count FROM files WHERE path LIKE '%test.md'", [], |r| r.get(0))
+            .query_row(
+                "SELECT chunk_count FROM files WHERE path LIKE '%test.md'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert!(test_chunks > 0);
         let files_after_run1: i64 = db

@@ -198,7 +198,10 @@ fn test_append_audit_creates_and_appends() {
 fn test_load_allowlist_missing_returns_empty() {
     let dir = TempDir::new().unwrap();
     let list = load_allowlist(dir.path()).unwrap();
-    assert!(list.is_empty(), "missing allowlist.json must return empty list");
+    assert!(
+        list.is_empty(),
+        "missing allowlist.json must return empty list"
+    );
 }
 
 #[test]
@@ -219,7 +222,10 @@ fn test_is_allowed_pilot_agent_returns_true() {
     fs::create_dir_all(&reg_dir).unwrap();
     fs::write(reg_dir.join("allowlist.json"), r#"["agent-a"]"#).unwrap();
 
-    assert!(is_allowed(dir.path(), "agent-a"), "pilot agent must be allowed");
+    assert!(
+        is_allowed(dir.path(), "agent-a"),
+        "pilot agent must be allowed"
+    );
 }
 
 #[test]
@@ -258,7 +264,11 @@ fn test_build_catalog_includes_functions_and_triggers() {
     add_trigger(&registry_dir, &trig_cap).unwrap();
 
     let catalog = build_catalog(&registry_dir).unwrap();
-    assert_eq!(catalog.len(), 2, "catalog must include both function and trigger");
+    assert_eq!(
+        catalog.len(),
+        2,
+        "catalog must include both function and trigger"
+    );
 
     let ids: Vec<&str> = catalog.iter().map(|e| e.id.as_str()).collect();
     assert!(ids.contains(&"fn-001"), "function in catalog");

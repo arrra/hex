@@ -119,12 +119,14 @@ impl Embedder {
     /// Embed corpus chunks (document side).
     pub fn embed_documents(&self, texts: &[String]) -> anyhow::Result<Vec<Vec<f32>>> {
         let prefixed: Vec<String> = texts.iter().map(|t| format!("{DOC_PREFIX}{t}")).collect();
-        Ok(self.model.embed(prefixed, None)?)
+        self.model.embed(prefixed, None)
     }
 
     /// Embed a single search query (query side).
     pub fn embed_query(&self, text: &str) -> anyhow::Result<Vec<f32>> {
-        let mut out = self.model.embed(vec![format!("{QUERY_PREFIX}{text}")], None)?;
+        let mut out = self
+            .model
+            .embed(vec![format!("{QUERY_PREFIX}{text}")], None)?;
         out.pop()
             .ok_or_else(|| anyhow::anyhow!("fastembed returned no embedding for query"))
     }
@@ -168,7 +170,9 @@ mod tests {
     #[ignore]
     fn embeds_at_768_dimensions() {
         let e = Embedder::new(Path::new(".")).unwrap();
-        let q = e.embed_query("what did we decide about the memory schema").unwrap();
+        let q = e
+            .embed_query("what did we decide about the memory schema")
+            .unwrap();
         assert_eq!(q.len(), super::super::vector::EMBED_DIM);
 
         let docs = e

@@ -36,7 +36,10 @@ impl Status {
         matches!(self, Status::Warn)
     }
     pub fn counts_as_pass(&self) -> bool {
-        matches!(self, Status::Pass | Status::Fixed | Status::Skip | Status::Info)
+        matches!(
+            self,
+            Status::Pass | Status::Fixed | Status::Skip | Status::Info
+        )
     }
 }
 
@@ -63,19 +66,44 @@ pub struct CheckResult {
 
 impl CheckResult {
     pub fn pass(msg: impl Into<String>) -> Self {
-        Self { status: Status::Pass, message: msg.into(), details: None, elapsed_ms: 0 }
+        Self {
+            status: Status::Pass,
+            message: msg.into(),
+            details: None,
+            elapsed_ms: 0,
+        }
     }
     pub fn warn(msg: impl Into<String>) -> Self {
-        Self { status: Status::Warn, message: msg.into(), details: None, elapsed_ms: 0 }
+        Self {
+            status: Status::Warn,
+            message: msg.into(),
+            details: None,
+            elapsed_ms: 0,
+        }
     }
     pub fn fail(msg: impl Into<String>) -> Self {
-        Self { status: Status::Fail, message: msg.into(), details: None, elapsed_ms: 0 }
+        Self {
+            status: Status::Fail,
+            message: msg.into(),
+            details: None,
+            elapsed_ms: 0,
+        }
     }
     pub fn skip(msg: impl Into<String>) -> Self {
-        Self { status: Status::Skip, message: msg.into(), details: None, elapsed_ms: 0 }
+        Self {
+            status: Status::Skip,
+            message: msg.into(),
+            details: None,
+            elapsed_ms: 0,
+        }
     }
     pub fn fixed(msg: impl Into<String>) -> Self {
-        Self { status: Status::Fixed, message: msg.into(), details: None, elapsed_ms: 0 }
+        Self {
+            status: Status::Fixed,
+            message: msg.into(),
+            details: None,
+            elapsed_ms: 0,
+        }
     }
     pub fn with_details(mut self, details: impl Into<String>) -> Self {
         self.details = Some(details.into());

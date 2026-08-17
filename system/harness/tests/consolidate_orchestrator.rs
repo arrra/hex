@@ -44,8 +44,14 @@ fn consolidate_help_lists_full_and_quick_modes() {
         String::from_utf8_lossy(&output.stderr)
     );
     let help = String::from_utf8_lossy(&output.stdout).to_lowercase();
-    assert!(help.contains("full"), "help must list 'full' mode; got:\n{help}");
-    assert!(help.contains("quick"), "help must list 'quick' mode; got:\n{help}");
+    assert!(
+        help.contains("full"),
+        "help must list 'full' mode; got:\n{help}"
+    );
+    assert!(
+        help.contains("quick"),
+        "help must list 'quick' mode; got:\n{help}"
+    );
 }
 
 #[test]

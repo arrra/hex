@@ -156,9 +156,10 @@ pub fn run_routed(
         },
         LiveMode::Forced => match try_live(home, workspace, verb, a1.live_target.as_ref()) {
             Ok(results) => Ok(live_envelope(a1.envelope, results, started)),
-            Err(failure) => {
-                Err(CqError::LiveUnavailable { reason: failure.describe() }.into())
+            Err(failure) => Err(CqError::LiveUnavailable {
+                reason: failure.describe(),
             }
+            .into()),
         },
         LiveMode::Disabled => unreachable!("Disabled handled above"),
     }
@@ -170,7 +171,10 @@ enum LiveFailure {
     /// Socket missing/refused/timed out, or the connection died.
     Unavailable { reason: String },
     /// Daemon reachable; the instance is still priming (SPEC-A2 §3).
-    Warming { elapsed_secs: u64, workspace: Option<String> },
+    Warming {
+        elapsed_secs: u64,
+        workspace: Option<String>,
+    },
     /// Daemon reachable; it answered with a structured error.
     LiveError { code: String, message: String },
     /// No live position could be derived for the query target.
@@ -186,7 +190,10 @@ impl LiveFailure {
                 workspace: None,
                 detail: Some(reason),
             },
-            LiveFailure::Warming { elapsed_secs, workspace } => Escalated {
+            LiveFailure::Warming {
+                elapsed_secs,
+                workspace,
+            } => Escalated {
                 reason: "warming".into(),
                 elapsed_secs: Some(elapsed_secs),
                 workspace,
@@ -202,9 +209,7 @@ impl LiveFailure {
                 reason: "live-error".into(),
                 elapsed_secs: None,
                 workspace: None,
-                detail: Some(
-                    "no live position could be derived for the query target".into(),
-                ),
+                detail: Some("no live position could be derived for the query target".into()),
             },
         }
     }
@@ -239,7 +244,9 @@ fn try_live(
         Verb::Callers(_) => QueryVerb::Callers,
         other => unreachable!("non-live verb {other:?} routed to try_live"),
     };
-    let map_client_err = |e: ClientError| LiveFailure::Unavailable { reason: e.to_string() };
+    let map_client_err = |e: ClientError| LiveFailure::Unavailable {
+        reason: e.to_string(),
+    };
     let mut client = LiveClient::connect(home).map_err(map_client_err)?;
     let reply = client
         .query(query_verb, &workspace.query_root, path, *line, *col)
@@ -262,7 +269,10 @@ fn interpret_query_reply(reply: Reply) -> std::result::Result<Vec<QueryResult>, 
         });
     }
     if let Some(error) = reply.error {
-        return Err(LiveFailure::LiveError { code: error.code, message: error.message });
+        return Err(LiveFailure::LiveError {
+            code: error.code,
+            message: error.message,
+        });
     }
     Err(LiveFailure::LiveError {
         code: "BAD_REPLY".into(),
@@ -319,7 +329,11 @@ fn run_a1(
     } else {
         false
     };
-    let live_target = if for_routing { live_target(verb, &conn) } else { None };
+    let live_target = if for_routing {
+        live_target(verb, &conn)
+    } else {
+        None
+    };
 
     let stale_set: HashSet<&str> = stale_files.iter().map(String::as_str).collect();
     let mut snippet_cache: HashMap<String, Vec<String>> = HashMap::new();
@@ -343,7 +357,12 @@ fn run_a1(
         escalated: None,
         results,
     };
-    Ok(A1Answer { envelope, exit_code, live_target, target_stale })
+    Ok(A1Answer {
+        envelope,
+        exit_code,
+        live_target,
+        target_stale,
+    })
 }
 
 /// Freshness of the verb's *target* file (SPEC-A2 §5 routing input). Files
@@ -359,7 +378,9 @@ fn target_is_stale(
     result_files: &[String],
     stale_files: &[String],
 ) -> Result<bool> {
-    let Some(target) = verb.target_path() else { return Ok(false) };
+    let Some(target) = verb.target_path() else {
+        return Ok(false);
+    };
     if result_files.iter().any(|f| f == target) {
         return Ok(stale_files.iter().any(|f| f == target));
     }
@@ -421,16 +442,23 @@ fn flavor_unindexed(
     conn: &Connection,
     query_root: &Path,
 ) -> anyhow::Error {
-    if !matches!(err.downcast_ref::<CqError>(), Some(CqError::NotFound { .. })) {
+    if !matches!(
+        err.downcast_ref::<CqError>(),
+        Some(CqError::NotFound { .. })
+    ) {
         return err;
     }
-    let Some(path) = verb.target_path() else { return err };
+    let Some(path) = verb.target_path() else {
+        return err;
+    };
     let in_index = conn
         .query_row("SELECT 1 FROM files WHERE path = ?1", [path], |_| Ok(()))
         .is_ok();
     if !in_index && query_root.join(path).is_file() {
         return CqError::NotFound {
-            query: format!("{path} exists in the worktree but is not in the index (UNINDEXED_FILE)"),
+            query: format!(
+                "{path} exists in the worktree but is not in the index (UNINDEXED_FILE)"
+            ),
         }
         .into();
     }
@@ -457,7 +485,12 @@ fn to_query_result(
         symbol: raw.scip_symbol.clone(),
         display_name: raw.display_name.clone(),
         kind: kind_str(raw.kind),
-        role: if raw.is_definition() { "definition" } else { "reference" }.into(),
+        role: if raw.is_definition() {
+            "definition"
+        } else {
+            "reference"
+        }
+        .into(),
         snippet,
     })
 }
@@ -475,11 +508,17 @@ fn snippet_line(
         let full = root.join(path);
         let content = std::fs::read_to_string(&full)
             .with_context(|| format!("reading fresh file {} for snippet", full.display()))?;
-        cache.insert(path.to_string(), content.lines().map(str::to_string).collect());
+        cache.insert(
+            path.to_string(),
+            content.lines().map(str::to_string).collect(),
+        );
     }
     let idx = usize::try_from(line0).context("negative line in index")?;
     cache[path].get(idx).cloned().ok_or_else(|| {
-        anyhow!("fresh file {path} has no line {} — freshness/index mismatch", line0 + 1)
+        anyhow!(
+            "fresh file {path} has no line {} — freshness/index mismatch",
+            line0 + 1
+        )
     })
 }
 
@@ -507,7 +546,9 @@ fn index_age_secs(conn: &Connection) -> Result<u64> {
     let created_at = meta_value(conn, "created_at")?;
     let created = chrono::DateTime::parse_from_rfc3339(&created_at)
         .with_context(|| format!("meta created_at {created_at:?} is not RFC3339"))?;
-    let age = chrono::Utc::now().signed_duration_since(created).num_seconds();
+    let age = chrono::Utc::now()
+        .signed_duration_since(created)
+        .num_seconds();
     Ok(u64::try_from(age).unwrap_or(0)) // clock skew → age 0, never a crash
 }
 
@@ -570,8 +611,7 @@ mod tests {
     /// into a generation database, meta populated (as the Task 8 indexer
     /// will), and atomically published under a hermetic home.
     fn indexed_golden() -> Fixture {
-        let fixture =
-            Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/golden-crate");
+        let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/golden-crate");
         let repo = tempfile::tempdir().unwrap();
         copy_dir(&fixture, repo.path());
         run_cmd(repo.path(), "git", &["init", "-q", "-b", "main"]);
@@ -698,10 +738,8 @@ mod tests {
             };
             assert!(query.contains("UNINDEXED_FILE"), "{query}");
             // The standard NotFound hint already points at `cq index`.
-            let j: serde_json::Value = serde_json::from_str(
-                &err.downcast_ref::<CqError>().unwrap().to_json(),
-            )
-            .unwrap();
+            let j: serde_json::Value =
+                serde_json::from_str(&err.downcast_ref::<CqError>().unwrap().to_json()).unwrap();
             assert!(j["error"]["hint"].as_str().unwrap().contains("cq index"));
         }
 
@@ -764,8 +802,7 @@ mod tests {
         assert_eq!(env.stale_files, vec!["src/ops.rs".to_string()]);
         assert!(env.results[0].snippet.is_none());
 
-        let (env, exit) =
-            run(fx.home.path(), &fx.workspace(), &name("double"), false).unwrap();
+        let (env, exit) = run(fx.home.path(), &fx.workspace(), &name("double"), false).unwrap();
         assert_eq!(exit, 0);
         assert_eq!(env.stale_files, Vec::<String>::new());
         assert!(env.results[0].snippet.is_some());
@@ -795,8 +832,13 @@ mod tests {
         let fx = indexed_golden();
         let ws = fx.workspace();
 
-        let (env, exit) =
-            run(fx.home.path(), &ws, &Verb::Search("gener".to_string()), false).unwrap();
+        let (env, exit) = run(
+            fx.home.path(),
+            &ws,
+            &Verb::Search("gener".to_string()),
+            false,
+        )
+        .unwrap();
         assert_eq!(exit, 0);
         assert!(env.results.iter().any(|r| r.display_name == "generic_max"));
 
@@ -827,10 +869,7 @@ mod tests {
 
     /// Newline-JSON fake daemon at `<home>/scipd.sock` answering each
     /// request via `respond`.
-    fn fake_daemon(
-        home: &Path,
-        respond: impl Fn(&serde_json::Value) -> String + Send + 'static,
-    ) {
+    fn fake_daemon(home: &Path, respond: impl Fn(&serde_json::Value) -> String + Send + 'static) {
         let listener =
             std::os::unix::net::UnixListener::bind(crate::daemon::socket_path(home)).unwrap();
         std::thread::spawn(move || {
@@ -879,8 +918,7 @@ mod tests {
         let ws = fx.workspace();
         make_stale(&fx);
         let verb = Verb::Refs(Selector::Name("double".to_string()));
-        let (env, exit) =
-            run_routed(fx.home.path(), &ws, &verb, false, LiveMode::Auto).unwrap();
+        let (env, exit) = run_routed(fx.home.path(), &ws, &verb, false, LiveMode::Auto).unwrap();
         assert_eq!(exit, 2, "A1 exit rules stand");
         assert_eq!(env.source, "index");
         assert_eq!(env.stale_files, vec!["src/ops.rs".to_string()]);
@@ -902,8 +940,7 @@ mod tests {
             )
         });
         let verb = Verb::Refs(Selector::Name("double".to_string()));
-        let (env, exit) =
-            run_routed(fx.home.path(), &ws, &verb, false, LiveMode::Auto).unwrap();
+        let (env, exit) = run_routed(fx.home.path(), &ws, &verb, false, LiveMode::Auto).unwrap();
         assert_eq!(exit, 2);
         assert_eq!(env.source, "index");
         let escalated = env.escalated.expect("escalated section");
@@ -930,8 +967,7 @@ mod tests {
             )
         });
         let verb = Verb::Refs(Selector::Name("double".to_string()));
-        let (env, exit) =
-            run_routed(fx.home.path(), &ws, &verb, false, LiveMode::Auto).unwrap();
+        let (env, exit) = run_routed(fx.home.path(), &ws, &verb, false, LiveMode::Auto).unwrap();
         assert_eq!(exit, 0, "live answers are current: exit 0");
         assert_eq!(env.source, "live");
         assert_eq!(env.stale_files, Vec::<String>::new());
@@ -948,8 +984,7 @@ mod tests {
         let ws = fx.workspace();
         make_stale(&fx);
         let verb = Verb::Refs(Selector::Name("double".to_string()));
-        let err =
-            run_routed(fx.home.path(), &ws, &verb, true, LiveMode::Auto).unwrap_err();
+        let err = run_routed(fx.home.path(), &ws, &verb, true, LiveMode::Auto).unwrap_err();
         assert!(
             matches!(err.downcast_ref::<CqError>(), Some(CqError::StaleResults)),
             "{err:?}"
@@ -960,8 +995,14 @@ mod tests {
     fn routed_forced_with_daemon_down_is_live_unavailable() {
         let fx = indexed_golden();
         let ws = fx.workspace();
-        let err = run_routed(fx.home.path(), &ws, &name("double"), false, LiveMode::Forced)
-            .unwrap_err();
+        let err = run_routed(
+            fx.home.path(),
+            &ws,
+            &name("double"),
+            false,
+            LiveMode::Forced,
+        )
+        .unwrap_err();
         match err.downcast_ref::<CqError>() {
             Some(CqError::LiveUnavailable { reason }) => {
                 assert!(reason.contains("unreachable"), "{reason}");
@@ -978,10 +1019,12 @@ mod tests {
             Verb::Symbols("src/shapes.rs".to_string()),
             Verb::Search("gener".to_string()),
         ] {
-            let err = run_routed(fx.home.path(), &ws, &verb, false, LiveMode::Forced)
-                .unwrap_err();
+            let err = run_routed(fx.home.path(), &ws, &verb, false, LiveMode::Forced).unwrap_err();
             assert!(
-                matches!(err.downcast_ref::<CqError>(), Some(CqError::LiveUnavailable { .. })),
+                matches!(
+                    err.downcast_ref::<CqError>(),
+                    Some(CqError::LiveUnavailable { .. })
+                ),
                 "{verb:?}: {err:?}"
             );
         }
@@ -1037,8 +1080,7 @@ mod tests {
 
         // Routed: the stale target forces the escalation attempt; with the
         // daemon down that surfaces as escalated.daemon-unavailable.
-        let (env, exit) =
-            run_routed(fx.home.path(), &ws, &verb, false, LiveMode::Auto).unwrap();
+        let (env, exit) = run_routed(fx.home.path(), &ws, &verb, false, LiveMode::Auto).unwrap();
         assert_eq!(exit, 0, "A1 exit rules stand (no stale RESULT files)");
         let escalated = env.escalated.expect("stale target must escalate");
         assert_eq!(escalated.reason, "daemon-unavailable");
