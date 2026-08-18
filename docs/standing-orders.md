@@ -10,7 +10,7 @@ These are the behavioral enforcement mechanisms that make the Standing Orders op
 
 **Decision tree (answer each → act):**
 1. Is this a single-line edit? → Do it inline.
-2. Is this recurring or scheduled? → Configure an OS-level job (launchd/cron) targeting the specific script. NEVER use CronCreate or polling loops.
+2. Is this recurring or scheduled? → Author a hex harness worker (`Worker::new(...).on_cron(...)`) — never a new launchd/cron entry (sanctioned launchd surface: `docs/hex-ops.md`). NEVER use CronCreate or polling loops.
 3. Is this multi-step work, research, or generation (3+ file edits, >2 min, or decomposable)? → **Write a TOML BOI spec and dispatch** with `~/.boi/bin/boi dispatch <spec.toml>`. NEVER code inline for multi-file projects.
 4. Is it a one-time lookup or simple edit? → Do it inline.
 
