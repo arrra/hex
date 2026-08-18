@@ -206,6 +206,19 @@ pub fn run_on_file(
                 }
                 ProviderError::Upstream(_) => {
                     let new_strikes = strikes + 1;
+                    if new_strikes == STRIKE_LIMIT - 1 {
+                        // One strike from a skip: page the alert path while an
+                        // operator can still intervene before content is passed
+                        // over (rule S6 — unattended backfills must be loud).
+                        record_flag_event(
+                            "distill::strike-warning",
+                            "error",
+                            &format!(
+                                "file at {} of {} strikes: {} reason={}",
+                                new_strikes, STRIKE_LIMIT, path, reason
+                            ),
+                        );
+                    }
                     if new_strikes >= STRIKE_LIMIT {
                         // Poison-slice escape hatch: advance past the slice
                         // LOUDLY so the cron is not trapped retrying forever.
@@ -221,6 +234,14 @@ pub fn run_on_file(
                             "skipped",
                             new_strikes,
                             Some(reason.as_str()),
+                        );
+                        record_flag_event(
+                            "distill::poison-skip",
+                            "error",
+                            &format!(
+                                "POISON SLICE SKIP file={} bytes={}..{} reason={}",
+                                path, offset, slice_end_offset, reason
+                            ),
                         );
                         let tx = conn.transaction()?;
                         watermark::advance_offset(&tx, path, slice_end_offset)?;
@@ -249,130 +270,99 @@ pub fn run_on_file(
     };
 
     let new_offset = slice_end_offset;
-    let tx = conn.transaction()?;
+    let mut tx = conn.transaction()?;
     for c in candidates {
-        let (pred, obj) = if predicates::validate(&c.predicate).is_ok() {
-            (c.predicate.clone(), c.object.clone())
-        } else {
-            (
-                "_unmapped".to_string(),
-                format!("{}: {}", c.predicate, c.object),
-            )
-        };
+        // Per-candidate savepoint: one bad candidate (constraint violation,
+        // malformed judge output) must never roll back the whole slice's good
+        // facts — that was the blast radius of the 2026-08-17 FK bug. On error
+        // the savepoint drops (rolls back just this candidate), telemetry
+        // records it loudly, and the loop continues.
+        let sp = tx.savepoint()?;
+        let res: anyhow::Result<()> = (|| {
+            let (pred, obj) = if predicates::validate(&c.predicate).is_ok() {
+                (c.predicate.clone(), c.object.clone())
+            } else {
+                (
+                    "_unmapped".to_string(),
+                    format!("{}: {}", c.predicate, c.object),
+                )
+            };
 
-        let effective = Candidate {
-            predicate: pred.clone(),
-            object: obj.clone(),
-            ..c.clone()
-        };
-        let outcome = dedup::classify(&tx, &effective, None)?;
-        match outcome {
-            dedup::DedupOutcome::Noop { existing_id } => {
-                report.noops += 1;
-                tx.execute(
-                    "UPDATE facts SET access_count=access_count+1, last_accessed=datetime('now') WHERE id=?1",
-                    [existing_id],
-                )?;
-            }
-            dedup::DedupOutcome::CleanAdd => {
-                let id = Ulid::new().to_string();
-                tx.execute(
-                    "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,source_ref)
-                     VALUES (?1,?2,?3,?4,?5,datetime('now'),datetime('now'),?6)",
-                    rusqlite::params![id, c.subject, pred, obj, c.importance, path],
-                )?;
-                tx.execute(
-                    "INSERT INTO fact_history (fact_id,op,new_value,ts) VALUES (?1,'ADD',?2,datetime('now'))",
-                    rusqlite::params![id, obj],
-                )?;
-                report.adds += 1;
-            }
-            dedup::DedupOutcome::Ambiguous { nearest_ids } => {
-                let existing: Vec<(String, String, String, String)> = nearest_ids
-                    .iter()
-                    .filter_map(|nid| {
-                        tx.query_row(
-                            "SELECT id,subject,predicate,object FROM facts WHERE id=?1",
-                            [nid],
-                            |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
-                        )
-                        .ok()
-                    })
-                    .collect();
-                let decision = match judge::judge(&c.subject, &pred, &obj, "", &existing) {
-                    Ok(d) => d,
-                    Err(e) => {
-                        // Judge ProviderError MUST NOT discard the slice's
-                        // extract work. Record a FLAG row, log loudly, and
-                        // continue processing remaining candidates.
-                        eprintln!(
-                            "[distill] judge failed for ({},{},{}) in {}: {} — recording FLAG and continuing",
-                            c.subject, pred, obj, path, e
-                        );
-                        tx.execute(
-                            "INSERT INTO fact_history (fact_id,op,new_value,ts) VALUES (?1,'FLAG',?2,datetime('now'))",
-                            rusqlite::params![
-                                "",
-                                format!(
-                                    "judge-error on ({},{},{}): {}",
-                                    c.subject, pred, obj, e
-                                )
-                            ],
-                        )?;
-                        report.flags += 1;
-                        continue;
-                    }
-                };
-                match decision.action {
-                    judge::Action::Add => {
-                        let id = Ulid::new().to_string();
-                        tx.execute(
-                            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,source_ref)
-                             VALUES (?1,?2,?3,?4,?5,datetime('now'),datetime('now'),?6)",
-                            rusqlite::params![id, c.subject, pred, obj, c.importance, path],
-                        )?;
-                        tx.execute(
-                            "INSERT INTO fact_history (fact_id,op,new_value,ts) VALUES (?1,'ADD',?2,datetime('now'))",
-                            rusqlite::params![id, obj],
-                        )?;
-                        report.adds += 1;
-                    }
-                    judge::Action::Update => {
-                        if let Some(tid) = decision.target_id {
-                            let prev: String = tx.query_row(
-                                "SELECT object FROM facts WHERE id=?1",
-                                [&tid],
-                                |r| r.get(0),
-                            )?;
-                            tx.execute(
-                                "UPDATE facts SET object=?1, updated_at=datetime('now') WHERE id=?2",
-                                rusqlite::params![obj, tid],
-                            )?;
-                            tx.execute(
-                                "INSERT INTO fact_history (fact_id,op,prev_value,new_value,ts) VALUES (?1,'UPDATE',?2,?3,datetime('now'))",
-                                rusqlite::params![tid, prev, obj],
-                            )?;
-                            report.updates += 1;
-                        }
-                    }
-                    judge::Action::Noop => {
-                        report.noops += 1;
-                    }
-                    judge::Action::Flag => {
-                        let tid = decision.target_id.clone().unwrap_or_default();
-                        tx.execute(
-                            "INSERT INTO fact_history (fact_id,op,new_value,ts) VALUES (?1,'FLAG',?2,datetime('now'))",
-                            rusqlite::params![
-                                tid,
-                                format!(
-                                    "contested by: ({},{},{}) — {}",
-                                    c.subject, pred, obj, decision.reason
-                                )
-                            ],
-                        )?;
-                        report.flags += 1;
-                    }
+            let effective = Candidate {
+                predicate: pred.clone(),
+                object: obj.clone(),
+                ..c.clone()
+            };
+            let outcome = dedup::classify(&sp, &effective, None)?;
+            match outcome {
+                dedup::DedupOutcome::Noop { existing_id } => {
+                    report.noops += 1;
+                    sp.execute(
+                        "UPDATE facts SET access_count=access_count+1, last_accessed=datetime('now') WHERE id=?1",
+                        [existing_id],
+                    )?;
                 }
+                dedup::DedupOutcome::CleanAdd => {
+                    insert_fact_with_history(&sp, &c.subject, &pred, &obj, c.importance, path)?;
+                    report.adds += 1;
+                }
+                dedup::DedupOutcome::Ambiguous { nearest_ids } => {
+                    let existing: Vec<(String, String, String, String)> = nearest_ids
+                        .iter()
+                        .filter_map(|nid| {
+                            sp.query_row(
+                                "SELECT id,subject,predicate,object FROM facts WHERE id=?1",
+                                [nid],
+                                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?, r.get(3)?)),
+                            )
+                            .ok()
+                        })
+                        .collect();
+                    let decision = match judge::judge(&c.subject, &pred, &obj, "", &existing) {
+                        Ok(d) => d,
+                        Err(e) => {
+                            // Judge ProviderError MUST NOT discard the slice's
+                            // extract work, and MUST NOT write a fact_history
+                            // row with no target: fact_id is NOT NULL with an
+                            // enforced FK, so the old ""-keyed FLAG insert was
+                            // the exact constraint violation that rolled back
+                            // whole slices. Loud telemetry carries the detail.
+                            eprintln!(
+                                "[distill] judge failed for ({},{},{}) in {}: {} — recording FLAG and continuing",
+                                c.subject, pred, obj, path, e
+                            );
+                            record_flag_event(
+                                "distill::judge-error",
+                                "error",
+                                &format!(
+                                    "judge-error on ({},{},{}) in {}: {}",
+                                    c.subject, pred, obj, path, e
+                                ),
+                            );
+                            report.flags += 1;
+                            return Ok(());
+                        }
+                    };
+                    apply_judge_decision(&sp, &c, &pred, &obj, decision, path, &mut report)?;
+                }
+            }
+            Ok(())
+        })();
+        match res {
+            Ok(()) => sp.commit()?,
+            Err(e) => {
+                eprintln!(
+                    "[distill] candidate failed (rolled back, slice continues): ({},{},{}) in {}: {}",
+                    c.subject, c.predicate, c.object, path, e
+                );
+                record_flag_event(
+                    "distill::candidate-error",
+                    "error",
+                    &format!(
+                        "candidate rolled back ({},{},{}) in {}: {}",
+                        c.subject, c.predicate, c.object, path, e
+                    ),
+                );
             }
         }
     }
@@ -381,6 +371,121 @@ pub fn run_on_file(
     tx.commit()?;
     telemetry_slice(path, offset, cap_len as i64, est_tokens, "ok", 0, None);
     Ok(report)
+}
+
+/// Insert a fact plus its ADD history row. fact_history.fact_id references the
+/// fact created here, so the FK is satisfied by construction.
+fn insert_fact_with_history(
+    conn: &rusqlite::Connection,
+    subject: &str,
+    pred: &str,
+    obj: &str,
+    importance: f32,
+    path: &str,
+) -> anyhow::Result<String> {
+    let id = Ulid::new().to_string();
+    conn.execute(
+        "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,source_ref)
+         VALUES (?1,?2,?3,?4,?5,datetime('now'),datetime('now'),?6)",
+        rusqlite::params![id, subject, pred, obj, importance, path],
+    )?;
+    conn.execute(
+        "INSERT INTO fact_history (fact_id,op,new_value,ts) VALUES (?1,'ADD',?2,datetime('now'))",
+        rusqlite::params![id, obj],
+    )?;
+    Ok(id)
+}
+
+/// Record a FLAG-class observation that has no valid facts row to attach to.
+/// fact_history.fact_id is NOT NULL and FK-enforced, so target-less flags go
+/// to telemetry (loud, greppable) instead of a guaranteed constraint violation.
+fn record_flag_event(event: &str, status: &str, detail: &str) {
+    crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+        source: "memory::distill".into(),
+        event: event.into(),
+        status: status.into(),
+        duration_ms: None,
+        exit_code: None,
+        detail: Some(detail.chars().take(300).collect::<String>()),
+    });
+}
+
+/// Apply a judge decision for a candidate. Split out of the slice loop so the
+/// FLAG/UPDATE/ADD write paths are unit-testable against an FK-enforcing
+/// connection without a live judge (the target-less FLAG path is the exact
+/// 2026-08-17 production failure).
+fn apply_judge_decision(
+    conn: &rusqlite::Connection,
+    c: &Candidate,
+    pred: &str,
+    obj: &str,
+    decision: judge::Decision,
+    path: &str,
+    report: &mut DistillReport,
+) -> anyhow::Result<()> {
+    match decision.action {
+        judge::Action::Add => {
+            insert_fact_with_history(conn, &c.subject, pred, obj, c.importance, path)?;
+            report.adds += 1;
+        }
+        judge::Action::Update => {
+            if let Some(tid) = decision.target_id {
+                let prev: String =
+                    conn.query_row("SELECT object FROM facts WHERE id=?1", [&tid], |r| r.get(0))?;
+                conn.execute(
+                    "UPDATE facts SET object=?1, updated_at=datetime('now') WHERE id=?2",
+                    rusqlite::params![obj, tid],
+                )?;
+                conn.execute(
+                    "INSERT INTO fact_history (fact_id,op,prev_value,new_value,ts) VALUES (?1,'UPDATE',?2,?3,datetime('now'))",
+                    rusqlite::params![tid, prev, obj],
+                )?;
+                report.updates += 1;
+            } else {
+                // UPDATE with no target is a judge protocol violation — do not
+                // silently drop it (rule S6). Record and count as a flag.
+                record_flag_event(
+                    "distill::flag-untargeted",
+                    "ok",
+                    &format!(
+                        "judge said UPDATE without target_id for ({},{},{}) in {}: {}",
+                        c.subject, pred, obj, path, decision.reason
+                    ),
+                );
+                report.flags += 1;
+            }
+        }
+        judge::Action::Noop => {
+            report.noops += 1;
+        }
+        judge::Action::Flag => match decision.target_id {
+            Some(tid) if !tid.is_empty() => {
+                conn.execute(
+                    "INSERT INTO fact_history (fact_id,op,new_value,ts) VALUES (?1,'FLAG',?2,datetime('now'))",
+                    rusqlite::params![
+                        tid,
+                        format!(
+                            "contested by: ({},{},{}) — {}",
+                            c.subject, pred, obj, decision.reason
+                        )
+                    ],
+                )?;
+                report.flags += 1;
+            }
+            _ => {
+                record_flag_event(
+                    "distill::flag-untargeted",
+                    "ok",
+                    &format!(
+                        "contested, no target: ({},{},{}) in {} — {}",
+                        c.subject, pred, obj, path, decision.reason
+                    ),
+                );
+                report.flags += 1;
+            }
+        },
+    }
+    Ok(())
 }
 
 #[cfg(test)]
@@ -394,6 +499,73 @@ mod tests {
         crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
         crate::memory::schema::apply_plan2(&conn).unwrap();
         conn
+    }
+
+    /// FK regression (2026-08-17/18 production failure): a judge FLAG with no
+    /// target_id used to insert fact_history.fact_id='' — a guaranteed FOREIGN
+    /// KEY violation with FKs enforced, which rolled back the entire slice
+    /// transaction and trapped the file in a retry-spend loop. It must now
+    /// succeed, write NO fact_history row, and record loud telemetry instead.
+    #[test]
+    fn untargeted_flag_does_not_violate_fk_or_error() {
+        let (_td, _g) = crate::telemetry::test_support::isolate();
+        let conn = fixture_conn();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let mut report = DistillReport::default();
+        let c = Candidate {
+            subject: "Mike".into(),
+            predicate: "prefers".into(),
+            object: "tea".into(),
+            importance: 0.5,
+        };
+        let d = judge::Decision {
+            action: judge::Action::Flag,
+            target_id: None,
+            reason: "ambiguous vs existing".into(),
+        };
+        apply_judge_decision(&conn, &c, "prefers", "tea", d, "/tmp/t.md", &mut report)
+            .expect("target-less FLAG must not error (this was the FK bug)");
+        assert_eq!(report.flags, 1);
+        let hist: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(hist, 0, "no fact_history row may be written without a valid target");
+        let rows = crate::telemetry::recent(10).unwrap();
+        assert!(
+            rows.iter().any(|r| r.event == "distill::flag-untargeted"),
+            "target-less FLAG must be recorded in telemetry"
+        );
+    }
+
+    /// The legitimate FLAG path (valid target) must keep writing fact_history.
+    #[test]
+    fn targeted_flag_still_writes_history_row() {
+        let (_td, _g) = crate::telemetry::test_support::isolate();
+        let conn = fixture_conn();
+        conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
+        let mut report = DistillReport::default();
+        let id = insert_fact_with_history(&conn, "Mike", "prefers", "coffee", 0.5, "/tmp/t.md")
+            .unwrap();
+        let c = Candidate {
+            subject: "Mike".into(),
+            predicate: "prefers".into(),
+            object: "tea".into(),
+            importance: 0.5,
+        };
+        let d = judge::Decision {
+            action: judge::Action::Flag,
+            target_id: Some(id.clone()),
+            reason: "contradicts".into(),
+        };
+        apply_judge_decision(&conn, &c, "prefers", "tea", d, "/tmp/t.md", &mut report).unwrap();
+        let flags: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fact_history WHERE op='FLAG' AND fact_id=?1",
+                [&id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(flags, 1, "a targeted FLAG keeps its fact_history row");
     }
 
     /// Red test for Te4qev9ed: strike escalation + 3-strike loud skip.
@@ -489,6 +661,20 @@ mod tests {
             detail.contains("reason="),
             "strike 3: telemetry detail must carry reason=<error> for a skipped slice (got {:?})",
             slice_row.detail
+        );
+
+        // Alerting contract (2026-08-18): strike 2 pages the alert path while
+        // an operator can still intervene, and the poison-skip itself is
+        // recorded as a status="error" event, not only the "skipped" slice row.
+        assert!(
+            rows.iter()
+                .any(|r| r.event == "distill::strike-warning" && r.status == "error"),
+            "strike 2 must record a loud strike-warning event"
+        );
+        assert!(
+            rows.iter()
+                .any(|r| r.event == "distill::poison-skip" && r.status == "error"),
+            "the poison skip must record a loud error event"
         );
 
         std::env::remove_var("HEX_DISTILL_FORCE_EXTRACT_FAIL");
