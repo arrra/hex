@@ -88,8 +88,7 @@ pub fn offset_of(conn: &Connection, path: &str) -> anyhow::Result<Option<i64>> {
 /// `distill-rewind --all` preview so the CLI can print old->new per row and
 /// detect the zero-row case loudly.
 pub fn all_rows(conn: &Connection) -> anyhow::Result<Vec<(String, i64)>> {
-    let mut stmt =
-        conn.prepare("SELECT path, last_offset FROM transcript_files ORDER BY path")?;
+    let mut stmt = conn.prepare("SELECT path, last_offset FROM transcript_files ORDER BY path")?;
     let rows = stmt
         .query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))?
         .collect::<Result<Vec<_>, _>>()?;
@@ -154,7 +153,11 @@ pub struct RewindPlan {
 /// (or `--all` on an empty corpus) must surface as a failure, not a quiet
 /// success (S6). `dry_run` resolves and reports the same rows but writes
 /// nothing, so an operator can preview the regression before committing it.
-pub fn rewind(conn: &Connection, target: RewindTarget, dry_run: bool) -> anyhow::Result<RewindPlan> {
+pub fn rewind(
+    conn: &Connection,
+    target: RewindTarget,
+    dry_run: bool,
+) -> anyhow::Result<RewindPlan> {
     let rows = match target {
         RewindTarget::One(path) => match offset_of(conn, path)? {
             Some(off) => vec![(path.to_string(), off)],
@@ -293,8 +296,16 @@ mod tests {
         set_strikes(&conn, "/b.md", 1).unwrap();
         rewind_all(&conn).unwrap();
         for p in ["/a.md", "/b.md"] {
-            assert_eq!(last_offset(&conn, p).unwrap(), 0, "rewind_all must zero {p}");
-            assert_eq!(strikes(&conn, p).unwrap(), 0, "rewind_all must clear strikes for {p}");
+            assert_eq!(
+                last_offset(&conn, p).unwrap(),
+                0,
+                "rewind_all must zero {p}"
+            );
+            assert_eq!(
+                strikes(&conn, p).unwrap(),
+                0,
+                "rewind_all must clear strikes for {p}"
+            );
         }
     }
 

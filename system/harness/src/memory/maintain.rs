@@ -42,6 +42,28 @@ pub fn run_maintain(conn: &Connection, hex_dir: &Path, backfill_facts: bool) -> 
         }
     }
 
+    // 2b. facts_fts integrity check + self-heal. External-content fts5 can
+    //     hold an index that no longer matches the facts table (lost rebuild,
+    //     out-of-band writes); recall's relevance arm then degrades silently.
+    //     rank=1 checks the index AGAINST the content table; on mismatch,
+    //     rebuild — loud either way (SO S6).
+    match conn.execute(
+        "INSERT INTO facts_fts(facts_fts, rank) VALUES('integrity-check', 1)",
+        [],
+    ) {
+        Ok(_) => println!("maintain: facts_fts integrity ok"),
+        Err(e) => {
+            eprintln!("maintain: facts_fts integrity check failed ({e}) — rebuilding");
+            match conn.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')", []) {
+                Ok(_) => println!("maintain: facts_fts rebuilt"),
+                Err(e2) => {
+                    eprintln!("maintain: facts_fts rebuild FAILED: {e2}");
+                    failures += 1;
+                }
+            }
+        }
+    }
+
     // 3. transcript_files hygiene. Canonical rows are keyed EXACTLY as the
     //    live writer writes them: op_transcript_backstop (consolidate.rs)
     //    registers the ABSOLUTE path under `<hex_dir>/raw/transcripts/`, and

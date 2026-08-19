@@ -3,6 +3,7 @@ pub mod claude_cli;
 pub mod consolidate;
 pub mod distill;
 pub mod embed;
+pub mod eval;
 pub mod index;
 pub mod maintain;
 pub mod maintain_facts;

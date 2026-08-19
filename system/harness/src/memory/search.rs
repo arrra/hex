@@ -423,11 +423,15 @@ pub(crate) fn run_query(
     }
 
     // Facts arm — reuses the already-computed query vector for its KNN side.
-    let mut facts = super::recall::facts_recall(conn, &args.query, FACTS_TOP_K, query_vec)
-        .unwrap_or_else(|e| {
-            eprintln!("facts arm failed: {e}");
-            vec![]
-        });
+    // Privacy is applied post-fusion below alongside the chunk arms, so the
+    // retrieval itself runs unfiltered (exclude_private = false).
+    let mut facts: Vec<super::recall::FactHit> =
+        super::recall::facts_recall(conn, &args.query, FACTS_TOP_K, query_vec, false)
+            .map(|hits| hits.into_iter().map(|(f, _)| f).collect())
+            .unwrap_or_else(|e| {
+                eprintln!("facts arm failed: {e}");
+                vec![]
+            });
 
     // --file path filter, applied POST-fusion so it covers every arm. The FTS
     // arm filters in SQL (search_fts), but the vector and facts arms do NOT —
