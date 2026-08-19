@@ -11,6 +11,7 @@ pub mod parse_transcripts;
 pub mod predicates;
 pub mod provider;
 pub mod recall;
+pub mod recall_config;
 pub mod recent;
 pub mod rrf;
 pub mod schema;
