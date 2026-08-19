@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use super::recall_config::RecallConfig;
+
 #[derive(Debug, Deserialize)]
 pub struct CaseFile {
     #[serde(default)]
@@ -112,13 +114,175 @@ pub fn compare(
     (regressions, new_passes)
 }
 
+/// Machine-readable summary of one eval run, for trend recording. Every count
+/// is exactly what the JSON output already reports — this struct just hands
+/// them back in-process instead of over stdout.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EvalSummary {
+    pub cases_total: usize,
+    pub facts_hits: usize,
+    pub anywhere_hits: usize,
+    /// Number of baseline facts-hits that now miss (0 when no baseline).
+    pub regressions: usize,
+    pub baseline_present: bool,
+}
+
+/// Outcome of a headless eval run. Separates the benign "instance shipped no
+/// cases file" skip from a genuine error so the caller can SKIP loudly vs FAIL
+/// loudly (SO S6) without string-matching.
+#[derive(Debug)]
+pub enum EvalRunError {
+    /// Cases file does not exist — the instance has not opted into the eval.
+    CasesAbsent(PathBuf),
+    /// Any other failure (unreadable/parse-broken cases, empty suite,
+    /// unreadable baseline). Always loud.
+    Other(String),
+}
+
+impl std::fmt::Display for EvalRunError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            EvalRunError::CasesAbsent(p) => write!(f, "cases file absent at {}", p.display()),
+            EvalRunError::Other(msg) => write!(f, "{msg}"),
+        }
+    }
+}
+
+impl std::error::Error for EvalRunError {}
+
+/// Internal API: run the recall eval and return machine-readable counts WITHOUT
+/// printing, gating, or touching the baseline file. Reuses the exact `score`
+/// and `compare` path the CLI `run` uses, so trend numbers match the gate. Used
+/// by the `hex-eval-trend` cron worker.
+pub fn summarize(
+    hex_root: &Path,
+    cases_override: Option<&Path>,
+) -> std::result::Result<EvalSummary, EvalRunError> {
+    let cpath = cases_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cases_path(hex_root));
+    let raw = match std::fs::read_to_string(&cpath) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(EvalRunError::CasesAbsent(cpath));
+        }
+        Err(e) => {
+            return Err(EvalRunError::Other(format!(
+                "cannot read cases file {}: {e}",
+                cpath.display()
+            )));
+        }
+    };
+    let file: CaseFile = toml::from_str(&raw)
+        .map_err(|e| EvalRunError::Other(format!("cases file parse error: {e}")))?;
+    if file.cases.is_empty() {
+        return Err(EvalRunError::Other(format!(
+            "no cases in {}",
+            cpath.display()
+        )));
+    }
+
+    let mut results: BTreeMap<String, CaseResult> = BTreeMap::new();
+    for case in &file.cases {
+        let outcome = super::recall::recall(hex_root, &case.query, false);
+        results.insert(case.id.clone(), score(&outcome.context, case));
+    }
+    let cases_total = file.cases.len();
+    let facts_hits = results.values().filter(|r| r.facts).count();
+    let anywhere_hits = results.values().filter(|r| r.anywhere).count();
+
+    // A baseline that EXISTS but fails to parse is a hard error (S6) — a corrupt
+    // baseline silently reporting zero regressions is exactly the quiet failure
+    // the trend must never record.
+    let bpath = baseline_path(hex_root);
+    let baseline: Option<BTreeMap<String, CaseResult>> = match std::fs::read_to_string(&bpath) {
+        Ok(s) => Some(serde_json::from_str(&s).map_err(|e| {
+            EvalRunError::Other(format!("baseline {} is unreadable: {e}", bpath.display()))
+        })?),
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            return Err(EvalRunError::Other(format!(
+                "cannot read baseline {}: {e}",
+                bpath.display()
+            )));
+        }
+    };
+    let regressions = match &baseline {
+        Some(b) => compare(&results, b).0.len(),
+        None => 0,
+    };
+
+    Ok(EvalSummary {
+        cases_total,
+        facts_hits,
+        anywhere_hits,
+        regressions,
+        baseline_present: baseline.is_some(),
+    })
+}
+
+/// Additive scoring helper for the weekly auto-tuner (spec Tzxmamhr8). Scores
+/// every case in `cases_path` through `recall_with_config` against the DB rooted
+/// at `hex_root`, returning per-case results keyed by case id. Reuses the EXACT
+/// private `score` + `recall_with_config` path the CLI eval uses, so tuner
+/// numbers match the eval's — scoring semantics are unchanged, this is only a
+/// new in-process entry point that never reads or gates against the baseline
+/// and never prints.
+///
+/// The tuner points `hex_root` at a frozen memory.db SNAPSHOT so every variant
+/// is scored against identical data, and passes the variant `cfg` explicitly so
+/// the live `recall.toml` is never read or mutated.
+pub fn score_cases_with_config(
+    hex_root: &Path,
+    cases_path: &Path,
+    cfg: &RecallConfig,
+) -> std::result::Result<BTreeMap<String, CaseResult>, EvalRunError> {
+    let raw = match std::fs::read_to_string(cases_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(EvalRunError::CasesAbsent(cases_path.to_path_buf()));
+        }
+        Err(e) => {
+            return Err(EvalRunError::Other(format!(
+                "cannot read cases file {}: {e}",
+                cases_path.display()
+            )));
+        }
+    };
+    let file: CaseFile = toml::from_str(&raw)
+        .map_err(|e| EvalRunError::Other(format!("cases file parse error: {e}")))?;
+    if file.cases.is_empty() {
+        return Err(EvalRunError::Other(format!(
+            "no cases in {}",
+            cases_path.display()
+        )));
+    }
+    let mut results: BTreeMap<String, CaseResult> = BTreeMap::new();
+    for case in &file.cases {
+        let outcome = super::recall::recall_with_config(hex_root, &case.query, false, cfg);
+        results.insert(case.id.clone(), score(&outcome.context, case));
+    }
+    Ok(results)
+}
+
+/// Count of facts-hits in a per-case result map — the scalar a sweep maximizes.
+pub fn facts_hits(results: &BTreeMap<String, CaseResult>) -> usize {
+    results.values().filter(|r| r.facts).count()
+}
+
 /// Run the eval. Returns the process exit code (0 = pass, 1 = regression or
 /// setup error). Loud on every failure path per SO S6.
+///
+/// `cfg_override` lets a sweep score a parameter variant WITHOUT touching the
+/// live `recall.toml` (spec Tx4px1hxf): `Some(cfg)` scores every case through
+/// that config; `None` runs the live recall path (which loads the instance
+/// config, or compiled defaults when absent).
 pub fn run(
     hex_root: &Path,
     cases_override: Option<&Path>,
     update_baseline: bool,
     json_out: bool,
+    cfg_override: Option<&RecallConfig>,
 ) -> i32 {
     let cpath = cases_override
         .map(Path::to_path_buf)
@@ -148,7 +312,10 @@ pub fn run(
     let mut results: BTreeMap<String, CaseResult> = BTreeMap::new();
     let mut slice_tally: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for case in &file.cases {
-        let outcome = super::recall::recall(hex_root, &case.query, false);
+        let outcome = match cfg_override {
+            Some(cfg) => super::recall::recall_with_config(hex_root, &case.query, false, cfg),
+            None => super::recall::recall(hex_root, &case.query, false),
+        };
         let r = score(&outcome.context, case);
         let slice = case.slice.clone().unwrap_or_else(|| "unsliced".into());
         let t = slice_tally.entry(slice).or_insert((0, 0));

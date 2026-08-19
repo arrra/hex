@@ -7,6 +7,8 @@ use serde_json::json;
 use std::io::Write;
 use std::path::Path;
 
+use super::recall_config::RecallConfig;
+
 const MIN_QUERY_CHARS: usize = 12;
 /// Hard cap on the injected context block. Was 10_000 (spec §8); cut to 3_000
 /// on 2026-06-11 — injected chars are transcript ballast cache-re-read on each
@@ -63,6 +65,27 @@ pub(crate) fn facts_recall(
     query_vec: Option<&[f32]>,
     exclude_private: bool,
 ) -> rusqlite::Result<Vec<(FactHit, f64)>> {
+    facts_recall_with_config(
+        conn,
+        query,
+        k,
+        query_vec,
+        exclude_private,
+        &RecallConfig::default(),
+    )
+}
+
+/// [`facts_recall`] with an explicit recall config. The RRF fusion constant and
+/// the two dual-weighted bm25 arm weightings come from `cfg`; `&RecallConfig::default()`
+/// reproduces the previous hardcoded constants exactly.
+pub(crate) fn facts_recall_with_config(
+    conn: &rusqlite::Connection,
+    query: &str,
+    k: usize,
+    query_vec: Option<&[f32]>,
+    exclude_private: bool,
+    cfg: &RecallConfig,
+) -> rusqlite::Result<Vec<(FactHit, f64)>> {
     // FTS5 default-ANDs tokens — for natural-language queries we want any-match.
     // Drop stopwords and OR the remaining alphanumerics so "who is alice" hits
     // facts mentioning the slug.
@@ -118,9 +141,10 @@ pub(crate) fn facts_recall(
         .query_map(rusqlite::params![fts_query, (k * 3) as i64], |r| r.get(0))?
         .collect()
     };
-    // (subject, predicate, object) weights per arm.
-    let fts_content_ids: Vec<i64> = fts_arm("1.0, 0.25, 2.0")?;
-    let fts_entity_ids: Vec<i64> = fts_arm("2.0, 1.0, 0.25")?;
+    // (subject, predicate, object) weights per arm — lifted into RecallConfig
+    // (spec Tx4px1hxf); defaults are "1.0, 0.25, 2.0" / "2.0, 1.0, 0.25".
+    let fts_content_ids: Vec<i64> = fts_arm(&cfg.arm_weights.content_sql())?;
+    let fts_entity_ids: Vec<i64> = fts_arm(&cfg.arm_weights.entity_sql())?;
 
     // Slug arm: subjects whose colon-slug contains a query token (e.g.
     // "alice" → `person:alice`, `person:alice-chew`). FTS tokenization can't
@@ -164,7 +188,7 @@ pub(crate) fn facts_recall(
     let slug_top1 = slug_ids.first().copied();
     let fused = super::rrf::rrf_fuse(
         &[fts_content_ids, fts_entity_ids, slug_ids, knn_ids],
-        super::rrf::RRF_K,
+        cfg.rrf_k,
     );
 
     // Truncate to k in fused order, but GUARANTEE the slug arm's top-1 a
@@ -265,7 +289,25 @@ fn is_machine(query: &str) -> bool {
 
 /// Run recall for `query`. `for_agent` = true applies the private filter
 /// (BOI workers get non-private chunks only — spec §7).
+///
+/// Loads the instance recall config (`$HEX_DIR/.hex/config/recall.toml`);
+/// absent → compiled defaults (identical to the pre-config behavior). A sweep
+/// scoring a variant against a frozen snapshot uses [`recall_with_config`]
+/// directly so it never touches the live config file.
 pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
+    let cfg = RecallConfig::load(hex_root);
+    recall_with_config(hex_root, query, for_agent, &cfg)
+}
+
+/// [`recall`] with an explicit recall config — the seam the eval/tuning sweep
+/// uses to score a parameter variant without loading (or mutating) the live
+/// `recall.toml`.
+pub fn recall_with_config(
+    hex_root: &Path,
+    query: &str,
+    for_agent: bool,
+    cfg: &RecallConfig,
+) -> RecallOutcome {
     let t0 = std::time::Instant::now();
 
     if is_trivial(query) || is_machine(query) {
@@ -298,13 +340,14 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
                 // Chunk cap = what format_context_v2 actually renders; without
                 // it, merged-but-unrendered chunks eat the char budget that
                 // should carry facts (~600 chars each).
-                let assembled = super::assemble::assemble_with_chunk_cap(
+                let assembled = super::assemble::assemble_with_config(
                     &conn,
                     query,
                     for_agent,
                     MAX_CONTEXT_CHARS,
                     None,
                     MAX_CHUNKS_RENDERED,
+                    cfg,
                 );
 
                 // Capture per-move stats for the recall-log (calibration seam —
@@ -869,6 +912,77 @@ mod plan2_tests {
             !fused.iter().any(|f| f.subject == "person:dead"),
             "tombstoned fact must not surface via the KNN arm"
         );
+    }
+
+    /// Spec Tx4px1hxf guarantee, checked end-to-end at the ranking layer: the
+    /// live path (`facts_recall`, which delegates to `RecallConfig::default()`)
+    /// must produce the SAME fused ordering and native scores as an explicit
+    /// config built from the documented default LITERALS (rrf_k 60.0, arm
+    /// weights [1,0.25,2]/[2,1,0.25], move-relevance 1.0/0.3). Because the
+    /// explicit literals are independent of the `Default` impl, a drift in a
+    /// compiled default that changes this fixture's ranking fails here. This
+    /// complements the struct-level pin in
+    /// `recall_config::compiled_defaults_equal_prior_constants` by proving the
+    /// defaults thread through the real `facts_recall_with_config` fusion.
+    #[test]
+    fn default_config_reproduces_legacy_facts_recall_exactly() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        // A mix that exercises the content arm, the entity arm, and the slug
+        // arm so the fusion order is non-trivial and sensitive to every
+        // lifted constant (arm weights + RRF k).
+        let rows = [
+            ("f1", "project:hex", "uses", "sqlite-vec for the vector store"),
+            ("f2", "person:alexandra", "prefers", "quiet mornings and vector math"),
+            ("f3", "project:hex", "decided", "to store the vector index on disk"),
+            ("f4", "person:bob", "wrote", "the store migration for vectors"),
+        ];
+        for (id, s, p, o) in rows {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,0.5,'2026-06-11','2026-06-11')",
+                rusqlite::params![id, s, p, o],
+            )
+            .unwrap();
+        }
+
+        // An explicit config spelled entirely from the documented default
+        // LITERALS — deliberately NOT `RecallConfig::default()`, so a drift in
+        // the Default impl makes the two paths disagree.
+        let explicit = crate::memory::recall_config::RecallConfig {
+            rrf_k: 60.0,
+            arm_weights: crate::memory::recall_config::ArmWeights {
+                content: [1.0, 0.25, 2.0],
+                entity: [2.0, 1.0, 0.25],
+            },
+            move_relevance: crate::memory::recall_config::MoveRelevance {
+                fired: 1.0,
+                unfired: 0.3,
+            },
+        };
+
+        let query = "what powers the vector store";
+        // `FactHit` carries no id; (subject, object) uniquely tags each fixture
+        // fact, and `native` is the fused score — together they pin ordering,
+        // membership, AND score so any ranking drift shows.
+        let live: Vec<(String, String, f64)> = facts_recall(&c, query, 5, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|(f, native)| (f.subject, f.object, native))
+            .collect();
+        let via_literals: Vec<(String, String, f64)> =
+            facts_recall_with_config(&c, query, 5, None, false, &explicit)
+                .unwrap()
+                .into_iter()
+                .map(|(f, native)| (f.subject, f.object, native))
+                .collect();
+        assert_eq!(
+            live, via_literals,
+            "live default recall ranking drifted from the documented default literals"
+        );
+        assert!(!live.is_empty(), "fixture must produce hits");
     }
 
     #[test]

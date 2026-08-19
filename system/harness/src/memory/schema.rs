@@ -117,6 +117,68 @@ pub fn apply_messages_schema(conn: &Connection) -> Result<()> {
     conn.execute_batch(MESSAGES_DDL)
 }
 
+/// Trend table for the recall eval — one row per `hex-eval-trend` cron run.
+/// Columns mirror the eval's machine-readable summary so the trend is a
+/// straight append: no scoring change, just a durable record of each night's
+/// numbers. `baseline_present` is stored 0/1.
+pub const EVAL_RUNS_DDL: &str = "
+CREATE TABLE IF NOT EXISTS eval_runs (
+    id               INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts               TEXT NOT NULL,
+    cases_total      INTEGER NOT NULL,
+    facts_hits       INTEGER NOT NULL,
+    anywhere_hits    INTEGER NOT NULL,
+    regressions      INTEGER NOT NULL,
+    baseline_present INTEGER NOT NULL,
+    harness_version  TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_eval_runs_ts ON eval_runs(ts);
+";
+
+/// Apply the `eval_runs` migration. A single `CREATE TABLE IF NOT EXISTS` DDL
+/// batch is atomic and idempotent (same shape as `apply_messages_schema`), so
+/// a partial or repeated apply can never leave a half-built table.
+pub fn apply_eval_runs_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(EVAL_RUNS_DDL)
+}
+
+/// Auto-tuner ledgers (hill-climber stage 1, spec Tzxmamhr8). `win_log` records
+/// every landed parameter change; `regret_log` records every rejected candidate
+/// AND every later auto-revert. Both tables carry the identical column set the
+/// spec fixes — `id, ts, params_json, tuning_score, heldout_score, action,
+/// reverted` — so the weekly digest reads them uniformly. `params_json` is the
+/// free-form payload (the winning `RecallConfig`, the archived `.prev` path, and
+/// the pre-change held-out score the revert check re-measures against).
+pub const TUNE_LOG_DDL: &str = "
+CREATE TABLE IF NOT EXISTS win_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            TEXT NOT NULL,
+    params_json   TEXT NOT NULL,
+    tuning_score  INTEGER NOT NULL,
+    heldout_score INTEGER NOT NULL,
+    action        TEXT NOT NULL,
+    reverted      INTEGER NOT NULL DEFAULT 0
+);
+CREATE TABLE IF NOT EXISTS regret_log (
+    id            INTEGER PRIMARY KEY AUTOINCREMENT,
+    ts            TEXT NOT NULL,
+    params_json   TEXT NOT NULL,
+    tuning_score  INTEGER NOT NULL,
+    heldout_score INTEGER NOT NULL,
+    action        TEXT NOT NULL,
+    reverted      INTEGER NOT NULL DEFAULT 0
+);
+CREATE INDEX IF NOT EXISTS idx_win_log_ts    ON win_log(ts);
+CREATE INDEX IF NOT EXISTS idx_regret_log_ts ON regret_log(ts);
+";
+
+/// Apply the `win_log`/`regret_log` migration. One `CREATE TABLE IF NOT EXISTS`
+/// batch — atomic and idempotent, same shape as `apply_eval_runs_schema`, so a
+/// partial or repeated apply can never leave a half-built ledger.
+pub fn apply_tune_log_schema(conn: &Connection) -> Result<()> {
+    conn.execute_batch(TUNE_LOG_DDL)
+}
+
 pub fn apply_plan2(conn: &Connection) -> Result<()> {
     conn.execute_batch(PLAN2_DDL)?;
     // Backfill: older DBs created before consecutive_failures was added still
