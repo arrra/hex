@@ -217,7 +217,7 @@ the slope, per-item cancels in the intercept. Throwaway dirs deleted after.
 | Dimensional consistency | 768 (ok) / 384 if MiniLM (breaks) | **768 (ok)** | n/a |
 
 ### Why (a) is rejected
-1. **Latency:** ≥1.6 s cold-load per invocation on the quiet floor; ~22 s here.
+1. **Latency:** ≥1.6 s cold-load per invocation on the quiet floor; ~13–15 s here (§3, measured two ways).
    Off the p95 budget by ≥3×. This is the hot UserPromptSubmit hook — it runs
    per message.
 2. **The "small int8 MiniLM" mitigation does not hold:** MiniLM-class models
