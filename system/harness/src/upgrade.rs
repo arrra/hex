@@ -538,7 +538,15 @@ fn binary_needs_rebuild(
     source_sha: Option<&str>,
 ) -> bool {
     let version_mismatch = installed_ver != Some(cargo_ver);
-    let sha_mismatch = source_sha.is_some() && installed_sha != source_sha;
+    // SHA drives a rebuild only when BOTH sides are known and differ. Either
+    // side unknown + version matching = freshness unverifiable, and the skip
+    // is deliberate (the caller warns loudly): `source_sha` None is the
+    // offline/--local source; `installed_sha` None is a prebuilt or
+    // hand-installed binary (install.sh never writes hex.sha) — forcing a
+    // rebuild there made every upgrade on a cargo-less box hard-fail forever
+    // on a binary that was already current (review 2026-08-19).
+    let sha_mismatch =
+        source_sha.is_some() && installed_sha.is_some() && installed_sha != source_sha;
     version_mismatch || sha_mismatch
 }
 
@@ -605,20 +613,26 @@ fn detect_personal_overlay(hex_dot_dir: &Path) -> bool {
     hex_dot_dir.join("harness-personal").is_dir() || hex_dot_dir.join("modules").is_dir()
 }
 
-fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
+/// Sync VERSIONS and rebuild/swap the hex binary when stale. Returns `true`
+/// when the binary step is HEALTHY (rebuilt+swapped, or legitimately up to
+/// date / not applicable) and `false` when the installed binary may be stale
+/// after this run (sync failure, cargo build failure, install failure). The
+/// caller MUST fail the whole upgrade on `false` — printing "Upgrade
+/// complete." over a stale binary is the OBS-017 deploy black hole.
+fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) -> bool {
     let versions_file = hex_dir.join("VERSIONS");
     if !versions_file.exists() {
-        return;
+        return true;
     }
     let cargo_toml = source_dir.join("system/harness/Cargo.toml");
     if !cargo_toml.exists() {
-        return;
+        return true;
     }
     let cargo_content = match fs::read_to_string(&cargo_toml) {
         Ok(s) => s,
         Err(_) => {
             eprintln!("  [WARN] Could not read Cargo.toml");
-            return;
+            return false;
         }
     };
     let cargo_ver = cargo_content
@@ -630,7 +644,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
 
     let Some(cargo_ver) = cargo_ver else {
         eprintln!("  [WARN] Could not parse version from Cargo.toml");
-        return;
+        return false;
     };
 
     // Preserve every existing line — comments, blank lines, and any
@@ -729,8 +743,8 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
         println!("  → hex binary {reason} — rebuilding...");
         let harness_src = source_dir.join("system/harness");
         if let Err(e) = apply_sync(&harness_src, &harness_dst, None) {
-            eprintln!("  [WARN] Failed to sync harness source: {e}");
-            return;
+            eprintln!("  [FAIL] Failed to sync harness source: {e}");
+            return false;
         }
         // Deletion pass scoped to src/ and tests/ only — never touches target/ or Cargo.lock.
         for sub in &["src", "tests"] {
@@ -753,8 +767,8 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
         let codeintel_dst = hex_dot_dir.join("code-intel");
         if codeintel_src.exists() {
             if let Err(e) = apply_sync(&codeintel_src, &codeintel_dst, None) {
-                eprintln!("  [WARN] Failed to sync code-intel source: {e}");
-                return;
+                eprintln!("  [FAIL] Failed to sync code-intel source: {e}");
+                return false;
             }
             for sub in &["src", "tests"] {
                 let dst_sub = codeintel_dst.join(sub);
@@ -773,6 +787,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
         // (personal workers) — NOT a specific file, so it survives files being
         // added/removed/re-homed (e.g. release.rs leaving the binary).
         let use_personal = detect_personal_overlay(&hex_dot_dir);
+        let mut binary_step_ok = false;
         let mut build_args = vec!["build", "--release"];
         // --target-dir is always set to harness_dst/target so the output location is
         // deterministic regardless of workspace nesting (fixes OBS-017).
@@ -794,6 +809,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                 let release_bin = harness_dst.join("target/release/hex");
                 match atomic_install_binary(&release_bin, &installed_bin) {
                     Ok(()) => {
+                        binary_step_ok = true;
                         println!("  [OK] hex binary rebuilt and swapped (atomic): v{cargo_ver}");
                         if let Some(ref sha) = source_sha {
                             let sha_tmp = installed_sha_file.with_extension("tmp");
@@ -831,8 +847,29 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) {
                 eprintln!("  [FAIL] cargo build failed — install Rust and rerun upgrade");
             }
         }
+        binary_step_ok
     } else {
-        println!("  [OK] hex binary already at v{cargo_ver} (SHA matches) — no rebuild needed");
+        if source_sha.is_none() || installed_sha.is_none() {
+            // Version matches but freshness is UNVERIFIABLE — source SHA
+            // unknown (offline/--local, git failed) or installed SHA never
+            // recorded (prebuilt / hand-installed binary; install.sh writes
+            // no hex.sha). The skip is deliberate: forcing a rebuild here
+            // hard-fails forever on cargo-less boxes whose binary is already
+            // current. But silence would hide a same-version code change
+            // (OBS-017 #1's residual) — say it loudly.
+            let missing = if source_sha.is_none() {
+                "source SHA unknown (git unavailable at source)"
+            } else {
+                "installed SHA never recorded (prebuilt or hand-installed binary)"
+            };
+            eprintln!(
+                "  [WARN] {missing} — binary freshness NOT verified; \
+                 skipping rebuild because the version matches (v{cargo_ver})."
+            );
+        } else {
+            println!("  [OK] hex binary already at v{cargo_ver} (SHA matches) — no rebuild needed");
+        }
+        true
     }
 }
 
@@ -1248,7 +1285,7 @@ pub fn run(args: &[String]) -> i32 {
 
     // Step 5: Sync VERSIONS + rebuild binary if needed
     println!("\n5. Sync VERSIONS");
-    sync_versions_file(&hex_dir, &source_dir, &backup_dir);
+    let binary_ok = sync_versions_file(&hex_dir, &source_dir, &backup_dir);
 
     // Step 6: Shell setup
     println!("\n6. Shell Setup");
@@ -1259,6 +1296,13 @@ pub fn run(args: &[String]) -> i32 {
     println!("  Files updated:  {total_changed}");
     println!("  Files added:    {total_new}");
     println!();
+    if !binary_ok {
+        // OBS-017 deploy black hole: never print success over a stale binary.
+        eprintln!("  Upgrade FAILED — the hex binary was NOT updated (see Step 5).");
+        eprintln!("  The workspace files may have synced, but the running code is stale.");
+        println!();
+        return 1;
+    }
     println!("  Upgrade complete.");
     println!();
 
@@ -1821,6 +1865,107 @@ mod tests {
             !cache_is_healthy(&corrupt),
             "a headless .git shell must be unhealthy (must not resolve up-tree)"
         );
+    }
+
+    /// The binary step must report health honestly: an up-to-date skip is
+    /// `true`; an unparseable Cargo.toml (can't even determine the target
+    /// version — the source sync is broken) is `false`, which run() turns
+    /// into a failed upgrade instead of "Upgrade complete." (OBS-017).
+    #[cfg(unix)]
+    #[test]
+    fn sync_versions_file_returns_binary_step_health() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_dir = tmp.path().join("hex");
+        let source_dir = tmp.path().join("source");
+        let backup_dir = tmp.path().join("backup");
+        fs::create_dir_all(&backup_dir).unwrap();
+        write_file(&hex_dir.join("VERSIONS"), "HEX_FOUNDATION_VERSION=v0.1.0\n");
+        write_file(
+            &source_dir.join("system/harness/Cargo.toml"),
+            "[package]\nname = \"hex-harness\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        );
+        let bin_dir = hex_dir.join(".hex/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let mock_bin = bin_dir.join("hex");
+        fs::write(&mock_bin, "#!/bin/sh\necho hex 1.0.0\n").unwrap();
+        fs::set_permissions(&mock_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Version matches → legitimate skip → healthy.
+        assert!(
+            sync_versions_file(&hex_dir, &source_dir, &backup_dir),
+            "up-to-date skip must report the binary step healthy"
+        );
+
+        // Cargo.toml present but versionless → cannot verify anything → NOT healthy.
+        write_file(
+            &source_dir.join("system/harness/Cargo.toml"),
+            "[package]\nname = \"hex-harness\"\nedition = \"2021\"\n",
+        );
+        assert!(
+            !sync_versions_file(&hex_dir, &source_dir, &backup_dir),
+            "unparseable Cargo.toml must fail the binary step loudly"
+        );
+
+        // Missing VERSIONS (older layout) → step not applicable → healthy no-op.
+        fs::remove_file(hex_dir.join("VERSIONS")).unwrap();
+        assert!(sync_versions_file(&hex_dir, &source_dir, &backup_dir));
+    }
+
+    /// The deploy-black-hole path itself (OBS-017): a rebuild is NEEDED
+    /// (version mismatch) but the rebuild machinery fails — here the harness
+    /// source sync fails deterministically because `.hex/harness` exists as a
+    /// FILE. sync_versions_file must return false so run() fails the upgrade
+    /// instead of printing "Upgrade complete." over a stale binary. This
+    /// enters the `binary_needs_rebuild == true` block without invoking
+    /// cargo.
+    #[cfg(unix)]
+    #[test]
+    fn sync_versions_file_fails_when_rebuild_path_breaks() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_dir = tmp.path().join("hex");
+        let source_dir = tmp.path().join("source");
+        let backup_dir = tmp.path().join("backup");
+        fs::create_dir_all(&backup_dir).unwrap();
+        write_file(&hex_dir.join("VERSIONS"), "HEX_FOUNDATION_VERSION=v0.1.0\n");
+        write_file(
+            &source_dir.join("system/harness/Cargo.toml"),
+            "[package]\nname = \"hex-harness\"\nversion = \"2.0.0\"\nedition = \"2021\"\n",
+        );
+        // Installed binary reports an OLDER version → rebuild required.
+        let bin_dir = hex_dir.join(".hex/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let mock_bin = bin_dir.join("hex");
+        fs::write(&mock_bin, "#!/bin/sh\necho hex 1.0.0\n").unwrap();
+        fs::set_permissions(&mock_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        // Sabotage: .hex/harness is a FILE, so the harness source sync fails.
+        fs::write(hex_dir.join(".hex/harness"), "not a directory").unwrap();
+
+        assert!(
+            !sync_versions_file(&hex_dir, &source_dir, &backup_dir),
+            "a broken rebuild path must fail the binary step (deploy black hole)"
+        );
+    }
+
+    /// Prebuilt/hand-installed binaries have no hex.sha. When the version
+    /// already matches, that must NOT force a rebuild (a cargo-less box would
+    /// hard-fail every upgrade forever on a binary that is already current);
+    /// a genuine version mismatch must still rebuild.
+    #[test]
+    fn binary_needs_rebuild_skips_when_installed_sha_unrecorded() {
+        assert!(!binary_needs_rebuild(
+            Some("0.50.3"),
+            "0.50.3",
+            None,
+            Some("d1c63f37"),
+        ));
+        assert!(binary_needs_rebuild(
+            Some("0.50.2"),
+            "0.50.3",
+            None,
+            Some("d1c63f37"),
+        ));
     }
 
     // Regression test for the 2026-07-16 audit finding: sync_versions_file
