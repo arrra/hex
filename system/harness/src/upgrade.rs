@@ -538,7 +538,15 @@ fn binary_needs_rebuild(
     source_sha: Option<&str>,
 ) -> bool {
     let version_mismatch = installed_ver != Some(cargo_ver);
-    let sha_mismatch = source_sha.is_some() && installed_sha != source_sha;
+    // SHA drives a rebuild only when BOTH sides are known and differ. Either
+    // side unknown + version matching = freshness unverifiable, and the skip
+    // is deliberate (the caller warns loudly): `source_sha` None is the
+    // offline/--local source; `installed_sha` None is a prebuilt or
+    // hand-installed binary (install.sh never writes hex.sha) — forcing a
+    // rebuild there made every upgrade on a cargo-less box hard-fail forever
+    // on a binary that was already current (review 2026-08-19).
+    let sha_mismatch =
+        source_sha.is_some() && installed_sha.is_some() && installed_sha != source_sha;
     version_mismatch || sha_mismatch
 }
 
@@ -841,16 +849,22 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) -> b
         }
         binary_step_ok
     } else {
-        if source_sha.is_none() {
-            // Version matches but freshness is UNVERIFIABLE (git rev-parse
-            // failed on the source). The skip stands (pinned behavior:
-            // offline/--local sources must not force a rebuild every run),
-            // but silence here would hide a same-version code change forever
+        if source_sha.is_none() || installed_sha.is_none() {
+            // Version matches but freshness is UNVERIFIABLE — source SHA
+            // unknown (offline/--local, git failed) or installed SHA never
+            // recorded (prebuilt / hand-installed binary; install.sh writes
+            // no hex.sha). The skip is deliberate: forcing a rebuild here
+            // hard-fails forever on cargo-less boxes whose binary is already
+            // current. But silence would hide a same-version code change
             // (OBS-017 #1's residual) — say it loudly.
+            let missing = if source_sha.is_none() {
+                "source SHA unknown (git unavailable at source)"
+            } else {
+                "installed SHA never recorded (prebuilt or hand-installed binary)"
+            };
             eprintln!(
-                "  [WARN] source SHA unknown (git unavailable at source) — \
-                 binary freshness NOT verified; skipping rebuild because the \
-                 version matches (v{cargo_ver}). Use a git source to verify."
+                "  [WARN] {missing} — binary freshness NOT verified; \
+                 skipping rebuild because the version matches (v{cargo_ver})."
             );
         } else {
             println!("  [OK] hex binary already at v{cargo_ver} (SHA matches) — no rebuild needed");
@@ -1896,6 +1910,62 @@ mod tests {
         // Missing VERSIONS (older layout) → step not applicable → healthy no-op.
         fs::remove_file(hex_dir.join("VERSIONS")).unwrap();
         assert!(sync_versions_file(&hex_dir, &source_dir, &backup_dir));
+    }
+
+    /// The deploy-black-hole path itself (OBS-017): a rebuild is NEEDED
+    /// (version mismatch) but the rebuild machinery fails — here the harness
+    /// source sync fails deterministically because `.hex/harness` exists as a
+    /// FILE. sync_versions_file must return false so run() fails the upgrade
+    /// instead of printing "Upgrade complete." over a stale binary. This
+    /// enters the `binary_needs_rebuild == true` block without invoking
+    /// cargo.
+    #[cfg(unix)]
+    #[test]
+    fn sync_versions_file_fails_when_rebuild_path_breaks() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_dir = tmp.path().join("hex");
+        let source_dir = tmp.path().join("source");
+        let backup_dir = tmp.path().join("backup");
+        fs::create_dir_all(&backup_dir).unwrap();
+        write_file(&hex_dir.join("VERSIONS"), "HEX_FOUNDATION_VERSION=v0.1.0\n");
+        write_file(
+            &source_dir.join("system/harness/Cargo.toml"),
+            "[package]\nname = \"hex-harness\"\nversion = \"2.0.0\"\nedition = \"2021\"\n",
+        );
+        // Installed binary reports an OLDER version → rebuild required.
+        let bin_dir = hex_dir.join(".hex/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let mock_bin = bin_dir.join("hex");
+        fs::write(&mock_bin, "#!/bin/sh\necho hex 1.0.0\n").unwrap();
+        fs::set_permissions(&mock_bin, fs::Permissions::from_mode(0o755)).unwrap();
+        // Sabotage: .hex/harness is a FILE, so the harness source sync fails.
+        fs::write(hex_dir.join(".hex/harness"), "not a directory").unwrap();
+
+        assert!(
+            !sync_versions_file(&hex_dir, &source_dir, &backup_dir),
+            "a broken rebuild path must fail the binary step (deploy black hole)"
+        );
+    }
+
+    /// Prebuilt/hand-installed binaries have no hex.sha. When the version
+    /// already matches, that must NOT force a rebuild (a cargo-less box would
+    /// hard-fail every upgrade forever on a binary that is already current);
+    /// a genuine version mismatch must still rebuild.
+    #[test]
+    fn binary_needs_rebuild_skips_when_installed_sha_unrecorded() {
+        assert!(!binary_needs_rebuild(
+            Some("0.50.3"),
+            "0.50.3",
+            None,
+            Some("d1c63f37"),
+        ));
+        assert!(binary_needs_rebuild(
+            Some("0.50.2"),
+            "0.50.3",
+            None,
+            Some("d1c63f37"),
+        ));
     }
 
     // Regression test for the 2026-07-16 audit finding: sync_versions_file
