@@ -1,0 +1,288 @@
+//! `hex memory eval` — recall golden-set eval + regression gate.
+//!
+//! Runs a checked-in set of (query, expected-content) cases through the real
+//! `recall::recall` path against the instance's live memory DB and scores
+//! whether the expected fact reaches the injected context. The gate is
+//! no-regression-from-baseline: a case that passed in the committed baseline
+//! and fails now exits non-zero, loudly. Absolute score floors are deliberate
+//! non-goals — the suite grows from real misses, so the honest gate is
+//! "nothing that worked stopped working" (industry pattern; see
+//! projects/hex-ops/research 2026-08-18 recall investigation).
+//!
+//! Cases live at `$HEX_DIR/.hex/eval/recall-cases.toml` (instance data — real
+//! queries contain personal context and are NOT shipped with foundation).
+//! Baseline: `$HEX_DIR/.hex/eval/recall-baseline.json`, updated only via
+//! `--update-baseline` (review the diff like a snapshot test).
+
+use serde::{Deserialize, Serialize};
+use std::collections::BTreeMap;
+use std::path::{Path, PathBuf};
+
+#[derive(Debug, Deserialize)]
+pub struct CaseFile {
+    #[serde(default)]
+    pub cases: Vec<EvalCase>,
+}
+
+#[derive(Debug, Deserialize)]
+pub struct EvalCase {
+    pub id: String,
+    pub query: String,
+    /// Substring that must appear in an injected fact line (case-insensitive).
+    pub expect: String,
+    /// Optional additional substring the SAME fact line must contain (use for
+    /// subject identity so a coincidental text match can't pass the case).
+    #[serde(default)]
+    pub expect_also: Option<String>,
+    /// Free-form slice tag for reporting (e.g. "fact-relevance", "entity",
+    /// "temporal", "control"). Regressions localize per-slice.
+    #[serde(default)]
+    pub slice: Option<String>,
+}
+
+#[derive(Debug, Serialize, Deserialize, Clone, Copy, PartialEq, Default)]
+pub struct CaseResult {
+    /// Expected content reached the injected `### Facts` section.
+    pub facts: bool,
+    /// Expected content appears anywhere in the injected context (facts or
+    /// chunk snippets). Secondary, non-gating.
+    pub anywhere: bool,
+}
+
+pub fn cases_path(hex_root: &Path) -> PathBuf {
+    hex_root.join(".hex/eval/recall-cases.toml")
+}
+
+pub fn baseline_path(hex_root: &Path) -> PathBuf {
+    hex_root.join(".hex/eval/recall-baseline.json")
+}
+
+/// Score one recall context block against a case. Fact lines are rendered as
+/// `- **subject** predicate object`; a facts hit requires `expect` (and
+/// `expect_also` when set) on a single fact line.
+fn score(context: &str, case: &EvalCase) -> CaseResult {
+    let lc = context.to_lowercase();
+    let expect = case.expect.to_lowercase();
+    let also = case.expect_also.as_ref().map(|s| s.to_lowercase());
+
+    let facts_section = lc
+        .split("### facts")
+        .nth(1)
+        .map(|rest| rest.split("### ").next().unwrap_or(rest))
+        .unwrap_or("");
+    let facts = facts_section
+        .lines()
+        .filter(|l| l.trim_start().starts_with("- "))
+        .any(|l| l.contains(&expect) && also.as_ref().is_none_or(|a| l.contains(a)));
+
+    let anywhere =
+        lc.contains(&expect) && also.as_ref().is_none_or(|a| lc.contains(a));
+    CaseResult { facts, anywhere }
+}
+
+pub struct EvalReport {
+    pub results: BTreeMap<String, CaseResult>,
+    pub regressions: Vec<String>,
+    pub new_passes: Vec<String>,
+}
+
+/// Compare current results to a baseline. Regression = baseline facts-hit now
+/// missing. New passes are informational (candidates for --update-baseline).
+pub fn compare(
+    results: &BTreeMap<String, CaseResult>,
+    baseline: &BTreeMap<String, CaseResult>,
+) -> (Vec<String>, Vec<String>) {
+    let mut regressions = Vec::new();
+    let mut new_passes = Vec::new();
+    for (id, r) in results {
+        match baseline.get(id) {
+            Some(b) => {
+                if b.facts && !r.facts {
+                    regressions.push(id.clone());
+                } else if !b.facts && r.facts {
+                    new_passes.push(id.clone());
+                }
+            }
+            None => {
+                if r.facts {
+                    new_passes.push(id.clone());
+                }
+            }
+        }
+    }
+    (regressions, new_passes)
+}
+
+/// Run the eval. Returns the process exit code (0 = pass, 1 = regression or
+/// setup error). Loud on every failure path per SO S6.
+pub fn run(
+    hex_root: &Path,
+    cases_override: Option<&Path>,
+    update_baseline: bool,
+    json_out: bool,
+) -> i32 {
+    let cpath = cases_override
+        .map(Path::to_path_buf)
+        .unwrap_or_else(|| cases_path(hex_root));
+    let raw = match std::fs::read_to_string(&cpath) {
+        Ok(s) => s,
+        Err(e) => {
+            eprintln!("[memory eval] cannot read cases file {}: {e}", cpath.display());
+            return 1;
+        }
+    };
+    let file: CaseFile = match toml::from_str(&raw) {
+        Ok(f) => f,
+        Err(e) => {
+            eprintln!("[memory eval] cases file parse error: {e}");
+            return 1;
+        }
+    };
+    if file.cases.is_empty() {
+        eprintln!("[memory eval] no cases in {}", cpath.display());
+        return 1;
+    }
+
+    let mut results: BTreeMap<String, CaseResult> = BTreeMap::new();
+    let mut slice_tally: BTreeMap<String, (usize, usize)> = BTreeMap::new();
+    for case in &file.cases {
+        let outcome = super::recall::recall(hex_root, &case.query, false);
+        let r = score(&outcome.context, case);
+        let slice = case.slice.clone().unwrap_or_else(|| "unsliced".into());
+        let t = slice_tally.entry(slice).or_insert((0, 0));
+        t.1 += 1;
+        if r.facts {
+            t.0 += 1;
+        }
+        if !json_out {
+            println!(
+                "{}: facts={} anywhere={}",
+                case.id,
+                if r.facts { "HIT" } else { "miss" },
+                if r.anywhere { "HIT" } else { "miss" }
+            );
+        }
+        results.insert(case.id.clone(), r);
+    }
+
+    let n = file.cases.len();
+    let facts_hits = results.values().filter(|r| r.facts).count();
+    let any_hits = results.values().filter(|r| r.anywhere).count();
+
+    let bpath = baseline_path(hex_root);
+    let baseline: Option<BTreeMap<String, CaseResult>> = std::fs::read_to_string(&bpath)
+        .ok()
+        .and_then(|s| serde_json::from_str(&s).ok());
+
+    let (regressions, new_passes) = match &baseline {
+        Some(b) => compare(&results, b),
+        None => (Vec::new(), Vec::new()),
+    };
+
+    if json_out {
+        println!(
+            "{}",
+            serde_json::json!({
+                "cases": n,
+                "facts_hits": facts_hits,
+                "anywhere_hits": any_hits,
+                "per_case": results,
+                "per_slice": slice_tally.iter().map(|(s,(h,t))| (s.clone(), serde_json::json!({"hits": h, "total": t}))).collect::<BTreeMap<_,_>>(),
+                "regressions": regressions,
+                "new_passes": new_passes,
+                "baseline_present": baseline.is_some(),
+            })
+        );
+    } else {
+        println!("\nSUMMARY: facts {facts_hits}/{n}, anywhere {any_hits}/{n}");
+        for (slice, (h, t)) in &slice_tally {
+            println!("  slice {slice}: {h}/{t}");
+        }
+        if !new_passes.is_empty() {
+            println!("new passes vs baseline: {}", new_passes.join(", "));
+        }
+    }
+
+    if update_baseline {
+        if let Some(parent) = bpath.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        match std::fs::write(
+            &bpath,
+            serde_json::to_string_pretty(&results).unwrap_or_default(),
+        ) {
+            Ok(()) => println!("baseline updated: {}", bpath.display()),
+            Err(e) => {
+                eprintln!("[memory eval] baseline write failed: {e}");
+                return 1;
+            }
+        }
+        return 0;
+    }
+
+    if baseline.is_none() {
+        eprintln!(
+            "[memory eval] no baseline at {} — run with --update-baseline to set one",
+            bpath.display()
+        );
+        return 0;
+    }
+    if !regressions.is_empty() {
+        eprintln!(
+            "[memory eval] REGRESSION: {} case(s) that passed in baseline now fail: {}",
+            regressions.len(),
+            regressions.join(", ")
+        );
+        return 1;
+    }
+    0
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn case(id: &str, expect: &str, also: Option<&str>) -> EvalCase {
+        EvalCase {
+            id: id.into(),
+            query: "q".into(),
+            expect: expect.into(),
+            expect_also: also.map(String::from),
+            slice: None,
+        }
+    }
+
+    #[test]
+    fn score_requires_expect_on_a_fact_line() {
+        let ctx = "## Relevant workspace memory\n\n### Facts\n\n- **Mike** knows Justin Frankel, who referred him\n\n### Chunks\n\n#### a.md — h\nlawyer stuff\n";
+        let r = score(ctx, &case("c", "justin frankel", None));
+        assert!(r.facts && r.anywhere);
+        // Present only in chunks → anywhere but not facts.
+        let r2 = score(ctx, &case("c", "lawyer stuff", None));
+        assert!(!r2.facts && r2.anywhere);
+        let r3 = score(ctx, &case("c", "absent", None));
+        assert!(!r3.facts && !r3.anywhere);
+    }
+
+    #[test]
+    fn score_expect_also_binds_to_same_fact_line() {
+        let ctx = "### Facts\n\n- **Mike** works-on hex\n- **Whit** works-on garden\n";
+        assert!(score(ctx, &case("c", "hex", Some("mike"))).facts);
+        // Both substrings exist in the section but never on one line.
+        assert!(!score(ctx, &case("c", "garden", Some("mike"))).facts);
+    }
+
+    #[test]
+    fn compare_flags_regressions_and_new_passes() {
+        let mut base = BTreeMap::new();
+        base.insert("a".to_string(), CaseResult { facts: true, anywhere: true });
+        base.insert("b".to_string(), CaseResult { facts: false, anywhere: false });
+        let mut now = BTreeMap::new();
+        now.insert("a".to_string(), CaseResult { facts: false, anywhere: true });
+        now.insert("b".to_string(), CaseResult { facts: true, anywhere: true });
+        now.insert("c".to_string(), CaseResult { facts: true, anywhere: true });
+        let (reg, newp) = compare(&now, &base);
+        assert_eq!(reg, vec!["a".to_string()]);
+        assert_eq!(newp, vec!["b".to_string(), "c".to_string()]);
+    }
+}

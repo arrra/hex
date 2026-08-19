@@ -83,22 +83,33 @@ pub(crate) fn facts_recall(
         .collect::<Vec<_>>()
         .join(" OR ");
 
-    // FTS arm — ranked facts rowids (bm25, then importance). The rowid is the
-    // fusion key shared with the KNN arm (facts.id is a TEXT ULID, not an
+    // FTS arms — ranked facts rowids (bm25, then importance). The rowid is
+    // the fusion key shared with the KNN arm (facts.id is a TEXT ULID, not an
     // integer — knn_facts joins it back to the rowid).
-    let fts_ids: Vec<i64> = if fts_query.is_empty() {
-        Vec::new()
-    } else {
-        conn.prepare(
+    //
+    // TWO weightings run as separate arms and fuse by rank (RRF), because no
+    // single bm25 column weighting serves both query shapes (measured on the
+    // 17-case golden set, 2026-08-18): content questions need object-heavy
+    // weights, while entity/attribute questions ("what is X's focus") carry
+    // their signal in subject+predicate and object weighting buries them.
+    // Rank fusion sidesteps the scale conflict; each arm over-fetches 3x so
+    // fusion has real overlap to work with (12/17 single-arm → 15/17 fused).
+    let fts_arm = |weights: &str| -> rusqlite::Result<Vec<i64>> {
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        conn.prepare(&format!(
             "SELECT facts_fts.rowid
              FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
              WHERE facts_fts MATCH ?1 AND f.tombstone = 0
-             ORDER BY bm25(facts_fts), f.importance DESC LIMIT ?2",
-        )?
-        .query_map(rusqlite::params![fts_query, k as i64], |r| r.get(0))?
-        .filter_map(Result::ok)
+             ORDER BY bm25(facts_fts, {weights}), f.importance DESC LIMIT ?2",
+        ))?
+        .query_map(rusqlite::params![fts_query, (k * 3) as i64], |r| r.get(0))?
         .collect()
     };
+    // (subject, predicate, object) weights per arm.
+    let fts_content_ids: Vec<i64> = fts_arm("1.0, 0.25, 2.0")?;
+    let fts_entity_ids: Vec<i64> = fts_arm("2.0, 1.0, 0.25")?;
 
     // Vector arm — same shape as the chunk-side fusion (search.rs run()):
     // best-effort, loud on failure, never degrades the FTS arm.
@@ -112,7 +123,10 @@ pub(crate) fn facts_recall(
         None => vec![],
     };
 
-    let fused = super::rrf::rrf_fuse(&[fts_ids, knn_ids], super::rrf::RRF_K);
+    let fused = super::rrf::rrf_fuse(
+        &[fts_content_ids, fts_entity_ids, knn_ids],
+        super::rrf::RRF_K,
+    );
 
     // Fetch facts in fused order. Importance breaks RRF-score ties (the
     // fuse's HashMap ordering is arbitrary on equal scores); the sort is
@@ -257,8 +271,17 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
                 // model here blew the latency budget (measured 1.33-1.9 s per
                 // recall). Offline CLI callers who want semantic search embed the
                 // query themselves and pass `Some(&qv)`.
-                let assembled =
-                    super::assemble::assemble(&conn, query, for_agent, MAX_CONTEXT_CHARS, None);
+                // Chunk cap = what format_context_v2 actually renders; without
+                // it, merged-but-unrendered chunks eat the char budget that
+                // should carry facts (~600 chars each).
+                let assembled = super::assemble::assemble_with_chunk_cap(
+                    &conn,
+                    query,
+                    for_agent,
+                    MAX_CONTEXT_CHARS,
+                    None,
+                    MAX_CHUNKS_RENDERED,
+                );
 
                 // Capture per-move stats for the recall-log (calibration seam —
                 // raw native scores per move; top_confidence alone is useless).
@@ -372,6 +395,7 @@ fn move_id_str(m: super::assemble::MoveId) -> &'static str {
         M2EntityFilter => "M2",
         M3PredicateQuery => "M3",
         M4TemporalSelect => "M4",
+        M5FactRelevance => "M5",
     }
 }
 

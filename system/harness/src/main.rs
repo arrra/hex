@@ -800,6 +800,18 @@ enum MemoryCommands {
         #[arg(long)]
         agent: bool,
     },
+    /// Run the recall golden-set eval and regression gate
+    Eval {
+        /// Cases file (default: $HEX_DIR/.hex/eval/recall-cases.toml)
+        #[arg(long)]
+        cases: Option<PathBuf>,
+        /// Write current results as the new baseline (review the diff)
+        #[arg(long)]
+        update_baseline: bool,
+        /// Emit a JSON report instead of per-case lines
+        #[arg(long)]
+        json: bool,
+    },
     /// Distill facts from a file into the memory facts layer.
     /// Internal: pipeline plumbing, not a human-facing command.
     #[command(hide = true)]
@@ -1099,6 +1111,11 @@ fn main() {
                 MemoryCommands::Recall { query, agent } => {
                     memory::recall::run(&hex_dir, query, *agent)
                 }
+                MemoryCommands::Eval {
+                    cases,
+                    update_baseline,
+                    json,
+                } => memory::eval::run(&hex_dir, cases.as_deref(), *update_baseline, *json),
                 MemoryCommands::Distill { path } => {
                     let db_path = memory::db_path(&hex_dir);
                     match memory::open_db(&db_path) {
