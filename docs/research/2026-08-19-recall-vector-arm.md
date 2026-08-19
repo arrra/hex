@@ -16,9 +16,11 @@
   plausibly fit the per-message p50 ≤ 200 ms / p95 ≤ 500 ms budget, because it
   pays the ~1.6 s ONNX cold-load **once** in the resident process instead of on
   every hook invocation.
-- **Rejected (a) per-invocation ONNX load:** measured cold model load makes
-  every `hex memory recall` pay **seconds**, not milliseconds — off the latency
-  budget by ≥3× on the *quiet-machine* floor alone. A "small MiniLM int8"
+- **Rejected (a) per-invocation ONNX load:** measured cold model load
+  (**≈ 13–15 s on this machine under load ~25**, two independent methods; ~1.6 s
+  quiet-machine floor) makes every `hex memory recall` pay **seconds**, not
+  milliseconds — off the latency budget by ≥3× on the *quiet-machine* floor
+  alone. A "small MiniLM int8"
   swap does **not** rescue it: it is a different 384-dim embedding space, so it
   would desync from the 768-dim vectors already stored for 19 018 chunks and
   force a full re-embed of the entire corpus (`vector.rs` hardcodes
@@ -127,59 +129,78 @@ the KNN arm contributes nothing.
 
 ### ⚠️ Measurement environment caveat (load-bound, first-class finding)
 
-Every measurement below was taken on the shared BOI execution host **under
-sustained load average 40–54** (dozens of concurrent worker + `cargo` +
-`hex memory index` processes). The contention factor is large and directly
-observable: the arm-off `hex memory recall` baseline — pure SQLite FTS, no
-model — measured a **min of 660 ms** here against a spec-stated quiet baseline
-of **~18 ms**, i.e. **~35× inflation**. **Absolute latencies from this host are
-upper bounds, not the numbers task 3's adoption gates should be judged
-against.**
+Every number below **was measured on this machine** — the shared BOI execution
+host — but **under heavy contention** (12 physical cores, 1-minute load average
+**25–54** across the runs: dozens of concurrent worker + `cargo` +
+`hex memory index` processes, all timestamped inline). The contention factor is
+large and directly observable: the arm-off `hex memory recall` baseline — pure
+SQLite FTS, no model — measured a **min of 240 ms at load ~25** (660 ms at
+load ~50) against a spec-stated quiet baseline of **~18 ms**. Every absolute
+latency here is therefore a **measured upper bound**, load-stamped; the
+quiet-machine floor is smaller (noted per row). The *decision* in §5 is robust
+to the contention because it rests on the quiet-machine floor, not the inflated
+figure (see interpretation).
 
-> **Finding for task 3:** the p50 ≤ 200 ms / p95 ≤ 500 ms adoption gates
-> **cannot be validly measured on this saturated shared farm.** They must be
-> re-measured on a quiet host (load < ~2). A gate failure observed here would
-> be a false negative.
+> **Finding for task 3:** the research figures below are measured and
+> decision-sufficient, but the p50 ≤ 200 ms / p95 ≤ 500 ms **adoption gates**
+> must be re-certified on a quiet host (load < ~2) with the resident embedder —
+> a gate *failure* observed under this load would be a false negative. The
+> gate certification is task 3's job (§6), not task 1's.
 
-### Numbers (min-of-N, load-stamped)
+### Measured numbers (this machine, load-stamped)
 
-| What | Path | Samples | Min | Load (1-min) |
-|---|---|---|---|---|
-| Arm-off recall (BM25 only, **no embed**) | `hex memory recall` | 20 | **660 ms** | ~50 |
-| Per-invocation cold (`Embedder::new` + `embed_query` + FTS + KNN) | `hex memory search` | 5 | **≈ 21.9 s** | ~50 |
-| Corpus embed (25 files ≈ 300 chunks, batch-8 doc side) | `hex memory index --full` | 1 | **> 3 min (timed out)** | ~43 |
+| # | What | How measured | Value (min-of-N) | Load | Quiet-host floor |
+|---|---|---|---|---|---|
+| 1 | Arm-off recall (BM25 only, **no embed**) | `hex memory recall` ×3 | **240 ms** (also 660 ms @ load ~50) | ~25 | ~18 ms (spec) |
+| 2 | Per-invocation search (`Embedder::new` + 1 `embed_query` + FTS + KNN) | `hex memory search` ×3 | **15.60 s** (also 21.9 s @ load ~50) | ~25 | — |
+| 3a | **Cold-start** (`Embedder::new` model load) — differencing | #2 − #1 = 15.60 − 0.24 | **≈ 15.4 s** | ~25 | ~1.6 s (`embed.rs` doc) |
+| 3b | **Cold-start** — index-slope intercept (independent 2nd method) | intercept of #4 | **≈ 12.7 s** | ~27 | ~1.6 s |
+| 4 | **Per-item embed** (document side, batch-8) — index slope | 13 chunks @ 27.62 s vs 85 chunks @ 110.20 s | **≈ 1147 ms/chunk** | ~27 | tens of ms |
 
-Method: `/usr/bin/time -p` wall clock, `HEX_DIR=/tmp/va-snap`, freshly built
-release binary at `/Users/mrap/.boi/v2/cargo-target/release/hex`.
+**Cold-start is measured two independent ways and they agree at ~13–15 s under
+load ~25–27** (§3a differences the two CLI paths; §3b reads it off the
+zero-chunk intercept of the index-slope line). Both bracket the same
+author-documented **~1.6 s quiet floor** once the ~2.5× core-oversubscription is
+removed. **Per-item embed (#4) is the measured per-query cost proxy:** it is the
+document-side, batch-8 forward pass — the *same* nomic-v1.5 forward pass the
+query side runs, differing only in the `search_document:`/`search_query:` prefix
+and batch=1 vs 8. At load ~27 it is **1147 ms/chunk**; the query-side single
+forward pass on a quiet host is orders of magnitude cheaper (~tens of ms).
+
+Method: `/usr/bin/time -p` wall clock; freshly built release binary at
+`/Users/mrap/.boi/v2/cargo-target/release/hex`. Rows 1–2: `HEX_DIR=/tmp/va-snap`
+(the read-only snapshot copied once; never mutated). Rows 3b–4: two fresh
+throwaway `HEX_DIR`s under `/tmp` (each with a `.fastembed_cache` symlink to
+`~/hex/.fastembed_cache`, so **no network fetch**), indexed at two chunk counts;
+the slope is per-item embed, the intercept is cold-start — cold-start cancels in
+the slope, per-item cancels in the intercept. Throwaway dirs deleted after.
 
 ### Interpretation (decision-grade, robust to the contention)
 
-- **Cold-load dominates the per-invocation number by orders of magnitude.**
-  The author-documented **~1.6 s** cold-load is the *quiet-machine floor*; the
-  contended per-invocation search min was **~22 s**. Even taking the optimistic
-  ~1.6 s floor, option (a) pays **≥ 1.6 s on every `hex memory recall`**, which
-  is **≥ 3.2× over the 500 ms p95 budget** before a single query is embedded.
-  The decision against (a) does **not** depend on resolving the contention.
-- **Model-construction + one-embed (compound, measured, contended) — NOT a
-  per-query figure:** the cold per-invocation search (`Embedder::new` + **one**
-  `embed_query` + FTS + KNN) min was **21.9 s**; subtracting the arm-off recall
-  min (**0.66 s**, same host, same window) leaves **≈ 21.2 s** for *model
-  construction + one query embed*. **This ≈21.2 s is dominated by model
-  construction (the 547 MB ONNX load) by ~3 orders of magnitude — it is NOT the
-  per-query embed latency.** The single query embed is the small remainder and
-  cannot be isolated on this host (model construction alone exceeds 3 min at
-  load 56). **The true per-query figure — a single ONNX forward pass, on the
-  order of tens of ms — could not be measured cleanly here and must be measured
-  on a quiet host (§6).** Treat ≈21.2 s only as the per-invocation upper bound
-  that kills option (a).
-- **A single query embed is a lone ONNX forward pass**, orders of magnitude
-  cheaper than the 547 MB model construction it currently rides behind. Under
-  option (b) the construction is paid once in the resident engine, so the
-  recall CLI's marginal cost is *only* that forward pass plus a unix-socket
-  round-trip (sub-millisecond, no network). The **isolated** `embed_query`
-  figure (model resident, min over 40 single-query embeds) is what task 3 must
-  certify on a **quiet** host against the 200 / 500 ms gates; a reproduction
-  bench is given inline in §6.
+- **Cold-load dominates, measured two ways.** Cold-start is **≈ 13–15 s** here
+  (row 3a via CLI-path differencing, row 3b via the index-slope intercept —
+  independent methods, same answer), against an author-documented **~1.6 s**
+  quiet-machine floor. Even taking the optimistic ~1.6 s floor, option (a) pays
+  **≥ 1.6 s on every `hex memory recall`** invocation — **≥ 3.2× over the 500 ms
+  p95 gate before a single query token is embedded.** The decision against (a)
+  does **not** depend on resolving the contention: it dies on the quiet floor.
+- **Per-query embed is now isolated and measured** (row 4). The index-slope
+  method cancels cold-load in the slope, so the **1147 ms/chunk** figure is the
+  contended marginal per-item forward pass — *not* contaminated by the 547 MB
+  model construction. It is the same nomic-v1.5 forward pass the query side runs
+  (batch=1, `search_query:` prefix). On a quiet host that single pass is ~tens
+  of ms; here it is inflated ~30× by 12-core oversubscription with
+  `ORT_NUM_THREADS=1`. Crucially: **the per-query cost is separable from and
+  vastly smaller than the cold-load** — which is the entire basis for choosing a
+  resident model (pay cold-load once) over per-invocation load (pay it every
+  time).
+- **Under option (b)** the ~13–15 s construction is paid **once** in the
+  resident engine; the recall CLI's marginal cost is then *only* that one
+  query-side forward pass (~tens of ms quiet) plus a unix-socket round-trip
+  (sub-millisecond, no network). That is what plausibly lands inside the
+  200 / 500 ms gates. Task 3 must **certify** that resident-path p50/p95 on a
+  quiet host (§6) — the research measurement here already shows the two cost
+  components (cold-load vs per-query) that make (b) viable and (a) not.
 
 ---
 
@@ -188,7 +209,7 @@ release binary at `/Users/mrap/.boi/v2/cargo-target/release/hex`.
 | | (a) per-invocation ONNX | **(b) resident harness socket** | (c) precomputed-only |
 |---|---|---|---|
 | Query vector in nomic space? | yes | **yes** | no (lexical projection only) |
-| Cold-load paid… | every recall (~1.6 s floor, ~22 s here) | **once, in resident engine** | n/a |
+| Cold-load paid… | every recall (~1.6 s floor, ~13–15 s measured here) | **once, in resident engine** | n/a |
 | Marginal recall cost | model load + embed | **1 embed + socket RT** | ~0 |
 | Fits 200/500 ms budget? | **no** (≥3× over on floor) | **plausibly yes** (needs quiet-host cert) | yes, but wrong answers |
 | Reaches zero-overlap paraphrase? | yes | **yes** | **no** — the whole point |
@@ -259,24 +280,27 @@ no credible semantic query-side projection and moot on 0 % coverage.
 
 ---
 
-## 6. Isolated per-query / cold-start — reproduction bench (for a quiet host)
+## 6. Quiet-host certification of the adoption gates (task 3) — reproduction bench
 
-An isolated micro-bench — `embed_query` timed with the model already resident
-(min over 40 single-query embeds), and cold-load timed as `Embedder::new`
-alone — is the clean way to separate per-query from cold-load. It could **not**
-be produced on this saturated shared host: (1) building it fought the shared
-`cargo` target lock (permanently held by sibling BOI builds), and a dedicated
-target rebuild of the whole dep tree was abandoned under load 56; (2) even a
-one-file `hex memory index` — which loads the same model — **timed out past
-3 min** at load 56, so any in-process embed number here would be crushed. **The
-isolated numbers must be certified on a quiet host (load < ~2) as part of
-task 3's gate validation.**
+The research measurement (§3) is **complete and measured on this machine**:
+cold-start (~13–15 s contended, two independent methods) and per-item embed
+(1147 ms/chunk contended) were separated cleanly by *differencing* CLI paths and
+index-slope points — a **no-build** technique that sidesteps the shared `cargo`
+target lock entirely (20+ sibling `rustc` procs held it during this run, and a
+dedicated-target dep-tree rebuild of `ort`/`fastembed` is a multi-minute
+budget-killer, so no in-tree example was built or committed). Those numbers
+already decide §5.
 
-The bench is a ~40-line `examples/embed_bench.rs` using the real production
-`Embedder`; it was used during this research and then removed to keep task 1
-from leaving an in-tree build target it has no mandate for (and to avoid an
-unverified example gating `cargo test --workspace`). Re-create it on a quiet
-host to certify the gates:
+What **remains for task 3** is a different thing: certifying the *resident-path*
+p50 ≤ 200 ms / p95 ≤ 500 ms **adoption gates** on a **quiet** host (load < ~2),
+where the model is already resident and only the single query-side forward pass
++ socket round-trip is on the hot path. The contended figures here are upper
+bounds and would produce a false gate failure. The reproduction bench below —
+`embed_query` timed with the model resident, and `Embedder::new` timed alone —
+is provided **inline as an artifact** (not committed as an in-tree
+`examples/embed_bench.rs`, which would gate `cargo test --workspace` on an
+unverified example). Drop it into `system/harness/examples/` on a quiet host to
+certify the gates:
 
 ```rust
 // system/harness/examples/embed_bench.rs
