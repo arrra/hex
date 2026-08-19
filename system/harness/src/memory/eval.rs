@@ -18,6 +18,8 @@ use serde::{Deserialize, Serialize};
 use std::collections::BTreeMap;
 use std::path::{Path, PathBuf};
 
+use super::recall_config::RecallConfig;
+
 #[derive(Debug, Deserialize)]
 pub struct CaseFile {
     #[serde(default)]
@@ -114,11 +116,17 @@ pub fn compare(
 
 /// Run the eval. Returns the process exit code (0 = pass, 1 = regression or
 /// setup error). Loud on every failure path per SO S6.
+///
+/// `cfg_override` lets a sweep score a parameter variant WITHOUT touching the
+/// live `recall.toml` (spec Tx4px1hxf): `Some(cfg)` scores every case through
+/// that config; `None` runs the live recall path (which loads the instance
+/// config, or compiled defaults when absent).
 pub fn run(
     hex_root: &Path,
     cases_override: Option<&Path>,
     update_baseline: bool,
     json_out: bool,
+    cfg_override: Option<&RecallConfig>,
 ) -> i32 {
     let cpath = cases_override
         .map(Path::to_path_buf)
@@ -148,7 +156,10 @@ pub fn run(
     let mut results: BTreeMap<String, CaseResult> = BTreeMap::new();
     let mut slice_tally: BTreeMap<String, (usize, usize)> = BTreeMap::new();
     for case in &file.cases {
-        let outcome = super::recall::recall(hex_root, &case.query, false);
+        let outcome = match cfg_override {
+            Some(cfg) => super::recall::recall_with_config(hex_root, &case.query, false, cfg),
+            None => super::recall::recall(hex_root, &case.query, false),
+        };
         let r = score(&outcome.context, case);
         let slice = case.slice.clone().unwrap_or_else(|| "unsliced".into());
         let t = slice_tally.entry(slice).or_insert((0, 0));
