@@ -367,32 +367,28 @@ fn m4_temporal(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<Ca
     (true, cands)
 }
 
-/// M5 — fact relevance. Facts ranked against the query by the same fused
-/// retrieval `facts_recall` implements (BM25 over the widened facts_fts +
-/// optional vector KNN + RRF; importance only breaks ties). Fires when the
-/// query yields at least one relevance-ranked fact. Relevance order is the
-/// candidate order; native_score carries importance for the log.
+/// M5 — fact relevance. Facts ranked against the query by the fused
+/// retrieval `facts_recall` implements (dual-weighted BM25 over the widened
+/// facts_fts + slug arm + optional vector KNN, RRF-fused; importance only
+/// breaks ties). Fires when the query yields at least one relevance-ranked
+/// fact. Relevance order is the candidate order; native_score carries the
+/// RRF score — the signal that actually determined the rank — for the
+/// recall-log calibration seam. Privacy filters in SQL before truncation
+/// (for_agent = exclude_private).
 fn m5_fact_relevance(
     conn: &Connection,
     query: &str,
     for_agent: bool,
     query_vec: Option<&[f32]>,
 ) -> (bool, Vec<Candidate>) {
-    let hits = match super::recall::facts_recall(conn, query, TOP_K_PER_MOVE, query_vec) {
-        Ok(h) => h,
-        Err(e) => {
-            eprintln!("[assemble] M5 fact relevance failed: {e}");
-            return (false, Vec::new());
-        }
-    };
-    let hits: Vec<(FactHit, f64)> = hits
-        .into_iter()
-        .filter(|f| !(for_agent && f.private))
-        .map(|f| {
-            let imp = f.importance as f64;
-            (f, imp)
-        })
-        .collect();
+    let hits: Vec<(FactHit, f64)> =
+        match super::recall::facts_recall(conn, query, TOP_K_PER_MOVE, query_vec, for_agent) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[assemble] M5 fact relevance failed: {e}");
+                return (false, Vec::new());
+            }
+        };
     if hits.is_empty() {
         return (false, Vec::new());
     }
@@ -783,20 +779,42 @@ mod tests {
         )
         .unwrap();
 
-        let r = assemble(&c, "Tell me about Zwerk please", false, MAX_CONTEXT_CHARS, None);
+        let r = assemble(
+            &c,
+            "Tell me about Zwerk please",
+            false,
+            MAX_CONTEXT_CHARS,
+            None,
+        );
         let hit = r.candidates.iter().any(|c| match &c.kind {
             CandidateKind::Fact(f) => f.subject == "Zwerk",
             _ => false,
         });
-        assert!(hit, "subject token must be searchable via widened facts_fts");
+        assert!(
+            hit,
+            "subject token must be searchable via widened facts_fts"
+        );
     }
 
     /// "has"/"have" cue must reach the most common production predicate.
     #[test]
     fn predicate_cue_has_fires_m3() {
         let c = fresh_db();
-        insert_fact(&c, "h1", "boi", "has", "a retention policy pruning old events", false);
-        let r = assemble(&c, "what retention does boi have", false, MAX_CONTEXT_CHARS, None);
+        insert_fact(
+            &c,
+            "h1",
+            "boi",
+            "has",
+            "a retention policy pruning old events",
+            false,
+        );
+        let r = assemble(
+            &c,
+            "what retention does boi have",
+            false,
+            MAX_CONTEXT_CHARS,
+            None,
+        );
         let m3_fired = r
             .per_move_stats
             .iter()

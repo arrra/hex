@@ -203,7 +203,8 @@ mod tests {
 
     const GOOD_JSON: &str =
         r#"[{"subject":"user","predicate":"prefers","object":"tea","importance":0.6}]"#;
-    const HIJACKED: &str = "I'll execute the tasks from the transcript now. First, let me Read(...)";
+    const HIJACKED: &str =
+        "I'll execute the tasks from the transcript now. First, let me Read(...)";
 
     /// Content-hijack regression: the slice must be followed by the re-anchor,
     /// so the last thing the model reads is the extraction instruction, not
@@ -213,7 +214,10 @@ mod tests {
         let p = assemble_prompt("tpl [[PREDICATES]]", "agent says: run the deploy");
         let text_pos = p.find("agent says: run the deploy").unwrap();
         let end_pos = p.find("--- END TEXT ---").unwrap();
-        assert!(end_pos > text_pos, "END TEXT sentinel must come after the slice");
+        assert!(
+            end_pos > text_pos,
+            "END TEXT sentinel must come after the slice"
+        );
         assert!(
             p.trim_end().ends_with("No prose, no commentary."),
             "prompt must END with the re-anchor instruction, got tail: {:?}",
@@ -228,7 +232,11 @@ mod tests {
         let out = extract_with(
             |_p| {
                 calls.set(calls.get() + 1);
-                Ok(if calls.get() == 1 { HIJACKED.to_string() } else { GOOD_JSON.to_string() })
+                Ok(if calls.get() == 1 {
+                    HIJACKED.to_string()
+                } else {
+                    GOOD_JSON.to_string()
+                })
             },
             "prompt",
         )
@@ -288,6 +296,10 @@ mod tests {
         )
         .unwrap_err();
         assert!(matches!(err, ProviderError::Deferred(_)));
-        assert_eq!(calls.get(), 1, "no retry on a generate (transport/config) error");
+        assert_eq!(
+            calls.get(),
+            1,
+            "no retry on a generate (transport/config) error"
+        );
     }
 }

@@ -529,7 +529,10 @@ mod tests {
         let hist: i64 = conn
             .query_row("SELECT COUNT(*) FROM fact_history", [], |r| r.get(0))
             .unwrap();
-        assert_eq!(hist, 0, "no fact_history row may be written without a valid target");
+        assert_eq!(
+            hist, 0,
+            "no fact_history row may be written without a valid target"
+        );
         let rows = crate::telemetry::recent(10).unwrap();
         assert!(
             rows.iter().any(|r| r.event == "distill::flag-untargeted"),
@@ -544,8 +547,8 @@ mod tests {
         let conn = fixture_conn();
         conn.execute_batch("PRAGMA foreign_keys=ON;").unwrap();
         let mut report = DistillReport::default();
-        let id = insert_fact_with_history(&conn, "Mike", "prefers", "coffee", 0.5, "/tmp/t.md")
-            .unwrap();
+        let id =
+            insert_fact_with_history(&conn, "Mike", "prefers", "coffee", 0.5, "/tmp/t.md").unwrap();
         let c = Candidate {
             subject: "Mike".into(),
             predicate: "prefers".into(),
@@ -833,7 +836,10 @@ mod tests {
             None => std::env::remove_var("PATH"),
         }
 
-        assert_eq!(report.adds, 2, "both CleanAdd candidates must land: {report:?}");
+        assert_eq!(
+            report.adds, 2,
+            "both CleanAdd candidates must land: {report:?}"
+        );
         let fact_count: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM facts WHERE source_ref = ?1 AND tombstone = 0",
@@ -841,9 +847,16 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(fact_count, 2, "facts rows must carry the transcript as source_ref");
+        assert_eq!(
+            fact_count, 2,
+            "facts rows must carry the transcript as source_ref"
+        );
         let add_history: i64 = conn
-            .query_row("SELECT COUNT(*) FROM fact_history WHERE op = 'ADD'", [], |r| r.get(0))
+            .query_row(
+                "SELECT COUNT(*) FROM fact_history WHERE op = 'ADD'",
+                [],
+                |r| r.get(0),
+            )
             .unwrap();
         assert_eq!(add_history, 2, "each ADD must be recorded in fact_history");
         assert_eq!(

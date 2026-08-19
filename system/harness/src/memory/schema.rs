@@ -134,12 +134,44 @@ pub fn apply_plan2(conn: &Connection) -> Result<()> {
         }
     }
     conn.execute_batch(PLAN2_VEC_DDL)?;
-    let widened = migrate_facts_fts_widen(conn)?;
-    conn.execute_batch(PLAN2_FTS_DDL)?;
-    if widened {
-        // External-content fts5: repopulate the new 3-column index from facts.
-        conn.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')", [])?;
-        eprintln!("[schema] facts_fts widened to subject+predicate+object and rebuilt");
+    if facts_fts_needs_widening(conn)? {
+        // One IMMEDIATE transaction: the write lock is taken up front, the
+        // widening need is RE-checked under that lock (two fresh-process
+        // openers race this path — the loser must see the winner's finished
+        // table and no-op, not drop it again), and drop+recreate+rebuild
+        // commit atomically so no crash can leave the index dropped or
+        // empty. On any error the guard rolls back to the old, still-
+        // searchable table and the next open retries.
+        conn.execute_batch("BEGIN IMMEDIATE")?;
+        let migrate = || -> Result<bool> {
+            if !facts_fts_needs_widening(conn)? {
+                return Ok(false);
+            }
+            conn.execute_batch(
+                "DROP TRIGGER IF EXISTS facts_fts_ai;
+                 DROP TRIGGER IF EXISTS facts_fts_ad;
+                 DROP TRIGGER IF EXISTS facts_fts_au;
+                 DROP TABLE IF EXISTS facts_fts;",
+            )?;
+            conn.execute_batch(PLAN2_FTS_DDL)?;
+            // External-content fts5: repopulate the 3-column index from facts.
+            conn.execute("INSERT INTO facts_fts(facts_fts) VALUES('rebuild')", [])?;
+            Ok(true)
+        };
+        match migrate() {
+            Ok(did) => {
+                conn.execute_batch("COMMIT")?;
+                if did {
+                    eprintln!("[schema] facts_fts widened to subject+predicate+object and rebuilt");
+                }
+            }
+            Err(e) => {
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(e);
+            }
+        }
+    } else {
+        conn.execute_batch(PLAN2_FTS_DDL)?;
     }
     conn.execute(
         "INSERT INTO schema_version (version, applied_at) VALUES (4, datetime('now'))
@@ -151,10 +183,8 @@ pub fn apply_plan2(conn: &Connection) -> Result<()> {
 
 /// Pre-2026-08 instances carry an object-only facts_fts, which makes any query
 /// naming a subject or predicate structurally invisible to relevance ranking.
-/// Detect that shape and drop it (table + triggers) so `PLAN2_FTS_DDL` can
-/// recreate the 3-column form; the caller then issues the fts5 'rebuild'.
-/// Returns true when a drop happened (i.e. a rebuild is required).
-fn migrate_facts_fts_widen(conn: &Connection) -> Result<bool> {
+/// True when that shape is present and the widening migration must run.
+fn facts_fts_needs_widening(conn: &Connection) -> Result<bool> {
     let exists: i64 = conn.query_row(
         "SELECT COUNT(*) FROM sqlite_master WHERE type='table' AND name='facts_fts'",
         [],
@@ -168,16 +198,7 @@ fn migrate_facts_fts_widen(conn: &Connection) -> Result<bool> {
         [],
         |r| r.get(0),
     )?;
-    if has_subject > 0 {
-        return Ok(false);
-    }
-    conn.execute_batch(
-        "DROP TRIGGER IF EXISTS facts_fts_ai;
-         DROP TRIGGER IF EXISTS facts_fts_ad;
-         DROP TRIGGER IF EXISTS facts_fts_au;
-         DROP TABLE facts_fts;",
-    )?;
-    Ok(true)
+    Ok(has_subject == 0)
 }
 
 /// Create the minimal Plan 1 schema baseline needed by tests that exercise Plan 2.
@@ -290,7 +311,10 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(post, 1, "widened index must match subject tokens after rebuild");
+        assert_eq!(
+            post, 1,
+            "widened index must match subject tokens after rebuild"
+        );
 
         // Recreated trigger keeps new inserts searchable by subject.
         conn.execute(

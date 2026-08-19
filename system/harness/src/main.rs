@@ -1147,17 +1147,11 @@ fn main() {
                     vacuum,
                     backfill_facts,
                 } => memory::maintain::run(&hex_dir, *vacuum, *backfill_facts),
-                MemoryCommands::DistillRewind {
-                    file,
-                    all,
-                    dry_run,
-                } => {
+                MemoryCommands::DistillRewind { file, all, dry_run } => {
                     // Exactly one selector. Neither and both are loud usage
                     // errors — never a quiet no-op (S6).
                     let exit = if file.is_some() == *all {
-                        eprintln!(
-                            "distill-rewind: pass exactly one of --file <path> or --all"
-                        );
+                        eprintln!("distill-rewind: pass exactly one of --file <path> or --all");
                         2
                     } else {
                         let db_path = memory::db_path(&hex_dir);
@@ -1174,8 +1168,11 @@ fn main() {
                                 };
                                 match memory::distill::watermark::rewind(&conn, target, *dry_run) {
                                     Ok(plan) => {
-                                        let action =
-                                            if plan.applied { "rewound" } else { "would rewind" };
+                                        let action = if plan.applied {
+                                            "rewound"
+                                        } else {
+                                            "would rewind"
+                                        };
                                         for (p, old) in &plan.rows {
                                             println!("{action}: {p}  offset {old} -> 0");
                                         }

@@ -75,8 +75,7 @@ fn score(context: &str, case: &EvalCase) -> CaseResult {
         .filter(|l| l.trim_start().starts_with("- "))
         .any(|l| l.contains(&expect) && also.as_ref().is_none_or(|a| l.contains(a)));
 
-    let anywhere =
-        lc.contains(&expect) && also.as_ref().is_none_or(|a| lc.contains(a));
+    let anywhere = lc.contains(&expect) && also.as_ref().is_none_or(|a| lc.contains(a));
     CaseResult { facts, anywhere }
 }
 
@@ -127,7 +126,10 @@ pub fn run(
     let raw = match std::fs::read_to_string(&cpath) {
         Ok(s) => s,
         Err(e) => {
-            eprintln!("[memory eval] cannot read cases file {}: {e}", cpath.display());
+            eprintln!(
+                "[memory eval] cannot read cases file {}: {e}",
+                cpath.display()
+            );
             return 1;
         }
     };
@@ -169,10 +171,38 @@ pub fn run(
     let facts_hits = results.values().filter(|r| r.facts).count();
     let any_hits = results.values().filter(|r| r.anywhere).count();
 
+    // Missing baseline = benign first run. A baseline that EXISTS but fails
+    // to parse must be loud and fatal — a corrupt file silently disabling
+    // the regression gate is exactly the quiet failure S6 forbids.
     let bpath = baseline_path(hex_root);
-    let baseline: Option<BTreeMap<String, CaseResult>> = std::fs::read_to_string(&bpath)
-        .ok()
-        .and_then(|s| serde_json::from_str(&s).ok());
+    let baseline: Option<BTreeMap<String, CaseResult>> = match std::fs::read_to_string(&bpath) {
+        Ok(s) => match serde_json::from_str(&s) {
+            Ok(b) => Some(b),
+            Err(e) if update_baseline => {
+                eprintln!(
+                    "[memory eval] baseline {} was unreadable ({e}) — replacing it",
+                    bpath.display()
+                );
+                None
+            }
+            Err(e) => {
+                eprintln!(
+                    "[memory eval] baseline {} exists but is unreadable ({e}) — \
+                         regression gate cannot run; restore it or re-run --update-baseline",
+                    bpath.display()
+                );
+                return 1;
+            }
+        },
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => None,
+        Err(e) => {
+            eprintln!(
+                "[memory eval] cannot read baseline {}: {e}",
+                bpath.display()
+            );
+            return 1;
+        }
+    };
 
     let (regressions, new_passes) = match &baseline {
         Some(b) => compare(&results, b),
@@ -207,10 +237,15 @@ pub fn run(
         if let Some(parent) = bpath.parent() {
             let _ = std::fs::create_dir_all(parent);
         }
-        match std::fs::write(
-            &bpath,
+        // Atomic replace: an interrupted in-place write would leave a
+        // truncated baseline that disables the gate on every later run.
+        let tmp = bpath.with_extension("json.tmp");
+        let write = std::fs::write(
+            &tmp,
             serde_json::to_string_pretty(&results).unwrap_or_default(),
-        ) {
+        )
+        .and_then(|()| std::fs::rename(&tmp, &bpath));
+        match write {
             Ok(()) => println!("baseline updated: {}", bpath.display()),
             Err(e) => {
                 eprintln!("[memory eval] baseline write failed: {e}");
@@ -275,12 +310,42 @@ mod tests {
     #[test]
     fn compare_flags_regressions_and_new_passes() {
         let mut base = BTreeMap::new();
-        base.insert("a".to_string(), CaseResult { facts: true, anywhere: true });
-        base.insert("b".to_string(), CaseResult { facts: false, anywhere: false });
+        base.insert(
+            "a".to_string(),
+            CaseResult {
+                facts: true,
+                anywhere: true,
+            },
+        );
+        base.insert(
+            "b".to_string(),
+            CaseResult {
+                facts: false,
+                anywhere: false,
+            },
+        );
         let mut now = BTreeMap::new();
-        now.insert("a".to_string(), CaseResult { facts: false, anywhere: true });
-        now.insert("b".to_string(), CaseResult { facts: true, anywhere: true });
-        now.insert("c".to_string(), CaseResult { facts: true, anywhere: true });
+        now.insert(
+            "a".to_string(),
+            CaseResult {
+                facts: false,
+                anywhere: true,
+            },
+        );
+        now.insert(
+            "b".to_string(),
+            CaseResult {
+                facts: true,
+                anywhere: true,
+            },
+        );
+        now.insert(
+            "c".to_string(),
+            CaseResult {
+                facts: true,
+                anywhere: true,
+            },
+        );
         let (reg, newp) = compare(&now, &base);
         assert_eq!(reg, vec!["a".to_string()]);
         assert_eq!(newp, vec!["b".to_string(), "c".to_string()]);
