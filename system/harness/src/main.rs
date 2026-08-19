@@ -1115,7 +1115,7 @@ fn main() {
                     cases,
                     update_baseline,
                     json,
-                } => memory::eval::run(&hex_dir, cases.as_deref(), *update_baseline, *json),
+                } => memory::eval::run(&hex_dir, cases.as_deref(), *update_baseline, *json, None),
                 MemoryCommands::Distill { path } => {
                     let db_path = memory::db_path(&hex_dir);
                     match memory::open_db(&db_path) {

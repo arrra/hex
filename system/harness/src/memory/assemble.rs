@@ -16,6 +16,7 @@ use rusqlite::Connection;
 use std::collections::HashSet;
 
 use super::recall::FactHit;
+use super::recall_config::RecallConfig;
 use super::search::{search_fts_public, SearchResult};
 
 pub const MAX_CONTEXT_CHARS: usize = 10_000;
@@ -189,6 +190,7 @@ fn m1_content(
     query: &str,
     for_agent: bool,
     query_vec: Option<&[f32]>,
+    cfg: &RecallConfig,
 ) -> Vec<Candidate> {
     let mut out: Vec<Candidate> = Vec::new();
 
@@ -202,7 +204,7 @@ fn m1_content(
         let native = c.score;
         let dedup_key = format!("chunk:{}", c.rowid);
         let move_fired = true;
-        let confidence = move_fired_relevance(move_fired) * (1.0 / (rank as f32 + 1.0));
+        let confidence = cfg.move_relevance.factor(move_fired) * (1.0 / (rank as f32 + 1.0));
         out.push(Candidate {
             kind: CandidateKind::Chunk(c),
             move_id: MoveId::M1ContentMatch,
@@ -270,17 +272,14 @@ fn m1_content(
     out
 }
 
-fn move_fired_relevance(fired: bool) -> f32 {
-    if fired {
-        1.0
-    } else {
-        0.3
-    }
-}
-
 /// M2 — entity filter. Fires when at least one detected entity matches a
 /// stored fact subject.
-fn m2_entity(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<Candidate>) {
+fn m2_entity(
+    conn: &Connection,
+    query: &str,
+    for_agent: bool,
+    cfg: &RecallConfig,
+) -> (bool, Vec<Candidate>) {
     let subjects = detect_entity_subjects(conn, query);
     if subjects.is_empty() {
         return (false, Vec::new());
@@ -309,12 +308,17 @@ fn m2_entity(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<Cand
     }
     // Sort by importance DESC for stable rank ordering across multiple subjects.
     hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let cands = facts_to_candidates(hits, MoveId::M2EntityFilter, true);
+    let cands = facts_to_candidates(hits, MoveId::M2EntityFilter, true, cfg);
     (true, cands)
 }
 
 /// M3 — predicate query. Fires when a cue maps to a known predicate.
-fn m3_predicate(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<Candidate>) {
+fn m3_predicate(
+    conn: &Connection,
+    query: &str,
+    for_agent: bool,
+    cfg: &RecallConfig,
+) -> (bool, Vec<Candidate>) {
     let preds = predicate_cues(query);
     if preds.is_empty() {
         return (false, Vec::new());
@@ -342,12 +346,17 @@ fn m3_predicate(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<C
         hits.extend(collected);
     }
     hits.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
-    let cands = facts_to_candidates(hits, MoveId::M3PredicateQuery, true);
+    let cands = facts_to_candidates(hits, MoveId::M3PredicateQuery, true, cfg);
     (true, cands)
 }
 
 /// M4 — temporal select (FACTS ONLY; chunks have no timestamp column).
-fn m4_temporal(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<Candidate>) {
+fn m4_temporal(
+    conn: &Connection,
+    query: &str,
+    for_agent: bool,
+    cfg: &RecallConfig,
+) -> (bool, Vec<Candidate>) {
     if !is_temporal(query) {
         return (false, Vec::new());
     }
@@ -363,7 +372,7 @@ fn m4_temporal(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<Ca
         })
         .map(|rows| rows.filter_map(Result::ok).collect())
         .unwrap_or_default();
-    let cands = facts_to_candidates(hits, MoveId::M4TemporalSelect, true);
+    let cands = facts_to_candidates(hits, MoveId::M4TemporalSelect, true, cfg);
     (true, cands)
 }
 
@@ -380,24 +389,36 @@ fn m5_fact_relevance(
     query: &str,
     for_agent: bool,
     query_vec: Option<&[f32]>,
+    cfg: &RecallConfig,
 ) -> (bool, Vec<Candidate>) {
-    let hits: Vec<(FactHit, f64)> =
-        match super::recall::facts_recall(conn, query, TOP_K_PER_MOVE, query_vec, for_agent) {
-            Ok(h) => h,
-            Err(e) => {
-                eprintln!("[assemble] M5 fact relevance failed: {e}");
-                return (false, Vec::new());
-            }
-        };
+    let hits: Vec<(FactHit, f64)> = match super::recall::facts_recall_with_config(
+        conn,
+        query,
+        TOP_K_PER_MOVE,
+        query_vec,
+        for_agent,
+        cfg,
+    ) {
+        Ok(h) => h,
+        Err(e) => {
+            eprintln!("[assemble] M5 fact relevance failed: {e}");
+            return (false, Vec::new());
+        }
+    };
     if hits.is_empty() {
         return (false, Vec::new());
     }
-    let cands = facts_to_candidates(hits, MoveId::M5FactRelevance, true);
+    let cands = facts_to_candidates(hits, MoveId::M5FactRelevance, true, cfg);
     (true, cands)
 }
 
-fn facts_to_candidates(hits: Vec<(FactHit, f64)>, move_id: MoveId, fired: bool) -> Vec<Candidate> {
-    let mr = move_fired_relevance(fired);
+fn facts_to_candidates(
+    hits: Vec<(FactHit, f64)>,
+    move_id: MoveId,
+    fired: bool,
+    cfg: &RecallConfig,
+) -> Vec<Candidate> {
+    let mr = cfg.move_relevance.factor(fired);
     hits.into_iter()
         .enumerate()
         .map(|(rank, (f, native))| {
@@ -465,6 +486,10 @@ pub fn assemble(
 /// (~600 each) and silently crowd out facts — measured on the 2026-08-18
 /// golden set as the difference between a relevant fact landing in context
 /// or not. Chunks past the cap are skipped without charging the budget.
+///
+/// Uses the compiled-default recall parameters. Callers that must apply an
+/// instance-tuned config (the hot recall path) or score a variant (the eval
+/// sweep) use [`assemble_with_config`].
 pub fn assemble_with_chunk_cap(
     conn: &Connection,
     query: &str,
@@ -472,6 +497,30 @@ pub fn assemble_with_chunk_cap(
     budget: usize,
     query_vec: Option<&[f32]>,
     max_chunks: usize,
+) -> AssembledContext {
+    assemble_with_config(
+        conn,
+        query,
+        for_agent,
+        budget,
+        query_vec,
+        max_chunks,
+        &RecallConfig::default(),
+    )
+}
+
+/// [`assemble_with_chunk_cap`] with an explicit recall config. This is the
+/// single site the recall ranking parameters (RRF constant, bm25 arm weights,
+/// M5 relevance-move multipliers) enter the assembler. `&RecallConfig::default()`
+/// reproduces the previous hardcoded behavior exactly.
+pub fn assemble_with_config(
+    conn: &Connection,
+    query: &str,
+    for_agent: bool,
+    budget: usize,
+    query_vec: Option<&[f32]>,
+    max_chunks: usize,
+    cfg: &RecallConfig,
 ) -> AssembledContext {
     let budget = if budget == 0 {
         MAX_CONTEXT_CHARS
@@ -481,11 +530,11 @@ pub fn assemble_with_chunk_cap(
 
     // ── run the moves (sequential — local SQLite, the cost is dominated by
     // FTS5/index lookups; "parallel" in spec scope is logical, not threaded).
-    let m1_c = m1_content(conn, query, for_agent, query_vec);
-    let (m5_f, m5_c) = m5_fact_relevance(conn, query, for_agent, query_vec);
-    let (m2_f, m2_c) = m2_entity(conn, query, for_agent);
-    let (m3_f, m3_c) = m3_predicate(conn, query, for_agent);
-    let (m4_f, m4_c) = m4_temporal(conn, query, for_agent);
+    let m1_c = m1_content(conn, query, for_agent, query_vec, cfg);
+    let (m5_f, m5_c) = m5_fact_relevance(conn, query, for_agent, query_vec, cfg);
+    let (m2_f, m2_c) = m2_entity(conn, query, for_agent, cfg);
+    let (m3_f, m3_c) = m3_predicate(conn, query, for_agent, cfg);
+    let (m4_f, m4_c) = m4_temporal(conn, query, for_agent, cfg);
 
     let per_move_stats = vec![
         move_stats(MoveId::M1ContentMatch, true, &m1_c),

@@ -249,8 +249,40 @@ fn run_layer3(hex_dir: &Path) -> Result<()> {
     let body = crate::memory::provider::generate_for("consolidate_audit", &prompt)
         .map_err(|e| anyhow::anyhow!("provider::generate_for(consolidate_audit) failed: {e}"))?;
 
+    // Silent-billing guard: an empty response is billed but worthless (task
+    // Tx6nx2jhv). Turn it into a loud, nonzero failure BEFORE any artifact write.
+    reject_empty_audit_body(&body)?;
+
     let path = write_audit_artifact(hex_dir, &body)?;
     println!("Layer 3 wrote audit: {}", path.display());
+    Ok(())
+}
+
+/// Silent-billing guard (task Tx6nx2jhv). The `consolidate_audit` LLM call can
+/// return empty or whitespace-only content when all output tokens are consumed
+/// by hidden reasoning (observed 2026-08-16..19 in instance telemetry): the call
+/// is billed (~$0.21/night) yet writes no audit, and today that failure is
+/// invisible — telemetry logs "ok" and no artifact appears. Turn it into a LOUD,
+/// nonzero error (Rule S6): stderr + an error telemetry event, then bail. Any
+/// body with real content returns `Ok(())`.
+fn reject_empty_audit_body(body: &str) -> Result<()> {
+    if body.trim().is_empty() {
+        eprintln!(
+            "Layer 3 FAILED: consolidate_audit returned EMPTY content (0 \
+             non-whitespace chars) — the call was billed but no audit was written. \
+             Likely all output tokens were consumed by hidden reasoning; \
+             raise consolidate_audit max_tokens (llm_config.rs)."
+        );
+        crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
+            source: "memory::consolidate".into(),
+            event: "consolidate::layer3".into(),
+            status: "empty-llm-response".into(),
+            duration_ms: None,
+            exit_code: Some(1),
+            detail: Some("consolidate_audit returned empty/whitespace-only content".into()),
+        });
+        anyhow::bail!("consolidate_audit LLM returned empty/whitespace-only content");
+    }
     Ok(())
 }
 
@@ -276,6 +308,17 @@ fn build_audit_prompt(claude_md: &str, learnings_md: &str) -> String {
 /// the audit file written.
 pub(crate) fn write_audit_artifact(hex_dir: &Path, body: &str) -> Result<PathBuf> {
     use std::io::Write;
+
+    // Defense in depth for the silent-billing guard (task Tx6nx2jhv): never
+    // persist a header-only artifact for an empty/whitespace-only body. The
+    // Layer 3 caller already rejects this loudly via `reject_empty_audit_body`;
+    // refusing here as well means no code path can ever write an empty audit.
+    if body.trim().is_empty() {
+        anyhow::bail!(
+            "refusing to write consolidation audit: body is empty/whitespace-only \
+             (consolidate_audit returned no usable content)"
+        );
+    }
 
     let evo = hex_dir.join("evolution");
     fs::create_dir_all(&evo).with_context(|| format!("mkdir {}", evo.display()))?;
@@ -499,6 +542,108 @@ mod tests {
         let learn_after = fs::read_to_string(dir.path().join("me").join("learnings.md")).unwrap();
         assert_eq!(claude_before, claude_after, "CLAUDE.md must not be edited");
         assert_eq!(learn_before, learn_after, "learnings.md must not be edited");
+    }
+
+    #[test]
+    fn write_audit_artifact_rejects_empty_or_whitespace_body() {
+        // RED test for task Tx6nx2jhv (consolidate_audit silent-billing bug).
+        //
+        // Observed bug (2026-08-16..19): the consolidate_audit LLM call returns
+        // EMPTY content when all output tokens are consumed by hidden reasoning.
+        // Today write_audit_artifact happily writes a header-only file and
+        // returns Ok, so the empty response is billed but never surfaces as a
+        // failure. Fix requirement: an empty or whitespace-only LLM audit body
+        // is a HARD error — the call site must return a nonzero result rather
+        // than silently persisting an empty audit.
+        //
+        // This red test pins the empty-body hard error at the testable seam
+        // (write_audit_artifact must refuse an empty/whitespace body and write
+        // NO audit file). It does NOT pin the error-telemetry emission on the
+        // Layer 3 path — see this task's write_red_tests summary: the implement
+        // phase must ALSO add a `telemetry::record_loud` error event + loud
+        // stderr on the empty-response path in run_layer3/run.
+        let dir = fake_hex_dir();
+
+        for body in ["", "   ", "\n\t  \n"] {
+            let result = super::write_audit_artifact(dir.path(), body);
+            assert!(
+                result.is_err(),
+                "empty/whitespace body {body:?} must be a hard error, got {result:?}"
+            );
+        }
+
+        // No audit file may be written for an empty body (no silent header-only
+        // artifact that hides the billing waste).
+        let evo = dir.path().join("evolution");
+        if evo.exists() {
+            let wrote_audit = fs::read_dir(&evo)
+                .unwrap()
+                .filter_map(|e| e.ok())
+                .any(|e| {
+                    e.file_name()
+                        .to_str()
+                        .map(|n| n.starts_with("consolidation-audit-"))
+                        .unwrap_or(false)
+                });
+            assert!(
+                !wrote_audit,
+                "no consolidation-audit file may be written for an empty body"
+            );
+        }
+    }
+
+    // Bin-crate-local HEX_DIR lock. The lib's `telemetry::test_support::ENV_LOCK`
+    // is `#[cfg(test)]` in the `hex` lib, so it is NOT compiled into the bin's
+    // own test build — bin tests that mutate the process-global HEX_DIR must
+    // serialize on a local mutex instead.
+    static HEX_DIR_ENV_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    /// Task Tx6nx2jhv: the Layer 3 empty-response guard is a HARD error AND emits
+    /// an error telemetry event (Rule S6: no quiet failures). We point HEX_DIR at
+    /// a temp dir so `record_loud` writes into a throwaway telemetry db rather
+    /// than a developer's real one, then read the event back to prove it landed.
+    #[test]
+    fn reject_empty_audit_body_is_hard_error() {
+        let _guard = HEX_DIR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+        let tmp = tempfile::tempdir().unwrap();
+        let prev = std::env::var_os("HEX_DIR");
+        std::env::set_var("HEX_DIR", tmp.path());
+
+        for body in ["", "   ", "\n\t  \n"] {
+            assert!(
+                super::reject_empty_audit_body(body).is_err(),
+                "empty/whitespace body {body:?} must be a hard error"
+            );
+        }
+
+        // Real content is accepted.
+        assert!(
+            super::reject_empty_audit_body("- REVIEW: a real finding\n").is_ok(),
+            "a non-empty audit body must pass the guard"
+        );
+
+        // The empty-response path must ALSO emit an error telemetry event. HEX_DIR
+        // points at the temp db, so the guard's `record_loud` wrote there — assert
+        // a non-ok event for the Layer 3 audit landed.
+        let events = crate::telemetry::recent(16).expect("read telemetry");
+        let err_event = events
+            .iter()
+            .find(|e| e.event == "consolidate::layer3" && e.status == "empty-llm-response")
+            .expect("empty-response path must record an error telemetry event");
+        assert_ne!(
+            err_event.status, "ok",
+            "the empty-response telemetry event must be non-ok"
+        );
+        assert_eq!(
+            err_event.exit_code,
+            Some(1),
+            "the empty-response telemetry event must carry a nonzero exit code"
+        );
+
+        match prev {
+            Some(v) => std::env::set_var("HEX_DIR", v),
+            None => std::env::remove_var("HEX_DIR"),
+        }
     }
 
     /// Regression: there must be exactly ONE consolidate orchestrator, and it

@@ -54,6 +54,7 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::vector_search::VectorSearchHealthy),
         Box::new(checks::reflection_liveness::ReflectionLogFresh),
         Box::new(checks::nightly_full_liveness::NightlyFullLiveness),
+        Box::new(checks::consolidation_audit_freshness::ConsolidationAuditFreshness),
         Box::new(checks::scripts_exec::ScriptsExecutable),
         Box::new(checks::boi_health::BoiHealth),
         Box::new(checks::iii_engine_health::IiiEngineHealth),
@@ -222,6 +223,18 @@ mod tests {
         assert!(
             runner.checks.iter().any(|c| c.name() == "telemetry-health"),
             "registry must include the telemetry-health doctor check"
+        );
+    }
+
+    #[test]
+    fn test_registry_includes_consolidation_audit_freshness() {
+        let runner = Runner::all_checks();
+        assert!(
+            runner
+                .checks
+                .iter()
+                .any(|c| c.name() == "consolidation-audit-freshness"),
+            "registry must include the consolidation-audit-freshness doctor check"
         );
     }
 }

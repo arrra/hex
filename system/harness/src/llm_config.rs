@@ -94,9 +94,15 @@ fn builtin(use_case: &str) -> Option<BuiltIn> {
             max_tokens: 256,
             max_input_tokens: None,
         }),
+        // consolidate_audit runs on anthropic/claude-sonnet-5 via OpenRouter,
+        // whose hidden reasoning tokens count against max_tokens. At the previous
+        // 4k cap the entire output budget was consumed by reasoning, so the audit
+        // returned EMPTY content while still billing (~$0.21/night, observed
+        // 2026-08-16..19). Raise to 16384 so the response has real content
+        // headroom above the reasoning spend.
         "consolidate_audit" => Some(BuiltIn {
             model: "anthropic/claude-sonnet-5",
-            max_tokens: 4096,
+            max_tokens: 16384,
             max_input_tokens: None,
         }),
         "health_check" => Some(BuiltIn {
@@ -358,7 +364,7 @@ mod tests {
 
         let r = resolve("consolidate_audit").expect("resolve ok");
         assert_eq!(r.model, "anthropic/claude-sonnet-5");
-        assert_eq!(r.max_tokens, 4096);
+        assert_eq!(r.max_tokens, 16384);
 
         let r = resolve("health_check").expect("resolve ok");
         assert_eq!(r.model, "anthropic/claude-haiku-4.5");
