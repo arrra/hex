@@ -221,6 +221,55 @@ pub fn summarize(
     })
 }
 
+/// Additive scoring helper for the weekly auto-tuner (spec Tzxmamhr8). Scores
+/// every case in `cases_path` through `recall_with_config` against the DB rooted
+/// at `hex_root`, returning per-case results keyed by case id. Reuses the EXACT
+/// private `score` + `recall_with_config` path the CLI eval uses, so tuner
+/// numbers match the eval's — scoring semantics are unchanged, this is only a
+/// new in-process entry point that never reads or gates against the baseline
+/// and never prints.
+///
+/// The tuner points `hex_root` at a frozen memory.db SNAPSHOT so every variant
+/// is scored against identical data, and passes the variant `cfg` explicitly so
+/// the live `recall.toml` is never read or mutated.
+pub fn score_cases_with_config(
+    hex_root: &Path,
+    cases_path: &Path,
+    cfg: &RecallConfig,
+) -> std::result::Result<BTreeMap<String, CaseResult>, EvalRunError> {
+    let raw = match std::fs::read_to_string(cases_path) {
+        Ok(s) => s,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            return Err(EvalRunError::CasesAbsent(cases_path.to_path_buf()));
+        }
+        Err(e) => {
+            return Err(EvalRunError::Other(format!(
+                "cannot read cases file {}: {e}",
+                cases_path.display()
+            )));
+        }
+    };
+    let file: CaseFile = toml::from_str(&raw)
+        .map_err(|e| EvalRunError::Other(format!("cases file parse error: {e}")))?;
+    if file.cases.is_empty() {
+        return Err(EvalRunError::Other(format!(
+            "no cases in {}",
+            cases_path.display()
+        )));
+    }
+    let mut results: BTreeMap<String, CaseResult> = BTreeMap::new();
+    for case in &file.cases {
+        let outcome = super::recall::recall_with_config(hex_root, &case.query, false, cfg);
+        results.insert(case.id.clone(), score(&outcome.context, case));
+    }
+    Ok(results)
+}
+
+/// Count of facts-hits in a per-case result map — the scalar a sweep maximizes.
+pub fn facts_hits(results: &BTreeMap<String, CaseResult>) -> usize {
+    results.values().filter(|r| r.facts).count()
+}
+
 /// Run the eval. Returns the process exit code (0 = pass, 1 = regression or
 /// setup error). Loud on every failure path per SO S6.
 ///

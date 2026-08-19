@@ -19,11 +19,15 @@
 //! `eval::run`'s override) so a variant can be scored WITHOUT touching the live
 //! config file — the seam the weekly auto-tuner (spec Tzxmamhr8) builds on.
 
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use std::path::{Path, PathBuf};
 
 /// The full set of tunable recall ranking parameters.
-#[derive(Debug, Clone, Deserialize)]
+///
+/// `Serialize` is the seam the weekly auto-tuner (spec Tzxmamhr8) uses to write
+/// a landed variant back to `recall.toml` and to stash it as `params_json`; it
+/// does not touch the ranking algorithm.
+#[derive(Debug, Clone, Serialize, Deserialize)]
 #[serde(default)]
 pub struct RecallConfig {
     /// RRF fusion constant. Default 60.0 (was `rrf::RRF_K`).
@@ -46,7 +50,7 @@ impl Default for RecallConfig {
 }
 
 /// bm25 `(subject, predicate, object)` column weights, one triple per FTS arm.
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct ArmWeights {
     /// Content-question weighting (object-heavy).
@@ -84,7 +88,7 @@ fn bm25_weights(w: &[f64; 3]) -> String {
 
 /// Confidence multiplier applied to a move's candidates by whether the move
 /// fired (was `move_fired_relevance`).
-#[derive(Debug, Clone, Copy, Deserialize)]
+#[derive(Debug, Clone, Copy, Serialize, Deserialize)]
 #[serde(default)]
 pub struct MoveRelevance {
     /// Multiplier when the move fired. Default 1.0.
