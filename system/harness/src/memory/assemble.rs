@@ -28,6 +28,12 @@ pub enum MoveId {
     M2EntityFilter,
     M3PredicateQuery,
     M4TemporalSelect,
+    /// Facts ranked by query relevance (BM25 over facts_fts, RRF-fused with
+    /// the vector arm when a query_vec is supplied). The arm the 2026-08-18
+    /// recall audit found missing: M2/M3/M4 order by importance/recency and
+    /// never score fact content against the query, so the correct fact lost
+    /// to generic high-importance facts on 14/17 golden-set questions.
+    M5FactRelevance,
 }
 
 pub enum CandidateKind {
@@ -83,6 +89,10 @@ fn predicate_cues(query: &str) -> Vec<&'static str> {
         (&["values"], "values"),
         (&["avoid", "avoids", "avoiding"], "avoids"),
         (&["work", "works", "working"], "works-on"),
+        // "has" is the single most common predicate in production (427/1,863
+        // facts on the 2026-08-18 audit snapshot) and was unreachable by any
+        // query phrasing before this cue existed.
+        (&["has", "have"], "has"),
     ];
     for (cues, pred) in map {
         if cues.iter().any(|c| toks.contains(c)) && !out.contains(pred) {
@@ -357,6 +367,35 @@ fn m4_temporal(conn: &Connection, query: &str, for_agent: bool) -> (bool, Vec<Ca
     (true, cands)
 }
 
+/// M5 — fact relevance. Facts ranked against the query by the fused
+/// retrieval `facts_recall` implements (dual-weighted BM25 over the widened
+/// facts_fts + slug arm + optional vector KNN, RRF-fused; importance only
+/// breaks ties). Fires when the query yields at least one relevance-ranked
+/// fact. Relevance order is the candidate order; native_score carries the
+/// RRF score — the signal that actually determined the rank — for the
+/// recall-log calibration seam. Privacy filters in SQL before truncation
+/// (for_agent = exclude_private).
+fn m5_fact_relevance(
+    conn: &Connection,
+    query: &str,
+    for_agent: bool,
+    query_vec: Option<&[f32]>,
+) -> (bool, Vec<Candidate>) {
+    let hits: Vec<(FactHit, f64)> =
+        match super::recall::facts_recall(conn, query, TOP_K_PER_MOVE, query_vec, for_agent) {
+            Ok(h) => h,
+            Err(e) => {
+                eprintln!("[assemble] M5 fact relevance failed: {e}");
+                return (false, Vec::new());
+            }
+        };
+    if hits.is_empty() {
+        return (false, Vec::new());
+    }
+    let cands = facts_to_candidates(hits, MoveId::M5FactRelevance, true);
+    (true, cands)
+}
+
 fn facts_to_candidates(hits: Vec<(FactHit, f64)>, move_id: MoveId, fired: bool) -> Vec<Candidate> {
     let mr = move_fired_relevance(fired);
     hits.into_iter()
@@ -417,6 +456,23 @@ pub fn assemble(
     budget: usize,
     query_vec: Option<&[f32]>,
 ) -> AssembledContext {
+    assemble_with_chunk_cap(conn, query, for_agent, budget, query_vec, usize::MAX)
+}
+
+/// `assemble` with a cap on how many chunk candidates the merge admits.
+/// Callers that render only the first N chunks (recall renders 2) MUST pass
+/// their render cap: un-rendered chunks otherwise consume the char budget
+/// (~600 each) and silently crowd out facts — measured on the 2026-08-18
+/// golden set as the difference between a relevant fact landing in context
+/// or not. Chunks past the cap are skipped without charging the budget.
+pub fn assemble_with_chunk_cap(
+    conn: &Connection,
+    query: &str,
+    for_agent: bool,
+    budget: usize,
+    query_vec: Option<&[f32]>,
+    max_chunks: usize,
+) -> AssembledContext {
     let budget = if budget == 0 {
         MAX_CONTEXT_CHARS
     } else {
@@ -426,27 +482,35 @@ pub fn assemble(
     // ── run the moves (sequential — local SQLite, the cost is dominated by
     // FTS5/index lookups; "parallel" in spec scope is logical, not threaded).
     let m1_c = m1_content(conn, query, for_agent, query_vec);
+    let (m5_f, m5_c) = m5_fact_relevance(conn, query, for_agent, query_vec);
     let (m2_f, m2_c) = m2_entity(conn, query, for_agent);
     let (m3_f, m3_c) = m3_predicate(conn, query, for_agent);
     let (m4_f, m4_c) = m4_temporal(conn, query, for_agent);
 
     let per_move_stats = vec![
         move_stats(MoveId::M1ContentMatch, true, &m1_c),
+        move_stats(MoveId::M5FactRelevance, m5_f, &m5_c),
         move_stats(MoveId::M2EntityFilter, m2_f, &m2_c),
         move_stats(MoveId::M3PredicateQuery, m3_f, &m3_c),
         move_stats(MoveId::M4TemporalSelect, m4_f, &m4_c),
     ];
 
     // ── merge: FLOOR — M1 top-1 first, then each fired non-M1 move's top-1.
+    // M5 sits directly after M1 so the relevance-ranked fact wins any
+    // dedup-key collision against importance-ranked M2/M3/M4 picks, and ties
+    // in the round-robin (stable sort) resolve in relevance's favor.
     let mut merged: Vec<Candidate> = Vec::new();
     let mut chars = 0usize;
     let mut seen: HashSet<String> = HashSet::new();
     let mut queues: Vec<(MoveId, std::vec::IntoIter<Candidate>)> = vec![
         (MoveId::M1ContentMatch, m1_c.into_iter()),
+        (MoveId::M5FactRelevance, m5_c.into_iter()),
         (MoveId::M2EntityFilter, m2_c.into_iter()),
         (MoveId::M3PredicateQuery, m3_c.into_iter()),
         (MoveId::M4TemporalSelect, m4_c.into_iter()),
     ];
+
+    let mut chunks_taken = 0usize;
 
     // Floor: take the first available from each queue, M1 first.
     for (move_id, queue) in &mut queues {
@@ -454,6 +518,7 @@ pub fn assemble(
         // do not warrant a guaranteed slot. M1 always fires.
         let fired = match move_id {
             MoveId::M1ContentMatch => true,
+            MoveId::M5FactRelevance => m5_f,
             MoveId::M2EntityFilter => m2_f,
             MoveId::M3PredicateQuery => m3_f,
             MoveId::M4TemporalSelect => m4_f,
@@ -462,8 +527,15 @@ pub fn assemble(
             continue;
         }
         if let Some(cand) = queue.next() {
+            let is_chunk = matches!(cand.kind, CandidateKind::Chunk(_));
+            if is_chunk && chunks_taken >= max_chunks {
+                continue;
+            }
             let cost = cand_chars(&cand);
             if seen.insert(cand.dedup_key.clone()) {
+                if is_chunk {
+                    chunks_taken += 1;
+                }
                 if chars + cost > budget {
                     // Floor over-budget — still push so the facet coverage
                     // contract is honored, then stop (no further candidates
@@ -500,8 +572,15 @@ pub fn assemble(
                 .unwrap_or(std::cmp::Ordering::Equal)
         });
         for cand in round {
+            let is_chunk = matches!(cand.kind, CandidateKind::Chunk(_));
+            if is_chunk && chunks_taken >= max_chunks {
+                continue;
+            }
             if !seen.insert(cand.dedup_key.clone()) {
                 continue;
+            }
+            if is_chunk {
+                chunks_taken += 1;
             }
             let cost = cand_chars(&cand);
             if chars + cost > budget {
@@ -617,17 +696,130 @@ mod tests {
             MoveId::M1ContentMatch,
             "M1 top-1 must be placed first as the floor"
         );
-        // Each fired non-M1 move must contribute at least one candidate.
-        for m in &[MoveId::M2EntityFilter, MoveId::M3PredicateQuery] {
-            let fired = r.per_move_stats.iter().any(|s| s.move_id == *m && s.fired);
-            if fired {
-                assert!(
-                    r.candidates.iter().any(|c| c.move_id == *m),
-                    "fired move {:?} contributed no candidate to the floor",
-                    m
-                );
-            }
+        // Each fired non-M1 move's coverage must reach the merge. Since M5
+        // (fact relevance) runs first and shares dedup keys, the guarantee is
+        // that the move's facts are PRESENT — not that the move gets the
+        // attribution (M5 legitimately claims the same facts first).
+        let objects: Vec<&str> = r
+            .candidates
+            .iter()
+            .filter_map(|c| match &c.kind {
+                CandidateKind::Fact(f) => Some(f.object.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            objects.iter().any(|o| o.contains("use sqlite-vec")),
+            "M3-covered fact missing from merge"
+        );
+        assert!(
+            objects.iter().any(|o| o.contains("rust")),
+            "M2-covered fact missing from merge"
+        );
+    }
+
+    /// The 2026-08-18 recall bug, as a regression test: a fact whose content
+    /// answers the query but whose subject is a minority variant and whose
+    /// importance is LOW must beat generic high-importance facts under the
+    /// majority subject. Only a query-relevance arm (M5) can surface it —
+    /// M2 matches subject "Mike" and sorts by importance, burying it.
+    #[test]
+    fn m5_fact_relevance_surfaces_low_importance_specific_fact() {
+        let c = fresh_db();
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+             VALUES ('t1','Michael Rapadas','knows',
+                     'Justin Frankel, who referred him to an employment lawyer',
+                     0.5,'2026-06-04','2026-06-04',0)",
+            [],
+        )
+        .unwrap();
+        for i in 0..6 {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+                 VALUES (?1,'Mike','works-on',?2,0.9,'2026-06-04','2026-06-04',0)",
+                rusqlite::params![format!("g{i}"), format!("generic project number {i}")],
+            )
+            .unwrap();
         }
+
+        let r = assemble(
+            &c,
+            "Who referred Mike to an employment lawyer?",
+            false,
+            MAX_CONTEXT_CHARS,
+            None,
+        );
+
+        let m5_fired = r
+            .per_move_stats
+            .iter()
+            .any(|s| s.move_id == MoveId::M5FactRelevance && s.fired);
+        assert!(m5_fired, "M5 must fire on a content-matching query");
+        let target_in = r.candidates.iter().any(|c| match &c.kind {
+            CandidateKind::Fact(f) => f.object.contains("Justin Frankel"),
+            _ => false,
+        });
+        assert!(
+            target_in,
+            "relevance-ranked fact must be injected despite low importance"
+        );
+    }
+
+    /// Subject-only match: the widened facts_fts must make entity-name
+    /// queries rankable when the name never appears in any object text.
+    #[test]
+    fn m5_finds_fact_via_subject_token() {
+        let c = fresh_db();
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+             VALUES ('z1','Zwerk','is','an open-source model-agnostic agent platform',
+                     0.5,'2026-06-04','2026-06-04',0)",
+            [],
+        )
+        .unwrap();
+
+        let r = assemble(
+            &c,
+            "Tell me about Zwerk please",
+            false,
+            MAX_CONTEXT_CHARS,
+            None,
+        );
+        let hit = r.candidates.iter().any(|c| match &c.kind {
+            CandidateKind::Fact(f) => f.subject == "Zwerk",
+            _ => false,
+        });
+        assert!(
+            hit,
+            "subject token must be searchable via widened facts_fts"
+        );
+    }
+
+    /// "has"/"have" cue must reach the most common production predicate.
+    #[test]
+    fn predicate_cue_has_fires_m3() {
+        let c = fresh_db();
+        insert_fact(
+            &c,
+            "h1",
+            "boi",
+            "has",
+            "a retention policy pruning old events",
+            false,
+        );
+        let r = assemble(
+            &c,
+            "what retention does boi have",
+            false,
+            MAX_CONTEXT_CHARS,
+            None,
+        );
+        let m3_fired = r
+            .per_move_stats
+            .iter()
+            .any(|s| s.move_id == MoveId::M3PredicateQuery && s.fired);
+        assert!(m3_fired, "'have' must cue the 'has' predicate");
     }
 
     /// Privacy: for_agent=true MUST exclude facts marked private from every
@@ -697,13 +889,15 @@ mod tests {
             .any(|s| s.move_id == MoveId::M3PredicateQuery && s.fired);
         assert!(m3_fired, "M3 should fire on the 'decide' cue");
 
-        let m3_kept = r
-            .candidates
-            .iter()
-            .any(|c| c.move_id == MoveId::M3PredicateQuery);
+        // The fact must survive M1's domination regardless of which fact move
+        // (M5 relevance or M3 predicate) carries it into the merge.
+        let fact_kept = r.candidates.iter().any(|c| match &c.kind {
+            CandidateKind::Fact(f) => f.object.contains("parallel-moves assembler"),
+            _ => false,
+        });
         assert!(
-            m3_kept,
-            "M3's fact was crowded out by M1's long list — per-move quota missing"
+            fact_kept,
+            "the fact was crowded out by M1's long list — per-move quota missing"
         );
     }
 

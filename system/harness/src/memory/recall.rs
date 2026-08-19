@@ -39,7 +39,10 @@ pub fn recall_with_facts(conn: &rusqlite::Connection, query: &str) -> rusqlite::
     let chunks = chunks_recall(conn, query, 5).unwrap_or_default();
     // Hot-path budget: no embedding model is loaded here (module doc), so the
     // facts vector arm is off (None ⇒ exactly the FTS-only behavior).
-    let facts = facts_recall(conn, query, 5, None)?;
+    let facts = facts_recall(conn, query, 5, None, false)?
+        .into_iter()
+        .map(|(f, _)| f)
+        .collect();
     Ok(RecallV2 { chunks, facts })
 }
 
@@ -47,16 +50,19 @@ fn chunks_recall(conn: &rusqlite::Connection, query: &str, k: usize) -> rusqlite
     super::search::search_fts_public(conn, query, k, None)
 }
 
-/// Facts retrieval: FTS keyword arm, plus a KNN arm over `facts_vec` when the
-/// caller already holds a query embedding (hoist it from the chunk path — do
-/// NOT cold-load the model here). `query_vec = None` ⇒ FTS-only, identical to
-/// the pre-fusion behavior.
+/// Facts retrieval: dual-weighted FTS arms + slug arm + KNN arm over
+/// `facts_vec` when the caller already holds a query embedding (hoist it from
+/// the chunk path — do NOT cold-load the model here), fused by RRF. Returns
+/// `(fact, rrf_score)` in fused order so callers can log the real ranking
+/// signal. `exclude_private` filters in SQL BEFORE any top-k truncation —
+/// filtering after the cut silently starves the window (review 2026-08-18).
 pub(crate) fn facts_recall(
     conn: &rusqlite::Connection,
     query: &str,
     k: usize,
     query_vec: Option<&[f32]>,
-) -> rusqlite::Result<Vec<FactHit>> {
+    exclude_private: bool,
+) -> rusqlite::Result<Vec<(FactHit, f64)>> {
     // FTS5 default-ANDs tokens — for natural-language queries we want any-match.
     // Drop stopwords and OR the remaining alphanumerics so "who is alice" hits
     // facts mentioning the slug.
@@ -83,22 +89,65 @@ pub(crate) fn facts_recall(
         .collect::<Vec<_>>()
         .join(" OR ");
 
-    // FTS arm — ranked facts rowids (bm25, then importance). The rowid is the
-    // fusion key shared with the KNN arm (facts.id is a TEXT ULID, not an
+    // FTS arms — ranked facts rowids (bm25, then importance). The rowid is
+    // the fusion key shared with the KNN arm (facts.id is a TEXT ULID, not an
     // integer — knn_facts joins it back to the rowid).
-    let fts_ids: Vec<i64> = if fts_query.is_empty() {
-        Vec::new()
+    //
+    // TWO weightings run as separate arms and fuse by rank (RRF), because no
+    // single bm25 column weighting serves both query shapes (measured on the
+    // 17-case golden set, 2026-08-18): content questions need object-heavy
+    // weights, while entity/attribute questions ("what is X's focus") carry
+    // their signal in subject+predicate and object weighting buries them.
+    // Rank fusion sidesteps the scale conflict; each arm over-fetches 3x so
+    // fusion has real overlap to work with (12/17 single-arm → 15/17 fused).
+    let privacy = if exclude_private {
+        " AND f.private = 0"
     } else {
-        conn.prepare(
+        ""
+    };
+    let fts_arm = |weights: &str| -> rusqlite::Result<Vec<i64>> {
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        conn.prepare(&format!(
             "SELECT facts_fts.rowid
              FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
-             WHERE facts_fts MATCH ?1 AND f.tombstone = 0
-             ORDER BY bm25(facts_fts), f.importance DESC LIMIT ?2",
-        )?
-        .query_map(rusqlite::params![fts_query, k as i64], |r| r.get(0))?
-        .filter_map(Result::ok)
+             WHERE facts_fts MATCH ?1 AND f.tombstone = 0{privacy}
+             ORDER BY bm25(facts_fts, {weights}), f.importance DESC LIMIT ?2",
+        ))?
+        .query_map(rusqlite::params![fts_query, (k * 3) as i64], |r| r.get(0))?
         .collect()
     };
+    // (subject, predicate, object) weights per arm.
+    let fts_content_ids: Vec<i64> = fts_arm("1.0, 0.25, 2.0")?;
+    let fts_entity_ids: Vec<i64> = fts_arm("2.0, 1.0, 0.25")?;
+
+    // Slug arm: subjects whose colon-slug contains a query token (e.g.
+    // "alice" → `person:alice`, `person:alice-chew`). FTS tokenization can't
+    // see inside slugs, so this runs as its own ranked arm in the fusion —
+    // it must NOT be appended after truncation, where a full FTS window
+    // starves it (review 2026-08-18).
+    let mut slug_ids: Vec<i64> = Vec::new();
+    for tok in query.to_lowercase().split_whitespace() {
+        if tok.len() < 3 {
+            continue;
+        }
+        let pattern = format!("%:{tok}%");
+        let ids: Vec<i64> = conn
+            .prepare(&format!(
+                "SELECT rowid FROM facts f
+                 WHERE subject LIKE ?1 AND tombstone = 0{privacy}
+                 ORDER BY importance DESC LIMIT 3",
+            ))?
+            .query_map([&pattern], |r| r.get(0))?
+            .filter_map(Result::ok)
+            .collect();
+        for id in ids {
+            if !slug_ids.contains(&id) {
+                slug_ids.push(id);
+            }
+        }
+    }
 
     // Vector arm — same shape as the chunk-side fusion (search.rs run()):
     // best-effort, loud on failure, never degrades the FTS arm.
@@ -112,13 +161,36 @@ pub(crate) fn facts_recall(
         None => vec![],
     };
 
-    let fused = super::rrf::rrf_fuse(&[fts_ids, knn_ids], super::rrf::RRF_K);
+    let slug_top1 = slug_ids.first().copied();
+    let fused = super::rrf::rrf_fuse(
+        &[fts_content_ids, fts_entity_ids, slug_ids, knn_ids],
+        super::rrf::RRF_K,
+    );
+
+    // Truncate to k in fused order, but GUARANTEE the slug arm's top-1 a
+    // slot: a query naming an entity must never lose its best entity match
+    // to keyword-noise facts that happen to fill the window (each noise fact
+    // appears in two FTS arms, so pure RRF can rank all of them above a
+    // single-arm slug hit).
+    let mut keep: Vec<(i64, f64)> = fused;
+    if let Some(top) = slug_top1 {
+        if keep.len() > k {
+            let in_window = keep.iter().take(k).any(|(id, _)| *id == top);
+            if !in_window {
+                if let Some(pos) = keep.iter().position(|(id, _)| *id == top) {
+                    let slug_entry = keep.remove(pos);
+                    keep.insert(k - 1, slug_entry);
+                }
+            }
+        }
+    }
+    keep.truncate(k);
 
     // Fetch facts in fused order. Importance breaks RRF-score ties (the
     // fuse's HashMap ordering is arbitrary on equal scores); the sort is
     // stable, so the single-arm (None) path keeps exactly the FTS order.
     let mut scored: Vec<(FactHit, f64)> = Vec::new();
-    for (rowid, score) in &fused {
+    for (rowid, score) in &keep {
         let row = conn.query_row(
             "SELECT subject, predicate, object, importance, private
              FROM facts WHERE rowid = ?1 AND tombstone = 0",
@@ -134,6 +206,9 @@ pub(crate) fn facts_recall(
             },
         );
         if let Ok(h) = row {
+            if exclude_private && h.private {
+                continue;
+            }
             scored.push((h, *score));
         }
     }
@@ -146,44 +221,7 @@ pub(crate) fn facts_recall(
                     .unwrap_or(std::cmp::Ordering::Equal),
             )
     });
-    let mut hits: Vec<FactHit> = scored.into_iter().map(|(h, _)| h).collect();
-    hits.truncate(k);
-
-    // Slug boost: for each token in the query, surface facts whose subject
-    // contains `:<token>` after the type prefix (e.g. "alice" → subject
-    // LIKE '%:alice%' matches both `person:alice` and `person:alice-chew`).
-    for tok in query.to_lowercase().split_whitespace() {
-        if tok.len() < 3 {
-            continue;
-        }
-        let pattern = format!("%:{tok}%");
-        let mut q = conn.prepare(
-            "SELECT subject, predicate, object, importance, private FROM facts
-             WHERE subject LIKE ?1 AND tombstone = 0
-             ORDER BY importance DESC LIMIT 3",
-        )?;
-        for hit in q
-            .query_map([&pattern], |r| {
-                Ok(FactHit {
-                    subject: r.get(0)?,
-                    predicate: r.get(1)?,
-                    object: r.get(2)?,
-                    importance: r.get(3)?,
-                    private: r.get::<_, i64>(4)? != 0,
-                })
-            })?
-            .filter_map(Result::ok)
-        {
-            if !hits
-                .iter()
-                .any(|h| h.subject == hit.subject && h.predicate == hit.predicate)
-            {
-                hits.push(hit);
-            }
-        }
-    }
-    hits.truncate(k);
-    Ok(hits)
+    Ok(scored)
 }
 
 pub struct RecallOutcome {
@@ -257,8 +295,17 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
                 // model here blew the latency budget (measured 1.33-1.9 s per
                 // recall). Offline CLI callers who want semantic search embed the
                 // query themselves and pass `Some(&qv)`.
-                let assembled =
-                    super::assemble::assemble(&conn, query, for_agent, MAX_CONTEXT_CHARS, None);
+                // Chunk cap = what format_context_v2 actually renders; without
+                // it, merged-but-unrendered chunks eat the char budget that
+                // should carry facts (~600 chars each).
+                let assembled = super::assemble::assemble_with_chunk_cap(
+                    &conn,
+                    query,
+                    for_agent,
+                    MAX_CONTEXT_CHARS,
+                    None,
+                    MAX_CHUNKS_RENDERED,
+                );
 
                 // Capture per-move stats for the recall-log (calibration seam —
                 // raw native scores per move; top_confidence alone is useless).
@@ -372,6 +419,7 @@ fn move_id_str(m: super::assemble::MoveId) -> &'static str {
         M2EntityFilter => "M2",
         M3PredicateQuery => "M3",
         M4TemporalSelect => "M4",
+        M5FactRelevance => "M5",
     }
 }
 
@@ -679,7 +727,12 @@ mod plan2_tests {
         crate::memory::vector::insert_fact_vec(&c, "fb", &qv).unwrap();
 
         // FTS-only: B is invisible.
-        let fts_only = facts_recall(&c, "what powers the vector store", 5, None).unwrap();
+        let fts_only: Vec<FactHit> =
+            facts_recall(&c, "what powers the vector store", 5, None, false)
+                .unwrap()
+                .into_iter()
+                .map(|(f, _)| f)
+                .collect();
         assert!(
             fts_only.iter().any(|f| f.subject == "project:hex"),
             "FTS arm must still surface the keyword match"
@@ -690,7 +743,12 @@ mod plan2_tests {
         );
 
         // Fused: both arms contribute.
-        let fused = facts_recall(&c, "what powers the vector store", 5, Some(&qv)).unwrap();
+        let fused: Vec<FactHit> =
+            facts_recall(&c, "what powers the vector store", 5, Some(&qv), false)
+                .unwrap()
+                .into_iter()
+                .map(|(f, _)| f)
+                .collect();
         assert!(
             fused.iter().any(|f| f.subject == "project:hex"),
             "FTS hit must survive fusion"
@@ -701,6 +759,86 @@ mod plan2_tests {
                 .any(|f| f.subject == "person:bob" && f.object == "zzqx qqzz"),
             "KNN arm must surface the semantically-near fact, got {:?}",
             fused.iter().map(|f| &f.subject).collect::<Vec<_>>()
+        );
+    }
+
+    /// Review 2026-08-18 regression: a fact reachable ONLY via the slug arm
+    /// (subject `person:alexandra`, query token "alex" — no FTS token match)
+    /// must survive even when keyword-noise facts fill the whole top-k
+    /// window. Pre-fix, slug results were appended after truncation and a
+    /// second truncate dropped them.
+    #[test]
+    fn slug_arm_survives_full_fts_window() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        for i in 0..8 {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+                 VALUES (?1,'project:noise','decided',?2,0.9,'2026-06-11','2026-06-11')",
+                rusqlite::params![
+                    format!("n{i}"),
+                    format!("unrelated filler payload number {i}")
+                ],
+            )
+            .unwrap();
+        }
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('ax','person:alexandra','prefers','quiet mornings',0.4,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+
+        let hits: Vec<FactHit> = facts_recall(&c, "what did alex decide", 6, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert!(
+            hits.iter().any(|f| f.subject == "person:alexandra"),
+            "slug-arm entity match starved out of the top-k window, got {:?}",
+            hits.iter().map(|f| &f.subject).collect::<Vec<_>>()
+        );
+    }
+
+    /// Review 2026-08-18 regression: with exclude_private, private facts must
+    /// be filtered in SQL BEFORE truncation — filtering after lets private
+    /// facts fill the window and starve out the public match entirely.
+    #[test]
+    fn exclude_private_filters_before_truncation() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        for i in 0..8 {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+                 VALUES (?1,'me/secret','decided','the zzkey rotation plan',0.9,'2026-06-11','2026-06-11',1)",
+                rusqlite::params![format!("p{i}")],
+            )
+            .unwrap();
+        }
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+             VALUES ('pub','project:hex','decided','the zzkey rotation plan',0.3,'2026-06-11','2026-06-11',0)",
+            [],
+        )
+        .unwrap();
+
+        let hits: Vec<FactHit> = facts_recall(&c, "what was decided about zzkey", 6, None, true)
+            .unwrap()
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert!(
+            hits.iter().all(|f| !f.private),
+            "private fact leaked through exclude_private"
+        );
+        assert!(
+            hits.iter().any(|f| f.subject == "project:hex"),
+            "public fact starved out by private facts filling the pre-filter window"
         );
     }
 
@@ -721,7 +859,12 @@ mod plan2_tests {
         let qv = vec![0.1f32; crate::memory::vector::EMBED_DIM];
         crate::memory::vector::insert_fact_vec(&c, "fd", &qv).unwrap();
 
-        let fused = facts_recall(&c, "anything relevant here at all", 5, Some(&qv)).unwrap();
+        let fused: Vec<FactHit> =
+            facts_recall(&c, "anything relevant here at all", 5, Some(&qv), false)
+                .unwrap()
+                .into_iter()
+                .map(|(f, _)| f)
+                .collect();
         assert!(
             !fused.iter().any(|f| f.subject == "person:dead"),
             "tombstoned fact must not surface via the KNN arm"
