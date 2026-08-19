@@ -328,24 +328,30 @@ pub fn recall_with_config(
     let (filtered, facts, extras): (Vec<super::search::SearchResult>, Vec<FactHit>, LogExtras) =
         match super::open_db(&db) {
             Ok(conn) => {
-                // Route the hot path through the v1 ContextAssembler. Passing
-                // `None` for `query_vec` is the load-bearing hot-path policy: the
-                // assembler runs in FTS-only mode and — by construction, not by
-                // env-var toggle — never constructs an `Embedder`. Per spec
-                // Tj0b203yv (finding 1 of the 2026-07-16 audit), this hook is a
-                // fresh OS process per user message; cold-loading the 522 MB nomic
-                // model here blew the latency budget (measured 1.33-1.9 s per
-                // recall). Offline CLI callers who want semantic search embed the
-                // query themselves and pass `Some(&qv)`.
+                // Route the hot path through the v1 ContextAssembler. The
+                // CHUNK-side vector arm (M1) stays OFF here (`query_vec = None`):
+                // per spec Tj0b203yv this hook is a fresh OS process per message
+                // and must never cold-load the 522 MB nomic model itself
+                // (measured 1.33-1.9 s per recall). The FACTS-side KNN arm (M5)
+                // is gated separately by `cfg.vector` (spec Sdnap37he): when the
+                // arm is enabled the query vector comes from the resident embed
+                // endpoint over a unix socket (loud, hard-bounded, BM25-only on
+                // any failure — never cold-loads a model on the hot path). When
+                // the arm is OFF (the compiled default / absent config),
+                // `query_vector` returns `None`, the facts arm is not fused, and
+                // recall is byte-identical to the BM25-only behavior. Offline CLI
+                // callers who want semantic search embed the query themselves.
                 // Chunk cap = what format_context_v2 actually renders; without
                 // it, merged-but-unrendered chunks eat the char budget that
                 // should carry facts (~600 chars each).
+                let facts_qv = super::embed_client::query_vector(hex_root, &cfg.vector, query);
                 let assembled = super::assemble::assemble_with_config(
                     &conn,
                     query,
                     for_agent,
                     MAX_CONTEXT_CHARS,
                     None,
+                    facts_qv.as_deref(),
                     MAX_CHUNKS_RENDERED,
                     cfg,
                 );
@@ -961,6 +967,9 @@ mod plan2_tests {
                 fired: 1.0,
                 unfired: 0.3,
             },
+            // The vector arm ships DEFAULT OFF; the legacy BM25 fusion this test
+            // pins is the `enabled = false` behavior.
+            vector: crate::memory::recall_config::VectorArm::default(),
         };
 
         let query = "what powers the vector store";
@@ -983,6 +992,78 @@ mod plan2_tests {
             "live default recall ranking drifted from the documented default literals"
         );
         assert!(!live.is_empty(), "fixture must produce hits");
+    }
+
+    /// Off-is-identical pin for the vector arm (spec Sdnap37he, task Ttrmaca6q)
+    /// — the analogue of `default_config_reproduces_legacy_facts_recall_exactly`
+    /// above. With the vector arm at its compiled default (OFF), the recall hot
+    /// path resolves NO query vector, so `facts_recall`'s KNN arm is never fused
+    /// and the facts ranking is byte-identical to the pre-change BM25-only
+    /// behavior. A configured-but-disabled socket is never consulted.
+    #[test]
+    fn default_config_vector_arm_off_is_byte_identical() {
+        use crate::memory::recall_config::{RecallConfig, VectorArm};
+
+        // 1) The load-bearing claim: a disabled arm produces NO query vector,
+        //    even when a socket path is configured — so `recall_with_config`
+        //    hands `assemble_with_config` exactly the `None` it passed before
+        //    this change. This is the whole byte-identical guarantee.
+        let default_cfg = RecallConfig::default();
+        assert!(!default_cfg.vector.enabled, "vector arm must default OFF");
+        let armed_but_disabled = VectorArm {
+            enabled: false,
+            socket_path: "/dev/null/never-consulted.sock".to_string(),
+            timeout_ms: 1,
+        };
+        let root = std::path::Path::new("/tmp");
+        assert!(
+            crate::memory::embed_client::query_vector(root, &default_cfg.vector, "a paraphrase")
+                .is_none(),
+            "default (OFF) arm must resolve no query vector"
+        );
+        assert!(
+            crate::memory::embed_client::query_vector(root, &armed_but_disabled, "a paraphrase")
+                .is_none(),
+            "a disabled arm must not consult its configured socket"
+        );
+
+        // 2) End-to-end over a fixture: default-config facts equal the
+        //    explicit-`None` (pre-change) facts arm, ordering + score.
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        let rows = [
+            ("f1", "project:hex", "uses", "sqlite-vec for the vector store"),
+            ("f2", "person:alexandra", "prefers", "quiet mornings and vector math"),
+            ("f3", "project:hex", "decided", "to store the vector index on disk"),
+            ("f4", "person:bob", "wrote", "the store migration for vectors"),
+        ];
+        for (id, s, p, o) in rows {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,0.5,'2026-06-11','2026-06-11')",
+                rusqlite::params![id, s, p, o],
+            )
+            .unwrap();
+        }
+        let query = "what powers the vector store";
+        let via_default: Vec<(String, String, f64)> =
+            facts_recall_with_config(&c, query, 5, None, false, &default_cfg)
+                .unwrap()
+                .into_iter()
+                .map(|(f, native)| (f.subject, f.object, native))
+                .collect();
+        let via_legacy_none: Vec<(String, String, f64)> = facts_recall(&c, query, 5, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|(f, native)| (f.subject, f.object, native))
+            .collect();
+        assert_eq!(
+            via_default, via_legacy_none,
+            "default-config (vector OFF) facts drifted from the pre-change BM25-only path"
+        );
+        assert!(!via_default.is_empty(), "fixture must produce hits");
     }
 
     #[test]

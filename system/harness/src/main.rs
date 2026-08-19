@@ -853,6 +853,17 @@ enum MemoryCommands {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Resident query-embedding endpoint for the recall vector arm (spec
+    /// Sdnap37he). Holds ONE embedder and answers query-embedding requests
+    /// over a local unix socket so the per-message recall CLI never cold-loads
+    /// the model. Internal: run by the engine, not typed by humans.
+    #[command(name = "embed-serve", hide = true)]
+    EmbedServe {
+        /// Socket path (default: $HEX_DIR/.hex/run/embed.sock). Must match the
+        /// `[vector].socket_path` the recall config points at.
+        #[arg(long)]
+        socket: Option<PathBuf>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -1147,6 +1158,32 @@ fn main() {
                     vacuum,
                     backfill_facts,
                 } => memory::maintain::run(&hex_dir, *vacuum, *backfill_facts),
+                MemoryCommands::EmbedServe { socket } => {
+                    // Resident endpoint for the recall vector arm (option (b) of
+                    // docs/research/2026-08-19-recall-vector-arm.md): cold-load
+                    // the model ONCE, then serve query vectors over a unix socket
+                    // so the per-message recall CLI stays inside its budget.
+                    let sock = socket
+                        .clone()
+                        .unwrap_or_else(|| hex_dir.join(".hex/run/embed.sock"));
+                    match memory::embed::Embedder::new(&hex_dir) {
+                        Ok(embedder) => {
+                            match memory::embed_client::serve_with(&sock, |q| {
+                                embedder.embed_query(q).ok()
+                            }) {
+                                Ok(()) => 0,
+                                Err(e) => {
+                                    eprintln!("embed-serve: socket error on {}: {e}", sock.display());
+                                    1
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("embed-serve: failed to load embedder: {e}");
+                            1
+                        }
+                    }
+                }
                 MemoryCommands::DistillRewind { file, all, dry_run } => {
                     // Exactly one selector. Neither and both are loud usage
                     // errors — never a quiet no-op (S6).

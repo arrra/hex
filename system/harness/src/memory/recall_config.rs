@@ -37,6 +37,11 @@ pub struct RecallConfig {
     pub arm_weights: ArmWeights,
     /// M5 relevance-move confidence multipliers (was `move_fired_relevance`).
     pub move_relevance: MoveRelevance,
+    /// Semantic KNN (vector) arm over `facts_vec`. DEFAULT OFF — an absent
+    /// config or an absent `[vector]` section leaves it disabled, so recall is
+    /// byte-for-byte identical to the BM25-only behavior (spec Sdnap37he
+    /// task Ttrmaca6q).
+    pub vector: VectorArm,
 }
 
 impl Default for RecallConfig {
@@ -45,6 +50,7 @@ impl Default for RecallConfig {
             rrf_k: 60.0,
             arm_weights: ArmWeights::default(),
             move_relevance: MoveRelevance::default(),
+            vector: VectorArm::default(),
         }
     }
 }
@@ -117,6 +123,49 @@ impl MoveRelevance {
     }
 }
 
+/// Config for the semantic KNN (vector) arm over `facts_vec` — the query-side
+/// embedding path chosen in `docs/research/2026-08-19-recall-vector-arm.md`
+/// (option (b): a resident hex-engine embed endpoint served over a local unix
+/// socket). The recall hot path is a fresh OS process per message, so it must
+/// NOT cold-load the ~522 MB nomic model itself (measured 13–15 s under load);
+/// instead it asks the resident endpoint for the query vector.
+///
+/// DEFAULT OFF. With `enabled = false` (or an absent config / absent `[vector]`
+/// section) the recall path produces no query vector and the facts KNN arm is
+/// never fused — recall is byte-for-byte identical to the BM25-only behavior.
+///
+/// When enabled, any embed failure (missing socket, dead/slow endpoint,
+/// malformed reply, timeout) degrades LOUDLY to BM25-only (stderr WARN, SO S6)
+/// within `timeout_ms`. It never errors recall and never adds unbounded
+/// latency. No network calls — the endpoint is a local unix socket only.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct VectorArm {
+    /// Master switch for the facts KNN arm. Default `false` (byte-identical
+    /// BM25-only recall). The compiled default ships OFF until the task-3 A/B
+    /// adoption gates pass (spec Sdnap37he, SO 11).
+    pub enabled: bool,
+    /// Unix-socket path of the resident embed endpoint (`hex memory
+    /// embed-serve`). A relative path resolves under `$HEX_DIR`; an absolute
+    /// path is used verbatim. Default: `.hex/run/embed.sock`.
+    pub socket_path: String,
+    /// Hard upper bound (ms) on the WHOLE embed step — connect + write + read.
+    /// The recall caller waits at most this long before falling back to
+    /// BM25-only. Default 150 ms: inside the p95 ≤ 500 ms adoption gate with
+    /// headroom over the memo's tens-of-ms expected per-query cost.
+    pub timeout_ms: u64,
+}
+
+impl Default for VectorArm {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            socket_path: ".hex/run/embed.sock".to_string(),
+            timeout_ms: 150,
+        }
+    }
+}
+
 /// Path to the instance recall-tuning config: `$HEX_DIR/.hex/config/recall.toml`.
 pub fn config_path(hex_root: &Path) -> PathBuf {
     hex_root.join(".hex/config/recall.toml")
@@ -171,6 +220,23 @@ mod tests {
         // SQL fragments are numerically identical to the old string literals.
         assert_eq!(d.arm_weights.content_sql(), "1, 0.25, 2");
         assert_eq!(d.arm_weights.entity_sql(), "2, 1, 0.25");
+        // The semantic KNN arm ships DEFAULT OFF (spec Sdnap37he / SO 11) so
+        // the compiled default is byte-identical BM25-only recall.
+        assert!(!d.vector.enabled, "vector arm must default OFF");
+    }
+
+    #[test]
+    fn absent_vector_section_stays_disabled() {
+        // A config file that tunes other params but omits `[vector]` must leave
+        // the arm OFF (byte-identical recall for every already-tuned instance).
+        let tmp = tempfile::TempDir::new().unwrap();
+        std::fs::create_dir_all(tmp.path().join(".hex/config")).unwrap();
+        std::fs::write(config_path(tmp.path()), "rrf_k = 45.0\n").unwrap();
+        let cfg = RecallConfig::load(tmp.path());
+        assert_eq!(cfg.rrf_k, 45.0);
+        assert!(!cfg.vector.enabled, "absent [vector] section must stay OFF");
+        assert_eq!(cfg.vector.socket_path, ".hex/run/embed.sock");
+        assert_eq!(cfg.vector.timeout_ms, 150);
     }
 
     #[test]
