@@ -156,6 +156,19 @@ fn score_heldout(
 /// both opt-in slices but has no memory.db is inconsistent, not a benign skip.
 /// The `-wal` sidecar is copied best-effort so committed-but-uncheckpointed
 /// writes are included; `-shm` is rebuilt by SQLite on open.
+/// Loud guard for the phantom-DB trap: `open_db` (`Connection::open`) CREATES
+/// the file when absent. An absent memory.db on an opted-in instance is an
+/// inconsistent install — a hard error, never a benign skip.
+fn ensure_db_exists(dbp: &Path) -> Result<()> {
+    if dbp.exists() {
+        return Ok(());
+    }
+    Err(anyhow::anyhow!(
+        "recall-tune: memory.db absent at {} — case files present but no memory store",
+        dbp.display()
+    ))
+}
+
 fn snapshot_db(live_root: &Path) -> Result<(tempfile::TempDir, PathBuf)> {
     let src = db_path(live_root);
     if !src.exists() {
@@ -175,8 +188,13 @@ fn snapshot_db(live_root: &Path) -> Result<(tempfile::TempDir, PathBuf)> {
     if src_wal.exists() {
         let dst_wal = PathBuf::from(format!("{}-wal", dst.display()));
         // Best-effort — a missing WAL tail only costs the snapshot the most
-        // recent uncheckpointed rows, never correctness of relative scoring.
-        let _ = std::fs::copy(&src_wal, &dst_wal);
+        // recent uncheckpointed rows, never correctness of relative scoring —
+        // but the miss itself is said out loud (S6).
+        if let Err(e) = std::fs::copy(&src_wal, &dst_wal) {
+            eprintln!(
+                "[recall-tune] WARN: WAL sidecar copy failed ({e}) — snapshot misses uncheckpointed rows"
+            );
+        }
     }
     let snap_root = tmp.path().to_path_buf();
     Ok((tmp, snap_root))
@@ -208,8 +226,9 @@ fn insert_ledger(
 /// Archive the current `recall.toml` with a timestamped `.prev` suffix, then
 /// ATOMICALLY write `new_cfg`. Archive-then-rename ordering means a crash
 /// mid-land leaves either the old config or the new one, never a partial. Returns
-/// the archive path (None when there was no prior config to archive) so the
-/// `win_log` row can point the later revert check at exactly the file to restore.
+/// the archive path (always Some: a first-ever land archives the compiled
+/// defaults) so the `win_log` row can point the later revert check at exactly
+/// the file to restore.
 fn land_config(root: &Path, new_cfg: &RecallConfig, stamp: &str) -> Result<Option<PathBuf>> {
     let live = config_path(root);
     let dir = live
@@ -219,15 +238,22 @@ fn land_config(root: &Path, new_cfg: &RecallConfig, stamp: &str) -> Result<Optio
         .map_err(|e| anyhow::anyhow!("recall-tune: config mkdir failed: {e}"))?;
 
     // Archive the previous config FIRST, so the new-config rename below is the
-    // last mutation and cannot orphan an un-archived predecessor.
-    let archive = if live.exists() {
-        let a = dir.join(format!("recall.toml.{stamp}.prev"));
+    // last mutation and cannot orphan an un-archived predecessor. A first-ever
+    // land (no live config) archives the COMPILED DEFAULTS instead: restoring
+    // that archive is behaviorally identical to the pre-land state, so the
+    // revert path exists from day one — and the first landing is exactly the
+    // one with the least evidence behind it.
+    let a = dir.join(format!("recall.toml.{stamp}.prev"));
+    if live.exists() {
         std::fs::copy(&live, &a)
             .map_err(|e| anyhow::anyhow!("recall-tune: archive .prev failed: {e}"))?;
-        Some(a)
     } else {
-        None
-    };
+        let body = toml::to_string(&RecallConfig::default())
+            .map_err(|e| anyhow::anyhow!("recall-tune: serialize default .prev failed: {e}"))?;
+        std::fs::write(&a, body)
+            .map_err(|e| anyhow::anyhow!("recall-tune: write default .prev failed: {e}"))?;
+    }
+    let archive = Some(a);
 
     let body = toml::to_string(new_cfg)
         .map_err(|e| anyhow::anyhow!("recall-tune: serialize recall.toml failed: {e}"))?;
@@ -270,7 +296,8 @@ fn last_active_win(conn: &rusqlite::Connection) -> Result<Option<LastWin>> {
         .map_err(|e| anyhow::anyhow!("recall-tune: win_log params_json parse failed: {e}"))?;
     let prev_archive = match v.get("prev_archive").and_then(|x| x.as_str()) {
         Some(s) => PathBuf::from(s),
-        // No prior config to restore → nothing revertible.
+        // Only legacy/malformed rows lack prev_archive (land_config now always
+        // records one) → nothing revertible for such a row.
         None => return Ok(None),
     };
     let prev_heldout_score = v
@@ -379,7 +406,12 @@ fn run_recall_tune(_e: Event, ctx: Ctx) -> Result<()> {
     let tuning = TuningPath(tuning);
 
     // Open the ledger DB and ensure win_log/regret_log exist (atomic migration).
+    // Existence is checked BEFORE open_db: `Connection::open` CREATES the file
+    // when absent, so an instance with case files but no memory store would be
+    // scored against a phantom empty DB and read as "nothing to improve"
+    // forever (S6). Same guard as climber_digest.
     let dbp = db_path(&root);
+    ensure_db_exists(&dbp)?;
     let conn = open_db(&dbp)
         .map_err(|e| anyhow::anyhow!("recall-tune: open memory.db {} failed: {e}", dbp.display()))?;
     schema::apply_tune_log_schema(&conn)
@@ -550,6 +582,35 @@ pub fn worker() -> Worker {
 mod tests {
     use super::*;
 
+    /// The phantom-DB guard: absent memory.db is a hard error and the guard
+    /// itself must not create the file (that is the whole point).
+    #[test]
+    fn ensure_db_exists_is_loud_when_absent_and_never_creates() {
+        let tmp = tempfile::tempdir().unwrap();
+        let dbp = tmp.path().join(".hex").join("memory.db");
+        let err = ensure_db_exists(&dbp).unwrap_err().to_string();
+        assert!(err.contains("memory.db absent"), "err: {err}");
+        assert!(!dbp.exists());
+        std::fs::create_dir_all(dbp.parent().unwrap()).unwrap();
+        std::fs::write(&dbp, b"x").unwrap();
+        assert!(ensure_db_exists(&dbp).is_ok());
+    }
+
+    /// A first-ever land (no live recall.toml) must still be revertible: the
+    /// archive it records contains the compiled defaults, byte-identical to
+    /// what land_config itself would serialize for them.
+    #[test]
+    fn first_land_archives_compiled_defaults_for_revert() {
+        let tmp = tempfile::tempdir().unwrap();
+        let archive = land_config(tmp.path(), &nondefault_config(), "20260819T000000Z")
+            .unwrap()
+            .expect("first land must produce a revertible archive");
+        let archived = std::fs::read_to_string(&archive).unwrap();
+        assert_eq!(archived, toml::to_string(&RecallConfig::default()).unwrap());
+        let live = std::fs::read_to_string(config_path(tmp.path())).unwrap();
+        assert_eq!(live, toml::to_string(&nondefault_config()).unwrap());
+    }
+
     fn nondefault_config() -> RecallConfig {
         let mut c = RecallConfig::default();
         c.rrf_k = 42.0;
@@ -683,10 +744,16 @@ mod tests {
         let tmp = tempfile::tempdir().unwrap();
         let root = tmp.path();
 
-        // First land: no prior config → no archive; loader sees the exact values.
+        // First land: no prior config → the compiled defaults are archived so
+        // the revert path exists from day one; loader sees the exact values.
         let cfg = nondefault_config();
         let archive = land_config(root, &cfg, "20260819T050000Z").unwrap();
-        assert!(archive.is_none(), "first land has no predecessor to archive");
+        let first_arch = archive.expect("first land archives the compiled defaults");
+        assert_eq!(
+            std::fs::read_to_string(&first_arch).unwrap(),
+            toml::to_string(&RecallConfig::default()).unwrap(),
+            "first-land archive must hold the compiled defaults"
+        );
         let loaded = RecallConfig::load(root);
         assert_eq!(loaded.rrf_k, cfg.rrf_k);
         assert_eq!(loaded.arm_weights.content, cfg.arm_weights.content);
