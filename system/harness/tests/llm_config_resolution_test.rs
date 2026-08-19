@@ -52,7 +52,7 @@ fn llm_config_resolution_layers() {
 
     let r = llm_config::resolve("consolidate_audit").expect("built-in default");
     assert_eq!(r.model, "anthropic/claude-sonnet-5");
-    assert_eq!(r.max_tokens, 4096);
+    assert_eq!(r.max_tokens, 16384);
 
     let r = llm_config::resolve("health_check").expect("built-in default");
     assert_eq!(r.model, "anthropic/claude-haiku-4.5");
