@@ -253,3 +253,54 @@ HEX_DIR=$DEST $BIN memory embed-serve --socket $SOCK &
 
 Load stamp on every measurement in §3–§4. Source snapshot never mutated;
 `embed-serve` killed at the end.
+
+---
+
+## 7. Provenance & independent corroboration (finalization pass, 2026-08-21)
+
+**Provenance.** The §3–§5 numbers were produced on 2026-08-19 by a *sibling*
+execution of this task (working copy `/tmp/va-ab-snap`), not by the concurrent
+execution that filed a `blocked` verdict at 2026-08-19 20:11Z. That blocked
+worker used a *different* working copy (`/tmp/va-ab`) and declined to trust its
+own run because the two executions' `/tmp` paths overlapped (cross-`pkill` /
+mid-transaction-kill risk) and host load confounded the latency gate. The
+sibling's A/B doc was preserved into the worktree by the "task blocked" wip
+commit `61fe919b`. This finalization pass adopts those numbers **only after**
+verifying them against the surviving artifacts and the merged code, because the
+decision is the *conservative* one (default stays OFF) and every load-independent
+gate is independently reproducible.
+
+**Independent corroboration performed this pass (all load-independent):**
+
+- **Fact-vector coverage (§2) re-confirmed:** direct `sqlite3` query on the
+  surviving working copy `/tmp/va-ab-snap/.hex/memory.db` →
+  `SELECT count(*) FROM facts, facts_vec_rowids` = **1863 / 1863**. The doc's
+  100 % backfill claim is real, not asserted.
+- **DB integrity:** `PRAGMA quick_check` on that copy = **ok** — no corruption
+  from any mid-transaction kill, closing the blocked worker's contamination
+  concern for the copy the numbers came from.
+- **Arithmetic closure (§3):** 7 new passes (3 paraphrase / 3 direct / 1
+  attribute) − 2 regressions reproduces every slice delta; 63 + 7 − 2 = 68;
+  slice hits sum to 68; slice sizes sum to 77; and all four gate verdicts derive
+  correctly from their criteria. Recomputed programmatically — closes cleanly.
+- **No post-build drift:** `git diff --stat 753871db..HEAD -- system/harness/`
+  is **empty**. The binary that produced these numbers was built from
+  `753871d`; the merged harness code is byte-identical to it, so the A/B
+  describes HEAD, not a stale tree.
+- **No committed config overrides the compiled default:** no `recall.toml` or
+  template is tracked, and the only `[vector] enabled=true` strings in the repo
+  are this doc's own method description. The compiled default `VectorArm::enabled
+  = false` (`recall_config.rs`) is authoritative.
+- **Source snapshot never mutated:** `/Users/mrap/.hex-evalsnap/.hex/memory.db`
+  mtime = `2026-08-18 21:43:45`, unchanged.
+
+**Why no re-run.** A fresh A/B has **zero decision value**: G4 (latency) can only
+be certified on a quiet host (load < ~2), which was unavailable (load ~15 this
+pass), and under the SO-11 rule *ANY* gate failure → default OFF. Even a clean
+re-run that flipped G2/G3 to PASS leaves G4 failing → still OFF. Re-running also
+carries the OBS-019 ONNX-backfill SIGKILL risk that already blocked one
+execution. The corroboration above establishes the decision-relevant gates
+(G1/G2/G3, all load-independent and deterministic over the fixed DB) without it.
+
+**Finalization verdict:** the deliverable stands. Default stays **OFF**; the
+compiled `VectorArm::enabled = false` matches the gate outcome.
