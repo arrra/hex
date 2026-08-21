@@ -176,8 +176,26 @@ where
         std::fs::create_dir_all(parent)?;
     }
     // A leftover socket file from a previous run makes bind() fail with
-    // EADDRINUSE even though nothing is listening — remove it first.
-    let _ = std::fs::remove_file(socket_path);
+    // EADDRINUSE even though nothing is listening — but unlinking a LIVE
+    // server's socket would silently orphan it (a second resident embedder,
+    // unreachable, still holding the ~522 MB model). Probe first: only a
+    // confirmed-dead socket is removed; a live one is a loud refusal.
+    if socket_path.exists() {
+        match UnixStream::connect(socket_path) {
+            Ok(_) => {
+                return Err(std::io::Error::new(
+                    std::io::ErrorKind::AddrInUse,
+                    format!(
+                        "embed-serve already listening on {}",
+                        socket_path.display()
+                    ),
+                ));
+            }
+            Err(_) => {
+                let _ = std::fs::remove_file(socket_path);
+            }
+        }
+    }
     let listener = UnixListener::bind(socket_path)?;
     eprintln!(
         "[embed-serve] listening on {} (dim {EMBED_DIM})",
@@ -198,14 +216,36 @@ where
     Ok(())
 }
 
+/// Per-connection I/O ceiling on the ACCEPTED stream. The serve loop handles
+/// one connection at a time, so a client that stalls mid-request would
+/// otherwise wedge the accept loop forever (every future query then pays its
+/// client-side timeout and falls back, silently, for good).
+const CONN_IO_TIMEOUT: Duration = Duration::from_secs(2);
+
+/// Longest accepted request line. Recall queries are single chat messages;
+/// anything larger is a bug or abuse and is refused before it can grow the
+/// server's memory (the reader is capped, not just checked after the fact).
+const MAX_QUERY_BYTES: u64 = 64 * 1024;
+
 /// Read one newline-framed query, embed it, and write the fixed-width response.
 fn handle_conn<F>(stream: UnixStream, embed: &F) -> std::io::Result<()>
 where
     F: Fn(&str) -> Option<Vec<f32>>,
 {
-    let mut reader = BufReader::new(stream);
+    stream.set_read_timeout(Some(CONN_IO_TIMEOUT))?;
+    stream.set_write_timeout(Some(CONN_IO_TIMEOUT))?;
     let mut line = String::new();
-    reader.read_line(&mut line)?;
+    BufReader::new((&stream).take(MAX_QUERY_BYTES)).read_line(&mut line)?;
+    // A capped read that never saw the newline is an oversized or truncated
+    // request (EOF mid-line) — refuse it rather than embedding a fragment.
+    if !line.ends_with('\n') {
+        return Err(std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            format!(
+                "request not newline-terminated within {MAX_QUERY_BYTES} bytes"
+            ),
+        ));
+    }
     let query = line.trim_end_matches(['\r', '\n']);
 
     let vec = embed(query).unwrap_or_default();
@@ -217,8 +257,8 @@ where
             out.extend_from_slice(&f.to_le_bytes());
         }
     }
-    reader.get_mut().write_all(&out)?;
-    reader.get_mut().flush()?;
+    (&stream).write_all(&out)?;
+    (&stream).flush()?;
     Ok(())
 }
 
@@ -374,5 +414,108 @@ mod tests {
         assert_eq!(got, Path::new("/home/x/hex/.hex/run/embed.sock"));
         let abs = resolve_socket_path(Path::new("/home/x/hex"), "/tmp/e.sock");
         assert_eq!(abs, Path::new("/tmp/e.sock"));
+    }
+
+    #[test]
+    fn stalled_connection_cannot_wedge_the_server() {
+        // A client that connects and never completes its newline-framed request
+        // must be timed out server-side (CONN_IO_TIMEOUT) so the one-at-a-time
+        // accept loop keeps serving. Without the accepted-stream timeouts this
+        // test hangs the fake server forever and the legit roundtrip times out.
+        let dir = tempfile::TempDir::new().unwrap();
+        let sock = spawn_fake_server(dir.path(), 0.25);
+
+        let mut stalled = UnixStream::connect(&sock).unwrap();
+        stalled.write_all(b"no newline ever").unwrap(); // then just hold it open
+
+        let arm = VectorArm {
+            enabled: true,
+            socket_path: sock.to_string_lossy().into_owned(),
+            timeout_ms: CONN_IO_TIMEOUT.as_millis() as u64 + 2000,
+        };
+        let got = query_vector(dir.path(), &arm, "legit query");
+        assert_eq!(
+            got.as_ref().map(|v| v.len()),
+            Some(EMBED_DIM),
+            "server must shed the stalled connection and serve the next client"
+        );
+        drop(stalled);
+    }
+
+    #[test]
+    fn oversized_request_is_refused_not_buffered() {
+        // A request larger than MAX_QUERY_BYTES with no newline must be refused
+        // (capped read => InvalidData) without growing server memory, and the
+        // server must go on serving conforming clients.
+        let dir = tempfile::TempDir::new().unwrap();
+        let sock = spawn_fake_server(dir.path(), 0.75);
+
+        {
+            let mut abuser = UnixStream::connect(&sock).unwrap();
+            let junk = vec![b'x'; (MAX_QUERY_BYTES + 1024) as usize];
+            // The server closes the socket at the cap; a write error here is fine.
+            let _ = abuser.write_all(&junk);
+        }
+
+        let arm = VectorArm {
+            enabled: true,
+            socket_path: sock.to_string_lossy().into_owned(),
+            timeout_ms: 2000,
+        };
+        let got = query_vector(dir.path(), &arm, "still works");
+        assert_eq!(
+            got.as_ref().map(|v| v.len()),
+            Some(EMBED_DIM),
+            "server must survive an oversized request and keep serving"
+        );
+    }
+
+    #[test]
+    fn double_start_refuses_live_socket_but_reclaims_stale_one() {
+        // Live socket: a second serve_with must FAIL LOUDLY (AddrInUse), never
+        // unlink the live server's socket out from under it (which would orphan
+        // a resident embedder silently — S6). Stale socket file: reclaimed.
+        let dir = tempfile::TempDir::new().unwrap();
+        let sock = spawn_fake_server(dir.path(), 0.1);
+
+        let err = serve_with(&sock, |_q| None)
+            .expect_err("second server on a live socket must refuse to start");
+        assert_eq!(err.kind(), std::io::ErrorKind::AddrInUse);
+        // The live server must still be reachable after the refused start.
+        let arm = VectorArm {
+            enabled: true,
+            socket_path: sock.to_string_lossy().into_owned(),
+            timeout_ms: 2000,
+        };
+        assert!(
+            query_vector(dir.path(), &arm, "after refused double-start").is_some(),
+            "refused double-start must leave the live server untouched"
+        );
+
+        // Stale: a bound-then-dropped listener leaves a dead socket file behind;
+        // a fresh server must reclaim it (the EADDRINUSE case the unlink is for).
+        let stale_dir = tempfile::TempDir::new().unwrap();
+        let stale = stale_dir.path().join("stale.sock");
+        drop(UnixListener::bind(&stale).unwrap());
+        assert!(stale.exists(), "dropped listener must leave a socket file");
+        let s2 = stale.clone();
+        std::thread::spawn(move || {
+            serve_with(&s2, move |_q| Some(vec![0.9; EMBED_DIM])).ok();
+        });
+        for _ in 0..200 {
+            if UnixStream::connect(&stale).is_ok() {
+                break;
+            }
+            std::thread::sleep(Duration::from_millis(5));
+        }
+        let arm2 = VectorArm {
+            enabled: true,
+            socket_path: stale.to_string_lossy().into_owned(),
+            timeout_ms: 2000,
+        };
+        assert!(
+            query_vector(stale_dir.path(), &arm2, "reclaimed").is_some(),
+            "stale socket file must be reclaimed by a fresh server"
+        );
     }
 }
