@@ -504,6 +504,9 @@ pub fn assemble_with_chunk_cap(
         for_agent,
         budget,
         query_vec,
+        // Offline semantic callers pass one vector meaning "both arms on";
+        // forward it to the facts arm too so their behavior is unchanged.
+        query_vec,
         max_chunks,
         &RecallConfig::default(),
     )
@@ -513,12 +516,22 @@ pub fn assemble_with_chunk_cap(
 /// single site the recall ranking parameters (RRF constant, bm25 arm weights,
 /// M5 relevance-move multipliers) enter the assembler. `&RecallConfig::default()`
 /// reproduces the previous hardcoded behavior exactly.
+///
+/// `query_vec` drives the CHUNK-side vector arm (M1); `facts_query_vec` drives
+/// the FACTS-side KNN arm (M5, `facts_recall`) independently. Keeping them
+/// separate lets the hot recall path turn on ONLY the facts arm
+/// (`query_vec = None`, `facts_query_vec = Some(qv)`) without lighting the
+/// chunk arm — so chunk results stay byte-identical and the task-3 facts A/B
+/// isolates the one arm it means to measure (spec Sdnap37he, task Ttrmaca6q;
+/// exclusion: do not regress existing arms). Offline semantic callers pass the
+/// same vector to both (see [`assemble_with_chunk_cap`]).
 pub fn assemble_with_config(
     conn: &Connection,
     query: &str,
     for_agent: bool,
     budget: usize,
     query_vec: Option<&[f32]>,
+    facts_query_vec: Option<&[f32]>,
     max_chunks: usize,
     cfg: &RecallConfig,
 ) -> AssembledContext {
@@ -531,7 +544,7 @@ pub fn assemble_with_config(
     // ── run the moves (sequential — local SQLite, the cost is dominated by
     // FTS5/index lookups; "parallel" in spec scope is logical, not threaded).
     let m1_c = m1_content(conn, query, for_agent, query_vec, cfg);
-    let (m5_f, m5_c) = m5_fact_relevance(conn, query, for_agent, query_vec, cfg);
+    let (m5_f, m5_c) = m5_fact_relevance(conn, query, for_agent, facts_query_vec, cfg);
     let (m2_f, m2_c) = m2_entity(conn, query, for_agent, cfg);
     let (m3_f, m3_c) = m3_predicate(conn, query, for_agent, cfg);
     let (m4_f, m4_c) = m4_temporal(conn, query, for_agent, cfg);
