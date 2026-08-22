@@ -550,6 +550,11 @@ _harness_download_prebuilt() {
     echo "  Downloading hex from ${harness_url}..."
     curl -fSL "$harness_url" -o "$TARGET_DIR/.hex/bin/hex" && chmod +x "$TARGET_DIR/.hex/bin/hex"
     ln -sf hex "$TARGET_DIR/.hex/bin/hex-agent"
+    # A sidecar from a PRIOR from-source run must not outlive the binary it
+    # described: leaving it would let `hex upgrade` see installed_sha ==
+    # source_sha and print "no rebuild needed" for a binary that is actually
+    # this prebuilt artifact. Absent sidecar = loud WARN-skip instead (S6).
+    rm -f "$TARGET_DIR/.hex/bin/hex.sha"
     # No prebuilt cq/scipd on releases — code-intel binaries require cargo.
     echo "  NOTE: cq/scipd (code-intel) skipped — install Rust and re-run to build them."
     # Deliberately NO hex.sha sidecar on this path: the binary came from a
@@ -577,6 +582,10 @@ _harness_warn_missing() {
 # hex.sha and continue — NEVER fail the install over the sidecar (S6). Only
 # call this on the build-from-source path: a prebuilt binary did not come from
 # $SCRIPT_DIR's checkout, so recording that SHA would falsely assert freshness.
+# NOTE: this stamps THIS checkout's HEAD, while `hex upgrade` compares against
+# a fresh pull of DEFAULT_REPO's default branch — installing from a non-default
+# branch therefore triggers ONE extra rebuild on the next upgrade, after which
+# the sidecar is rewritten from upgrade's own source dir (self-correcting).
 write_hex_sha_sidecar() {
     local sha_file="$TARGET_DIR/.hex/bin/hex.sha"
     local src_sha=""

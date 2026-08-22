@@ -49,8 +49,10 @@ pub struct Finding {
 fn patterns() -> Vec<(&'static str, Regex)> {
     vec![
         (
+            // AKIA = long-term IAM keys; ASIA = STS/temporary session keys
+            // (increasingly the default shape in SSO/assumed-role setups).
             "AWS access key id",
-            Regex::new(r"AKIA[0-9A-Z]{16}").unwrap(),
+            Regex::new(r"(?:AKIA|ASIA)[0-9A-Z]{16}").unwrap(),
         ),
         (
             "GitHub token",
@@ -67,6 +69,13 @@ fn patterns() -> Vec<(&'static str, Regex)> {
         (
             "OpenAI API key",
             Regex::new(r"sk-proj-[A-Za-z0-9_-]{10,}").unwrap(),
+        ),
+        (
+            // Classic pre-project OpenAI shape: `sk-` + long unbroken
+            // alphanumeric run. The other sk- vendors (ant/or/proj) all carry a
+            // hyphenated infix, so `[A-Za-z0-9]{40,}` cannot double-match them.
+            "OpenAI API key (legacy)",
+            Regex::new(r"sk-[A-Za-z0-9]{40,}").unwrap(),
         ),
         (
             "Tailscale key",
@@ -99,25 +108,38 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
     let mut findings = Vec::new();
     let mut cur_file: Option<String> = None;
     let mut new_line: u64 = 0;
+    // `+++ `/`--- ` are file headers ONLY between a `diff --git` line and that
+    // file's first hunk. Inside a hunk, an ADDED line whose own content starts
+    // with `++ ` renders as `+++ ...` — byte-identical to a header — and must
+    // be scanned as content, not swallowed as a header.
+    let mut in_hunk = false;
 
     for line in diff.lines() {
-        // New-file header (with --no-prefix the path is bare). `/dev/null` means
-        // the file was deleted — nothing added, so drop it.
-        if let Some(path) = line.strip_prefix("+++ ") {
-            cur_file = if path == "/dev/null" {
-                None
-            } else {
-                Some(path.to_string())
-            };
+        // File boundary: back to header territory.
+        if line.starts_with("diff --git ") {
+            in_hunk = false;
             continue;
         }
-        // Old-file header — ignore (never scanned).
-        if line.starts_with("--- ") {
-            continue;
+        // New-file header (with --no-prefix the path is bare). `/dev/null` means
+        // the file was deleted — nothing added, so drop it.
+        if !in_hunk {
+            if let Some(path) = line.strip_prefix("+++ ") {
+                cur_file = if path == "/dev/null" {
+                    None
+                } else {
+                    Some(path.to_string())
+                };
+                continue;
+            }
+            // Old-file header — ignore (never scanned).
+            if line.starts_with("--- ") {
+                continue;
+            }
         }
         // Hunk header resets the new-file line counter.
         if let Some(caps) = hunk_re.captures(line) {
             new_line = caps[1].parse().unwrap_or(0);
+            in_hunk = true;
             continue;
         }
 
@@ -148,6 +170,22 @@ pub fn scan_diff(diff: &str) -> Vec<Finding> {
     }
 
     findings
+}
+
+/// Paths (as raw `Binary files X and Y differ` phrases) that git rendered as
+/// binary — i.e. content [`scan_diff`] never saw. [`staged_diff`] passes
+/// `--text` precisely so this set is empty, but if git still refuses to
+/// line-diff something, the scan must SAY so rather than silently pass it
+/// (S6): a NUL byte or a `-diff` gitattribute would otherwise be a clean
+/// bypass of the whole scanner.
+pub fn unscanned_binary_paths(diff: &str) -> Vec<String> {
+    diff.lines()
+        .filter_map(|l| {
+            l.strip_prefix("Binary files ")
+                .and_then(|rest| rest.strip_suffix(" differ"))
+                .map(|s| s.to_string())
+        })
+        .collect()
 }
 
 /// Render findings for humans, with the secret VALUE redacted. Because
@@ -211,6 +249,18 @@ pub fn install_hook(hooks_dir: &Path) -> std::io::Result<InstallOutcome> {
     if pre_commit.exists() {
         let existing = std::fs::read_to_string(&pre_commit).unwrap_or_default();
         if existing == SHIM {
+            // Re-assert the exec bit: git SILENTLY skips a non-executable hook,
+            // so a content-identical shim that lost 0o755 (archive restore,
+            // non-preserving copy into the shared common-dir hooks) would
+            // otherwise report "already installed" while never firing (S6).
+            #[cfg(unix)]
+            {
+                use std::os::unix::fs::PermissionsExt;
+                std::fs::set_permissions(
+                    &pre_commit,
+                    std::fs::Permissions::from_mode(0o755),
+                )?;
+            }
             return Ok(InstallOutcome::AlreadyInstalled);
         }
         return Ok(InstallOutcome::Refused(pre_commit));
@@ -257,6 +307,21 @@ fn run_scan() {
             std::process::exit(2);
         }
     };
+
+    // `--text` should make this set empty; if git still rendered something as
+    // binary, say so loudly (S6) instead of letting it sail through unscanned.
+    let unscanned = unscanned_binary_paths(&diff);
+    if !unscanned.is_empty() {
+        eprintln!(
+            "secret-scan: WARNING — {} staged path(s) could not be scanned as text \
+             (git rendered them as binary despite --text). NOT scanned for secrets; \
+             verify manually before pushing:",
+            unscanned.len()
+        );
+        for u in &unscanned {
+            eprintln!("  {u}");
+        }
+    }
 
     let findings = scan_diff(&diff);
     if findings.is_empty() {
@@ -346,6 +411,14 @@ fn staged_diff(cwd: &Path) -> Option<String> {
             "--no-color",
             "--no-ext-diff",
             "--no-prefix",
+            // Force text treatment for EVERYTHING staged. Without this, a NUL
+            // byte anywhere in a file — or a `-diff` gitattribute (a pattern
+            // people use precisely on .env/.p12/keystore files) — collapses the
+            // file to `Binary files ... differ` with zero `+` lines, and the
+            // scanner silently passes the very files most likely to hold
+            // secrets. Scanning force-diffed binary garbage is harmless; the
+            // patterns just won't match noise.
+            "--text",
         ])
         .output()
         .ok()?;
@@ -412,7 +485,7 @@ mod tests {
     #[test]
     fn patterns_compile() {
         // Constructing them is the assertion — an invalid literal would panic.
-        assert_eq!(patterns().len(), 8);
+        assert_eq!(patterns().len(), 9);
     }
 
     #[test]
@@ -461,6 +534,35 @@ mod tests {
         let f = scan_diff(&d);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].pattern, "OpenAI API key");
+    }
+
+    #[test]
+    fn detects_aws_sts_key() {
+        let secret = format!("{}{}", "ASIA", "1234567890ABCDEF");
+        let d = diff_with(&format!("const K = \"{secret}\";"));
+        let f = scan_diff(&d);
+        assert_eq!(f.len(), 1, "findings: {f:?}");
+        assert_eq!(f[0].pattern, "AWS access key id");
+    }
+
+    #[test]
+    fn detects_legacy_openai_key() {
+        let secret = format!("{}{}", "sk-", "Ab0Cd1Ef2Gh3Ij4Kl5Mn6Op7Qr8St9Uv0Wx1Yz2Ab3Cd4Ef5");
+        let d = diff_with(&format!("key: {secret}"));
+        let f = scan_diff(&d);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].pattern, "OpenAI API key (legacy)");
+    }
+
+    #[test]
+    fn legacy_openai_pattern_does_not_double_match_vendored_sk_keys() {
+        // sk-ant/sk-or/sk-proj all break the unbroken-alnum run with a hyphen,
+        // so each must match ONLY its own vendor pattern.
+        let secret = format!("{}{}", "sk-ant-", "api03-Ab0Cd1Ef2Gh3Ij4Kl5Mn6Op7Qr8St9Uv0Wx1Yz2Ab3Cd4");
+        let d = diff_with(&format!("key: {secret}"));
+        let f = scan_diff(&d);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].pattern, "Anthropic API key");
     }
 
     #[test]
@@ -529,6 +631,91 @@ mod tests {
         let f = scan_diff(&d);
         assert_eq!(f.len(), 1, "{f:?}");
         assert_eq!(f[0].line, 6, "secret is the 2nd added line of a hunk @ +5");
+    }
+
+    #[test]
+    fn added_line_starting_with_plus_plus_is_scanned_not_swallowed_as_header() {
+        // An ADDED line whose content begins with `++ ` renders as `+++ ...` in
+        // the raw diff — byte-identical to a file header. It must be scanned as
+        // content, and file/line attribution for LATER lines must stay intact.
+        let secret = format!("{}{}", "AKIA", "1234567890ABCDEF");
+        let secret2 = format!("{}{}", "AKIA", "ZZZZ567890ABCDEF");
+        let d = format!(
+            "diff --git a.rs a.rs\n\
+             --- a.rs\n\
+             +++ a.rs\n\
+             @@ -0,0 +1,3 @@\n\
+             +line one\n\
+             +++ pasted combined-diff line with {secret}\n\
+             +second = \"{secret2}\"\n"
+        );
+        let f = scan_diff(&d);
+        assert_eq!(f.len(), 2, "both secrets must be found: {f:?}");
+        assert_eq!(f[0].file, "a.rs");
+        assert_eq!(f[0].line, 2, "the ++-content line is added line 2");
+        assert_eq!(f[1].file, "a.rs", "attribution must not be corrupted");
+        assert_eq!(f[1].line, 3, "counter must advance past the ++-content line");
+    }
+
+    #[test]
+    fn second_file_headers_still_parse_after_a_hunk() {
+        // `diff --git` must reset header parsing so the NEXT file's `+++ `
+        // header is honored again after the previous file's hunk body.
+        let secret = format!("{}{}", "AKIA", "1234567890ABCDEF");
+        let d = format!(
+            "diff --git a.rs a.rs\n\
+             --- a.rs\n\
+             +++ a.rs\n\
+             @@ -0,0 +1,1 @@\n\
+             +harmless\n\
+             diff --git b.rs b.rs\n\
+             --- b.rs\n\
+             +++ b.rs\n\
+             @@ -0,0 +1,1 @@\n\
+             +key = \"{secret}\"\n"
+        );
+        let f = scan_diff(&d);
+        assert_eq!(f.len(), 1, "{f:?}");
+        assert_eq!(f[0].file, "b.rs");
+        assert_eq!(f[0].line, 1);
+    }
+
+    #[test]
+    fn binary_rendered_paths_are_surfaced_not_silently_clean() {
+        let d = "diff --git secrets.env secrets.env\n\
+                 index 0000000..1111111 100644\n\
+                 Binary files secrets.env and secrets.env differ\n";
+        assert!(scan_diff(d).is_empty());
+        let unscanned = unscanned_binary_paths(d);
+        assert_eq!(unscanned.len(), 1, "{unscanned:?}");
+        assert!(unscanned[0].contains("secrets.env"));
+    }
+
+    #[test]
+    fn install_restores_lost_exec_bit_on_identical_shim() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hooks = tmp.path().join("hooks");
+        std::fs::create_dir_all(&hooks).unwrap();
+        // Content-identical shim that lost its exec bit (archive restore, bad copy).
+        std::fs::write(hooks.join("pre-commit"), SHIM).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                hooks.join("pre-commit"),
+                std::fs::Permissions::from_mode(0o644),
+            )
+            .unwrap();
+            assert_eq!(
+                install_hook(&hooks).unwrap(),
+                InstallOutcome::AlreadyInstalled
+            );
+            let mode = std::fs::metadata(hooks.join("pre-commit"))
+                .unwrap()
+                .permissions()
+                .mode();
+            assert_eq!(mode & 0o111, 0o111, "exec bit must be restored");
+        }
     }
 
     #[test]
