@@ -2,9 +2,9 @@
 
 **Date:** 2026-08-19
 **Spec:** Sdnap37he · **Task:** Tgsw5by6q (eval-ab)
-**Author:** BOI execute worker (mike@mrap.me)
+**Author:** BOI execute worker (operator account)
 **Base:** develop @ c1905be · **Binary:** freshly built release @
-`/Users/mrap/.boi/v2/cargo-target/release/hex` (built 2026-08-19 15:53, after the
+`~/.boi/v2/cargo-target/release/hex` (built 2026-08-19 15:53, after the
 task-2 commit 753871d)
 
 ## Outcome (decisive)
@@ -32,19 +32,19 @@ OFF.**
 ## 1. Method
 
 Everything ran against a **copy** of the frozen snapshot; the read-only source
-`/Users/mrap/.hex-evalsnap` was never mutated (verified: `memory.db` mtime
+`~/.hex-evalsnap` was never mutated (verified: `memory.db` mtime
 `Aug 18 21:43` unchanged before and after).
 
-- **Snapshot copy:** `/Users/mrap/.hex-evalsnap` → `/tmp/va-ab-snap`
+- **Snapshot copy:** `~/.hex-evalsnap` → `/tmp/va-ab-snap`
   (`memory.db` + `-wal` + `-shm`, `recall-log.jsonl`, `CLAUDE.md` so
   `get_hex_dir` accepts it as `HEX_DIR`). `.fastembed_cache` symlinked to
   `~/hex/.fastembed_cache` — **no network fetch**, reuses the resident nomic
   model artifact.
 - **HEX_DIR layout verified first** (STOP-condition pre-check): one
-  `hex memory recall` against the copy injected the expected `mrap.me` facts
+  `hex memory recall` against the copy injected the expected operator-domain facts
   before any A/B leg ran.
 - **Case suite:** the 77-case golden set at
-  `/Users/mrap/hex/.hex/eval/recall-cases.toml` (read-only), passed via
+  `$HEX_DIR/.hex/eval/recall-cases.toml` (read-only), passed via
   `hex memory eval --cases … --json`. Slice sizes: `holdout-direct` 33,
   `holdout-paraphrase` 27, `fact-relevance` 9, `attribute` 5, `control` 2,
   `entity` 1.
@@ -234,10 +234,10 @@ A/B, which correctly reports the shipped arm's measured negative result.
 ## Appendix — reproduction
 
 ```
-BIN=/Users/mrap/.boi/v2/cargo-target/release/hex        # freshly built release
-SNAP=/Users/mrap/.hex-evalsnap                          # READ-ONLY source
+BIN=~/.boi/v2/cargo-target/release/hex        # freshly built release
+SNAP=~/.hex-evalsnap                          # READ-ONLY source
 DEST=/tmp/va-ab-snap                                     # working copy
-CASES=/Users/mrap/hex/.hex/eval/recall-cases.toml       # READ-ONLY suite
+CASES=$HEX_DIR/.hex/eval/recall-cases.toml       # READ-ONLY suite
 SOCK=$DEST/.hex/run/embed.sock
 
 # 1. copy snapshot (memory.db family + CLAUDE.md), symlink cache, verify one recall
@@ -291,7 +291,7 @@ gate is independently reproducible.
   template is tracked, and the only `[vector] enabled=true` strings in the repo
   are this doc's own method description. The compiled default `VectorArm::enabled
   = false` (`recall_config.rs`) is authoritative.
-- **Source snapshot never mutated:** `/Users/mrap/.hex-evalsnap/.hex/memory.db`
+- **Source snapshot never mutated:** `~/.hex-evalsnap/.hex/memory.db`
   mtime = `2026-08-18 21:43:45`, unchanged.
 
 **Why no re-run.** A fresh A/B has **zero decision value**: G4 (latency) can only
