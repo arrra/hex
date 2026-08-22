@@ -1,5 +1,6 @@
 pub mod capture;
 pub mod lint_predispatch;
+pub mod secret_scan;
 pub mod user_prompt_submit;
 pub mod worktree_guard;
 
@@ -25,6 +26,16 @@ pub enum HookCommands {
     /// BOI itself would reject (unreadable / parse error).
     #[command(name = "lint-predispatch")]
     LintPredispatch,
+    /// Scan the staged diff (added lines) of the repo in the current directory
+    /// for secret patterns; on a hit print file/line/pattern with the value
+    /// REDACTED and exit 1. `--install` writes a pre-commit shim into the repo's
+    /// hooks dir (refuses to overwrite a differing existing hook).
+    #[command(name = "secret-scan")]
+    SecretScan {
+        /// Install a pre-commit shim invoking `hex hook secret-scan`.
+        #[arg(long)]
+        install: bool,
+    },
 }
 
 pub fn run(command: HookCommands) {
@@ -33,5 +44,6 @@ pub fn run(command: HookCommands) {
         HookCommands::UserPromptSubmit => user_prompt_submit::run(),
         HookCommands::WorktreeGuard => worktree_guard::run(),
         HookCommands::LintPredispatch => lint_predispatch::run(),
+        HookCommands::SecretScan { install } => secret_scan::run(install),
     }
 }
