@@ -2,7 +2,7 @@
 
 **Date:** 2026-08-19
 **Spec:** Sdnap37he · **Task:** Tw0gedxnr (research-embed-option)
-**Author:** BOI execute worker (mike@mrap.me)
+**Author:** BOI execute worker (operator account)
 **Base:** develop @ c1905be
 
 ## TL;DR
@@ -89,7 +89,7 @@ the OBS-019 working-set bound.
 
 ## 2. Fact-vector coverage in the frozen snapshot
 
-Read-only source: `/Users/mrap/.hex-evalsnap/.hex/memory.db` (106 MB), copied
+Read-only source: `~/.hex-evalsnap/.hex/memory.db` (106 MB), copied
 to `/tmp/va-snap` for all work — the snapshot was never mutated.
 
 | Metric | Count |
@@ -168,7 +168,7 @@ and batch=1 vs 8. At load ~27 it is **1147 ms/chunk**; the query-side single
 forward pass on a quiet host is orders of magnitude cheaper (~tens of ms).
 
 Method: `/usr/bin/time -p` wall clock; freshly built release binary at
-`/Users/mrap/.boi/v2/cargo-target/release/hex`. Rows 1–2: `HEX_DIR=/tmp/va-snap`
+`~/.boi/v2/cargo-target/release/hex`. Rows 1–2: `HEX_DIR=/tmp/va-snap`
 (the read-only snapshot copied once; never mutated). Rows 3b–4: two fresh
 throwaway `HEX_DIR`s under `/tmp` (each with a `.fastembed_cache` symlink to
 `~/hex/.fastembed_cache`, so **no network fetch**), indexed at two chunk counts;
