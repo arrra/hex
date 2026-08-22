@@ -619,20 +619,24 @@ fn detect_personal_overlay(hex_dot_dir: &Path) -> bool {
 /// after this run (sync failure, cargo build failure, install failure). The
 /// caller MUST fail the whole upgrade on `false` — printing "Upgrade
 /// complete." over a stale binary is the OBS-017 deploy black hole.
-fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) -> bool {
+fn sync_versions_file(
+    hex_dir: &Path,
+    source_dir: &Path,
+    backup_dir: &Path,
+) -> Result<(), BinaryStepFailure> {
     let versions_file = hex_dir.join("VERSIONS");
     if !versions_file.exists() {
-        return true;
+        return Ok(());
     }
     let cargo_toml = source_dir.join("system/harness/Cargo.toml");
     if !cargo_toml.exists() {
-        return true;
+        return Ok(());
     }
     let cargo_content = match fs::read_to_string(&cargo_toml) {
         Ok(s) => s,
         Err(_) => {
             eprintln!("  [WARN] Could not read Cargo.toml");
-            return false;
+            return Err(BinaryStepFailure::Build);
         }
     };
     let cargo_ver = cargo_content
@@ -644,7 +648,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) -> b
 
     let Some(cargo_ver) = cargo_ver else {
         eprintln!("  [WARN] Could not parse version from Cargo.toml");
-        return false;
+        return Err(BinaryStepFailure::Build);
     };
 
     // Preserve every existing line — comments, blank lines, and any
@@ -744,7 +748,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) -> b
         let harness_src = source_dir.join("system/harness");
         if let Err(e) = apply_sync(&harness_src, &harness_dst, None) {
             eprintln!("  [FAIL] Failed to sync harness source: {e}");
-            return false;
+            return Err(BinaryStepFailure::Build);
         }
         // Deletion pass scoped to src/ and tests/ only — never touches target/ or Cargo.lock.
         for sub in &["src", "tests"] {
@@ -768,7 +772,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) -> b
         if codeintel_src.exists() {
             if let Err(e) = apply_sync(&codeintel_src, &codeintel_dst, None) {
                 eprintln!("  [FAIL] Failed to sync code-intel source: {e}");
-                return false;
+                return Err(BinaryStepFailure::Build);
             }
             for sub in &["src", "tests"] {
                 let dst_sub = codeintel_dst.join(sub);
@@ -787,7 +791,6 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) -> b
         // (personal workers) — NOT a specific file, so it survives files being
         // added/removed/re-homed (e.g. release.rs leaving the binary).
         let use_personal = detect_personal_overlay(&hex_dot_dir);
-        let mut binary_step_ok = false;
         let mut build_args = vec!["build", "--release"];
         // --target-dir is always set to harness_dst/target so the output location is
         // deterministic regardless of workspace nesting (fixes OBS-017).
@@ -809,7 +812,6 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) -> b
                 let release_bin = harness_dst.join("target/release/hex");
                 match atomic_install_binary(&release_bin, &installed_bin) {
                     Ok(()) => {
-                        binary_step_ok = true;
                         println!("  [OK] hex binary rebuilt and swapped (atomic): v{cargo_ver}");
                         if let Some(ref sha) = source_sha {
                             let sha_tmp = installed_sha_file.with_extension("tmp");
@@ -832,22 +834,36 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) -> b
                         // came back (a swallowed restart failure left the harness
                         // dead ~3h on 2026-06-12).
                         let ws_root = hex_dot_dir.parent().unwrap_or(hex_dot_dir.as_path());
-                        restart_harness(ws_root);
+                        let restart_result = restart_harness(ws_root);
                         // Refresh the code-intel binaries (cq, scipd) so they
                         // deploy alongside hex. Best-effort + loud (S6): a
-                        // failure here never blocks the hex swap above.
+                        // failure here never blocks the hex swap above. Run it
+                        // regardless of the restart outcome so the only deltas a
+                        // restart failure introduces are the nonzero exit and the
+                        // distinct message below.
                         build_and_install_code_intel(&hex_dot_dir);
+                        // The binary WAS swapped. If the harness restart failed,
+                        // the running harness still holds the OLD binary in memory
+                        // — propagate that as a DISTINCT failure kind so run()
+                        // prints the "swapped but restart FAILED" message and exits
+                        // nonzero (the 2026-06-12 stale-harness incident), never
+                        // the build-failure wording (the binary was in fact updated).
+                        if let Err(e) = restart_result {
+                            return Err(BinaryStepFailure::RestartFailed(e));
+                        }
+                        Ok(())
                     }
                     Err(e) => {
                         eprintln!("  [FAIL] atomic binary install failed: {e}");
+                        Err(BinaryStepFailure::Build)
                     }
                 }
             }
             _ => {
                 eprintln!("  [FAIL] cargo build failed — install Rust and rerun upgrade");
+                Err(BinaryStepFailure::Build)
             }
         }
-        binary_step_ok
     } else {
         if source_sha.is_none() || installed_sha.is_none() {
             // Version matches but freshness is UNVERIFIABLE — source SHA
@@ -869,7 +885,7 @@ fn sync_versions_file(hex_dir: &Path, source_dir: &Path, backup_dir: &Path) -> b
         } else {
             println!("  [OK] hex binary already at v{cargo_ver} (SHA matches) — no rebuild needed");
         }
-        true
+        Ok(())
     }
 }
 
@@ -908,32 +924,87 @@ fn build_and_install_code_intel(hex_dot_dir: &Path) {
     }
 }
 
+/// Why the binary step of an upgrade failed. Kept distinct so `run()` can print
+/// the RIGHT loud message: a build/install failure means the binary was NOT
+/// swapped, but a restart failure means the binary WAS swapped yet the running
+/// harness still holds the OLD one in memory (the 2026-06-12 stale-harness
+/// incident). Folding both into a single `bool` can only ever reproduce the
+/// build-failure wording, which is factually wrong once the swap has happened.
+#[derive(Debug, PartialEq)]
+enum BinaryStepFailure {
+    /// The binary was NOT updated — source sync, `cargo build`, atomic install,
+    /// or version parse failed before/at the swap.
+    Build,
+    /// The binary WAS swapped, but restarting the harness to load it failed.
+    /// Carries the underlying error so the operator can act on it.
+    RestartFailed(String),
+}
+
+/// Render the loud, operator-facing message for a binary-step failure. Pure
+/// (returns text, prints nothing) so it is testable without capturing stderr —
+/// same pattern as `hex_new_block()`. The `Build` wording is byte-identical to
+/// the pre-existing v0.50.4 line so that path stays unchanged; `RestartFailed`
+/// is deliberately distinct — it never claims the binary "was NOT updated".
+fn binary_step_failure_message(failure: &BinaryStepFailure) -> String {
+    match failure {
+        BinaryStepFailure::Build => {
+            "Upgrade FAILED — the hex binary was NOT updated (see Step 5).".to_string()
+        }
+        BinaryStepFailure::RestartFailed(err) => format!(
+            "Upgrade INCOMPLETE — the new hex binary WAS swapped in, but the harness \
+             restart FAILED.\n  \
+             The running harness still holds the OLD binary in memory (engine + every \
+             worker). New code is on disk but NOT live.\n  \
+             Restart error: {err}\n  \
+             Run `hex harness restart` manually to load the new binary."
+        ),
+    }
+}
+
+/// Injectable core of `restart_harness`: pure of launchctl/plist I/O so tests
+/// exercise the propagation path deterministically (a live restart would bootout
+/// the developer's real harness). When no LaunchAgent is installed there is
+/// nothing to restart — success forever, and `restart_fn` is NOT invoked.
+/// Otherwise the restart action's `Result` propagates unchanged.
+fn restart_harness_with<F>(hex_dir: &Path, agent_installed: bool, restart_fn: F) -> Result<(), String>
+where
+    F: FnOnce(&Path) -> Result<(), String>,
+{
+    if !agent_installed {
+        return Ok(());
+    }
+    restart_fn(hex_dir)
+}
+
 /// Restart the single `com.hex.harness` gui LaunchAgent so the swapped binary
 /// (engine + all workers, one process) reloads, then VERIFY the engine actually
 /// serves — escalating loudly (S6 alert) if it does not. Routes through
 /// `harness::supervise::restart_and_verify`, which holds the bootstrap lock (so it
 /// cannot race the watchdog) and re-bootstraps once before giving up. Skipped when
-/// the agent isn't installed (nothing to restart on this box).
+/// the agent isn't installed (nothing to restart on this box). Returns the restart
+/// result so the caller can propagate a failure (binary swapped, harness stale).
 ///
 /// `hex_dir` is the workspace root (parent of `.hex`).
-fn restart_harness(hex_dir: &Path) {
-    let Ok(home) = std::env::var("HOME") else {
-        return;
-    };
-    if !Path::new(&home)
-        .join("Library/LaunchAgents/com.hex.harness.plist")
-        .exists()
-    {
-        return; // harness not installed — nothing to restart
-    }
-    match hex::harness::supervise::restart_and_verify(hex_dir, "com.hex.harness") {
-        Ok(_) => {
+fn restart_harness(hex_dir: &Path) -> Result<(), String> {
+    let agent_installed = std::env::var("HOME").ok().is_some_and(|home| {
+        Path::new(&home)
+            .join("Library/LaunchAgents/com.hex.harness.plist")
+            .exists()
+    });
+    let result = restart_harness_with(hex_dir, agent_installed, |dir| {
+        hex::harness::supervise::restart_and_verify(dir, "com.hex.harness").map(|_| ())
+    });
+    match &result {
+        Ok(()) if agent_installed => {
             println!("  [OK] restarted com.hex.harness — engine + workers on the new binary");
         }
+        // Not installed → nothing was restarted → nothing to announce.
+        Ok(()) => {}
         // restart_and_verify already printed [FAIL] + fired the S6 alert; surface it here too
         // so the upgrade output makes the dead harness impossible to miss.
         Err(e) => eprintln!("  [FAIL] com.hex.harness did not come back after upgrade: {e}"),
     }
+    result
 }
 
 /// The `hex-new` launcher block appended to the user's shell rc. Pure so
@@ -1285,7 +1356,7 @@ pub fn run(args: &[String]) -> i32 {
 
     // Step 5: Sync VERSIONS + rebuild binary if needed
     println!("\n5. Sync VERSIONS");
-    let binary_ok = sync_versions_file(&hex_dir, &source_dir, &backup_dir);
+    let binary_result = sync_versions_file(&hex_dir, &source_dir, &backup_dir);
 
     // Step 6: Shell setup
     println!("\n6. Shell Setup");
@@ -1296,10 +1367,15 @@ pub fn run(args: &[String]) -> i32 {
     println!("  Files updated:  {total_changed}");
     println!("  Files added:    {total_new}");
     println!();
-    if !binary_ok {
-        // OBS-017 deploy black hole: never print success over a stale binary.
-        eprintln!("  Upgrade FAILED — the hex binary was NOT updated (see Step 5).");
-        eprintln!("  The workspace files may have synced, but the running code is stale.");
+    if let Err(failure) = &binary_result {
+        // Never print success over a binary problem. The message is chosen by
+        // failure KIND: Build (binary NOT updated — OBS-017 deploy black hole)
+        // vs RestartFailed (binary WAS swapped, harness still runs the old one —
+        // 2026-06-12 stale-harness). Both exit nonzero.
+        eprintln!("  {}", binary_step_failure_message(failure));
+        if matches!(failure, BinaryStepFailure::Build) {
+            eprintln!("  The workspace files may have synced, but the running code is stale.");
+        }
         println!();
         return 1;
     }
@@ -1893,7 +1969,7 @@ mod tests {
 
         // Version matches → legitimate skip → healthy.
         assert!(
-            sync_versions_file(&hex_dir, &source_dir, &backup_dir),
+            sync_versions_file(&hex_dir, &source_dir, &backup_dir).is_ok(),
             "up-to-date skip must report the binary step healthy"
         );
 
@@ -1903,13 +1979,13 @@ mod tests {
             "[package]\nname = \"hex-harness\"\nedition = \"2021\"\n",
         );
         assert!(
-            !sync_versions_file(&hex_dir, &source_dir, &backup_dir),
+            sync_versions_file(&hex_dir, &source_dir, &backup_dir).is_err(),
             "unparseable Cargo.toml must fail the binary step loudly"
         );
 
         // Missing VERSIONS (older layout) → step not applicable → healthy no-op.
         fs::remove_file(hex_dir.join("VERSIONS")).unwrap();
-        assert!(sync_versions_file(&hex_dir, &source_dir, &backup_dir));
+        assert!(sync_versions_file(&hex_dir, &source_dir, &backup_dir).is_ok());
     }
 
     /// The deploy-black-hole path itself (OBS-017): a rebuild is NEEDED
@@ -1943,7 +2019,7 @@ mod tests {
         fs::write(hex_dir.join(".hex/harness"), "not a directory").unwrap();
 
         assert!(
-            !sync_versions_file(&hex_dir, &source_dir, &backup_dir),
+            sync_versions_file(&hex_dir, &source_dir, &backup_dir).is_err(),
             "a broken rebuild path must fail the binary step (deploy black hole)"
         );
     }
@@ -2021,7 +2097,7 @@ CUSTOM_INSTANCE_PIN=abc123
 ";
         fs::write(&versions_path, original).unwrap();
 
-        sync_versions_file(&hex_dir, &source_dir, &backup_dir);
+        let _ = sync_versions_file(&hex_dir, &source_dir, &backup_dir);
 
         let after = fs::read_to_string(&versions_path).unwrap();
         assert!(
@@ -2052,6 +2128,179 @@ CUSTOM_INSTANCE_PIN=abc123
         assert_eq!(
             hex_ver_count, 1,
             "sync_versions_file must not duplicate the managed key. Got:\n{after}",
+        );
+    }
+
+    // ---------------------------------------------------------------------
+    // RED tests for task T82eegath (restart-health).
+    //
+    // Today `restart_harness` (line ~919) returns `()`: its call site (line
+    // ~835, inside sync_versions_file's rebuild branch) discards the result
+    // entirely, so a harness restart failure after a successful binary swap
+    // is silently swallowed — `binary_step_ok` stays `true`, `run()` prints
+    // "Upgrade complete." and exits 0 while the running harness still holds
+    // the OLD binary in memory (the exact 2026-06-12 stale-harness incident,
+    // see harness/supervise.rs's module doc).
+    //
+    // The tests below pin the required fix at a seam that does NOT touch
+    // `supervise.rs` (out of scope for this task) and does NOT invoke real
+    // `launchctl` or mutate `$HOME` (cargo test is multithreaded — an
+    // in-process $HOME mutation would race hex_dir_from_env/setup_shell,
+    // which also read it; and calling the real restart against the actual
+    // installed `com.hex.harness` LaunchAgent on this box would bootout the
+    // developer's live harness). They currently FAIL TO COMPILE because the
+    // fix has not been implemented yet:
+    //
+    //   - `restart_harness_with(hex_dir, agent_installed, restart_fn)` must
+    //     be added as an injectable, pure-of-I/O core for `restart_harness`:
+    //     when `agent_installed` is false it must short-circuit to `Ok(())`
+    //     WITHOUT calling `restart_fn` (nothing installed → nothing to
+    //     restart, must stay success forever); otherwise it must call
+    //     `restart_fn(hex_dir)` and return its `Result<(), String>`
+    //     unchanged. `restart_harness` itself becomes a thin wrapper that
+    //     checks the real plist and delegates to
+    //     `hex::harness::supervise::restart_and_verify` as the closure.
+    //   - `BinaryStepFailure` must be added as a small enum distinguishing
+    //     *why* the binary step failed — `Build` (today's only case, the
+    //     v0.50.4 message) vs `RestartFailed(String)` (binary WAS swapped,
+    //     harness restart failed) — because folding a restart failure into
+    //     the existing single `bool` can only ever reproduce the build-
+    //     failure message, which is factually wrong once the binary has
+    //     already been swapped.
+    //   - `binary_step_failure_message(&BinaryStepFailure) -> String` must
+    //     render the loud, distinct message for each case (mirrors the
+    //     existing pure-fn-returns-text pattern used by `hex_new_block()`
+    //     above, so it's testable without capturing stdout/stderr).
+    #[test]
+    fn restart_harness_with_propagates_restart_result_without_live_launchctl() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_dir = tmp.path();
+
+        // No LaunchAgent installed → nothing to restart → success, and the
+        // restart action must never even be invoked (invoking it is exactly
+        // the live-launchctl hazard this seam exists to avoid).
+        let ok = restart_harness_with(hex_dir, false, |_: &Path| -> Result<(), String> {
+            panic!("must not attempt a restart when no LaunchAgent is installed")
+        });
+        assert!(ok.is_ok(), "no agent installed must report success");
+
+        // Agent installed, restart succeeds → success (unchanged behavior;
+        // this is the success-unchanged verification).
+        let ok2 = restart_harness_with(hex_dir, true, |_: &Path| Ok(()));
+        assert!(ok2.is_ok(), "a successful restart must report success");
+
+        // Agent installed, restart fails → the failure must propagate, not
+        // be swallowed.
+        let failed = restart_harness_with(hex_dir, true, |_: &Path| {
+            Err("launchctl bootstrap failed: EIO".to_string())
+        });
+        assert!(
+            failed.is_err(),
+            "a failed harness restart must propagate as an error, not be swallowed \
+             (this is the 2026-06-12 stale-harness bug: binary swapped, restart \
+             failed, upgrade exited 0 anyway)"
+        );
+    }
+
+    #[test]
+    fn restart_failure_message_is_distinct_from_binary_build_failure_message() {
+        // The existing v0.50.4 message (run(), line ~1301) — printed when the
+        // binary rebuild/install itself failed and the binary was NOT
+        // updated. The new restart-failure message must never be confusable
+        // with this one: after a restart failure the binary WAS swapped.
+        let build_failure_msg = "Upgrade FAILED — the hex binary was NOT updated (see Step 5).";
+
+        let restart_err = "launchctl bootstrap failed: EIO".to_string();
+        let msg = binary_step_failure_message(&BinaryStepFailure::RestartFailed(restart_err.clone()));
+
+        assert_ne!(
+            msg, build_failure_msg,
+            "restart-failure message must differ from the binary-build failure message"
+        );
+        assert!(
+            !msg.contains("was NOT updated"),
+            "restart-failure message must not claim the binary wasn't updated — \
+             it WAS swapped. Got:\n{msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("swapped"),
+            "restart-failure message must state the binary WAS swapped. Got:\n{msg}"
+        );
+        assert!(
+            msg.to_lowercase().contains("restart") && msg.to_lowercase().contains("harness"),
+            "restart-failure message must state the harness restart failed. Got:\n{msg}"
+        );
+        assert!(
+            msg.contains(&restart_err),
+            "restart-failure message should surface the underlying error so an \
+             operator can act on it. Got:\n{msg}"
+        );
+        assert!(
+            msg.contains("hex harness restart"),
+            "restart-failure message must tell the operator what to run \
+             manually (`hex harness restart`). Got:\n{msg}"
+        );
+
+        // The pre-existing build-failure case must render BYTE-IDENTICAL to
+        // today's v0.50.4 output (run(), line ~1301) — success-unchanged:
+        // this task must not alter the build-failure path's wording at all.
+        let build_msg = binary_step_failure_message(&BinaryStepFailure::Build);
+        assert_eq!(
+            build_msg, build_failure_msg,
+            "the build-failure message must stay byte-identical to the existing \
+             v0.50.4 wording — this task only adds the restart-failure case"
+        );
+    }
+
+    /// Pins the WIRING, not just the pieces: `sync_versions_file` must
+    /// itself return `Result<(), BinaryStepFailure>` (not a bare `bool`).
+    /// A `bool` return can only ever fold `Build` and `RestartFailed` into a
+    /// single `false`, which is how an implementer could add
+    /// `restart_harness_with` / `BinaryStepFailure` / the message fn above,
+    /// pass both other red tests, and still leave `run()` printing the
+    /// build-failure wording over a restart failure (the binary WAS
+    /// swapped) — exactly the bug this task exists to close. Reuses the
+    /// no-cargo-invoked fixture from `sync_versions_file_returns_binary_step_health`
+    /// (version match → healthy; unparseable Cargo.toml → fails as `Build`,
+    /// since no rebuild/restart is ever attempted on that path).
+    #[cfg(unix)]
+    #[test]
+    fn sync_versions_file_return_type_carries_the_failure_kind() {
+        use std::os::unix::fs::PermissionsExt;
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_dir = tmp.path().join("hex");
+        let source_dir = tmp.path().join("source");
+        let backup_dir = tmp.path().join("backup");
+        fs::create_dir_all(&backup_dir).unwrap();
+        write_file(&hex_dir.join("VERSIONS"), "HEX_FOUNDATION_VERSION=v0.1.0\n");
+        write_file(
+            &source_dir.join("system/harness/Cargo.toml"),
+            "[package]\nname = \"hex-harness\"\nversion = \"1.0.0\"\nedition = \"2021\"\n",
+        );
+        let bin_dir = hex_dir.join(".hex/bin");
+        fs::create_dir_all(&bin_dir).unwrap();
+        let mock_bin = bin_dir.join("hex");
+        fs::write(&mock_bin, "#!/bin/sh\necho hex 1.0.0\n").unwrap();
+        fs::set_permissions(&mock_bin, fs::Permissions::from_mode(0o755)).unwrap();
+
+        // Version matches → legitimate skip → Ok.
+        assert!(
+            sync_versions_file(&hex_dir, &source_dir, &backup_dir).is_ok(),
+            "up-to-date skip must report the binary step healthy"
+        );
+
+        // Cargo.toml present but versionless → cannot verify anything → must
+        // fail as Build (no rebuild/restart was ever attempted here), never
+        // RestartFailed.
+        write_file(
+            &source_dir.join("system/harness/Cargo.toml"),
+            "[package]\nname = \"hex-harness\"\nedition = \"2021\"\n",
+        );
+        assert_eq!(
+            sync_versions_file(&hex_dir, &source_dir, &backup_dir),
+            Err(BinaryStepFailure::Build),
+            "an unparseable Cargo.toml must fail the binary step as Build, \
+             never RestartFailed"
         );
     }
 }

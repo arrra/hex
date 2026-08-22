@@ -4,6 +4,7 @@
 use rusqlite::ffi::sqlite3_auto_extension;
 use rusqlite::{params, Connection};
 use sqlite_vec::sqlite3_vec_init;
+use std::os::raw::{c_char, c_int};
 use std::sync::Once;
 
 /// nomic-embed-text-v1.5 native output dimension (verified by the §16 spike).
@@ -17,14 +18,17 @@ pub fn register_sqlite_vec() {
     VEC_INIT.call_once(|| unsafe {
         // Explicit transmute annotations (clippy::missing_transmute_annotations):
         // reinterpret the extension entry point as the C ABI fn pointer that
-        // `sqlite3_auto_extension` expects.
+        // `sqlite3_auto_extension` expects. The error-message arg must be
+        // `*mut *const c_char`, not a hardcoded i8: c_char is u8 on aarch64
+        // Linux (the docker-e2e container) and i8 on Apple targets, so i8
+        // compiles on the host but fails E0308 in the container.
         sqlite3_auto_extension(Some(std::mem::transmute::<
             *const (),
             unsafe extern "C" fn(
                 *mut rusqlite::ffi::sqlite3,
-                *mut *const i8,
+                *mut *const c_char,
                 *const rusqlite::ffi::sqlite3_api_routines,
-            ) -> i32,
+            ) -> c_int,
         >(sqlite3_vec_init as *const ())));
     });
 }
