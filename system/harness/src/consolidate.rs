@@ -155,10 +155,17 @@ pub fn run(mode: Mode, max: bool, hex_dir: &Path) -> i32 {
             match crate::memory::consolidate::run(&mut conn) {
                 Ok(report) => {
                     println!(
-                        "Layer 2 ok={} failed={}",
+                        "Layer 2 ok={} failed={} skipped={}",
                         report.ok.len(),
-                        report.failed.len()
+                        report.failed.len(),
+                        report.skipped.len()
                     );
+                    if !report.skipped.is_empty() {
+                        println!(
+                            "Layer 2 skipped (not implemented): {}",
+                            report.skipped.join(", ")
+                        );
+                    }
                     for (name, err) in &report.failed {
                         eprintln!("Layer 2 op '{name}' FAILED: {err}");
                     }
@@ -576,15 +583,12 @@ mod tests {
         // artifact that hides the billing waste).
         let evo = dir.path().join("evolution");
         if evo.exists() {
-            let wrote_audit = fs::read_dir(&evo)
-                .unwrap()
-                .filter_map(|e| e.ok())
-                .any(|e| {
-                    e.file_name()
-                        .to_str()
-                        .map(|n| n.starts_with("consolidation-audit-"))
-                        .unwrap_or(false)
-                });
+            let wrote_audit = fs::read_dir(&evo).unwrap().filter_map(|e| e.ok()).any(|e| {
+                e.file_name()
+                    .to_str()
+                    .map(|n| n.starts_with("consolidation-audit-"))
+                    .unwrap_or(false)
+            });
             assert!(
                 !wrote_audit,
                 "no consolidation-audit file may be written for an empty body"
