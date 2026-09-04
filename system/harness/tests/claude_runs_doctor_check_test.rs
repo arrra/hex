@@ -34,8 +34,7 @@ fn doctor_registry_contains_claude_runs_config_check() {
 
 #[test]
 fn example_claude_runs_config_exists_and_parses() {
-    let path = repo_root()
-        .join("system/templates/claude-runs.toml.example");
+    let path = repo_root().join("system/templates/claude-runs.toml.example");
     assert!(
         path.is_file(),
         "expected example config at {} — task Tn1wrdke4 must ship it",

@@ -6,8 +6,12 @@ use std::fs;
 pub struct RegistryOrphanedBin;
 
 impl DoctorCheck for RegistryOrphanedBin {
-    fn name(&self) -> &str { "registry-orphaned-bin" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "registry-orphaned-bin"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
 
     fn run(&self, ctx: &Context) -> CheckResult {
         let registry_dir = ctx.hex_dir.join(".hex/registry");
@@ -49,8 +53,12 @@ impl DoctorCheck for RegistryOrphanedBin {
 pub struct RegistryStalePolicy;
 
 impl DoctorCheck for RegistryStalePolicy {
-    fn name(&self) -> &str { "registry-stale-policy" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "registry-stale-policy"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
 
     fn run(&self, ctx: &Context) -> CheckResult {
         let registry_dir = ctx.hex_dir.join(".hex/registry");
@@ -74,6 +82,10 @@ impl DoctorCheck for RegistryStalePolicy {
                 continue;
             }
             // Extract <id> from "registry-<id>.yaml"
+            // Boundary proof: both bounds land on char boundaries — the "registry-"
+            // prefix (9 ASCII bytes) and ".yaml" suffix (5 ASCII bytes) are verified
+            // by starts_with/ends_with above, so their edges are char boundaries.
+            #[allow(clippy::string_slice)]
             let id = &file_name["registry-".len()..file_name.len() - ".yaml".len()];
             let trigger_json = tr_dir.join(format!("{id}.json"));
             if !trigger_json.exists() {

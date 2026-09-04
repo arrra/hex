@@ -57,8 +57,14 @@ fn memory_consolidate_is_the_canonical_subcommand() {
         String::from_utf8_lossy(&out.stderr),
     );
     let help = String::from_utf8_lossy(&out.stdout).to_lowercase();
-    assert!(help.contains("quick"), "help must list 'quick' mode; got:\n{help}");
-    assert!(help.contains("full"), "help must list 'full' mode; got:\n{help}");
+    assert!(
+        help.contains("quick"),
+        "help must list 'quick' mode; got:\n{help}"
+    );
+    assert!(
+        help.contains("full"),
+        "help must list 'full' mode; got:\n{help}"
+    );
 }
 
 #[test]

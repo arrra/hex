@@ -12,7 +12,10 @@ pub fn mint() -> String {
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_nanos() as u64)
         .unwrap_or(0);
-    let n = nanos ^ (COUNTER.fetch_add(1, Ordering::Relaxed).wrapping_mul(0x9E3779B97F4A7C15));
+    let n = nanos
+        ^ (COUNTER
+            .fetch_add(1, Ordering::Relaxed)
+            .wrapping_mul(0x9E3779B97F4A7C15));
     let mut v = n;
     let mut out = [0u8; 9];
     for slot in out.iter_mut() {

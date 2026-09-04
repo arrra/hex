@@ -175,11 +175,7 @@ fn upsert_symbol_info(conn: &Connection, info: &SymbolInformation) -> Result<()>
 }
 
 /// Get-or-insert a symbol row by SCIP symbol string, with an id cache.
-fn ensure_symbol(
-    conn: &Connection,
-    cache: &mut HashMap<String, i64>,
-    symbol: &str,
-) -> Result<i64> {
+fn ensure_symbol(conn: &Connection, cache: &mut HashMap<String, i64>, symbol: &str) -> Result<i64> {
     if let Some(id) = cache.get(symbol) {
         return Ok(*id);
     }
@@ -498,11 +494,9 @@ mod tests {
 
         // Blob OIDs recorded for every file.
         let no_oid: i64 = conn
-            .query_row(
-                "SELECT count(*) FROM files WHERE blob_oid = ''",
-                [],
-                |r| r.get(0),
-            )
+            .query_row("SELECT count(*) FROM files WHERE blob_oid = ''", [], |r| {
+                r.get(0)
+            })
             .unwrap();
         assert_eq!(no_oid, 0);
 

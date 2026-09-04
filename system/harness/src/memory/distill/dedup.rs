@@ -42,7 +42,9 @@ pub fn classify(
     // Phase 1.6: embedding similarity stub (full wire-up when embedding pipeline lands)
     let vec_ids = nearest_via_vec(conn, candidate)?;
     if !vec_ids.is_empty() {
-        return Ok(DedupOutcome::Ambiguous { nearest_ids: vec_ids });
+        return Ok(DedupOutcome::Ambiguous {
+            nearest_ids: vec_ids,
+        });
     }
 
     Ok(DedupOutcome::CleanAdd)

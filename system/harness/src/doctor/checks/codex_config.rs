@@ -5,8 +5,12 @@ use std::fs;
 pub struct CodexConfigExists;
 
 impl DoctorCheck for CodexConfigExists {
-    fn name(&self) -> &str { "codex-config" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "codex-config"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let path = ctx.hex_dir.join(".codex/config.toml");
         if path.is_file() {

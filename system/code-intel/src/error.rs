@@ -153,26 +153,68 @@ mod tests {
     #[test]
     fn exit_codes_match_spec() {
         assert_eq!(CqError::StaleResults.exit_code(), 2);
-        assert_eq!(CqError::NoIndex { workspace_id: "x".into() }.exit_code(), 3);
-        assert_eq!(CqError::UnregisteredWorkspace { cwd: "/tmp".into() }.exit_code(), 4);
         assert_eq!(
-            CqError::UnsupportedWorkspace { reason: "no Cargo.toml".into() }.exit_code(),
+            CqError::NoIndex {
+                workspace_id: "x".into()
+            }
+            .exit_code(),
+            3
+        );
+        assert_eq!(
+            CqError::UnregisteredWorkspace { cwd: "/tmp".into() }.exit_code(),
             4
         );
-        assert_eq!(CqError::NotFound { query: "nope".into() }.exit_code(), 5);
-        assert_eq!(CqError::EmitFailed { stderr_tail: "boom".into() }.exit_code(), 6);
-        // SPEC-A2 §5 additions
-        assert_eq!(CqError::LiveUnavailable { reason: "daemon down".into() }.exit_code(), 7);
-        assert_eq!(CqError::CheckFailed { detail: "no cargo".into() }.exit_code(), 8);
         assert_eq!(
-            CqError::RenameAborted { path: "a.rs".into(), detail: "mismatch".into() }.exit_code(),
+            CqError::UnsupportedWorkspace {
+                reason: "no Cargo.toml".into()
+            }
+            .exit_code(),
+            4
+        );
+        assert_eq!(
+            CqError::NotFound {
+                query: "nope".into()
+            }
+            .exit_code(),
+            5
+        );
+        assert_eq!(
+            CqError::EmitFailed {
+                stderr_tail: "boom".into()
+            }
+            .exit_code(),
+            6
+        );
+        // SPEC-A2 §5 additions
+        assert_eq!(
+            CqError::LiveUnavailable {
+                reason: "daemon down".into()
+            }
+            .exit_code(),
+            7
+        );
+        assert_eq!(
+            CqError::CheckFailed {
+                detail: "no cargo".into()
+            }
+            .exit_code(),
+            8
+        );
+        assert_eq!(
+            CqError::RenameAborted {
+                path: "a.rs".into(),
+                detail: "mismatch".into()
+            }
+            .exit_code(),
             7
         );
     }
 
     #[test]
     fn error_serializes_with_code_message_hint() {
-        let e = CqError::NoIndex { workspace_id: "ab12".into() };
+        let e = CqError::NoIndex {
+            workspace_id: "ab12".into(),
+        };
         let j: serde_json::Value = serde_json::from_str(&e.to_json()).unwrap();
         assert_eq!(j["error"]["code"], "NO_INDEX");
         assert!(j["error"]["message"].as_str().unwrap().contains("ab12"));
@@ -182,7 +224,13 @@ mod tests {
     #[test]
     fn code_strings_match_spec_table() {
         assert_eq!(CqError::StaleResults.code_str(), "STALE_RESULTS");
-        assert_eq!(CqError::NoIndex { workspace_id: "x".into() }.code_str(), "NO_INDEX");
+        assert_eq!(
+            CqError::NoIndex {
+                workspace_id: "x".into()
+            }
+            .code_str(),
+            "NO_INDEX"
+        );
         assert_eq!(
             CqError::UnregisteredWorkspace { cwd: "/x".into() }.code_str(),
             "UNREGISTERED_WORKSPACE"
@@ -191,15 +239,31 @@ mod tests {
             CqError::UnsupportedWorkspace { reason: "r".into() }.code_str(),
             "UNSUPPORTED_WORKSPACE"
         );
-        assert_eq!(CqError::NotFound { query: "q".into() }.code_str(), "NOT_FOUND");
-        assert_eq!(CqError::EmitFailed { stderr_tail: "t".into() }.code_str(), "EMIT_FAILED");
+        assert_eq!(
+            CqError::NotFound { query: "q".into() }.code_str(),
+            "NOT_FOUND"
+        );
+        assert_eq!(
+            CqError::EmitFailed {
+                stderr_tail: "t".into()
+            }
+            .code_str(),
+            "EMIT_FAILED"
+        );
         assert_eq!(
             CqError::LiveUnavailable { reason: "r".into() }.code_str(),
             "LIVE_UNAVAILABLE"
         );
-        assert_eq!(CqError::CheckFailed { detail: "d".into() }.code_str(), "CHECK_FAILED");
         assert_eq!(
-            CqError::RenameAborted { path: "p".into(), detail: "d".into() }.code_str(),
+            CqError::CheckFailed { detail: "d".into() }.code_str(),
+            "CHECK_FAILED"
+        );
+        assert_eq!(
+            CqError::RenameAborted {
+                path: "p".into(),
+                detail: "d".into()
+            }
+            .code_str(),
             "RENAME_ABORTED"
         );
     }
@@ -208,14 +272,21 @@ mod tests {
     fn every_variant_has_nonempty_hint() {
         let all = [
             CqError::StaleResults,
-            CqError::NoIndex { workspace_id: "x".into() },
+            CqError::NoIndex {
+                workspace_id: "x".into(),
+            },
             CqError::UnregisteredWorkspace { cwd: "/x".into() },
             CqError::UnsupportedWorkspace { reason: "r".into() },
             CqError::NotFound { query: "q".into() },
-            CqError::EmitFailed { stderr_tail: "t".into() },
+            CqError::EmitFailed {
+                stderr_tail: "t".into(),
+            },
             CqError::LiveUnavailable { reason: "r".into() },
             CqError::CheckFailed { detail: "d".into() },
-            CqError::RenameAborted { path: "p".into(), detail: "d".into() },
+            CqError::RenameAborted {
+                path: "p".into(),
+                detail: "d".into(),
+            },
         ];
         for e in all {
             let j: serde_json::Value = serde_json::from_str(&e.to_json()).unwrap();

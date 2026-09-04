@@ -147,9 +147,7 @@ fn resolve(conn: &Connection, selector: &Selector) -> Result<Vec<i64>> {
                 query: selector.to_string(),
             };
             let file_id: i64 = conn
-                .query_row("SELECT id FROM files WHERE path = ?1", [path], |r| {
-                    r.get(0)
-                })
+                .query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
                 .optional_not_found()?
                 .ok_or_else(not_found)?;
 
@@ -164,8 +162,10 @@ fn resolve(conn: &Connection, selector: &Selector) -> Result<Vec<i64>> {
                 .query_map([file_id], |r| {
                     Ok((
                         r.get::<_, i64>(0)?,
-                        ((r.get::<_, i64>(1)?, r.get::<_, i64>(2)?),
-                         (r.get::<_, i64>(3)?, r.get::<_, i64>(4)?)),
+                        (
+                            (r.get::<_, i64>(1)?, r.get::<_, i64>(2)?),
+                            (r.get::<_, i64>(3)?, r.get::<_, i64>(4)?),
+                        ),
                     ))
                 })?
                 .collect::<rusqlite::Result<Vec<(i64, ((i64, i64), (i64, i64)))>>>()?;
@@ -258,9 +258,7 @@ pub fn callers(conn: &Connection, selector: &Selector) -> Result<Vec<RawResult>>
 /// in source order, excluding SCIP `local` symbols (parameters, locals).
 pub fn symbols(conn: &Connection, path: &str) -> Result<Vec<RawResult>> {
     let file_id: i64 = conn
-        .query_row("SELECT id FROM files WHERE path = ?1", [path], |r| {
-            r.get(0)
-        })
+        .query_row("SELECT id FROM files WHERE path = ?1", [path], |r| r.get(0))
         .optional_not_found()?
         .ok_or_else(|| CqError::NotFound {
             query: format!("{path} (file not in index)"),
@@ -380,8 +378,7 @@ mod tests {
     fn golden_db() -> &'static Path {
         static DB: OnceLock<PathBuf> = OnceLock::new();
         DB.get_or_init(|| {
-            let fixture =
-                Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/golden-crate");
+            let fixture = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/golden-crate");
             let dir = tempfile::tempdir().unwrap();
             copy_dir(&fixture, dir.path());
             run(dir.path(), "git", &["init", "-q", "-b", "main"]);
@@ -453,7 +450,10 @@ mod tests {
         assert_eq!((d.start_line, d.start_col, d.end_col), (0, 7, 13));
         assert!(d.is_definition());
         assert_eq!(d.display_name, "double");
-        assert_eq!(d.scip_symbol, "rust-analyzer cargo golden 0.1.0 ops/double().");
+        assert_eq!(
+            d.scip_symbol,
+            "rust-analyzer cargo golden 0.1.0 ops/double()."
+        );
     }
 
     #[test]
@@ -480,7 +480,14 @@ mod tests {
         // emits no occurrence (known limitation; see callers_of_double).
         let sites: Vec<(&str, i64, i64, bool)> = results
             .iter()
-            .map(|r| (r.path.as_str(), r.start_line, r.start_col, r.is_definition()))
+            .map(|r| {
+                (
+                    r.path.as_str(),
+                    r.start_line,
+                    r.start_col,
+                    r.is_definition(),
+                )
+            })
             .collect();
         assert_eq!(
             sites,
@@ -532,11 +539,16 @@ mod tests {
             ("area", 70), // trait method declaration
             ("area", 26), // impl methods (x2)
         ] {
-            assert!(outline.contains(&expected), "{expected:?} not in {outline:?}");
+            assert!(
+                outline.contains(&expected),
+                "{expected:?} not in {outline:?}"
+            );
         }
         // Locals (self, items, i) are excluded from the outline.
         assert!(
-            !outline.iter().any(|(n, _)| *n == "self" || *n == "items" || *n == "i"),
+            !outline
+                .iter()
+                .any(|(n, _)| *n == "self" || *n == "items" || *n == "i"),
             "locals leaked into outline: {outline:?}"
         );
         // Source order.
@@ -594,7 +606,10 @@ mod tests {
             d.scip_symbol,
             "rust-analyzer cargo golden 0.1.0 shapes/Area#area()."
         );
-        assert_eq!((d.path.as_str(), d.start_line, d.start_col), ("src/shapes.rs", 0, 20));
+        assert_eq!(
+            (d.path.as_str(), d.start_line, d.start_col),
+            ("src/shapes.rs", 0, 20)
+        );
         assert_eq!(d.kind, 70); // SCIP TraitMethod
 
         // The impls remain reachable by name: def("area") surfaces the trait

@@ -78,7 +78,11 @@ fn main() {
     let mut entries: Vec<(String, String)> = Vec::new(); // (mod_ident, abs_path)
     for root in &roots {
         println!("cargo:rerun-if-changed={root}");
-        collect_worker_files(std::path::Path::new(root), std::path::Path::new(root), &mut entries);
+        collect_worker_files(
+            std::path::Path::new(root),
+            std::path::Path::new(root),
+            &mut entries,
+        );
     }
     entries.sort();
 
@@ -127,23 +131,37 @@ fn collect_worker_files(
         let path = entry.path();
         if path.is_dir() {
             collect_worker_files(&path, root, out);
-        } else if path.file_name().and_then(|s| s.to_str())
-            .map(|n| n.ends_with(".worker.rs")).unwrap_or(false)
+        } else if path
+            .file_name()
+            .and_then(|s| s.to_str())
+            .map(|n| n.ends_with(".worker.rs"))
+            .unwrap_or(false)
         {
             let rel = path.strip_prefix(root).unwrap();
             let rel_str = rel.to_str().unwrap();
             let stem = rel_str.trim_end_matches(".worker.rs");
             let ident: String = stem
                 .chars()
-                .map(|c| if c == '/' || c == '.' || c == '-' { '_' } else { c })
+                .map(|c| {
+                    if c == '/' || c == '.' || c == '-' {
+                        '_'
+                    } else {
+                        c
+                    }
+                })
                 .collect();
             if ident.is_empty()
-                || ident.chars().next().map(|c| c.is_ascii_digit()).unwrap_or(true)
+                || ident
+                    .chars()
+                    .next()
+                    .map(|c| c.is_ascii_digit())
+                    .unwrap_or(true)
                 || !ident.chars().all(|c| c.is_ascii_alphanumeric() || c == '_')
             {
                 panic!(
                     "hex module: '{}' does not yield a valid Rust identifier (got '{}')",
-                    path.display(), ident
+                    path.display(),
+                    ident
                 );
             }
             // Per-file rerun trigger so edits to a nested module rebuild

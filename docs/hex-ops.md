@@ -7,8 +7,8 @@ LaunchAgents, and **telemetry**.
 
 ## LaunchAgents (launchd)
 
-> **Note:** This section documents hex's **sanctioned** supervised services (the harness
-> bootstrap and the personal BOI daemon). It is **not** a pattern to copy for new scheduled
+> **Note:** This section documents hex's **sanctioned** supervised services (canonical
+> table below). It is **not** a pattern to copy for new scheduled
 > jobs — new recurring/scheduled work is a **hex worker**, and new persistent processes ride
 > the engine via **iii-exec** (see the AGENTS.md "Automation" rule and `docs/iii-hex.md`). Do
 > not add new per-job LaunchAgents (decision:
@@ -17,9 +17,30 @@ LaunchAgents, and **telemetry**.
 hex's supervised long-running services run as **per-user gui LaunchAgents** in
 `~/Library/LaunchAgents/`, bootstrapped into the **`gui/<uid>`** domain, with **no
 `SessionCreate` key** and **no `UserName`**. Examples: `com.hex.harness` (the core
-harness); `com.mrap.boi-daemon` (the personal BOI daemon — same pattern). The code already
+harness); an instance-declared daemon such as `com.mrap.boi-daemon` — same pattern.
+Canonical list: table below. The code already
 implements this: `hex harness start|stop|status` targets `gui/$(id -u)/com.hex.harness` and
 `upgrade.rs` kickstarts the same target after a binary swap.
+
+### Sanctioned launchd surface (canonical list)
+
+Foundation-sanctioned services — a loaded launchd job on neither this list nor the
+instance's declared list is an anomaly to flag:
+
+| Label | Role | Source |
+|---|---|---|
+| `com.hex.harness` | engine host | rendered by `hex harness start` |
+| `com.hex.harness-watchdog` | restarts the harness if it dies | rendered by `hex harness start` |
+| `com.hex.failures-probe` | out-of-process liveness probe — watches the harness itself, deliberately NOT a harness worker | `system/templates/launchd/com.hex.failures-probe.plist` |
+| `com.hex.scipd` | code-intel daemon | `system/templates/launchd/com.hex.scipd.plist` |
+| `com.hex.hitl-nudge` | HITL nudge | `system/templates/launchd/com.hex.hitl-nudge.plist` |
+
+An instance may extend this with its own entries, **declared in the instance
+CLAUDE.md/AGENTS.md Automation section** (e.g. a personal BOI daemon `com.mrap.boi-daemon`,
+a tmux boot script, a session sentinel, or a `pf`-persist system LaunchDaemon).
+`.disabled`/`.staged` plist suffixes are parked rollback/staging state, not violations.
+History: pre-2026-08 docs disagreed on this list (AGENTS.md said harness-only; the mrap
+instance's own architecture.md copy said boi-daemon+tmux-boot only) — reconciled 2026-08-19.
 
 ### Why gui/ with no SessionCreate (rationale)
 
@@ -169,6 +190,48 @@ natively in the Rust harness.
 ### Resources
 
 `hex resources sample|status` — hourly disk sampler (tier 0) + deterministic floor/trend pressure rules (tier 1) over the same telemetry store; on breach it alerts (6h dedupe) and emits `resource.pressure` level-triggered. Detection only — never cleans anything up.
+
+---
+
+## Cron workers
+
+Recurring in-harness jobs registered in the foundation worker registry
+(`hex_modules::module_registry()`) and run in-process by the engine — never
+LaunchAgents. Each fire is auto-traced (telemetry row per run) and its cron
+expectation is checked by `hex failures` (MISSED/NEVER-RAN detection).
+
+| Worker | Schedule | Does |
+|---|---|---|
+| `hex-failures` | daily 13:30 UTC (≈06:30 PT) | unexpected-failure digest (see `hex failures` above) |
+| `resources` | hourly | disk sampler + pressure rules (see Resources above) |
+| `boi-spec-watch` | every 5 min (`0 */5 * * * * *`) | watches BOI spec/task state above phase level |
+
+### `boi-spec-watch`
+
+Every 5 minutes it opens `~/.boi/v2/boi.db` **read-only** (never writes, never
+holds a lock; bounded busy timeout; 14-day lookback), diffs the spec/task state
+against the prior tick's persisted snapshot, and alerts on exactly two
+transition classes:
+
+1. a **spec newly reaching a terminal status** (`completed` / `failed` / `canceled`)
+2. a **task newly entering `state='blocked'`** (any reason — every blocked task needs an operator)
+
+Alerts go through the shared operator path (`hex::alert::notify`: stderr +
+telemetry row + deduped macOS notification) — the same convention sibling
+workers use.
+
+**First tick baselines silently** — no alert storm on deploy; a spec first
+observed already-terminal is not alerted.
+
+**Failure stance (S6):**
+- `~/.boi/v2/boi.db` **absent** → quiet no-op (debug-level at most). This worker
+  ships in foundation and most instances never run BOI.
+- `boi.db` **present but unreadable** → **loud** failure through the worker's
+  normal failure path, so `hex failures` counts it.
+
+This supersedes any ad-hoc BOI watching (e.g. the reverted standalone
+`boi-spec-watch.py` launchd watcher) — recurring/scheduled work is a hex
+worker, never a new LaunchAgent.
 
 ---
 

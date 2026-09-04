@@ -70,10 +70,9 @@ impl Workspace {
         // worktree the common dir is the PARENT repo's `.git`, which is
         // exactly the fold-back the spec requires.
         let primary_root = match common_dir.file_name() {
-            Some(name) if name == ".git" => common_dir
-                .parent()
-                .ok_or_else(unregistered)?
-                .to_path_buf(),
+            Some(name) if name == ".git" => {
+                common_dir.parent().ok_or_else(unregistered)?.to_path_buf()
+            }
             // Bare or exotic layouts (no work tree to index) are unsupported.
             _ => {
                 return Err(CqError::UnsupportedWorkspace {
@@ -149,9 +148,7 @@ impl Registry {
         let path = Self::path(home);
         let raw = match std::fs::read_to_string(&path) {
             Ok(raw) => raw,
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
-                return Ok(Registry::default())
-            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => return Ok(Registry::default()),
             Err(e) => {
                 return Err(CqError::UnsupportedWorkspace {
                     reason: format!("cannot read registry {}: {e}", path.display()),
@@ -218,7 +215,10 @@ pub fn register_workspace(home: &Path, path: &Path) -> Result<RegistryEntry, CqE
     let ws = Workspace::resolve(path)?;
     if !ws.primary_root.join("Cargo.toml").is_file() {
         return Err(CqError::UnsupportedWorkspace {
-            reason: format!("no Cargo.toml at primary root {}", ws.primary_root.display()),
+            reason: format!(
+                "no Cargo.toml at primary root {}",
+                ws.primary_root.display()
+            ),
         });
     }
     let mut reg = Registry::load(home)?;

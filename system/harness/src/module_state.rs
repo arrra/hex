@@ -37,8 +37,7 @@ fn open(hex_dir: &Path) -> Result<Connection, String> {
         std::fs::create_dir_all(parent)
             .map_err(|e| format!("cannot create {}: {e}", parent.display()))?;
     }
-    let conn =
-        Connection::open(&p).map_err(|e| format!("cannot open {}: {e}", p.display()))?;
+    let conn = Connection::open(&p).map_err(|e| format!("cannot open {}: {e}", p.display()))?;
     conn.execute_batch(
         "CREATE TABLE IF NOT EXISTS disabled_modules (
             name       TEXT PRIMARY KEY,
@@ -154,9 +153,15 @@ mod tests {
     fn module_state_idempotent_calls_report_unchanged() {
         let (_d, hex_dir) = tmp_hex_dir();
         assert!(set_disabled(&hex_dir, "x", true).unwrap());
-        assert!(!set_disabled(&hex_dir, "x", true).unwrap(), "second disable: no change");
+        assert!(
+            !set_disabled(&hex_dir, "x", true).unwrap(),
+            "second disable: no change"
+        );
         assert!(set_disabled(&hex_dir, "x", false).unwrap());
-        assert!(!set_disabled(&hex_dir, "x", false).unwrap(), "second enable: no change");
+        assert!(
+            !set_disabled(&hex_dir, "x", false).unwrap(),
+            "second enable: no change"
+        );
     }
 
     #[test]

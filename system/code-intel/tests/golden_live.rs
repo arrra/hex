@@ -96,7 +96,11 @@ fn live_answers_match_index_for_every_golden_symbol() {
 
     let exp = expectations();
     let symbols = exp["symbols"].as_array().unwrap();
-    assert!(symbols.len() >= 10, "golden fixture shrank: {}", symbols.len());
+    assert!(
+        symbols.len() >= 10,
+        "golden fixture shrank: {}",
+        symbols.len()
+    );
     warm_instance(home.path(), repo.path(), &def_selector(&symbols[0]));
 
     for sym in symbols {
@@ -193,7 +197,14 @@ fn worktree_edit_escalates_live_while_no_live_misses_and_flags_stale() {
     run_cmd(
         repo.path(),
         "git",
-        &["worktree", "add", "-q", wt.to_str().unwrap(), "-b", "live-edit"],
+        &[
+            "worktree",
+            "add",
+            "-q",
+            wt.to_str().unwrap(),
+            "-b",
+            "live-edit",
+        ],
     );
     let new_line = append_brand_new_caller(&wt);
 
@@ -206,7 +217,10 @@ fn worktree_edit_escalates_live_while_no_live_misses_and_flags_stale() {
     assert_exit(&out, 2);
     let env = stdout_json(&out);
     assert_eq!(env["source"], "index", "{env}");
-    assert!(env.get("escalated").is_none(), "--no-live never escalates: {env}");
+    assert!(
+        env.get("escalated").is_none(),
+        "--no-live never escalates: {env}"
+    );
     assert_eq!(
         env["stale_files"],
         serde_json::json!(["src/ops.rs"]),
@@ -349,7 +363,10 @@ fn rename_double_plan_pins_macro_body_blindness_at_three_edits() {
             )
         })
         .collect();
-    assert_eq!(got, want, "rename edits must hit the golden refs sites\n{plan}");
+    assert_eq!(
+        got, want,
+        "rename edits must hit the golden refs sites\n{plan}"
+    );
 
     // Belt and braces: the macro_rules! body line carries no edit.
     let macro_line = before

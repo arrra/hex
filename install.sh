@@ -499,6 +499,9 @@ _harness_build_from_source() {
     cp "$built" "$TARGET_DIR/.hex/bin/hex"
     chmod +x "$TARGET_DIR/.hex/bin/hex"
     ln -sf hex "$TARGET_DIR/.hex/bin/hex-agent"
+    # Record the source SHA that produced THIS binary (atomic tmp+rename) so
+    # `hex upgrade` can verify binary freshness. Never fails the install (S6).
+    write_hex_sha_sidecar
     _code_intel_build_and_deploy || true
     return 0
 }
@@ -547,8 +550,19 @@ _harness_download_prebuilt() {
     echo "  Downloading hex from ${harness_url}..."
     curl -fSL "$harness_url" -o "$TARGET_DIR/.hex/bin/hex" && chmod +x "$TARGET_DIR/.hex/bin/hex"
     ln -sf hex "$TARGET_DIR/.hex/bin/hex-agent"
+    # A sidecar from a PRIOR from-source run must not outlive the binary it
+    # described: leaving it would let `hex upgrade` see installed_sha ==
+    # source_sha and print "no rebuild needed" for a binary that is actually
+    # this prebuilt artifact. Absent sidecar = loud WARN-skip instead (S6).
+    rm -f "$TARGET_DIR/.hex/bin/hex.sha"
     # No prebuilt cq/scipd on releases — code-intel binaries require cargo.
     echo "  NOTE: cq/scipd (code-intel) skipped — install Rust and re-run to build them."
+    # Deliberately NO hex.sha sidecar on this path: the binary came from a
+    # release tarball, NOT $SCRIPT_DIR's checkout, so recording that source
+    # HEAD would falsely assert "built from this source" and make `hex upgrade`
+    # silently skip the freshness rebuild (installed_sha == source_sha match).
+    # Leaving it absent makes upgrade WARN-skip freshness loudly instead (S6).
+    echo "  ⚠️  WARN: prebuilt hex binary — no hex.sha recorded; hex upgrade cannot verify binary freshness" >&2
 }
 
 _harness_warn_missing() {
@@ -557,6 +571,37 @@ _harness_warn_missing() {
     echo "  Install Rust (https://rustup.rs) and re-run to build the hex binary."
     echo "  Core shell functionality (BOI, memory scripts) still works without it."
     echo ""
+}
+
+# Write the source checkout's git HEAD SHA next to the freshly built binary
+# (.hex/bin/hex.sha) using an atomic tmp+rename, mirroring upgrade.rs. `hex
+# upgrade` compares this sidecar against `git -C <source> rev-parse HEAD`;
+# without it a fresh install has installed_sha=None and upgrade must WARN-skip
+# the binary-freshness check forever. If the source git HEAD is unresolvable
+# (source is not a git checkout, git failed), print a loud WARN mentioning
+# hex.sha and continue — NEVER fail the install over the sidecar (S6). Only
+# call this on the build-from-source path: a prebuilt binary did not come from
+# $SCRIPT_DIR's checkout, so recording that SHA would falsely assert freshness.
+# NOTE: this stamps THIS checkout's HEAD, while `hex upgrade` compares against
+# a fresh pull of DEFAULT_REPO's default branch — installing from a non-default
+# branch therefore triggers ONE extra rebuild on the next upgrade, after which
+# the sidecar is rewritten from upgrade's own source dir (self-correcting).
+write_hex_sha_sidecar() {
+    local sha_file="$TARGET_DIR/.hex/bin/hex.sha"
+    local src_sha=""
+    src_sha=$(git -C "$SCRIPT_DIR" rev-parse HEAD 2>/dev/null || true)
+    if [ -n "$src_sha" ]; then
+        local sha_tmp="$sha_file.tmp"
+        if printf '%s' "$src_sha" > "$sha_tmp" 2>/dev/null && mv -f "$sha_tmp" "$sha_file" 2>/dev/null; then
+            echo "  hex.sha sidecar     ✓ (${src_sha:0:8})"
+        else
+            rm -f "$sha_tmp" 2>/dev/null || true
+            echo "  ⚠️  WARN: could not write hex.sha sidecar — hex upgrade will not verify binary freshness" >&2
+        fi
+    else
+        echo "  ⚠️  WARN: source git HEAD unresolvable — skipping hex.sha sidecar; hex upgrade will WARN-skip binary freshness checks" >&2
+    fi
+    return 0
 }
 
 if command -v cargo &>/dev/null; then

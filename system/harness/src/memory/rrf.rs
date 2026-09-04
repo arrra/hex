@@ -15,7 +15,15 @@ pub fn rrf_fuse(ranked_lists: &[Vec<i64>], k: f64) -> Vec<(i64, f64)> {
         }
     }
     let mut fused: Vec<(i64, f64)> = scores.into_iter().collect();
-    fused.sort_by(|a, b| b.1.partial_cmp(&a.1).unwrap_or(std::cmp::Ordering::Equal));
+    // Deterministic order: score desc, then id asc. Equal fused scores are
+    // common across arms (same rank in different arms); without the id
+    // tie-break the order inherits HashMap iteration and flaps run-to-run
+    // (OBS-035), including WHICH id survives a downstream truncate(k).
+    fused.sort_by(|a, b| {
+        b.1.partial_cmp(&a.1)
+            .unwrap_or(std::cmp::Ordering::Equal)
+            .then(a.0.cmp(&b.0))
+    });
     fused
 }
 
@@ -39,6 +47,25 @@ mod tests {
     #[test]
     fn single_list_preserves_order() {
         let fused = rrf_fuse(&[vec![9, 8, 7]], RRF_K);
-        assert_eq!(fused.iter().map(|(id, _)| *id).collect::<Vec<_>>(), vec![9, 8, 7]);
+        assert_eq!(
+            fused.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+            vec![9, 8, 7]
+        );
+    }
+
+    #[test]
+    fn equal_scores_break_ties_by_id_deterministically() {
+        // ids 5 and 3 each hold rank 0 in exactly one arm => identical fused
+        // scores. Order must be id-ascending, not HashMap iteration (OBS-035:
+        // near-tie order flapped run-to-run, flipping eval cases at the
+        // truncate(k) boundary).
+        for _ in 0..50 {
+            let fused = rrf_fuse(&[vec![5], vec![3]], RRF_K);
+            assert_eq!(
+                fused.iter().map(|(id, _)| *id).collect::<Vec<_>>(),
+                vec![3, 5],
+                "equal-score order must be deterministic (id asc)"
+            );
+        }
     }
 }

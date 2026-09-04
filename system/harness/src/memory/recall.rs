@@ -7,6 +7,8 @@ use serde_json::json;
 use std::io::Write;
 use std::path::Path;
 
+use super::recall_config::RecallConfig;
+
 const MIN_QUERY_CHARS: usize = 12;
 /// Hard cap on the injected context block. Was 10_000 (spec §8); cut to 3_000
 /// on 2026-06-11 — injected chars are transcript ballast cache-re-read on each
@@ -35,61 +37,141 @@ pub struct RecallV2 {
     pub facts: Vec<FactHit>,
 }
 
-pub fn recall_with_facts(
-    conn: &rusqlite::Connection,
-    query: &str,
-) -> rusqlite::Result<RecallV2> {
+pub fn recall_with_facts(conn: &rusqlite::Connection, query: &str) -> rusqlite::Result<RecallV2> {
     let chunks = chunks_recall(conn, query, 5).unwrap_or_default();
     // Hot-path budget: no embedding model is loaded here (module doc), so the
     // facts vector arm is off (None ⇒ exactly the FTS-only behavior).
-    let facts = facts_recall(conn, query, 5, None)?;
+    let facts = facts_recall(conn, query, 5, None, false)?
+        .into_iter()
+        .map(|(f, _)| f)
+        .collect();
     Ok(RecallV2 { chunks, facts })
 }
 
-fn chunks_recall(
-    conn: &rusqlite::Connection,
-    query: &str,
-    k: usize,
-) -> rusqlite::Result<Vec<Hit>> {
+fn chunks_recall(conn: &rusqlite::Connection, query: &str, k: usize) -> rusqlite::Result<Vec<Hit>> {
     super::search::search_fts_public(conn, query, k, None)
 }
 
-/// Facts retrieval: FTS keyword arm, plus a KNN arm over `facts_vec` when the
-/// caller already holds a query embedding (hoist it from the chunk path — do
-/// NOT cold-load the model here). `query_vec = None` ⇒ FTS-only, identical to
-/// the pre-fusion behavior.
+/// Facts retrieval: dual-weighted FTS arms + slug arm + KNN arm over
+/// `facts_vec` when the caller already holds a query embedding (hoist it from
+/// the chunk path — do NOT cold-load the model here), fused by RRF. Returns
+/// `(fact, rrf_score)` in fused order so callers can log the real ranking
+/// signal. `exclude_private` filters in SQL BEFORE any top-k truncation —
+/// filtering after the cut silently starves the window (review 2026-08-18).
 pub(crate) fn facts_recall(
     conn: &rusqlite::Connection,
     query: &str,
     k: usize,
     query_vec: Option<&[f32]>,
-) -> rusqlite::Result<Vec<FactHit>> {
+    exclude_private: bool,
+) -> rusqlite::Result<Vec<(FactHit, f64)>> {
+    facts_recall_with_config(
+        conn,
+        query,
+        k,
+        query_vec,
+        exclude_private,
+        &RecallConfig::default(),
+    )
+}
+
+/// [`facts_recall`] with an explicit recall config. The RRF fusion constant and
+/// the two dual-weighted bm25 arm weightings come from `cfg`; `&RecallConfig::default()`
+/// reproduces the previous hardcoded constants exactly.
+pub(crate) fn facts_recall_with_config(
+    conn: &rusqlite::Connection,
+    query: &str,
+    k: usize,
+    query_vec: Option<&[f32]>,
+    exclude_private: bool,
+    cfg: &RecallConfig,
+) -> rusqlite::Result<Vec<(FactHit, f64)>> {
     // FTS5 default-ANDs tokens — for natural-language queries we want any-match.
     // Drop stopwords and OR the remaining alphanumerics so "who is alice" hits
     // facts mentioning the slug.
     let fts_query = query
         .to_lowercase()
         .split(|c: char| !c.is_alphanumeric())
-        .filter(|t| t.len() >= 3 && !matches!(*t, "the" | "and" | "for" | "are" | "was" | "who" | "what" | "how" | "does" | "did" | "is"))
+        .filter(|t| {
+            t.len() >= 3
+                && !matches!(
+                    *t,
+                    "the"
+                        | "and"
+                        | "for"
+                        | "are"
+                        | "was"
+                        | "who"
+                        | "what"
+                        | "how"
+                        | "does"
+                        | "did"
+                        | "is"
+                )
+        })
         .collect::<Vec<_>>()
         .join(" OR ");
 
-    // FTS arm — ranked facts rowids (bm25, then importance). The rowid is the
-    // fusion key shared with the KNN arm (facts.id is a TEXT ULID, not an
+    // FTS arms — ranked facts rowids (bm25, then importance). The rowid is
+    // the fusion key shared with the KNN arm (facts.id is a TEXT ULID, not an
     // integer — knn_facts joins it back to the rowid).
-    let fts_ids: Vec<i64> = if fts_query.is_empty() {
-        Vec::new()
+    //
+    // TWO weightings run as separate arms and fuse by rank (RRF), because no
+    // single bm25 column weighting serves both query shapes (measured on the
+    // 17-case golden set, 2026-08-18): content questions need object-heavy
+    // weights, while entity/attribute questions ("what is X's focus") carry
+    // their signal in subject+predicate and object weighting buries them.
+    // Rank fusion sidesteps the scale conflict; each arm over-fetches 3x so
+    // fusion has real overlap to work with (12/17 single-arm → 15/17 fused).
+    let privacy = if exclude_private {
+        " AND f.private = 0"
     } else {
-        conn.prepare(
+        ""
+    };
+    let fts_arm = |weights: &str| -> rusqlite::Result<Vec<i64>> {
+        if fts_query.is_empty() {
+            return Ok(Vec::new());
+        }
+        conn.prepare(&format!(
             "SELECT facts_fts.rowid
              FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
-             WHERE facts_fts MATCH ?1 AND f.tombstone = 0
-             ORDER BY bm25(facts_fts), f.importance DESC LIMIT ?2",
-        )?
-        .query_map(rusqlite::params![fts_query, k as i64], |r| r.get(0))?
-        .filter_map(Result::ok)
+             WHERE facts_fts MATCH ?1 AND f.tombstone = 0{privacy}
+             ORDER BY bm25(facts_fts, {weights}), f.importance DESC LIMIT ?2",
+        ))?
+        .query_map(rusqlite::params![fts_query, (k * 3) as i64], |r| r.get(0))?
         .collect()
     };
+    // (subject, predicate, object) weights per arm — lifted into RecallConfig
+    // (spec Tx4px1hxf); defaults are "1.0, 0.25, 2.0" / "2.0, 1.0, 0.25".
+    let fts_content_ids: Vec<i64> = fts_arm(&cfg.arm_weights.content_sql())?;
+    let fts_entity_ids: Vec<i64> = fts_arm(&cfg.arm_weights.entity_sql())?;
+
+    // Slug arm: subjects whose colon-slug contains a query token (e.g.
+    // "alice" → `person:alice`, `person:alice-chew`). FTS tokenization can't
+    // see inside slugs, so this runs as its own ranked arm in the fusion —
+    // it must NOT be appended after truncation, where a full FTS window
+    // starves it (review 2026-08-18).
+    let mut slug_ids: Vec<i64> = Vec::new();
+    for tok in query.to_lowercase().split_whitespace() {
+        if tok.len() < 3 {
+            continue;
+        }
+        let pattern = format!("%:{tok}%");
+        let ids: Vec<i64> = conn
+            .prepare(&format!(
+                "SELECT rowid FROM facts f
+                 WHERE subject LIKE ?1 AND tombstone = 0{privacy}
+                 ORDER BY importance DESC LIMIT 3",
+            ))?
+            .query_map([&pattern], |r| r.get(0))?
+            .filter_map(Result::ok)
+            .collect();
+        for id in ids {
+            if !slug_ids.contains(&id) {
+                slug_ids.push(id);
+            }
+        }
+    }
 
     // Vector arm — same shape as the chunk-side fusion (search.rs run()):
     // best-effort, loud on failure, never degrades the FTS arm.
@@ -103,13 +185,36 @@ pub(crate) fn facts_recall(
         None => vec![],
     };
 
-    let fused = super::rrf::rrf_fuse(&[fts_ids, knn_ids], super::rrf::RRF_K);
+    let slug_top1 = slug_ids.first().copied();
+    let fused = super::rrf::rrf_fuse(
+        &[fts_content_ids, fts_entity_ids, slug_ids, knn_ids],
+        cfg.rrf_k,
+    );
+
+    // Truncate to k in fused order, but GUARANTEE the slug arm's top-1 a
+    // slot: a query naming an entity must never lose its best entity match
+    // to keyword-noise facts that happen to fill the window (each noise fact
+    // appears in two FTS arms, so pure RRF can rank all of them above a
+    // single-arm slug hit).
+    let mut keep: Vec<(i64, f64)> = fused;
+    if let Some(top) = slug_top1 {
+        if keep.len() > k {
+            let in_window = keep.iter().take(k).any(|(id, _)| *id == top);
+            if !in_window {
+                if let Some(pos) = keep.iter().position(|(id, _)| *id == top) {
+                    let slug_entry = keep.remove(pos);
+                    keep.insert(k - 1, slug_entry);
+                }
+            }
+        }
+    }
+    keep.truncate(k);
 
     // Fetch facts in fused order. Importance breaks RRF-score ties (the
     // fuse's HashMap ordering is arbitrary on equal scores); the sort is
     // stable, so the single-arm (None) path keeps exactly the FTS order.
     let mut scored: Vec<(FactHit, f64)> = Vec::new();
-    for (rowid, score) in &fused {
+    for (rowid, score) in &keep {
         let row = conn.query_row(
             "SELECT subject, predicate, object, importance, private
              FROM facts WHERE rowid = ?1 AND tombstone = 0",
@@ -125,6 +230,9 @@ pub(crate) fn facts_recall(
             },
         );
         if let Ok(h) = row {
+            if exclude_private && h.private {
+                continue;
+            }
             scored.push((h, *score));
         }
     }
@@ -137,42 +245,7 @@ pub(crate) fn facts_recall(
                     .unwrap_or(std::cmp::Ordering::Equal),
             )
     });
-    let mut hits: Vec<FactHit> = scored.into_iter().map(|(h, _)| h).collect();
-    hits.truncate(k);
-
-    // Slug boost: for each token in the query, surface facts whose subject
-    // contains `:<token>` after the type prefix (e.g. "alice" → subject
-    // LIKE '%:alice%' matches both `person:alice` and `person:alice-chew`).
-    for tok in query.to_lowercase().split_whitespace() {
-        if tok.len() < 3 { continue; }
-        let pattern = format!("%:{tok}%");
-        let mut q = conn.prepare(
-            "SELECT subject, predicate, object, importance, private FROM facts
-             WHERE subject LIKE ?1 AND tombstone = 0
-             ORDER BY importance DESC LIMIT 3",
-        )?;
-        for hit in q
-            .query_map([&pattern], |r| {
-                Ok(FactHit {
-                    subject: r.get(0)?,
-                    predicate: r.get(1)?,
-                    object: r.get(2)?,
-                    importance: r.get(3)?,
-                    private: r.get::<_, i64>(4)? != 0,
-                })
-            })?
-            .filter_map(Result::ok)
-        {
-            if !hits
-                .iter()
-                .any(|h| h.subject == hit.subject && h.predicate == hit.predicate)
-            {
-                hits.push(hit);
-            }
-        }
-    }
-    hits.truncate(k);
-    Ok(hits)
+    Ok(scored)
 }
 
 pub struct RecallOutcome {
@@ -191,7 +264,10 @@ pub struct RecallOutcome {
 fn is_trivial(query: &str) -> bool {
     let q = query.trim().to_lowercase();
     q.len() < MIN_QUERY_CHARS
-        || matches!(q.as_str(), "ok" | "okay" | "thanks" | "thank you" | "yes" | "no" | "go" | "continue")
+        || matches!(
+            q.as_str(),
+            "ok" | "okay" | "thanks" | "thank you" | "yes" | "no" | "go" | "continue"
+        )
 }
 
 /// Machine-generated prompt pre-filter — the UserPromptSubmit hook fires for
@@ -213,116 +289,145 @@ fn is_machine(query: &str) -> bool {
 
 /// Run recall for `query`. `for_agent` = true applies the private filter
 /// (BOI workers get non-private chunks only — spec §7).
+///
+/// Loads the instance recall config (`$HEX_DIR/.hex/config/recall.toml`);
+/// absent → compiled defaults (identical to the pre-config behavior). A sweep
+/// scoring a variant against a frozen snapshot uses [`recall_with_config`]
+/// directly so it never touches the live config file.
 pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
+    let cfg = RecallConfig::load(hex_root);
+    recall_with_config(hex_root, query, for_agent, &cfg)
+}
+
+/// [`recall`] with an explicit recall config — the seam the eval/tuning sweep
+/// uses to score a parameter variant without loading (or mutating) the live
+/// `recall.toml`.
+pub fn recall_with_config(
+    hex_root: &Path,
+    query: &str,
+    for_agent: bool,
+    cfg: &RecallConfig,
+) -> RecallOutcome {
     let t0 = std::time::Instant::now();
 
     if is_trivial(query) || is_machine(query) {
         let outcome = RecallOutcome {
-            injected: false, gated: true, result_count: 0,
-            facts_injected: 0, chunks_injected: 0,
-            latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
+            injected: false,
+            gated: true,
+            result_count: 0,
+            facts_injected: 0,
+            chunks_injected: 0,
+            latency_ms: t0.elapsed().as_millis() as u64,
+            context: String::new(),
         };
         log_recall(hex_root, &outcome, &LogExtras::default());
         return outcome;
     }
 
     let db = super::db_path(hex_root);
-    let (filtered, facts, extras): (
-        Vec<super::search::SearchResult>,
-        Vec<FactHit>,
-        LogExtras,
-    ) = match super::open_db(&db) {
-        Ok(conn) => {
-            // Route the hot path through the v1 ContextAssembler. Passing
-            // `None` for `query_vec` is the load-bearing hot-path policy: the
-            // assembler runs in FTS-only mode and — by construction, not by
-            // env-var toggle — never constructs an `Embedder`. Per spec
-            // Tj0b203yv (finding 1 of the 2026-07-16 audit), this hook is a
-            // fresh OS process per user message; cold-loading the 522 MB nomic
-            // model here blew the latency budget (measured 1.33-1.9 s per
-            // recall). Offline CLI callers who want semantic search embed the
-            // query themselves and pass `Some(&qv)`.
-            let assembled = super::assemble::assemble(
-                &conn,
-                query,
-                for_agent,
-                MAX_CONTEXT_CHARS,
-                None,
-            );
+    let (filtered, facts, extras): (Vec<super::search::SearchResult>, Vec<FactHit>, LogExtras) =
+        match super::open_db(&db) {
+            Ok(conn) => {
+                // Route the hot path through the v1 ContextAssembler. The
+                // CHUNK-side vector arm (M1) stays OFF here (`query_vec = None`):
+                // per spec Tj0b203yv this hook is a fresh OS process per message
+                // and must never cold-load the 522 MB nomic model itself
+                // (measured 1.33-1.9 s per recall). The FACTS-side KNN arm (M5)
+                // is gated separately by `cfg.vector` (spec Sdnap37he): when the
+                // arm is enabled the query vector comes from the resident embed
+                // endpoint over a unix socket (loud, hard-bounded, BM25-only on
+                // any failure — never cold-loads a model on the hot path). When
+                // the arm is OFF (the compiled default / absent config),
+                // `query_vector` returns `None`, the facts arm is not fused, and
+                // recall is byte-identical to the BM25-only behavior. Offline CLI
+                // callers who want semantic search embed the query themselves.
+                // Chunk cap = what format_context_v2 actually renders; without
+                // it, merged-but-unrendered chunks eat the char budget that
+                // should carry facts (~600 chars each).
+                let facts_qv = super::embed_client::query_vector(hex_root, &cfg.vector, query);
+                let assembled = super::assemble::assemble_with_config(
+                    &conn,
+                    query,
+                    for_agent,
+                    MAX_CONTEXT_CHARS,
+                    None,
+                    facts_qv.as_deref(),
+                    MAX_CHUNKS_RENDERED,
+                    cfg,
+                );
 
-            // Capture per-move stats for the recall-log (calibration seam —
-            // raw native scores per move; top_confidence alone is useless).
-            let per_move_stats: Vec<serde_json::Value> = assembled
-                .per_move_stats
-                .iter()
-                .map(|s| {
-                    json!({
-                        "move_id": move_id_str(s.move_id),
-                        "fired": s.fired,
-                        "candidate_count": s.candidate_count,
-                        "top_native_scores": s.top_native_scores,
-                        "native_score": s.top_native_scores.first().copied(),
+                // Capture per-move stats for the recall-log (calibration seam —
+                // raw native scores per move; top_confidence alone is useless).
+                let per_move_stats: Vec<serde_json::Value> = assembled
+                    .per_move_stats
+                    .iter()
+                    .map(|s| {
+                        json!({
+                            "move_id": move_id_str(s.move_id),
+                            "fired": s.fired,
+                            "candidate_count": s.candidate_count,
+                            "top_native_scores": s.top_native_scores,
+                            "native_score": s.top_native_scores.first().copied(),
+                        })
                     })
-                })
-                .collect();
+                    .collect();
 
-            // Identify M1's top-1 (first candidate from M1 in the merged
-            // list — floor places it first). Used for the ablation control.
-            let m1_top1_key: Option<String> = assembled
-                .candidates
-                .iter()
-                .find(|c| c.move_id == super::assemble::MoveId::M1ContentMatch)
-                .map(|c| c.dedup_key.clone());
+                // Identify M1's top-1 (first candidate from M1 in the merged
+                // list — floor places it first). Used for the ablation control.
+                let m1_top1_key: Option<String> = assembled
+                    .candidates
+                    .iter()
+                    .find(|c| c.move_id == super::assemble::MoveId::M1ContentMatch)
+                    .map(|c| c.dedup_key.clone());
 
-            // Ablation dedup_keys (the merge with M1 top-1 removed).
-            let ablation_dedup_keys: Vec<String> = assembled
-                .candidates
-                .iter()
-                .filter(|c| Some(&c.dedup_key) != m1_top1_key.as_ref())
-                .map(|c| c.dedup_key.clone())
-                .collect();
+                // Ablation dedup_keys (the merge with M1 top-1 removed).
+                let ablation_dedup_keys: Vec<String> = assembled
+                    .candidates
+                    .iter()
+                    .filter(|c| Some(&c.dedup_key) != m1_top1_key.as_ref())
+                    .map(|c| c.dedup_key.clone())
+                    .collect();
 
-            // Partition merged candidates by kind. Order within each kind is
-            // preserved, so the first Chunk == M1's top-1 (when M1 fired).
-            let mut chunks: Vec<super::search::SearchResult> = Vec::new();
-            let mut fs: Vec<FactHit> = Vec::new();
-            let mut m1_is_chunk = false;
-            for cand in assembled.candidates {
-                let is_m1_top1 =
-                    Some(&cand.dedup_key) == m1_top1_key.as_ref();
-                match cand.kind {
-                    super::assemble::CandidateKind::Chunk(c) => {
-                        if is_m1_top1 {
-                            m1_is_chunk = true;
+                // Partition merged candidates by kind. Order within each kind is
+                // preserved, so the first Chunk == M1's top-1 (when M1 fired).
+                let mut chunks: Vec<super::search::SearchResult> = Vec::new();
+                let mut fs: Vec<FactHit> = Vec::new();
+                let mut m1_is_chunk = false;
+                for cand in assembled.candidates {
+                    let is_m1_top1 = Some(&cand.dedup_key) == m1_top1_key.as_ref();
+                    match cand.kind {
+                        super::assemble::CandidateKind::Chunk(c) => {
+                            if is_m1_top1 {
+                                m1_is_chunk = true;
+                            }
+                            chunks.push(c);
                         }
-                        chunks.push(c);
+                        super::assemble::CandidateKind::Fact(f) => fs.push(f),
                     }
-                    super::assemble::CandidateKind::Fact(f) => fs.push(f),
                 }
+
+                // Render ablation context block to measure total_chars. M1 only
+                // produces chunks today, so dropping its top-1 = drop chunks[0].
+                let ablation_chars = if m1_is_chunk && !chunks.is_empty() {
+                    format_context_v2(&chunks[1..], &fs).len()
+                } else {
+                    format_context_v2(&chunks, &fs).len()
+                };
+
+                let extras = LogExtras {
+                    per_move_stats,
+                    ablation: json!({
+                        "dedup_keys": ablation_dedup_keys,
+                        "total_chars": ablation_chars,
+                    }),
+                };
+                (chunks, fs, extras)
             }
-
-            // Render ablation context block to measure total_chars. M1 only
-            // produces chunks today, so dropping its top-1 = drop chunks[0].
-            let ablation_chars = if m1_is_chunk && !chunks.is_empty() {
-                format_context_v2(&chunks[1..], &fs).len()
-            } else {
-                format_context_v2(&chunks, &fs).len()
-            };
-
-            let extras = LogExtras {
-                per_move_stats,
-                ablation: json!({
-                    "dedup_keys": ablation_dedup_keys,
-                    "total_chars": ablation_chars,
-                }),
-            };
-            (chunks, fs, extras)
-        }
-        Err(e) => {
-            eprintln!("[memory recall] cannot open {}: {e}", db.display());
-            (vec![], vec![], LogExtras::default())
-        }
-    };
+            Err(e) => {
+                eprintln!("[memory recall] cannot open {}: {e}", db.display());
+                (vec![], vec![], LogExtras::default())
+            }
+        };
 
     let injected = !filtered.is_empty() || !facts.is_empty();
     let outcome = if injected {
@@ -337,9 +442,13 @@ pub fn recall(hex_root: &Path, query: &str, for_agent: bool) -> RecallOutcome {
         }
     } else {
         RecallOutcome {
-            injected: false, gated: false, result_count: 0,
-            facts_injected: 0, chunks_injected: 0,
-            latency_ms: t0.elapsed().as_millis() as u64, context: String::new(),
+            injected: false,
+            gated: false,
+            result_count: 0,
+            facts_injected: 0,
+            chunks_injected: 0,
+            latency_ms: t0.elapsed().as_millis() as u64,
+            context: String::new(),
         }
     };
     log_recall(hex_root, &outcome, &extras);
@@ -359,6 +468,7 @@ fn move_id_str(m: super::assemble::MoveId) -> &'static str {
         M2EntityFilter => "M2",
         M3PredicateQuery => "M3",
         M4TemporalSelect => "M4",
+        M5FactRelevance => "M5",
     }
 }
 
@@ -415,7 +525,9 @@ fn log_recall(hex_root: &Path, o: &RecallOutcome, extras: &LogExtras) {
     let dir = hex_root.join(".hex/memory");
     let _ = std::fs::create_dir_all(&dir);
     if let Ok(mut f) = std::fs::OpenOptions::new()
-        .create(true).append(true).open(dir.join("recall-log.jsonl"))
+        .create(true)
+        .append(true)
+        .open(dir.join("recall-log.jsonl"))
     {
         let _ = writeln!(
             f,
@@ -430,7 +542,6 @@ fn log_recall(hex_root: &Path, o: &RecallOutcome, extras: &LogExtras) {
             })
         );
     }
-
 }
 
 /// `hex memory recall <query>` — prints the context block to stdout.
@@ -465,7 +576,11 @@ mod tests {
     fn missing_index_fails_soft() {
         let tmp = tempfile::TempDir::new().unwrap();
         // Non-trivial query, but no DB — must not panic, must not inject.
-        let o = recall(tmp.path(), "what did we decide about the memory schema", false);
+        let o = recall(
+            tmp.path(),
+            "what did we decide about the memory schema",
+            false,
+        );
         assert!(!o.injected);
     }
 }
@@ -571,8 +686,7 @@ mod plan2_tests {
             .expect("recall-log.jsonl must be written by log_recall");
         let last = raw
             .lines()
-            .filter(|l| !l.trim().is_empty())
-            .last()
+            .rfind(|l| !l.trim().is_empty())
             .expect("recall-log.jsonl must contain at least one line");
         let v: serde_json::Value =
             serde_json::from_str(last).expect("recall-log line must be valid JSON");
@@ -662,7 +776,12 @@ mod plan2_tests {
         crate::memory::vector::insert_fact_vec(&c, "fb", &qv).unwrap();
 
         // FTS-only: B is invisible.
-        let fts_only = facts_recall(&c, "what powers the vector store", 5, None).unwrap();
+        let fts_only: Vec<FactHit> =
+            facts_recall(&c, "what powers the vector store", 5, None, false)
+                .unwrap()
+                .into_iter()
+                .map(|(f, _)| f)
+                .collect();
         assert!(
             fts_only.iter().any(|f| f.subject == "project:hex"),
             "FTS arm must still surface the keyword match"
@@ -673,15 +792,102 @@ mod plan2_tests {
         );
 
         // Fused: both arms contribute.
-        let fused = facts_recall(&c, "what powers the vector store", 5, Some(&qv)).unwrap();
+        let fused: Vec<FactHit> =
+            facts_recall(&c, "what powers the vector store", 5, Some(&qv), false)
+                .unwrap()
+                .into_iter()
+                .map(|(f, _)| f)
+                .collect();
         assert!(
             fused.iter().any(|f| f.subject == "project:hex"),
             "FTS hit must survive fusion"
         );
         assert!(
-            fused.iter().any(|f| f.subject == "person:bob" && f.object == "zzqx qqzz"),
+            fused
+                .iter()
+                .any(|f| f.subject == "person:bob" && f.object == "zzqx qqzz"),
             "KNN arm must surface the semantically-near fact, got {:?}",
             fused.iter().map(|f| &f.subject).collect::<Vec<_>>()
+        );
+    }
+
+    /// Review 2026-08-18 regression: a fact reachable ONLY via the slug arm
+    /// (subject `person:alexandra`, query token "alex" — no FTS token match)
+    /// must survive even when keyword-noise facts fill the whole top-k
+    /// window. Pre-fix, slug results were appended after truncation and a
+    /// second truncate dropped them.
+    #[test]
+    fn slug_arm_survives_full_fts_window() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        for i in 0..8 {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+                 VALUES (?1,'project:noise','decided',?2,0.9,'2026-06-11','2026-06-11')",
+                rusqlite::params![
+                    format!("n{i}"),
+                    format!("unrelated filler payload number {i}")
+                ],
+            )
+            .unwrap();
+        }
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('ax','person:alexandra','prefers','quiet mornings',0.4,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+
+        let hits: Vec<FactHit> = facts_recall(&c, "what did alex decide", 6, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert!(
+            hits.iter().any(|f| f.subject == "person:alexandra"),
+            "slug-arm entity match starved out of the top-k window, got {:?}",
+            hits.iter().map(|f| &f.subject).collect::<Vec<_>>()
+        );
+    }
+
+    /// Review 2026-08-18 regression: with exclude_private, private facts must
+    /// be filtered in SQL BEFORE truncation — filtering after lets private
+    /// facts fill the window and starve out the public match entirely.
+    #[test]
+    fn exclude_private_filters_before_truncation() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        for i in 0..8 {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+                 VALUES (?1,'me/secret','decided','the zzkey rotation plan',0.9,'2026-06-11','2026-06-11',1)",
+                rusqlite::params![format!("p{i}")],
+            )
+            .unwrap();
+        }
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
+             VALUES ('pub','project:hex','decided','the zzkey rotation plan',0.3,'2026-06-11','2026-06-11',0)",
+            [],
+        )
+        .unwrap();
+
+        let hits: Vec<FactHit> = facts_recall(&c, "what was decided about zzkey", 6, None, true)
+            .unwrap()
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert!(
+            hits.iter().all(|f| !f.private),
+            "private fact leaked through exclude_private"
+        );
+        assert!(
+            hits.iter().any(|f| f.subject == "project:hex"),
+            "public fact starved out by private facts filling the pre-filter window"
         );
     }
 
@@ -702,11 +908,162 @@ mod plan2_tests {
         let qv = vec![0.1f32; crate::memory::vector::EMBED_DIM];
         crate::memory::vector::insert_fact_vec(&c, "fd", &qv).unwrap();
 
-        let fused = facts_recall(&c, "anything relevant here at all", 5, Some(&qv)).unwrap();
+        let fused: Vec<FactHit> =
+            facts_recall(&c, "anything relevant here at all", 5, Some(&qv), false)
+                .unwrap()
+                .into_iter()
+                .map(|(f, _)| f)
+                .collect();
         assert!(
             !fused.iter().any(|f| f.subject == "person:dead"),
             "tombstoned fact must not surface via the KNN arm"
         );
+    }
+
+    /// Spec Tx4px1hxf guarantee, checked end-to-end at the ranking layer: the
+    /// live path (`facts_recall`, which delegates to `RecallConfig::default()`)
+    /// must produce the SAME fused ordering and native scores as an explicit
+    /// config built from the documented default LITERALS (rrf_k 60.0, arm
+    /// weights [1,0.25,2]/[2,1,0.25], move-relevance 1.0/0.3). Because the
+    /// explicit literals are independent of the `Default` impl, a drift in a
+    /// compiled default that changes this fixture's ranking fails here. This
+    /// complements the struct-level pin in
+    /// `recall_config::compiled_defaults_equal_prior_constants` by proving the
+    /// defaults thread through the real `facts_recall_with_config` fusion.
+    #[test]
+    fn default_config_reproduces_legacy_facts_recall_exactly() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        // A mix that exercises the content arm, the entity arm, and the slug
+        // arm so the fusion order is non-trivial and sensitive to every
+        // lifted constant (arm weights + RRF k).
+        let rows = [
+            ("f1", "project:hex", "uses", "sqlite-vec for the vector store"),
+            ("f2", "person:alexandra", "prefers", "quiet mornings and vector math"),
+            ("f3", "project:hex", "decided", "to store the vector index on disk"),
+            ("f4", "person:bob", "wrote", "the store migration for vectors"),
+        ];
+        for (id, s, p, o) in rows {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,0.5,'2026-06-11','2026-06-11')",
+                rusqlite::params![id, s, p, o],
+            )
+            .unwrap();
+        }
+
+        // An explicit config spelled entirely from the documented default
+        // LITERALS — deliberately NOT `RecallConfig::default()`, so a drift in
+        // the Default impl makes the two paths disagree.
+        let explicit = crate::memory::recall_config::RecallConfig {
+            rrf_k: 60.0,
+            arm_weights: crate::memory::recall_config::ArmWeights {
+                content: [1.0, 0.25, 2.0],
+                entity: [2.0, 1.0, 0.25],
+            },
+            move_relevance: crate::memory::recall_config::MoveRelevance {
+                fired: 1.0,
+                unfired: 0.3,
+            },
+            // The vector arm ships DEFAULT OFF; the legacy BM25 fusion this test
+            // pins is the `enabled = false` behavior.
+            vector: crate::memory::recall_config::VectorArm::default(),
+        };
+
+        let query = "what powers the vector store";
+        // `FactHit` carries no id; (subject, object) uniquely tags each fixture
+        // fact, and `native` is the fused score — together they pin ordering,
+        // membership, AND score so any ranking drift shows.
+        let live: Vec<(String, String, f64)> = facts_recall(&c, query, 5, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|(f, native)| (f.subject, f.object, native))
+            .collect();
+        let via_literals: Vec<(String, String, f64)> =
+            facts_recall_with_config(&c, query, 5, None, false, &explicit)
+                .unwrap()
+                .into_iter()
+                .map(|(f, native)| (f.subject, f.object, native))
+                .collect();
+        assert_eq!(
+            live, via_literals,
+            "live default recall ranking drifted from the documented default literals"
+        );
+        assert!(!live.is_empty(), "fixture must produce hits");
+    }
+
+    /// Off-is-identical pin for the vector arm (spec Sdnap37he, task Ttrmaca6q)
+    /// — the analogue of `default_config_reproduces_legacy_facts_recall_exactly`
+    /// above. With the vector arm at its compiled default (OFF), the recall hot
+    /// path resolves NO query vector, so `facts_recall`'s KNN arm is never fused
+    /// and the facts ranking is byte-identical to the pre-change BM25-only
+    /// behavior. A configured-but-disabled socket is never consulted.
+    #[test]
+    fn default_config_vector_arm_off_is_byte_identical() {
+        use crate::memory::recall_config::{RecallConfig, VectorArm};
+
+        // 1) The load-bearing claim: a disabled arm produces NO query vector,
+        //    even when a socket path is configured — so `recall_with_config`
+        //    hands `assemble_with_config` exactly the `None` it passed before
+        //    this change. This is the whole byte-identical guarantee.
+        let default_cfg = RecallConfig::default();
+        assert!(!default_cfg.vector.enabled, "vector arm must default OFF");
+        let armed_but_disabled = VectorArm {
+            enabled: false,
+            socket_path: "/dev/null/never-consulted.sock".to_string(),
+            timeout_ms: 1,
+        };
+        let root = std::path::Path::new("/tmp");
+        assert!(
+            crate::memory::embed_client::query_vector(root, &default_cfg.vector, "a paraphrase")
+                .is_none(),
+            "default (OFF) arm must resolve no query vector"
+        );
+        assert!(
+            crate::memory::embed_client::query_vector(root, &armed_but_disabled, "a paraphrase")
+                .is_none(),
+            "a disabled arm must not consult its configured socket"
+        );
+
+        // 2) End-to-end over a fixture: default-config facts equal the
+        //    explicit-`None` (pre-change) facts arm, ordering + score.
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        let rows = [
+            ("f1", "project:hex", "uses", "sqlite-vec for the vector store"),
+            ("f2", "person:alexandra", "prefers", "quiet mornings and vector math"),
+            ("f3", "project:hex", "decided", "to store the vector index on disk"),
+            ("f4", "person:bob", "wrote", "the store migration for vectors"),
+        ];
+        for (id, s, p, o) in rows {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+                 VALUES (?1,?2,?3,?4,0.5,'2026-06-11','2026-06-11')",
+                rusqlite::params![id, s, p, o],
+            )
+            .unwrap();
+        }
+        let query = "what powers the vector store";
+        let via_default: Vec<(String, String, f64)> =
+            facts_recall_with_config(&c, query, 5, None, false, &default_cfg)
+                .unwrap()
+                .into_iter()
+                .map(|(f, native)| (f.subject, f.object, native))
+                .collect();
+        let via_legacy_none: Vec<(String, String, f64)> = facts_recall(&c, query, 5, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|(f, native)| (f.subject, f.object, native))
+            .collect();
+        assert_eq!(
+            via_default, via_legacy_none,
+            "default-config (vector OFF) facts drifted from the pre-change BM25-only path"
+        );
+        assert!(!via_default.is_empty(), "fixture must produce hits");
     }
 
     #[test]
@@ -794,7 +1151,11 @@ mod injection_tax_tests {
     #[test]
     fn injection_respects_3k_budget() {
         let tmp = seeded_root();
-        let o = recall(tmp.path(), "what did we decide about the memory pipeline", false);
+        let o = recall(
+            tmp.path(),
+            "what did we decide about the memory pipeline",
+            false,
+        );
         assert!(o.injected, "seeded DB must produce an injection");
         assert!(
             o.context.len() <= 3_000,
@@ -807,7 +1168,11 @@ mod injection_tax_tests {
     #[test]
     fn injection_renders_at_most_two_chunks() {
         let tmp = seeded_root();
-        let o = recall(tmp.path(), "what did we decide about the memory pipeline", false);
+        let o = recall(
+            tmp.path(),
+            "what did we decide about the memory pipeline",
+            false,
+        );
         let chunk_headers = o.context.matches("\n#### ").count()
             + if o.context.starts_with("#### ") { 1 } else { 0 };
         assert!(
@@ -834,7 +1199,11 @@ mod injection_tax_tests {
             assert!(!o.injected, "machine prompt must not inject: {p}");
         }
         // A real user question still injects.
-        let o = recall(tmp.path(), "what did we decide about the memory pipeline", false);
+        let o = recall(
+            tmp.path(),
+            "what did we decide about the memory pipeline",
+            false,
+        );
         assert!(o.injected, "real user prompts must still inject");
     }
 }
@@ -915,8 +1284,7 @@ mod embedder_contract_tests {
         let query = "what did we decide about the memory pipeline architecture";
         let _outcome = recall(tmp.path(), query, false);
 
-        let count =
-            crate::memory::embed::EMBEDDER_CONSTRUCTIONS_THREAD.with(|c| c.get());
+        let count = crate::memory::embed::EMBEDDER_CONSTRUCTIONS_THREAD.with(|c| c.get());
         assert_eq!(
             count, 0,
             "UserPromptSubmit recall path must construct zero Embedders \

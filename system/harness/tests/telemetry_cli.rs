@@ -14,7 +14,10 @@ fn bin() -> Command {
 
 #[test]
 fn telemetry_help_lists_subcommand() {
-    let out = bin().args(["telemetry", "--help"]).output().expect("spawn hex");
+    let out = bin()
+        .args(["telemetry", "--help"])
+        .output()
+        .expect("spawn hex");
     assert!(
         out.status.success(),
         "`hex telemetry --help` should succeed; stderr={}",

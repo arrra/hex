@@ -54,6 +54,7 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::vector_search::VectorSearchHealthy),
         Box::new(checks::reflection_liveness::ReflectionLogFresh),
         Box::new(checks::nightly_full_liveness::NightlyFullLiveness),
+        Box::new(checks::consolidation_audit_freshness::ConsolidationAuditFreshness),
         Box::new(checks::scripts_exec::ScriptsExecutable),
         Box::new(checks::boi_health::BoiHealth),
         Box::new(checks::iii_engine_health::IiiEngineHealth),
@@ -62,6 +63,7 @@ fn registry() -> Vec<Box<dyn DoctorCheck>> {
         Box::new(checks::hex_binary::HexBinaryOnPath),
         // Config checks
         Box::new(checks::llm_provider::LlmProviderReachable),
+        Box::new(checks::distill_readiness::DistillReadiness),
         Box::new(checks::env_sh::EnvSh),
         Box::new(checks::claude_md::ClaudeMdExists),
         Box::new(checks::charter_drift::CharterDrift),
@@ -94,23 +96,41 @@ mod tests {
 
     struct AlwaysPass;
     impl DoctorCheck for AlwaysPass {
-        fn name(&self) -> &str { "always-pass" }
-        fn category(&self) -> Category { Category::Health }
-        fn run(&self, _ctx: &Context) -> CheckResult { CheckResult::pass("ok") }
+        fn name(&self) -> &str {
+            "always-pass"
+        }
+        fn category(&self) -> Category {
+            Category::Health
+        }
+        fn run(&self, _ctx: &Context) -> CheckResult {
+            CheckResult::pass("ok")
+        }
     }
 
     struct AlwaysWarn;
     impl DoctorCheck for AlwaysWarn {
-        fn name(&self) -> &str { "always-warn" }
-        fn category(&self) -> Category { Category::Config }
-        fn run(&self, _ctx: &Context) -> CheckResult { CheckResult::warn("degraded") }
+        fn name(&self) -> &str {
+            "always-warn"
+        }
+        fn category(&self) -> Category {
+            Category::Config
+        }
+        fn run(&self, _ctx: &Context) -> CheckResult {
+            CheckResult::warn("degraded")
+        }
     }
 
     struct AlwaysFail;
     impl DoctorCheck for AlwaysFail {
-        fn name(&self) -> &str { "always-fail" }
-        fn category(&self) -> Category { Category::Health }
-        fn run(&self, _ctx: &Context) -> CheckResult { CheckResult::fail("broken") }
+        fn name(&self) -> &str {
+            "always-fail"
+        }
+        fn category(&self) -> Category {
+            Category::Health
+        }
+        fn run(&self, _ctx: &Context) -> CheckResult {
+            CheckResult::fail("broken")
+        }
     }
 
     fn test_ctx() -> Context {
@@ -165,8 +185,14 @@ mod tests {
         };
         let results = runner.run(&test_ctx());
         let error_count = results.iter().filter(|(_, r)| r.status.is_error()).count();
-        let warn_count = results.iter().filter(|(_, r)| r.status.is_warning()).count();
-        let pass_count = results.iter().filter(|(_, r)| r.status.counts_as_pass()).count();
+        let warn_count = results
+            .iter()
+            .filter(|(_, r)| r.status.is_warning())
+            .count();
+        let pass_count = results
+            .iter()
+            .filter(|(_, r)| r.status.counts_as_pass())
+            .count();
         assert_eq!(error_count, 1);
         assert_eq!(warn_count, 1);
         assert_eq!(pass_count, 1);
@@ -174,7 +200,9 @@ mod tests {
 
     #[test]
     fn test_elapsed_ms_populated() {
-        let runner = Runner { checks: vec![Box::new(AlwaysPass)] };
+        let runner = Runner {
+            checks: vec![Box::new(AlwaysPass)],
+        };
         let results = runner.run(&test_ctx());
         // elapsed_ms should be set (may be 0 for instant check, that's fine)
         assert_eq!(results[0].0, "always-pass");
@@ -183,7 +211,10 @@ mod tests {
     #[test]
     fn test_registry_has_checks() {
         let runner = Runner::all_checks();
-        assert!(runner.checks.len() >= 10, "registry must have at least 10 checks");
+        assert!(
+            runner.checks.len() >= 10,
+            "registry must have at least 10 checks"
+        );
     }
 
     #[test]
@@ -192,6 +223,18 @@ mod tests {
         assert!(
             runner.checks.iter().any(|c| c.name() == "telemetry-health"),
             "registry must include the telemetry-health doctor check"
+        );
+    }
+
+    #[test]
+    fn test_registry_includes_consolidation_audit_freshness() {
+        let runner = Runner::all_checks();
+        assert!(
+            runner
+                .checks
+                .iter()
+                .any(|c| c.name() == "consolidation-audit-freshness"),
+            "registry must include the consolidation-audit-freshness doctor check"
         );
     }
 }

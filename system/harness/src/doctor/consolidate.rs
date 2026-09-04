@@ -48,10 +48,14 @@ pub fn run(hex_dir: &Path) -> i32 {
             Ok(entries) => {
                 for entry in entries.flatten() {
                     let path = entry.path();
-                    if !path.is_dir() { continue; }
+                    if !path.is_dir() {
+                        continue;
+                    }
                     let name = entry.file_name();
                     let name_str = name.to_string_lossy();
-                    if name_str == "_archive" { continue; }
+                    if name_str == "_archive" {
+                        continue;
+                    }
                     // Ralph research loops carry their own structure (PROMPT.md,
                     // domains.yaml, findings.md, confidence.md) and legitimately never
                     // hold context.md — exempt them so they aren't flagged as ORPHAN.
@@ -65,7 +69,9 @@ pub fn run(hex_dir: &Path) -> i32 {
                     // reason charter.yaml was dropped. Requiring either would flag every
                     // project as ORPHAN. context.md is the only required file.
                     if !has_context {
-                        let msg = format!("ORPHAN: projects/{name_str} missing required file (context.md)");
+                        let msg = format!(
+                            "ORPHAN: projects/{name_str} missing required file (context.md)"
+                        );
                         lines.push(msg.clone());
                         issues.push(msg);
                     }
@@ -119,7 +125,11 @@ pub fn run(hex_dir: &Path) -> i32 {
         }
     }
 
-    if issue_count == 0 { 0 } else { 1 }
+    if issue_count == 0 {
+        0
+    } else {
+        1
+    }
 }
 
 fn chrono_utc_now() -> String {
@@ -132,7 +142,7 @@ fn chrono_utc_now() -> String {
     let m = (secs / 60) % 60;
     let h = (secs / 3600) % 24;
     let days = secs / 86400; // days since epoch
-    // Compute year/month/day from days-since-epoch (Gregorian)
+                             // Compute year/month/day from days-since-epoch (Gregorian)
     let (year, month, day) = days_to_ymd(days);
     format!("{year:04}-{month:02}-{day:02}T{h:02}:{m:02}:{s:02}Z")
 }
@@ -165,7 +175,9 @@ fn stale_ref_scan_targets(hex_dir: &Path) -> Vec<PathBuf> {
 }
 
 fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
-    if !dir.is_dir() { return; }
+    if !dir.is_dir() {
+        return;
+    }
     if let Ok(entries) = fs::read_dir(dir) {
         for entry in entries.flatten() {
             let p = entry.path();
@@ -181,7 +193,9 @@ fn collect_md_files(dir: &Path, out: &mut Vec<PathBuf>) {
 fn find_stale_refs(hex_dir: &Path, targets: &[PathBuf]) -> Vec<String> {
     let mut stale = Vec::new();
     for file in targets {
-        if !file.exists() { continue; }
+        if !file.exists() {
+            continue;
+        }
         let content = match fs::read_to_string(file) {
             Ok(c) => c,
             Err(_) => continue,
@@ -223,9 +237,15 @@ fn extract_relative_links(content: &str) -> Vec<String> {
                     b')' => depth -= 1,
                     _ => {}
                 }
-                if depth > 0 { end += 1; }
+                if depth > 0 {
+                    end += 1;
+                }
             }
             if depth == 0 && end > start {
+                // Boundary proof: `start` is one past an ASCII '(' and `end` sits at
+                // an ASCII ')' (or content.len()). ASCII bytes never occur inside a
+                // multi-byte UTF-8 sequence, so both bounds are char boundaries.
+                #[allow(clippy::string_slice)]
                 let candidate = &content[start..end];
                 // Strip trailing anchors
                 let candidate = candidate.split('#').next().unwrap_or(candidate).trim();
@@ -248,95 +268,14 @@ fn extract_relative_links(content: &str) -> Vec<String> {
     links
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-
-    #[test]
-    fn consolidate_prose_parens_not_extracted() {
-        let content = "git tag must match (enforced by release.sh) here";
-        let links = extract_relative_links(content);
-        assert!(links.is_empty(), "prose parens should not be extracted: {links:?}");
-    }
-
-    #[test]
-    fn consolidate_real_link_is_extracted() {
-        let content = "See [the guide](docs/guide.md) for details.";
-        let links = extract_relative_links(content);
-        assert_eq!(links, vec!["docs/guide.md"]);
-    }
-
-    #[test]
-    fn consolidate_https_url_is_skipped() {
-        let content = "See [external](https://example.com/page.md) link.";
-        let links = extract_relative_links(content);
-        assert!(links.is_empty(), "https URLs should be skipped: {links:?}");
-    }
-
-    #[test]
-    fn consolidate_http_url_is_skipped() {
-        let content = "See [external](http://example.com/page.md) link.";
-        let links = extract_relative_links(content);
-        assert!(links.is_empty(), "http URLs should be skipped: {links:?}");
-    }
-
-    #[test]
-    fn consolidate_anchor_only_is_skipped() {
-        let content = "See [section](#heading) here.";
-        let links = extract_relative_links(content);
-        assert!(links.is_empty(), "anchor-only links should be skipped: {links:?}");
-    }
-
-    #[test]
-    fn consolidate_orphan_check_exempts_ralph_loops_and_gates_on_context_only() {
-        let tmp = tempfile::tempdir().unwrap();
-        let hex_dir = tmp.path();
-        let projects = hex_dir.join("projects");
-        fs::create_dir_all(&projects).unwrap();
-
-        // (a) Ralph research loop: has PROMPT.md, no context.md — must NOT be flagged.
-        let loop_dir = projects.join("research-loop");
-        fs::create_dir_all(&loop_dir).unwrap();
-        fs::write(loop_dir.join("PROMPT.md"), "loop prompt").unwrap();
-
-        // (b) Genuine non-loop project missing context.md — must be flagged.
-        let orphan_dir = projects.join("stray-project");
-        fs::create_dir_all(&orphan_dir).unwrap();
-
-        // Run the full consolidate pass; orphan lines land in the report log.
-        let _ = run(hex_dir);
-        let log = fs::read_to_string(hex_dir.join("evolution/consolidation-latest.log")).unwrap();
-
-        // (a) The Ralph loop is exempt — never flagged as ORPHAN.
-        assert!(
-            !log.contains("ORPHAN: projects/research-loop"),
-            "Ralph loop (PROMPT.md, no context.md) must not be flagged: {log}"
-        );
-
-        // (b) The genuine orphan IS flagged.
-        assert!(
-            log.contains("ORPHAN: projects/stray-project"),
-            "project missing context.md must be flagged: {log}"
-        );
-
-        // (c) The flag message names only context.md, never checkpoint.md.
-        assert!(
-            log.contains("context.md"),
-            "orphan message must name context.md: {log}"
-        );
-        assert!(
-            !log.contains("checkpoint.md"),
-            "orphan message must not reference checkpoint.md: {log}"
-        );
-    }
-}
-
 fn normalize_path(path: &Path) -> PathBuf {
     // Resolve .. and . without hitting the filesystem
     let mut components = Vec::new();
     for c in path.components() {
         match c {
-            std::path::Component::ParentDir => { components.pop(); }
+            std::path::Component::ParentDir => {
+                components.pop();
+            }
             std::path::Component::CurDir => {}
             other => components.push(other),
         }
@@ -384,5 +323,94 @@ fn check_audit_freshness(hex_dir: &Path) -> Result<String, String> {
             Err("LLM consolidation stale — run hex memory consolidate full".to_string())
         }
         Some(_) => Ok("OK: LLM consolidation audit is fresh".to_string()),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn consolidate_prose_parens_not_extracted() {
+        let content = "git tag must match (enforced by release.sh) here";
+        let links = extract_relative_links(content);
+        assert!(
+            links.is_empty(),
+            "prose parens should not be extracted: {links:?}"
+        );
+    }
+
+    #[test]
+    fn consolidate_real_link_is_extracted() {
+        let content = "See [the guide](docs/guide.md) for details.";
+        let links = extract_relative_links(content);
+        assert_eq!(links, vec!["docs/guide.md"]);
+    }
+
+    #[test]
+    fn consolidate_https_url_is_skipped() {
+        let content = "See [external](https://example.com/page.md) link.";
+        let links = extract_relative_links(content);
+        assert!(links.is_empty(), "https URLs should be skipped: {links:?}");
+    }
+
+    #[test]
+    fn consolidate_http_url_is_skipped() {
+        let content = "See [external](http://example.com/page.md) link.";
+        let links = extract_relative_links(content);
+        assert!(links.is_empty(), "http URLs should be skipped: {links:?}");
+    }
+
+    #[test]
+    fn consolidate_anchor_only_is_skipped() {
+        let content = "See [section](#heading) here.";
+        let links = extract_relative_links(content);
+        assert!(
+            links.is_empty(),
+            "anchor-only links should be skipped: {links:?}"
+        );
+    }
+
+    #[test]
+    fn consolidate_orphan_check_exempts_ralph_loops_and_gates_on_context_only() {
+        let tmp = tempfile::tempdir().unwrap();
+        let hex_dir = tmp.path();
+        let projects = hex_dir.join("projects");
+        fs::create_dir_all(&projects).unwrap();
+
+        // (a) Ralph research loop: has PROMPT.md, no context.md — must NOT be flagged.
+        let loop_dir = projects.join("research-loop");
+        fs::create_dir_all(&loop_dir).unwrap();
+        fs::write(loop_dir.join("PROMPT.md"), "loop prompt").unwrap();
+
+        // (b) Genuine non-loop project missing context.md — must be flagged.
+        let orphan_dir = projects.join("stray-project");
+        fs::create_dir_all(&orphan_dir).unwrap();
+
+        // Run the full consolidate pass; orphan lines land in the report log.
+        let _ = run(hex_dir);
+        let log = fs::read_to_string(hex_dir.join("evolution/consolidation-latest.log")).unwrap();
+
+        // (a) The Ralph loop is exempt — never flagged as ORPHAN.
+        assert!(
+            !log.contains("ORPHAN: projects/research-loop"),
+            "Ralph loop (PROMPT.md, no context.md) must not be flagged: {log}"
+        );
+
+        // (b) The genuine orphan IS flagged.
+        assert!(
+            log.contains("ORPHAN: projects/stray-project"),
+            "project missing context.md must be flagged: {log}"
+        );
+
+        // (c) The flag message names only context.md, never checkpoint.md.
+        assert!(
+            log.contains("context.md"),
+            "orphan message must name context.md: {log}"
+        );
+        assert!(
+            !log.contains("checkpoint.md"),
+            "orphan message must not reference checkpoint.md: {log}"
+        );
     }
 }

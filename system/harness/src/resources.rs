@@ -52,11 +52,17 @@ pub fn parse_df(out: &str) -> Option<DfSample> {
     let cols: Vec<&str> = line.split_whitespace().collect();
     let used_kb: i64 = cols.get(2)?.parse().ok()?;
     let free_kb: i64 = cols.get(3)?.parse().ok()?;
-    Some(DfSample { free_gb: free_kb / 1_048_576, used_gb: used_kb / 1_048_576 })
+    Some(DfSample {
+        free_gb: free_kb / 1_048_576,
+        used_gb: used_kb / 1_048_576,
+    })
 }
 
 pub fn sample_df() -> Option<DfSample> {
-    let out = std::process::Command::new("df").args(["-k", "/"]).output().ok()?;
+    let out = std::process::Command::new("df")
+        .args(["-k", "/"])
+        .output()
+        .ok()?;
     parse_df(&String::from_utf8_lossy(&out.stdout))
 }
 
@@ -72,7 +78,11 @@ pub fn du_sizes(dirs: &[String]) -> BTreeMap<String, i64> {
             continue;
         };
         let s = String::from_utf8_lossy(&o.stdout);
-        if let Some(kb) = s.split_whitespace().next().and_then(|v| v.parse::<i64>().ok()) {
+        if let Some(kb) = s
+            .split_whitespace()
+            .next()
+            .and_then(|v| v.parse::<i64>().ok())
+        {
             out.insert(d.clone(), kb / 1_048_576);
         }
     }
@@ -89,9 +99,7 @@ pub fn record_df(d: &DfSample) {
         status: "ok".into(),
         duration_ms: None,
         exit_code: None,
-        detail: Some(
-            serde_json::json!({ "free_gb": d.free_gb, "used_gb": d.used_gb }).to_string(),
-        ),
+        detail: Some(serde_json::json!({ "free_gb": d.free_gb, "used_gb": d.used_gb }).to_string()),
     });
 }
 
@@ -108,8 +116,14 @@ pub fn record_du(sizes: &BTreeMap<String, i64>) {
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum Breach {
-    Floor { free_gb: i64 },
-    Trend { dir: String, growth_gb: i64, window_hours: i64 },
+    Floor {
+        free_gb: i64,
+    },
+    Trend {
+        dir: String,
+        growth_gb: i64,
+        window_hours: i64,
+    },
 }
 
 /// Deterministic tier-1 rules over the current df sample + du history rows.
@@ -122,7 +136,9 @@ pub fn evaluate_rules(
 ) -> rusqlite::Result<Vec<Breach>> {
     let mut out = Vec::new();
     if df.free_gb < FLOOR_FREE_GB {
-        out.push(Breach::Floor { free_gb: df.free_gb });
+        out.push(Breach::Floor {
+            free_gb: df.free_gb,
+        });
     }
     // No telemetry store yet → no du history → floor rule only. (open_ro on a
     // missing file is an open error, not empty history — never create the db
@@ -143,9 +159,8 @@ pub fn evaluate_rules(
         .filter_map(|r| r.ok())
         .collect();
     if details.len() >= 2 {
-        let parse = |s: &str| -> BTreeMap<String, i64> {
-            serde_json::from_str(s).unwrap_or_default()
-        };
+        let parse =
+            |s: &str| -> BTreeMap<String, i64> { serde_json::from_str(s).unwrap_or_default() };
         let oldest = parse(&details[0]);
         let newest = parse(details.last().unwrap());
         for (dir, new_gb) in &newest {
@@ -200,10 +215,12 @@ pub fn sample_tick(now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Breach>, St
     });
     let du_due = match &last_du {
         None => true,
-        Some((ts, _)) => chrono::DateTime::parse_from_rfc3339(ts)
-            .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() >= DU_INTERVAL_HOURS)
-            .unwrap_or(true)
-            || last_df_free.map_or(false, |prev| prev - df.free_gb >= DU_DELTA_GB),
+        Some((ts, _)) => {
+            chrono::DateTime::parse_from_rfc3339(ts)
+                .map(|t| (now - t.with_timezone(&chrono::Utc)).num_hours() >= DU_INTERVAL_HOURS)
+                .unwrap_or(true)
+                || last_df_free.is_some_and(|prev| prev - df.free_gb >= DU_DELTA_GB)
+        }
     };
     if du_due {
         let dirs: Vec<String> = WATCH_LIST.iter().map(|d| expand_home(d)).collect();
@@ -218,14 +235,22 @@ pub fn sample_tick(now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Breach>, St
                 format!("root free space {free_gb}G < {FLOOR_FREE_GB}G floor"),
                 serde_json::json!({ "category": "floor", "free_gb": free_gb }),
             ),
-            Breach::Trend { dir, growth_gb, window_hours } => (
+            Breach::Trend {
+                dir,
+                growth_gb,
+                window_hours,
+            } => (
                 format!("trend-{dir}"),
                 format!("{dir} grew {growth_gb}G in {window_hours}h"),
                 serde_json::json!({ "category": "trend", "path": dir,
                     "growth_gb": growth_gb, "window_hours": window_hours }),
             ),
         };
-        crate::alert::notify(&crate::failures::alert_key("resource", &key_ident), "resource pressure", &msg);
+        crate::alert::notify(
+            &crate::failures::alert_key("resource", &key_ident),
+            "resource pressure",
+            &msg,
+        );
         // Level-triggered emission. ops::emit signature on this branch is
         // emit(event, data, producer: Option<&str>) — adapted from the plan's
         // sketch per its VERIFY note.
@@ -254,15 +279,22 @@ pub fn sample_tick(now: chrono::DateTime<chrono::Utc>) -> Result<Vec<Breach>, St
             .map(|o| o.status.success())
             .unwrap_or(false);
         if orb_running {
-            if let Ok(o) = std::process::Command::new("docker").args(["system", "df"]).output() {
+            if let Ok(o) = std::process::Command::new("docker")
+                .args(["system", "df"])
+                .output()
+            {
                 crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
                     source: "hex-resources".into(),
                     event: "sample::docker".into(),
                     status: "ok".into(),
                     duration_ms: None,
                     exit_code: None,
-                    detail: Some(String::from_utf8_lossy(&o.stdout).lines()
-                        .collect::<Vec<_>>().join(" | ")),
+                    detail: Some(
+                        String::from_utf8_lossy(&o.stdout)
+                            .lines()
+                            .collect::<Vec<_>>()
+                            .join(" | "),
+                    ),
                 });
             }
         }
@@ -278,11 +310,19 @@ mod rule_tests {
     fn seed_row(event: &str, ts: chrono::DateTime<Utc>, detail: &str) {
         // schema first
         crate::telemetry::record(&crate::telemetry::TelemetryEvent {
-            source: "seed".into(), event: "seed".into(), status: "ok".into(),
-            duration_ms: None, exit_code: None, detail: None }).unwrap();
+            source: "seed".into(),
+            event: "seed".into(),
+            status: "ok".into(),
+            duration_ms: None,
+            exit_code: None,
+            detail: None,
+        })
+        .unwrap();
         let conn = rusqlite::Connection::open(
             std::path::PathBuf::from(std::env::var("HEX_DIR").unwrap())
-                .join(".hex/telemetry/events.db")).unwrap();
+                .join(".hex/telemetry/events.db"),
+        )
+        .unwrap();
         conn.execute(
             "INSERT INTO events (ts, source, event, status, detail) VALUES (?1,'hex-resources',?2,'ok',?3)",
             rusqlite::params![ts.to_rfc3339(), event, detail]).unwrap();
@@ -293,18 +333,40 @@ mod rule_tests {
         let (_t, _g) = crate::telemetry::test_support::isolate();
         let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
         let breaches = evaluate_rules(
-            &DfSample { free_gb: 100, used_gb: 900 }, now).unwrap();
-        assert!(breaches.iter().any(|b| matches!(b, Breach::Floor { free_gb: 100 })));
+            &DfSample {
+                free_gb: 100,
+                used_gb: 900,
+            },
+            now,
+        )
+        .unwrap();
+        assert!(breaches
+            .iter()
+            .any(|b| matches!(b, Breach::Floor { free_gb: 100 })));
     }
 
     #[test]
     fn trend_breach_from_history() {
         let (_t, _g) = crate::telemetry::test_support::isolate();
         let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
-        seed_row("sample::du", now - Duration::hours(70), r#"{"/x/target":5}"#);
-        seed_row("sample::du", now - Duration::hours(1), r#"{"/x/target":40}"#);
+        seed_row(
+            "sample::du",
+            now - Duration::hours(70),
+            r#"{"/x/target":5}"#,
+        );
+        seed_row(
+            "sample::du",
+            now - Duration::hours(1),
+            r#"{"/x/target":40}"#,
+        );
         let breaches = evaluate_rules(
-            &DfSample { free_gb: 999, used_gb: 1 }, now).unwrap();
+            &DfSample {
+                free_gb: 999,
+                used_gb: 1,
+            },
+            now,
+        )
+        .unwrap();
         match breaches.iter().find(|b| matches!(b, Breach::Trend { .. })) {
             Some(Breach::Trend { dir, growth_gb, .. }) => {
                 assert_eq!(dir, "/x/target");
@@ -318,10 +380,20 @@ mod rule_tests {
     fn no_breach_when_healthy() {
         let (_t, _g) = crate::telemetry::test_support::isolate();
         let now = Utc.with_ymd_and_hms(2026, 6, 11, 12, 0, 0).unwrap();
-        seed_row("sample::du", now - Duration::hours(70), r#"{"/x/target":5}"#);
+        seed_row(
+            "sample::du",
+            now - Duration::hours(70),
+            r#"{"/x/target":5}"#,
+        );
         seed_row("sample::du", now - Duration::hours(1), r#"{"/x/target":6}"#);
         let breaches = evaluate_rules(
-            &DfSample { free_gb: 999, used_gb: 1 }, now).unwrap();
+            &DfSample {
+                free_gb: 999,
+                used_gb: 1,
+            },
+            now,
+        )
+        .unwrap();
         assert!(breaches.is_empty(), "{breaches:?}");
     }
 }

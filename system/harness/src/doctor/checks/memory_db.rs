@@ -5,8 +5,12 @@ use std::process::Command;
 pub struct MemoryDbExists;
 
 impl DoctorCheck for MemoryDbExists {
-    fn name(&self) -> &str { "memory-db" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "memory-db"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let db = ctx.hex_dir.join(".hex/memory.db");
         if db.is_file() {

@@ -5,8 +5,12 @@ use std::fs;
 pub struct AgentsSkillsSymlink;
 
 impl DoctorCheck for AgentsSkillsSymlink {
-    fn name(&self) -> &str { "agents-skills-symlink" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "agents-skills-symlink"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let agents_skills = ctx.hex_dir.join(".agents/skills");
         let target = ctx.hex_dir.join(".hex/skills");
@@ -47,8 +51,12 @@ impl DoctorCheck for AgentsSkillsSymlink {
 pub struct NoBrokenSymlinks;
 
 impl DoctorCheck for NoBrokenSymlinks {
-    fn name(&self) -> &str { "no-broken-symlinks" }
-    fn category(&self) -> Category { Category::Health }
+    fn name(&self) -> &str {
+        "no-broken-symlinks"
+    }
+    fn category(&self) -> Category {
+        Category::Health
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         let dirs = [ctx.hex_dir.join(".hex"), ctx.hex_dir.join(".agents")];
         let mut broken: Vec<String> = Vec::new();
@@ -75,9 +83,7 @@ impl DoctorCheck for NoBrokenSymlinks {
             if removed == count {
                 return CheckResult::fixed(format!("Removed {} broken symlink(s)", count));
             }
-            return CheckResult::warn(format!(
-                "Removed {}/{} broken symlink(s)", removed, count
-            ));
+            return CheckResult::warn(format!("Removed {}/{} broken symlink(s)", removed, count));
         }
 
         CheckResult::fail(format!("{} broken symlink(s) found", count))

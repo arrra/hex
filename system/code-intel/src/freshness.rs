@@ -78,8 +78,7 @@ fn ls_files_oids(root: &Path, paths: &BTreeSet<&str>) -> Result<HashMap<String, 
     let stdout = run_git(root, &["ls-files", "-s", "-z"], paths)?;
     let mut map = HashMap::new();
     for entry in stdout.split(|b| *b == 0).filter(|e| !e.is_empty()) {
-        let entry =
-            std::str::from_utf8(entry).context("non-UTF8 entry in git ls-files output")?;
+        let entry = std::str::from_utf8(entry).context("non-UTF8 entry in git ls-files output")?;
         // Format: "<mode> <oid> <stage>\t<path>"
         let (meta, path) = entry
             .split_once('\t')

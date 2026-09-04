@@ -340,7 +340,9 @@ fn instance_engine_workers_path() -> Option<std::path::PathBuf> {
 /// Missing file → empty (the common case). Unreadable or unparseable file →
 /// LOUD (stderr + alert) and empty: a typo in a personal services file must
 /// not crash-loop the whole harness, but it must never be silent either.
-fn instance_engine_workers(path: &std::path::Path) -> Vec<iii_engine::workers::config::WorkerEntry> {
+fn instance_engine_workers(
+    path: &std::path::Path,
+) -> Vec<iii_engine::workers::config::WorkerEntry> {
     #[derive(serde::Deserialize)]
     #[serde(deny_unknown_fields)]
     struct InstanceWorkersFile {
@@ -413,14 +415,10 @@ fn merge_instance_workers(
 fn loopback_engine_config(
     mut config: iii_engine::workers::config::EngineConfig,
 ) -> iii_engine::workers::config::EngineConfig {
-    let host =
-        std::env::var("III_BIND_HOST").unwrap_or_else(|_| DEFAULT_BIND_HOST.to_string());
+    let host = std::env::var("III_BIND_HOST").unwrap_or_else(|_| DEFAULT_BIND_HOST.to_string());
     for entry in config.modules.iter_mut().chain(config.workers.iter_mut()) {
         if LISTENER_WORKERS.contains(&entry.name.as_str()) {
-            let mut cfg = entry
-                .config
-                .take()
-                .unwrap_or_else(|| serde_json::json!({}));
+            let mut cfg = entry.config.take().unwrap_or_else(|| serde_json::json!({}));
             if let Some(obj) = cfg.as_object_mut() {
                 obj.insert("host".to_string(), serde_json::json!(host));
             }
@@ -434,11 +432,7 @@ fn loopback_engine_config(
 /// async — the replay path's equivalent of `ops::emit`, minus the nested tokio
 /// runtime. Writes the same `events`-scope state envelope `ops::emit` does, so a
 /// replayed emission fires the same state triggers as a fresh one.
-async fn emit_via(
-    iii: &iii_sdk::III,
-    event: &str,
-    data: serde_json::Value,
-) -> anyhow::Result<()> {
+async fn emit_via(iii: &iii_sdk::III, event: &str, data: serde_json::Value) -> anyhow::Result<()> {
     let producer = crate::ops::resolve_producer(None);
     let ts = chrono::Utc::now().to_rfc3339();
     let target = crate::ops::emit_target(event, &producer, &ts, &data);
@@ -573,10 +567,7 @@ pub enum DrainOutcome {
 /// Await every in-flight handler `JoinHandle` to completion, bounded by
 /// `timeout`. Returns `AllCompleted` only when every handle has finished;
 /// `TimedOut(n)` otherwise (n = handles not done by deadline).
-pub async fn drain(
-    handles: Vec<JoinHandle<()>>,
-    timeout: Duration,
-) -> DrainOutcome {
+pub async fn drain(handles: Vec<JoinHandle<()>>, timeout: Duration) -> DrainOutcome {
     let total = handles.len();
     let join_all = async {
         for h in handles {
@@ -674,7 +665,10 @@ mod tests {
                 .and_then(|c| c.get("host"))
                 .and_then(|h| h.as_str())
                 .unwrap_or_else(|| panic!("listener '{name}' must carry a host override"));
-            assert_eq!(host, DEFAULT_BIND_HOST, "listener '{name}' must bind loopback");
+            assert_eq!(
+                host, DEFAULT_BIND_HOST,
+                "listener '{name}' must bind loopback"
+            );
         }
     }
 
@@ -771,7 +765,10 @@ workers:
         let total = config.modules.len() + config.workers.len();
         assert_eq!(total, default_count, "override must not add an entry");
         let all: Vec<_> = config.modules.iter().chain(config.workers.iter()).collect();
-        let matches: Vec<_> = all.iter().filter(|e| e.name == "iii-observability").collect();
+        let matches: Vec<_> = all
+            .iter()
+            .filter(|e| e.name == "iii-observability")
+            .collect();
         assert_eq!(matches.len(), 1, "exactly one iii-observability entry");
         assert_eq!(
             matches[0].config.as_ref().unwrap()["exporter"],

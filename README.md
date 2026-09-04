@@ -177,6 +177,7 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 - **Memory** (`hex memory`) — search/index/recall/distill/consolidate over the SQLite FTS5 + vec0 store
 - **Doctor** (`hex doctor`) — system health checks across env, memory, structure, config, companions
 - **Telemetry** (`hex telemetry`) — telemetry file rotation and management
+- **HITL** (`hex hitl`) — pending-human-action queue (file/list/close items, iMessage pings + daily digest)
 - **Integration** (`hex integration`) — integration bundle lifecycle
 - **Hook** (`hex hook`) — Claude Code hook runners (session-start, post-tool-use, backup-session)
 - **Harness** (`hex harness`) — the wake/loop runtime
@@ -185,12 +186,13 @@ You can also run the upgrade from inside Claude Code via `/hex-upgrade`.
 - **Worker** (`hex worker`) — worker process entrypoint
 - **Env** (`hex env`) — environment setup utilities
 
-12 subcommands:
+13 subcommands:
 
 ```
 hex memory       — search, index, recall, distill, consolidate
 hex doctor       — system health checks (--fix, --json)
 hex telemetry    — telemetry file rotation and management
+hex hitl         — pending-human-action queue (add, list, show, done, skip, snooze, nudge, digest)
 hex integration  — integration bundle lifecycle
 hex completions  — shell completions (zsh, bash, fish)
 hex hook         — Claude Code hook runners (session-start, post-tool-use, backup-session)

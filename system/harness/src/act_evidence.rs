@@ -61,8 +61,7 @@ pub fn verify(ev: &ActEvidence) -> Result<(), String> {
             if !p.exists() {
                 return Err(format!("file '{path}' does not exist"));
             }
-            let meta = std::fs::metadata(p)
-                .map_err(|e| format!("cannot stat '{path}': {e}"))?;
+            let meta = std::fs::metadata(p).map_err(|e| format!("cannot stat '{path}': {e}"))?;
             if meta.len() == 0 {
                 Err(format!("file '{path}' exists but is empty (0 bytes)"))
             } else {

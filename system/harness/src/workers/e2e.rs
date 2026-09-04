@@ -7,11 +7,11 @@
 //!
 //! - `harness.e2e.ping`   → touch `ping.ran`            (basic emit→handler)
 //! - `harness.e2e.slow`   → sleep `sleep_ms`, then
-//!                          `ctx.emit("harness.e2e.drained")` (diverts to the
-//!                          outbox if mid-drain), then touch `slow.completed`
-//!                          (graceful-drain proof)
+//!   `ctx.emit("harness.e2e.drained")` (diverts to the
+//!   outbox if mid-drain), then touch `slow.completed`
+//!   (graceful-drain proof)
 //! - `harness.e2e.drained`→ append one line to `drained.delivered`
-//!                          (exactly-once replay proof — line count == deliveries)
+//!   (exactly-once replay proof — line count == deliveries)
 
 use crate::worker::{ctx::Ctx, event::Event, Result, Worker};
 use std::io::Write;

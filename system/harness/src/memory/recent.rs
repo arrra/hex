@@ -119,7 +119,7 @@ fn decision_files(hex_dir: &Path, limit: usize) -> Vec<Pointer> {
         }
     }
 
-    out.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    out.sort_by_key(|b| std::cmp::Reverse(b.mtime));
     out.truncate(limit);
     out
 }
@@ -160,8 +160,17 @@ fn todo_now_top3(hex_dir: &Path) -> Vec<Pointer> {
         .into_iter()
         .map(|item| {
             // Truncate item text so we stay pointers-only (no big bodies).
+            // Floor the cut to a char boundary — byte 80 can land mid-char.
             let snippet = if item.len() > 80 {
-                format!("{}…", &item[..80])
+                let mut end = 80;
+                while !item.is_char_boundary(end) {
+                    end -= 1;
+                }
+                // SAFETY(string_slice): `end` was floored to a char boundary by
+                // the is_char_boundary loop above.
+                #[allow(clippy::string_slice)]
+                let head = &item[..end];
+                format!("{}…", head)
             } else {
                 item
             };
@@ -183,7 +192,7 @@ pub fn collect_text(hex_dir: &Path) -> String {
     all.extend(todo_now_top3(hex_dir));
 
     // Recency-ordered, newest first.
-    all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+    all.sort_by_key(|b| std::cmp::Reverse(b.mtime));
     all.truncate(10);
 
     let now = SystemTime::now();
@@ -258,7 +267,7 @@ mod tests {
         all.extend(project_dir_mtimes(ws.path()));
         all.extend(decision_files(ws.path(), 10));
         all.extend(todo_now_top3(ws.path()));
-        all.sort_by(|a, b| b.mtime.cmp(&a.mtime));
+        all.sort_by_key(|b| std::cmp::Reverse(b.mtime));
         all.truncate(10);
         assert!(!all.is_empty(), "must produce pointers");
 
@@ -284,5 +293,20 @@ mod tests {
         assert_eq!(items.len(), 3);
         assert!(items[0].rel.contains("task a"));
         assert!(items[2].rel.contains("task c"));
+    }
+
+    #[test]
+    fn todo_now_truncates_long_items_at_char_boundary() {
+        let ws = make_workspace();
+        // 79 ASCII bytes followed by a 3-byte char: byte 80 falls mid-char,
+        // so a naive byte slice at 80 panics.
+        let long = format!(
+            "{}✅ trailing text past the truncation point",
+            "x".repeat(79)
+        );
+        fs::write(ws.path().join("todo.md"), format!("## Now\n- {}\n", long)).unwrap();
+        let items = todo_now_top3(ws.path());
+        assert_eq!(items.len(), 1);
+        assert!(items[0].rel.ends_with('…'), "long item must be truncated");
     }
 }

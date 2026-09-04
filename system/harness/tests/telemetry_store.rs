@@ -83,8 +83,15 @@ fn prune_removes_old_rows_when_keep_days_zero() {
         })
         .unwrap();
         let removed = telemetry::prune(0).expect("prune should succeed");
-        assert!(removed >= 1, "expected at least one row pruned, got {removed}");
+        assert!(
+            removed >= 1,
+            "expected at least one row pruned, got {removed}"
+        );
         let rows = telemetry::recent(10).expect("recent after prune");
-        assert!(rows.is_empty(), "expected empty after prune, got {} rows", rows.len());
+        assert!(
+            rows.is_empty(),
+            "expected empty after prune, got {} rows",
+            rows.len()
+        );
     });
 }

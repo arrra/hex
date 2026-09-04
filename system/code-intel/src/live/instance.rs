@@ -77,13 +77,23 @@ impl std::fmt::Display for InstanceState {
 pub enum LiveError {
     /// Not quiescent yet. The daemon maps this to the immediate
     /// `{ok:false, warming:{elapsed_secs}}` reply (SPEC-A2 §3).
-    Warming { elapsed_secs: u64 },
-    Dead { reason: String },
+    Warming {
+        elapsed_secs: u64,
+    },
+    Dead {
+        reason: String,
+    },
     /// JSON-RPC error from the server.
-    Server { code: i64, message: String },
+    Server {
+        code: i64,
+        message: String,
+    },
     /// Broken pipe / framing failure while talking to the child.
     Transport(String),
-    Timeout { method: String, after: Duration },
+    Timeout {
+        method: String,
+        after: Duration,
+    },
 }
 
 impl std::fmt::Display for LiveError {
@@ -173,9 +183,9 @@ impl LiveInstance {
         worktree_root: &Path,
         warm_fallback: Duration,
     ) -> Result<Self> {
-        let root = worktree_root.canonicalize().with_context(|| {
-            format!("canonicalizing worktree root {}", worktree_root.display())
-        })?;
+        let root = worktree_root
+            .canonicalize()
+            .with_context(|| format!("canonicalizing worktree root {}", worktree_root.display()))?;
         let mut child = Command::new(binary)
             .current_dir(&root)
             .stdin(Stdio::piped())
@@ -197,7 +207,9 @@ impl LiveInstance {
             })?;
         let pid = child.id();
         let stdout = child.stdout.take().expect("child stdout is piped");
-        let stdin = Arc::new(Mutex::new(child.stdin.take().expect("child stdin is piped")));
+        let stdin = Arc::new(Mutex::new(
+            child.stdin.take().expect("child stdin is piped"),
+        ));
         let shared = Arc::new(Mutex::new(Inner {
             state: InstanceState::Warming,
             warming_since: Instant::now(),
@@ -234,7 +246,9 @@ impl LiveInstance {
                 serde_json::to_value(params).context("serializing initialize params")?,
                 INITIALIZE_TIMEOUT,
             )
-            .map_err(|e| anyhow::anyhow!("initialize handshake with {binary} (pid {pid}) failed: {e}"))?;
+            .map_err(|e| {
+                anyhow::anyhow!("initialize handshake with {binary} (pid {pid}) failed: {e}")
+            })?;
         instance
             .notify(lsp::methods::INITIALIZED, serde_json::json!({}))
             .map_err(|e| anyhow::anyhow!("sending initialized to pid {pid}: {e}"))?;
@@ -247,9 +261,7 @@ impl LiveInstance {
             let probe_root = instance.worktree_root.clone();
             std::thread::Builder::new()
                 .name(format!("ra-prober-{pid}"))
-                .spawn(move || {
-                    prober_loop(stdin, shared, next_id, probe_root, warm_fallback, pid)
-                })
+                .spawn(move || prober_loop(stdin, shared, next_id, probe_root, warm_fallback, pid))
                 .context("spawning quiescent-fallback prober thread")?;
         }
         Ok(instance)
@@ -282,7 +294,6 @@ impl LiveInstance {
         let mut writer = self.stdin.lock().unwrap();
         lsp::write_message(&mut *writer, &msg)
     }
-
 }
 
 impl LiveBackend for LiveInstance {
@@ -328,7 +339,10 @@ impl LiveBackend for LiveInstance {
             inner.dead_reason.get_or_insert_with(|| "shut down".into());
         }
         if let Err(e) = self.raw_request(lsp::methods::SHUTDOWN, Value::Null, SHUTDOWN_GRACE) {
-            eprintln!("live: pid {} shutdown request not acknowledged: {e}", self.pid);
+            eprintln!(
+                "live: pid {} shutdown request not acknowledged: {e}",
+                self.pid
+            );
         }
         if let Err(e) = self.notify(lsp::methods::EXIT, Value::Null) {
             eprintln!("live: pid {} exit notification failed: {e}", self.pid);
@@ -350,10 +364,9 @@ impl LiveBackend for LiveInstance {
                             eprintln!("live: pid {} SIGKILL failed: {e}", self.pid);
                         }
                         match self.child.wait() {
-                            Ok(status) => eprintln!(
-                                "live: pid {} reaped after SIGKILL: {status}",
-                                self.pid
-                            ),
+                            Ok(status) => {
+                                eprintln!("live: pid {} reaped after SIGKILL: {status}", self.pid)
+                            }
                             Err(e) => eprintln!("live: pid {} reap failed: {e}", self.pid),
                         }
                         break;
@@ -561,7 +574,10 @@ fn prober_loop(
                 uri: lsp::path_to_uri(&probe_file),
             },
             // 1:1 in CLI terms == LSP 0:0.
-            position: lsp::Position { line: 0, character: 0 },
+            position: lsp::Position {
+                line: 0,
+                character: 0,
+            },
         };
         let params = match serde_json::to_value(&params) {
             Ok(v) => v,
@@ -1037,7 +1053,11 @@ sleep 60
         )
         .unwrap();
 
-        assert_eq!(inst.state(), InstanceState::Warming, "no quiescent yet → warming");
+        assert_eq!(
+            inst.state(),
+            InstanceState::Warming,
+            "no quiescent yet → warming"
+        );
         // Probe fires at ~1s; the canned answer arrives at ~3s.
         let t0 = Instant::now();
         while inst.state() != InstanceState::Ready {
@@ -1083,7 +1103,11 @@ sleep 60
     #[test]
     fn find_probe_file_prefers_src_then_walks() {
         let dir = tempfile::tempdir().unwrap();
-        assert_eq!(find_probe_file(dir.path()), None, "empty dir has nothing to probe");
+        assert_eq!(
+            find_probe_file(dir.path()),
+            None,
+            "empty dir has nothing to probe"
+        );
         std::fs::create_dir_all(dir.path().join("nested/deeper")).unwrap();
         std::fs::write(dir.path().join("nested/deeper/x.rs"), "").unwrap();
         assert_eq!(
@@ -1092,7 +1116,10 @@ sleep 60
         );
         std::fs::create_dir_all(dir.path().join("src")).unwrap();
         std::fs::write(dir.path().join("src/lib.rs"), "").unwrap();
-        assert_eq!(find_probe_file(dir.path()), Some(dir.path().join("src/lib.rs")));
+        assert_eq!(
+            find_probe_file(dir.path()),
+            Some(dir.path().join("src/lib.rs"))
+        );
         // target/ and .git/ are never probed.
         let lone = tempfile::tempdir().unwrap();
         std::fs::create_dir_all(lone.path().join("target")).unwrap();

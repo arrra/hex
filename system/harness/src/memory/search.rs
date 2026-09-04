@@ -31,33 +31,84 @@ fn truncate(text: &str, max_chars: usize) -> String {
     if text.chars().count() <= max_chars {
         return text.to_string();
     }
-    let end = text.char_indices().nth(max_chars).map(|(i, _)| i).unwrap_or(text.len());
+    let end = text
+        .char_indices()
+        .nth(max_chars)
+        .map(|(i, _)| i)
+        .unwrap_or(text.len());
+    // SAFETY(string_slice): `end` is a byte index from char_indices().nth(),
+    // so it is a UTF-8 char boundary — slicing there cannot split a char.
+    #[allow(clippy::string_slice)]
     let slice = &text[..end];
     match slice.rfind(' ') {
+        // SAFETY(string_slice): `pos` is the byte index of an ASCII space
+        // (rfind(' ')), always a char boundary.
+        #[allow(clippy::string_slice)]
         Some(pos) => format!("{}...", &slice[..pos]),
         None => format!("{}...", slice),
     }
 }
 
 // Case-insensitive highlight of a single term with ANSI bold-yellow.
+//
+// Matches against the ORIGINAL `text` (never a `to_lowercase()` copy): case
+// folding can change UTF-8 byte length (e.g. 'İ' U+0130 is 2 bytes but folds to
+// "i\u{307}", 3 bytes), so byte offsets found in a lowercased copy can land
+// mid-character in `text` and panic. `ci_prefix_match_len` folds on the fly and
+// only ever returns offsets that are char boundaries in `text` itself.
 fn highlight_term(text: &str, term: &str) -> String {
-    let lower_text = text.to_lowercase();
     let lower_term = term.to_lowercase();
     if lower_term.is_empty() {
         return text.to_string();
     }
     let mut result = String::with_capacity(text.len() + 32);
-    let mut start = 0;
-    while let Some(pos) = lower_text[start..].find(lower_term.as_str()) {
-        let abs = start + pos;
-        result.push_str(&text[start..abs]);
-        result.push_str("\x1b[1;33m");
-        result.push_str(&text[abs..abs + lower_term.len()]);
-        result.push_str("\x1b[0m");
-        start = abs + lower_term.len();
+    let mut cursor = 0usize;
+    while cursor < text.len() {
+        // SAFETY(string_slice): `cursor` starts at 0 and only ever advances by
+        // a whole matched span (`n`, a char-boundary length) or a whole char
+        // (`len_utf8()`), so it is always a UTF-8 char boundary in `text`.
+        #[allow(clippy::string_slice)]
+        let rest = &text[cursor..];
+        match ci_prefix_match_len(rest, &lower_term) {
+            Some(n) => {
+                result.push_str("\x1b[1;33m");
+                // SAFETY(string_slice): `n` is a char-boundary byte length
+                // within `rest` returned by ci_prefix_match_len.
+                #[allow(clippy::string_slice)]
+                result.push_str(&rest[..n]);
+                result.push_str("\x1b[0m");
+                cursor += n;
+            }
+            None => {
+                let ch = rest.chars().next().unwrap();
+                result.push(ch);
+                cursor += ch.len_utf8();
+            }
+        }
     }
-    result.push_str(&text[start..]);
     result
+}
+
+/// If `hay` case-insensitively starts with `lower_term` (already lowercased),
+/// return the number of `hay` bytes the match consumes — always ending on a
+/// char boundary in `hay`. Folds each source char of `hay` on the fly and
+/// compares against `lower_term`'s char stream, so it never carries a byte
+/// offset from a separately-lowercased copy (which could desync and panic).
+fn ci_prefix_match_len(hay: &str, lower_term: &str) -> Option<usize> {
+    let mut needle = lower_term.chars();
+    let mut nc = needle.next()?;
+    for (off, ch) in hay.char_indices() {
+        for f in ch.to_lowercase() {
+            if f != nc {
+                return None;
+            }
+            match needle.next() {
+                Some(n) => nc = n,
+                None => return Some(off + ch.len_utf8()),
+            }
+        }
+    }
+    None
 }
 
 // Mirror Python's highlight_terms(): iterates query words, applies each.
@@ -72,10 +123,7 @@ fn highlight_terms(text: &str, query: &str) -> String {
 // Mirror Python's _print_context_content().
 fn print_context_content(content: &str, query: &str, context_lines: usize) {
     let lines: Vec<&str> = content.split('\n').collect();
-    let query_terms: Vec<String> = query
-        .split_whitespace()
-        .map(|t| t.to_lowercase())
-        .collect();
+    let query_terms: Vec<String> = query.split_whitespace().map(|t| t.to_lowercase()).collect();
     let mut matching: BTreeSet<usize> = BTreeSet::new();
 
     for (idx, line) in lines.iter().enumerate() {
@@ -348,8 +396,8 @@ pub(crate) fn run_query(
     query_vec: Option<&[f32]>,
 ) -> (Vec<SearchResult>, Vec<super::recall::FactHit>) {
     // FTS5 arm — keeps bm25 * source_weight as its pre-RRF rank input (spec §7).
-    let fts = search_fts(conn, &args.query, args.top.max(20), args.file.as_deref())
-        .unwrap_or_default();
+    let fts =
+        search_fts(conn, &args.query, args.top.max(20), args.file.as_deref()).unwrap_or_default();
     let fts_rowids: Vec<i64> = fts.iter().map(|r| r.rowid).collect();
 
     // Vector arm — best-effort. If KNN fails, log loud and fall back to
@@ -375,11 +423,15 @@ pub(crate) fn run_query(
     }
 
     // Facts arm — reuses the already-computed query vector for its KNN side.
-    let mut facts = super::recall::facts_recall(conn, &args.query, FACTS_TOP_K, query_vec)
-        .unwrap_or_else(|e| {
-            eprintln!("facts arm failed: {e}");
-            vec![]
-        });
+    // Privacy is applied post-fusion below alongside the chunk arms, so the
+    // retrieval itself runs unfiltered (exclude_private = false).
+    let mut facts: Vec<super::recall::FactHit> =
+        super::recall::facts_recall(conn, &args.query, FACTS_TOP_K, query_vec, false)
+            .map(|hits| hits.into_iter().map(|(f, _)| f).collect())
+            .unwrap_or_else(|e| {
+                eprintln!("facts arm failed: {e}");
+                vec![]
+            });
 
     // --file path filter, applied POST-fusion so it covers every arm. The FTS
     // arm filters in SQL (search_fts), but the vector and facts arms do NOT —
@@ -436,15 +488,14 @@ pub fn run(hex_root: &Path, args: &SearchArgs) -> i32 {
 
     // Embed the query ONCE — the same vector feeds the chunk KNN arm and the
     // facts KNN arm. If the model fails, log loud and fall back to FTS5-only.
-    let query_vec: Option<Vec<f32>> = match super::embed::Embedder::new(hex_root)
-        .and_then(|e| e.embed_query(&args.query))
-    {
-        Ok(qv) => Some(qv),
-        Err(e) => {
-            eprintln!("query embedding failed, FTS5-only: {e}");
-            None
-        }
-    };
+    let query_vec: Option<Vec<f32>> =
+        match super::embed::Embedder::new(hex_root).and_then(|e| e.embed_query(&args.query)) {
+            Ok(qv) => Some(qv),
+            Err(e) => {
+                eprintln!("query embedding failed, FTS5-only: {e}");
+                None
+            }
+        };
 
     let (results, facts) = run_query(&conn, args, query_vec.as_deref());
 
@@ -618,7 +669,13 @@ mod tests {
         let conn = setup_full_db();
 
         // me/decisions doc: FTS-matchable by the query.
-        insert_chunk(&conn, "me/decisions/d.md", "decision", "alpha decision record", 1.0);
+        insert_chunk(
+            &conn,
+            "me/decisions/d.md",
+            "decision",
+            "alpha decision record",
+            1.0,
+        );
         // CLAUDE.md doc: shares NO query token (FTS won't surface it) but gets
         // the query vector, so ONLY the vector arm can surface it — the leak.
         insert_chunk(&conn, "CLAUDE.md", "footguns", "zzqx qqzz unrelated", 1.0);
@@ -645,7 +702,9 @@ mod tests {
         let (results, facts) = run_query(&conn, &args, Some(&qv));
 
         assert!(
-            results.iter().all(|r| r.source_path.contains("me/decisions")),
+            results
+                .iter()
+                .all(|r| r.source_path.contains("me/decisions")),
             "--file must exclude non-matching paths from ALL arms, got {:?}",
             results.iter().map(|r| &r.source_path).collect::<Vec<_>>()
         );
@@ -697,8 +756,20 @@ mod tests {
     #[test]
     fn test_search_returns_results() {
         let conn = setup_db();
-        insert_chunk(&conn, "projects/foo.md", "Intro", "This is about Rust programming.", 1.0);
-        insert_chunk(&conn, "projects/bar.md", "Overview", "Python scripting overview.", 1.2);
+        insert_chunk(
+            &conn,
+            "projects/foo.md",
+            "Intro",
+            "This is about Rust programming.",
+            1.0,
+        );
+        insert_chunk(
+            &conn,
+            "projects/bar.md",
+            "Overview",
+            "Python scripting overview.",
+            1.2,
+        );
 
         let results = search_fts(&conn, "Rust programming", 10, None).unwrap();
         assert!(!results.is_empty());
@@ -712,8 +783,20 @@ mod tests {
         // phrase anywhere — the exact-phrase and all-terms-AND variants both
         // miss. Only an OR fallback can surface these. This is the natural-
         // language recall case the UserPromptSubmit hook actually sees.
-        insert_chunk(&conn, "a.md", "Deploy", "the deployment pipeline runs nightly", 1.0);
-        insert_chunk(&conn, "b.md", "Schema", "we chose a vector schema for embeddings", 1.0);
+        insert_chunk(
+            &conn,
+            "a.md",
+            "Deploy",
+            "the deployment pipeline runs nightly",
+            1.0,
+        );
+        insert_chunk(
+            &conn,
+            "b.md",
+            "Schema",
+            "we chose a vector schema for embeddings",
+            1.0,
+        );
 
         let results =
             search_fts(&conn, "what schema did we pick for deployment", 10, None).unwrap();
@@ -734,8 +817,16 @@ mod tests {
         // b.md has weight 2.0 so its score is more negative (better in BM25 ordering).
         assert_eq!(results.len(), 2);
         // Verify scores differ by weight factor.
-        let score_a = results.iter().find(|r| r.source_path == "a.md").unwrap().score;
-        let score_b = results.iter().find(|r| r.source_path == "b.md").unwrap().score;
+        let score_a = results
+            .iter()
+            .find(|r| r.source_path == "a.md")
+            .unwrap()
+            .score;
+        let score_b = results
+            .iter()
+            .find(|r| r.source_path == "b.md")
+            .unwrap()
+            .score;
         // b score should be ~2x more negative than a score.
         assert!(
             (score_b / score_a - 2.0).abs() < 0.01,
@@ -752,13 +843,23 @@ mod tests {
         conn.execute(
             "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
              VALUES (1, ?, ?, '0', ?, ?)",
-            params!["me/journal.md", "Notes", "private personal notes here", 1i64],
+            params![
+                "me/journal.md",
+                "Notes",
+                "private personal notes here",
+                1i64
+            ],
         )
         .unwrap();
         conn.execute(
             "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
              VALUES (1, ?, ?, '0', ?, ?)",
-            params!["projects/work.md", "Work", "private work project details", 0i64],
+            params![
+                "projects/work.md",
+                "Work",
+                "private work project details",
+                0i64
+            ],
         )
         .unwrap();
 
@@ -774,8 +875,20 @@ mod tests {
     #[test]
     fn test_file_filter() {
         let conn = setup_db();
-        insert_chunk(&conn, "projects/alpha.md", "Alpha", "shared topic content", 1.0);
-        insert_chunk(&conn, "projects/beta.md", "Beta", "shared topic content", 1.0);
+        insert_chunk(
+            &conn,
+            "projects/alpha.md",
+            "Alpha",
+            "shared topic content",
+            1.0,
+        );
+        insert_chunk(
+            &conn,
+            "projects/beta.md",
+            "Beta",
+            "shared topic content",
+            1.0,
+        );
 
         let results = search_fts(&conn, "shared topic", 10, Some("alpha")).unwrap();
         assert_eq!(results.len(), 1);
@@ -805,6 +918,36 @@ mod tests {
 
         // Strings short enough must be returned unchanged (no '...').
         assert_eq!(truncate("hi", 10), "hi");
+    }
+
+    #[test]
+    fn test_highlight_term_multibyte_casefold_mismatch() {
+        // Case-folding can change UTF-8 byte length: 'İ' (U+0130, LATIN
+        // CAPITAL LETTER I WITH DOT ABOVE) is 2 bytes but lowercases to
+        // "i\u{307}" (3 bytes). highlight_term() searches for the match
+        // position in `lower_text` (the case-folded copy) but then slices
+        // into the *original* `text` at that same byte offset. Once a
+        // byte-length-changing char precedes another multibyte char, the
+        // offset from `lower_text` desyncs from `text`'s char boundaries and
+        // can land mid-character, panicking on the old code:
+        // "İÉhello" (İ=2 bytes, É=2 bytes) lowercases to "i\u{307}éhello"
+        // (i\u{307}=3 bytes, é=2 bytes) — searching for "É" finds it at byte
+        // offset 3 in the lowercased copy, but byte offset 3 in the original
+        // text falls inside É's own 2-byte encoding (bytes 2..4).
+        let text = "İÉhello";
+        let out = highlight_term(text, "É");
+        // No panic, valid UTF-8 (guaranteed by returning a String), and the
+        // matched term is still present in the output, wrapped for highlight.
+        assert!(
+            out.contains('É'),
+            "expected matched char preserved in output, got: {:?}",
+            out
+        );
+        assert!(
+            out.contains("hello"),
+            "expected trailing text preserved, got: {:?}",
+            out
+        );
     }
 
     #[test]

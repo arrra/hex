@@ -248,8 +248,7 @@ fn known_profile_names() -> Vec<String> {
 /// `hex_dir` is the workspace root (where `.hex/config/claude-runs.toml`
 /// lives). Pass `None` to skip the config file entirely (built-ins only).
 pub fn resolve(profile: &str, hex_dir: Option<&Path>) -> Result<ResolvedRun, ClaudeRunsError> {
-    let config_path =
-        hex_dir.map(|d| d.join(".hex").join("config").join("claude-runs.toml"));
+    let config_path = hex_dir.map(|d| d.join(".hex").join("config").join("claude-runs.toml"));
 
     // If the config file exists, parse it.
     let parsed = match &config_path {
@@ -362,6 +361,7 @@ fn parse_config_file(path: &Path) -> Result<ParsedConfig, ClaudeRunsError> {
 ///   - `key = "string"` (string)
 ///   - `key = ["a", "b"]` (list of strings, on one line)
 ///   - `# ...` line comments
+///
 /// Anything else is a parse error (loud, with line number).
 fn parse_config_str(raw: &str) -> Result<ParsedConfig, String> {
     let mut cfg = ParsedConfig::default();
@@ -408,6 +408,9 @@ fn parse_config_str(raw: &str) -> Result<ParsedConfig, String> {
     Ok(cfg)
 }
 
+// Boundary proof: the only slice, `&line[..i]`, uses `i` from char_indices(),
+// which yields byte offsets at char boundaries — never mid-character.
+#[allow(clippy::string_slice)]
 fn strip_comment(line: &str) -> &str {
     // Naive: '#' starts a comment unless inside a string. The schema uses
     // simple strings only and the parser is internal; we avoid quoted '#'.
@@ -469,9 +472,9 @@ fn parse_str_list(val: &str, line_no: usize) -> Result<Vec<String>, String> {
 /// eval-style substitution: `claude $(hex claude-flags X) -p ...`.
 pub fn shell_quote(arg: &str) -> String {
     if !arg.is_empty()
-        && arg
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | ',' | '=' | ':'))
+        && arg.chars().all(|c| {
+            c.is_ascii_alphanumeric() || matches!(c, '-' | '_' | '/' | '.' | ',' | '=' | ':')
+        })
     {
         return arg.to_string();
     }

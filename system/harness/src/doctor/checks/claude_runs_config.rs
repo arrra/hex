@@ -13,10 +13,18 @@ use crate::doctor::check::{Category, CheckResult, Context, DoctorCheck};
 pub struct ClaudeRunsConfig;
 
 impl DoctorCheck for ClaudeRunsConfig {
-    fn name(&self) -> &str { "claude-runs-config" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "claude-runs-config"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
-        let cfg_path = ctx.hex_dir.join(".hex").join("config").join("claude-runs.toml");
+        let cfg_path = ctx
+            .hex_dir
+            .join(".hex")
+            .join("config")
+            .join("claude-runs.toml");
         if !cfg_path.exists() {
             return CheckResult::pass(
                 "claude-runs.toml absent — built-in lean profiles apply (this is the intended default)",

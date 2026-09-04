@@ -94,9 +94,15 @@ fn builtin(use_case: &str) -> Option<BuiltIn> {
             max_tokens: 256,
             max_input_tokens: None,
         }),
+        // consolidate_audit runs on anthropic/claude-sonnet-5 via OpenRouter,
+        // whose hidden reasoning tokens count against max_tokens. At the previous
+        // 4k cap the entire output budget was consumed by reasoning, so the audit
+        // returned EMPTY content while still billing (~$0.21/night, observed
+        // 2026-08-16..19). Raise to 16384 so the response has real content
+        // headroom above the reasoning spend.
         "consolidate_audit" => Some(BuiltIn {
             model: "anthropic/claude-sonnet-5",
-            max_tokens: 4096,
+            max_tokens: 16384,
             max_input_tokens: None,
         }),
         "health_check" => Some(BuiltIn {
@@ -168,8 +174,8 @@ fn load_file() -> Result<Option<LlmTomlFile>> {
     }
     let body = std::fs::read_to_string(&path)
         .with_context(|| format!("reading llm.toml at {}", path.display()))?;
-    let parsed: LlmTomlFile = toml::from_str(&body)
-        .with_context(|| format!("parsing llm.toml at {}", path.display()))?;
+    let parsed: LlmTomlFile =
+        toml::from_str(&body).with_context(|| format!("parsing llm.toml at {}", path.display()))?;
 
     // Warn (do not fail) on unknown use-case table names.
     for name in parsed.use_cases.keys() {
@@ -225,7 +231,10 @@ pub fn resolve(use_case: &str) -> Result<ResolvedLlm> {
 
     let file = load_file()?;
 
-    let defaults = file.as_ref().and_then(|f| f.defaults.clone()).unwrap_or_default();
+    let defaults = file
+        .as_ref()
+        .and_then(|f| f.defaults.clone())
+        .unwrap_or_default();
     let uc = file
         .as_ref()
         .and_then(|f| f.use_cases.get(use_case).cloned())
@@ -355,7 +364,7 @@ mod tests {
 
         let r = resolve("consolidate_audit").expect("resolve ok");
         assert_eq!(r.model, "anthropic/claude-sonnet-5");
-        assert_eq!(r.max_tokens, 4096);
+        assert_eq!(r.max_tokens, 16384);
 
         let r = resolve("health_check").expect("resolve ok");
         assert_eq!(r.model, "anthropic/claude-haiku-4.5");
@@ -426,8 +435,7 @@ model = "file/model"
         write_llm_toml(td.path(), "this is = = not valid toml [[[");
 
         let err = resolve("memory_extract")
-            .err()
-            .expect("malformed TOML must be a loud error, not a silent fallback");
+            .expect_err("malformed TOML must be a loud error, not a silent fallback");
         let msg = format!("{err:#}");
         assert!(
             msg.to_lowercase().contains("llm.toml") || msg.to_lowercase().contains("toml"),

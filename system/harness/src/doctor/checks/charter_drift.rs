@@ -7,8 +7,12 @@ use crate::doctor::check::{Category, CheckResult, Context, DoctorCheck};
 pub struct CharterDrift;
 
 impl DoctorCheck for CharterDrift {
-    fn name(&self) -> &str { "charter-drift" }
-    fn category(&self) -> Category { Category::Config }
+    fn name(&self) -> &str {
+        "charter-drift"
+    }
+    fn category(&self) -> Category {
+        Category::Config
+    }
     fn run(&self, ctx: &Context) -> CheckResult {
         match crate::charter::verify(&ctx.hex_dir, false) {
             Ok(drifts) if drifts.is_empty() => {

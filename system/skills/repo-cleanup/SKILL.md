@@ -118,7 +118,7 @@ Strict order; each sub-step its own commit, `scripts/verify.sh` between. A categ
 3. **Verify after every batch via `scripts/verify.sh` — executed, not read.** Paste command + exit code as evidence. On a first-time red: re-run ONCE before reverting — a flaky suite must not silently revert a good batch; red twice = real, revert the batch. Log any flake loudly; a flaky test is itself a cleanup candidate.
 4. **No deletion without the conjunctive proof** (reference.md §3). Uncertain → defer and log, never guess-delete.
 5. **Untested code gets a characterization test before any structural change.**
-6. **Batch cap: ≤250 changed lines or one bounded module per commit, whichever is smaller.** `scripts/verify.sh --check-batch` enforces this mechanically against the last commit.
+6. **Batch cap: ≤250 changed lines or one bounded module per commit, whichever is smaller.** `scripts/verify.sh --check-batch` enforces this mechanically against the last commit. **One exemption:** the isolated format-pass commit (HARD RULE 2) — tool-generated output has no meaningful size cap; its safety proof is reproduction, not smallness (reference.md §2).
 7. **No silent failures.** Every script prints command + exit code. A failing batch reverts and re-verifies — never debugged in a left-broken state.
 8. **Baseline build+test green before Phase 0 completes; lint is a target, not a gate.** Build+test = regression signal (green→red means THIS batch). Lint mid-campaign is red by definition — it never fails the gate; its delta is measured at Closeout.
 9. **Never trust a fixer's exit code or a self-report of "behavior preserved."** The external oracle (tests, characterization, mutation spot-check) is the proof.

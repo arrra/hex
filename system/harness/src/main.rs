@@ -6,19 +6,19 @@ mod consolidate;
 mod throttle;
 use hex::doctor;
 mod integration;
-mod integration_cmd;
 mod integration_check_all;
+mod integration_cmd;
 // telemetry lives in the lib (used by the in-process worker runtime too); the
 // bin shares that one copy rather than compiling a second (mirrors hex::memory).
 use hex::alert;
 use hex::memory;
 use hex::telemetry;
-mod path_map;
 mod env;
 mod hook;
-mod usage;
-mod upgrade;
 mod learnings;
+mod path_map;
+mod upgrade;
+mod usage;
 // ops lives in the lib (the in-process worker runtime calls it too); the bin
 // shares that one copy rather than compiling a second (mirrors hex::memory).
 use hex::ops;
@@ -130,6 +130,13 @@ enum Commands {
         #[command(subcommand)]
         command: MessagesCommands,
     },
+    /// Pending human-action queue: file items agents are blocked on, ping the
+    /// operator by urgency over iMessage, and roll everything into a daily digest.
+    #[command(display_order = 4)]
+    Hitl {
+        #[command(subcommand)]
+        command: HitlCommands,
+    },
     /// Print resolved `claude -p` flags for a lean-run profile (spec Sf5bj7y1d).
     ///
     /// Reads built-in profiles plus optional
@@ -147,9 +154,7 @@ enum Commands {
     Version,
     /// Generate shell completions
     #[command(display_order = 12)]
-    Completions {
-        shell: clap_complete::Shell,
-    },
+    Completions { shell: clap_complete::Shell },
     /// Inspect auto-registered worker modules
     #[command(display_order = 14)]
     Module {
@@ -467,9 +472,7 @@ enum CharterCommands {
         alert: bool,
     },
     /// Print the governance trail (oldest first), optionally for one name.
-    Log {
-        name: Option<String>,
-    },
+    Log { name: Option<String> },
     /// Current registered charters: name, version, hash, path.
     Show,
 }
@@ -581,7 +584,11 @@ enum StateCommands {
     /// Print the JSON value at <scope>/<key>; empty + exit 1 if absent
     Get { scope: String, key: String },
     /// Set <scope>/<key> to <json> (a JSON literal, e.g. '{"a":1}' or '"str"')
-    Set { scope: String, key: String, json: String },
+    Set {
+        scope: String,
+        key: String,
+        json: String,
+    },
     /// Delete <scope>/<key>
     Delete { scope: String, key: String },
 }
@@ -627,6 +634,62 @@ enum TelemetryCommands {
         #[arg(long = "keep-days", default_value_t = 30)]
         keep_days: i64,
     },
+}
+
+#[derive(Subcommand)]
+enum HitlCommands {
+    /// File a new pending-human-action item. Prints the new id.
+    Add {
+        #[arg(long)]
+        project: String,
+        #[arg(long)]
+        title: String,
+        /// Urgency: P1 | P2 | P3
+        #[arg(long)]
+        priority: String,
+        /// Optional deadline (YYYY-MM-DD)
+        #[arg(long)]
+        deadline: Option<String>,
+        /// Optional estimate in minutes
+        #[arg(long)]
+        est: Option<u32>,
+        /// Optional comma-separated ids this item is blocked by
+        #[arg(long = "depends-on")]
+        depends_on: Option<String>,
+        /// Markdown body (exact steps + links). `--body -` reads stdin.
+        #[arg(long)]
+        body: Option<String>,
+    },
+    /// List open + snoozed items (default); `--all` includes closed.
+    List {
+        #[arg(long)]
+        all: bool,
+    },
+    /// Show one item in full, including its body.
+    Show { id: u64 },
+    /// Close an item as done.
+    Done {
+        id: u64,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Close an item as skipped.
+    Skip {
+        id: u64,
+        #[arg(long)]
+        note: Option<String>,
+    },
+    /// Snooze an item until a date (YYYY-MM-DD): silent until then.
+    Snooze {
+        id: u64,
+        #[arg(long)]
+        until: String,
+    },
+    /// Idempotent hourly entry point (launchd): send pings due now, plus the
+    /// daily digest when the hour matches and it has not gone out yet today.
+    Nudge,
+    /// Compose + send the digest unconditionally, right now.
+    Digest,
 }
 
 #[derive(Subcommand)]
@@ -737,6 +800,18 @@ enum MemoryCommands {
         #[arg(long)]
         agent: bool,
     },
+    /// Run the recall golden-set eval and regression gate
+    Eval {
+        /// Cases file (default: $HEX_DIR/.hex/eval/recall-cases.toml)
+        #[arg(long)]
+        cases: Option<PathBuf>,
+        /// Write current results as the new baseline (review the diff)
+        #[arg(long)]
+        update_baseline: bool,
+        /// Emit a JSON report instead of per-case lines
+        #[arg(long)]
+        json: bool,
+    },
     /// Distill facts from a file into the memory facts layer.
     /// Internal: pipeline plumbing, not a human-facing command.
     #[command(hide = true)]
@@ -760,6 +835,34 @@ enum MemoryCommands {
         vacuum: bool,
         #[arg(long)]
         backfill_facts: bool,
+    },
+    /// Rewind distill watermark(s): reset last_offset AND consecutive_failures
+    /// to 0 so the next quick tick reprocesses raw transcript slices from the
+    /// top. Operator recovery after a distill outage silently advanced past
+    /// unprocessed content. Raw transcript files are untouched.
+    #[command(name = "distill-rewind")]
+    DistillRewind {
+        /// Rewind exactly one transcript_files row (its path). Mutually
+        /// exclusive with --all; exactly one of the two is required.
+        #[arg(long)]
+        file: Option<PathBuf>,
+        /// Rewind every transcript_files row.
+        #[arg(long)]
+        all: bool,
+        /// Print what would change without modifying the database.
+        #[arg(long)]
+        dry_run: bool,
+    },
+    /// Resident query-embedding endpoint for the recall vector arm (spec
+    /// Sdnap37he). Holds ONE embedder and answers query-embedding requests
+    /// over a local unix socket so the per-message recall CLI never cold-loads
+    /// the model. Internal: run by the engine, not typed by humans.
+    #[command(name = "embed-serve", hide = true)]
+    EmbedServe {
+        /// Socket path (default: $HEX_DIR/.hex/run/embed.sock). Must match the
+        /// `[vector].socket_path` the recall config points at.
+        #[arg(long)]
+        socket: Option<PathBuf>,
     },
 }
 
@@ -843,7 +946,11 @@ fn main() {
             }
         },
         Commands::Triggers { command } => match command {
-            TriggersCommands::Emit { event, data, producer } => {
+            TriggersCommands::Emit {
+                event,
+                data,
+                producer,
+            } => {
                 let parsed: serde_json::Value = match data.as_deref() {
                     None | Some("") => serde_json::Value::Object(Default::default()),
                     Some(s) => match serde_json::from_str(s) {
@@ -922,8 +1029,9 @@ fn main() {
                 // Personal overlay probes (discovered, never named here) take
                 // precedence; unknown names fall through to the bundle probe.
                 #[cfg(feature = "personal")]
-                if let Some((_, f)) =
-                    personal_mods::probe_registry().iter().find(|(n, _)| n == name)
+                if let Some((_, f)) = personal_mods::probe_registry()
+                    .iter()
+                    .find(|(n, _)| n == name)
                 {
                     std::process::exit(f());
                 }
@@ -940,7 +1048,9 @@ fn main() {
             }
             if let IntegrationCommands::Update { ref name } = command {
                 let hex_dir = get_hex_dir();
-                std::process::exit(integration_cmd::update(&hex_dir, name, false, false, false, false));
+                std::process::exit(integration_cmd::update(
+                    &hex_dir, name, false, false, false, false,
+                ));
             }
             let hex_dir = get_hex_dir();
             let script = hex_dir.join(".hex/scripts/hex-integration");
@@ -972,7 +1082,14 @@ fn main() {
         Commands::Memory { command } => {
             let hex_dir = get_hex_dir();
             let exit_code = match &command {
-                MemoryCommands::Search { query, top, file, compact, context, private } => {
+                MemoryCommands::Search {
+                    query,
+                    top,
+                    file,
+                    compact,
+                    context,
+                    private,
+                } => {
                     let args = memory::search::SearchArgs {
                         query: query.clone(),
                         top: *top,
@@ -990,7 +1107,11 @@ fn main() {
                     }
                     memory::index::run(&hex_dir, *full, *stats)
                 }
-                MemoryCommands::ParseTranscripts { file, dry_run, force } => {
+                MemoryCommands::ParseTranscripts {
+                    file,
+                    dry_run,
+                    force,
+                } => {
                     let args = memory::parse_transcripts::ParseArgs {
                         file: file.clone(),
                         dry_run: *dry_run,
@@ -1001,6 +1122,11 @@ fn main() {
                 MemoryCommands::Recall { query, agent } => {
                     memory::recall::run(&hex_dir, query, *agent)
                 }
+                MemoryCommands::Eval {
+                    cases,
+                    update_baseline,
+                    json,
+                } => memory::eval::run(&hex_dir, cases.as_deref(), *update_baseline, *json, None),
                 MemoryCommands::Distill { path } => {
                     let db_path = memory::db_path(&hex_dir);
                     match memory::open_db(&db_path) {
@@ -1026,14 +1152,88 @@ fn main() {
                         }
                     }
                 }
-                MemoryCommands::Stats { json } => {
-                    memory::stats::run(&hex_dir, *json)
+                MemoryCommands::Stats { json } => memory::stats::run(&hex_dir, *json),
+                MemoryCommands::Recent => memory::recent::run(&hex_dir),
+                MemoryCommands::Maintain {
+                    vacuum,
+                    backfill_facts,
+                } => memory::maintain::run(&hex_dir, *vacuum, *backfill_facts),
+                MemoryCommands::EmbedServe { socket } => {
+                    // Resident endpoint for the recall vector arm (option (b) of
+                    // docs/research/2026-08-19-recall-vector-arm.md): cold-load
+                    // the model ONCE, then serve query vectors over a unix socket
+                    // so the per-message recall CLI stays inside its budget.
+                    let sock = socket
+                        .clone()
+                        .unwrap_or_else(|| hex_dir.join(".hex/run/embed.sock"));
+                    match memory::embed::Embedder::new(&hex_dir) {
+                        Ok(embedder) => {
+                            match memory::embed_client::serve_with(&sock, |q| {
+                                embedder.embed_query(q).ok()
+                            }) {
+                                Ok(()) => 0,
+                                Err(e) => {
+                                    eprintln!("embed-serve: socket error on {}: {e}", sock.display());
+                                    1
+                                }
+                            }
+                        }
+                        Err(e) => {
+                            eprintln!("embed-serve: failed to load embedder: {e}");
+                            1
+                        }
+                    }
                 }
-                MemoryCommands::Recent => {
-                    memory::recent::run(&hex_dir)
-                }
-                MemoryCommands::Maintain { vacuum, backfill_facts } => {
-                    memory::maintain::run(&hex_dir, *vacuum, *backfill_facts)
+                MemoryCommands::DistillRewind { file, all, dry_run } => {
+                    // Exactly one selector. Neither and both are loud usage
+                    // errors — never a quiet no-op (S6).
+                    let exit = if file.is_some() == *all {
+                        eprintln!("distill-rewind: pass exactly one of --file <path> or --all");
+                        2
+                    } else {
+                        let db_path = memory::db_path(&hex_dir);
+                        match memory::open_db(&db_path) {
+                            Ok(conn) => {
+                                // Thin printer over the testable planner: the
+                                // zero-match S6 guard and dry-run gate live in
+                                // watermark::rewind, not here.
+                                let file_str =
+                                    file.as_ref().map(|f| f.to_string_lossy().to_string());
+                                let target = match file_str.as_deref() {
+                                    Some(p) => memory::distill::watermark::RewindTarget::One(p),
+                                    None => memory::distill::watermark::RewindTarget::All,
+                                };
+                                match memory::distill::watermark::rewind(&conn, target, *dry_run) {
+                                    Ok(plan) => {
+                                        let action = if plan.applied {
+                                            "rewound"
+                                        } else {
+                                            "would rewind"
+                                        };
+                                        for (p, old) in &plan.rows {
+                                            println!("{action}: {p}  offset {old} -> 0");
+                                        }
+                                        println!(
+                                            "distill-rewind: {} {} row(s)",
+                                            if plan.applied { "reset" } else { "would reset" },
+                                            plan.rows.len()
+                                        );
+                                        0
+                                    }
+                                    Err(e) => {
+                                        // Includes the loud zero-match message (S6).
+                                        eprintln!("{e}");
+                                        1
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                eprintln!("open_db error: {e}");
+                                1
+                            }
+                        }
+                    };
+                    exit
                 }
                 MemoryCommands::Consolidate { command } => {
                     let (mode, max) = match command {
@@ -1052,7 +1252,13 @@ fn main() {
                     let code = doctor::stale_deps(&hex_dir, threshold, json);
                     std::process::exit(code);
                 }
-                DoctorCommands::Run { fix, smoke: _, quiet, json, filter } => {
+                DoctorCommands::Run {
+                    fix,
+                    smoke: _,
+                    quiet,
+                    json,
+                    filter,
+                } => {
                     let ctx = doctor::Context::new(hex_dir.clone(), fix);
                     let runner = match &filter {
                         Some(pat) => doctor::Runner::filtered(pat),
@@ -1090,17 +1296,28 @@ fn main() {
         Commands::Resources { command } => {
             std::process::exit(run_resources(command));
         }
-        Commands::Failures { command, window, alert } => match command {
+        Commands::Failures {
+            command,
+            window,
+            alert,
+        } => match command {
             Some(FailuresCommands::Probe) => std::process::exit(run_failures_probe()),
             None => std::process::exit(run_failures(window, alert)),
         },
         Commands::Messages { command } => {
             std::process::exit(run_messages(command));
         }
+        Commands::Hitl { command } => {
+            std::process::exit(run_hitl(command));
+        }
         Commands::Hook { command } => hook::run(command),
         Commands::Usage { command } => std::process::exit(usage::run(command)),
         Commands::Version => {
-            println!("hex {} ({})", env!("CARGO_PKG_VERSION"), env!("HEX_GIT_SHA"));
+            println!(
+                "hex {} ({})",
+                env!("CARGO_PKG_VERSION"),
+                env!("HEX_GIT_SHA")
+            );
         }
         Commands::ClaudeFlags { profile } => {
             // Read HEX_DIR optionally — claude-flags must work even when the
@@ -1151,7 +1368,11 @@ fn main() {
                 let registry = hex::workers::registry();
                 for w in &registry {
                     let (kind, _path) = module_source(&w.name);
-                    let state = if disabled.contains(&w.name) { "  DISABLED" } else { "" };
+                    let state = if disabled.contains(&w.name) {
+                        "  DISABLED"
+                    } else {
+                        ""
+                    };
                     println!("{:<28} [{}]  {}{}", w.name, kind, trigger_summary(w), state);
                 }
                 // A disabled name with no registered worker is drift — loud.
@@ -1165,7 +1386,10 @@ fn main() {
                 std::process::exit(0)
             }
             ModuleCommands::Status { name } => {
-                match hex::workers::registry().into_iter().find(|w| w.name == name) {
+                match hex::workers::registry()
+                    .into_iter()
+                    .find(|w| w.name == name)
+                {
                     Some(w) => {
                         let hex_dir = get_hex_dir();
                         let state = match hex::module_state::disabled_set(&hex_dir) {
@@ -1202,64 +1426,112 @@ fn main() {
         Commands::Charter { command } => {
             let hex_dir = get_hex_dir();
             match command {
-                CharterCommands::Register { name, path, why, by } => {
-                    match hex::charter::register(&hex_dir, &name, &path, &by, &why) {
-                        Ok(st) => println!("charter '{}' registered at v{} ({})", st.name, st.version, st.sha256),
-                        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                CharterCommands::Register {
+                    name,
+                    path,
+                    why,
+                    by,
+                } => match hex::charter::register(&hex_dir, &name, &path, &by, &why) {
+                    Ok(st) => println!(
+                        "charter '{}' registered at v{} ({})",
+                        st.name, st.version, st.sha256
+                    ),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
                     }
-                }
-                CharterCommands::Amend { name, file, why, by } => {
-                    match hex::charter::amend(&hex_dir, &name, &file, &by, &why) {
-                        Ok(st) => println!("charter '{}' amended to v{} ({})", st.name, st.version, st.sha256),
-                        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
+                },
+                CharterCommands::Amend {
+                    name,
+                    file,
+                    why,
+                    by,
+                } => match hex::charter::amend(&hex_dir, &name, &file, &by, &why) {
+                    Ok(st) => println!(
+                        "charter '{}' amended to v{} ({})",
+                        st.name, st.version, st.sha256
+                    ),
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(1);
                     }
-                }
+                },
                 CharterCommands::Rebaseline { name, why, by } => {
                     match hex::charter::rebaseline(&hex_dir, &name, &by, &why) {
-                        Ok(st) => println!("charter '{}' rebaselined to v{} ({}) — drift accepted into the trail", st.name, st.version, st.sha256),
-                        Err(e) => { eprintln!("{e}"); std::process::exit(1); }
-                    }
-                }
-                CharterCommands::Verify { alert } => {
-                    match hex::charter::verify(&hex_dir, alert) {
-                        Ok(drifts) if drifts.is_empty() => {
-                            println!("charter verify OK ({} registered)", hex::charter::latest_states(&hex_dir).map(|m| m.len()).unwrap_or(0));
-                        }
-                        Ok(drifts) => {
-                            eprintln!("charter verify: {} DRIFTED", drifts.len());
+                        Ok(st) => println!(
+                            "charter '{}' rebaselined to v{} ({}) — drift accepted into the trail",
+                            st.name, st.version, st.sha256
+                        ),
+                        Err(e) => {
+                            eprintln!("{e}");
                             std::process::exit(1);
                         }
-                        Err(e) => { eprintln!("{e}"); std::process::exit(2); }
                     }
                 }
+                CharterCommands::Verify { alert } => match hex::charter::verify(&hex_dir, alert) {
+                    Ok(drifts) if drifts.is_empty() => {
+                        println!(
+                            "charter verify OK ({} registered)",
+                            hex::charter::latest_states(&hex_dir)
+                                .map(|m| m.len())
+                                .unwrap_or(0)
+                        );
+                    }
+                    Ok(drifts) => {
+                        eprintln!("charter verify: {} DRIFTED", drifts.len());
+                        std::process::exit(1);
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2);
+                    }
+                },
                 CharterCommands::Log { name } => {
                     match hex::charter::log(&hex_dir, name.as_deref()) {
                         Ok(rows) => {
                             for (ts, v) in rows {
-                                println!("{} {}", chrono::DateTime::from_timestamp(ts, 0).map(|d| d.to_rfc3339()).unwrap_or_else(|| ts.to_string()), v);
+                                println!(
+                                    "{} {}",
+                                    chrono::DateTime::from_timestamp(ts, 0)
+                                        .map(|d| d.to_rfc3339())
+                                        .unwrap_or_else(|| ts.to_string()),
+                                    v
+                                );
                             }
                         }
-                        Err(e) => { eprintln!("{e}"); std::process::exit(2); }
-                    }
-                }
-                CharterCommands::Show => {
-                    match hex::charter::latest_states(&hex_dir) {
-                        Ok(states) if states.is_empty() => println!("no charters registered"),
-                        Ok(states) => {
-                            for (_, st) in states {
-                                println!("{:<12} v{:<3} {}  {}", st.name, st.version, st.sha256, st.path);
-                            }
+                        Err(e) => {
+                            eprintln!("{e}");
+                            std::process::exit(2);
                         }
-                        Err(e) => { eprintln!("{e}"); std::process::exit(2); }
                     }
                 }
+                CharterCommands::Show => match hex::charter::latest_states(&hex_dir) {
+                    Ok(states) if states.is_empty() => println!("no charters registered"),
+                    Ok(states) => {
+                        for (_, st) in states {
+                            println!(
+                                "{:<12} v{:<3} {}  {}",
+                                st.name, st.version, st.sha256, st.path
+                            );
+                        }
+                    }
+                    Err(e) => {
+                        eprintln!("{e}");
+                        std::process::exit(2);
+                    }
+                },
             }
         }
         Commands::Ledger { command } => {
             let hex_dir = get_hex_dir();
             let path = hex::ledger::default_path(&hex_dir);
             match command {
-                LedgerCommands::Append { agent, action_class, kind, payload } => {
+                LedgerCommands::Append {
+                    agent,
+                    action_class,
+                    kind,
+                    payload,
+                } => {
                     let payload_json: serde_json::Value = match serde_json::from_str(&payload) {
                         Ok(v) => v,
                         Err(e) => {
@@ -1424,7 +1696,12 @@ fn main() {
             );
             std::process::exit(0);
         }
-        Commands::Dial { agent, action_class, min_n, irreversible } => {
+        Commands::Dial {
+            agent,
+            action_class,
+            min_n,
+            irreversible,
+        } => {
             // Load all outcome rows from the ledger and feed the pure dial.
             let hex_dir = get_hex_dir();
             let path = hex::ledger::default_path(&hex_dir);
@@ -1452,7 +1729,16 @@ fn main() {
             }
         }
         Commands::Gatekeeper { command } => match command {
-            GatekeeperCommands::Judge { proposal, corpus, floor, out, now, store, canaries, boi_db } => {
+            GatekeeperCommands::Judge {
+                proposal,
+                corpus,
+                floor,
+                out,
+                now,
+                store,
+                canaries,
+                boi_db,
+            } => {
                 let hex_dir = get_hex_dir();
                 // Dial consult — recorded in the verdict, never upgrades it
                 // (P1: everything flags to Mike regardless).
@@ -1687,7 +1973,10 @@ fn main() {
                     version,
                     hotfix,
                     dry_run,
-                    skip: hex::release::SkipFlags { skip_e2e, skip_parity },
+                    skip: hex::release::SkipFlags {
+                        skip_e2e,
+                        skip_parity,
+                    },
                     finish,
                 };
                 match hex::release::cut(&opts) {
@@ -1710,7 +1999,9 @@ fn main() {
                     PathBuf::from(String::from_utf8_lossy(&out.stdout).trim())
                 }
                 _ => {
-                    eprintln!("hex sanitize: not inside a git repository — run from the repo to scan");
+                    eprintln!(
+                        "hex sanitize: not inside a git repository — run from the repo to scan"
+                    );
                     std::process::exit(2);
                 }
             };
@@ -1744,13 +2035,22 @@ fn main() {
     }
 }
 
+/// Open the ledger DB with a bounded busy_timeout, mirroring
+/// `memory::open_db`'s rationale: the applier holds an fs2 flock across its
+/// write sequence, and SQLite's default busy_timeout of 0 makes a concurrent
+/// read fail instantly with SQLITE_BUSY instead of waiting out the writer
+/// (2026-07-16 audit, finding hex:24).
+fn open_ledger(path: &std::path::Path) -> Result<rusqlite::Connection, String> {
+    let conn = rusqlite::Connection::open(path).map_err(|e| format!("open: {e}"))?;
+    conn.busy_timeout(std::time::Duration::from_secs(5))
+        .map_err(|e| format!("busy_timeout: {e}"))?;
+    Ok(conn)
+}
+
 /// Load every `outcome`-kind row from the ledger into [`hex::dial::OutcomeRow`]s.
 /// Errors loudly per S6 — no silent skip on a malformed row.
-fn load_outcome_rows(
-    path: &std::path::Path,
-) -> Result<Vec<hex::dial::OutcomeRow>, String> {
-    use rusqlite::Connection;
-    let conn = Connection::open(path).map_err(|e| format!("open: {e}"))?;
+fn load_outcome_rows(path: &std::path::Path) -> Result<Vec<hex::dial::OutcomeRow>, String> {
+    let conn = open_ledger(path)?;
     let mut stmt = conn
         .prepare("SELECT ts, agent, action_class, payload FROM ledger WHERE kind='outcome'")
         .map_err(|e| format!("prepare: {e}"))?;
@@ -1766,10 +2066,9 @@ fn load_outcome_rows(
         .map_err(|e| format!("query: {e}"))?;
     let mut out = Vec::new();
     for row in rows {
-        let (ts, agent, action_class, payload) =
-            row.map_err(|e| format!("row read: {e}"))?;
-        let v: serde_json::Value = serde_json::from_str(&payload)
-            .map_err(|e| format!("payload parse (ts={ts}): {e}"))?;
+        let (ts, agent, action_class, payload) = row.map_err(|e| format!("row read: {e}"))?;
+        let v: serde_json::Value =
+            serde_json::from_str(&payload).map_err(|e| format!("payload parse (ts={ts}): {e}"))?;
         let success = v.get("success").and_then(|x| x.as_bool()).unwrap_or(false);
         out.push(hex::dial::OutcomeRow {
             agent,
@@ -1818,9 +2117,7 @@ fn run_freshness(ledger: &hex::ledger::Ledger) -> i32 {
                 "age_seconds": age,
                 "window_seconds": window,
             });
-            if let Err(e) =
-                ledger.append("freshness", "freshness.alert", "alert", &alert)
-            {
+            if let Err(e) = ledger.append("freshness", "freshness.alert", "alert", &alert) {
                 eprintln!("hex ledger freshness: alert append failed: {e}");
             }
             // macOS notification (osascript). Best-effort — log a stderr
@@ -1857,9 +2154,7 @@ fn run_freshness(ledger: &hex::ledger::Ledger) -> i32 {
 /// Detection only; exit 1 when anything is bad, 2 on store read failure.
 fn run_failures(window: i64, alert: bool) -> i32 {
     let now = chrono::Utc::now();
-    let hex_dir = std::path::PathBuf::from(
-        std::env::var("HEX_DIR").unwrap_or_else(|_| ".".into()),
-    );
+    let hex_dir = std::path::PathBuf::from(std::env::var("HEX_DIR").unwrap_or_else(|_| ".".into()));
     let regs = hex::failures::registered_triggers();
     let disabled = hex::module_state::disabled_set(&hex_dir).unwrap_or_else(|e| {
         eprintln!("failures: disabled-set unreadable ({e}) — evaluating ALL modules");
@@ -1868,7 +2163,10 @@ fn run_failures(window: i64, alert: bool) -> i32 {
     let exp = hex::failures::cron_expectations(&regs, &disabled);
     let report = match hex::failures::evaluate(&exp, now, &[]) {
         Ok(r) => r,
-        Err(e) => { eprintln!("failures: events.db read failed: {e}"); return 2; }
+        Err(e) => {
+            eprintln!("failures: events.db read failed: {e}");
+            return 2;
+        }
     };
     let sigs = hex::failures::failure_signatures(now, window).unwrap_or_default();
     let dups = hex::failures::duplicate_fires(&exp, now).unwrap_or_default();
@@ -1876,31 +2174,54 @@ fn run_failures(window: i64, alert: bool) -> i32 {
     let not_landed = hex::failures::modules_not_landed(&hex_dir, &compiled);
 
     let mut bad = false;
-    println!("== hex failures (window {window}h, {} cron fids, {} disabled) ==",
-        exp.len(), disabled.len());
+    println!(
+        "== hex failures (window {window}h, {} cron fids, {} disabled) ==",
+        exp.len(),
+        disabled.len()
+    );
     if !report.missed.is_empty() {
         bad = true;
         println!("\nMISSED ({}):", report.missed.len());
         for m in &report.missed {
-            println!("  {}  expected {}  last-seen {}", m.fid,
-                m.expected_at.to_rfc3339(), m.last_seen.as_deref().unwrap_or("never"));
+            println!(
+                "  {}  expected {}  last-seen {}",
+                m.fid,
+                m.expected_at.to_rfc3339(),
+                m.last_seen.as_deref().unwrap_or("never")
+            );
             if alert {
-                hex::alert::notify(&hex::failures::alert_key("missed", &m.fid),
+                hex::alert::notify(
+                    &hex::failures::alert_key("missed", &m.fid),
                     "hex worker missed its scheduled run",
-                    &format!("{} expected at {}", m.fid, m.expected_at.to_rfc3339()));
+                    &format!("{} expected at {}", m.fid, m.expected_at.to_rfc3339()),
+                );
             }
         }
     }
     if !not_landed.is_empty() {
         bad = true;
-        println!("\nMODULE NOT LANDED — on disk, not in this binary ({}):", not_landed.len());
+        println!(
+            "\nMODULE NOT LANDED — on disk, not in this binary ({}):",
+            not_landed.len()
+        );
         for f in &not_landed {
             println!("  {f}  (rebuild + redeploy the harness to land it)");
             if alert {
-                hex::alert::notify(&hex::failures::alert_key("notlanded", f),
-                    "hex module on disk but not in the running binary", f);
+                hex::alert::notify(
+                    &hex::failures::alert_key("notlanded", f),
+                    "hex module on disk but not in the running binary",
+                    f,
+                );
             }
         }
+    }
+    if report.malformed_rows > 0 {
+        // S6: corrupt events.db rows must be loud — they silently weaken the
+        // downtime analysis this whole probe exists for.
+        println!(
+            "\nMALFORMED ROWS ({}): events.db rows dropped from the downtime timeline (unreadable or bad ts) — inspect the telemetry store",
+            report.malformed_rows
+        );
     }
     if !report.never_ran.is_empty() {
         bad = true; // visible during grace by design (proposal: defaults chosen)
@@ -1912,28 +2233,47 @@ fn run_failures(window: i64, alert: bool) -> i32 {
     }
     for d in &report.downtime {
         bad = true;
-        let msg = format!("no telemetry {} → {} — harness down, box asleep, or restarted; excused: {}",
-            d.from.to_rfc3339(), d.to.to_rfc3339(), d.excused_fids.join(", "));
+        let msg = format!(
+            "no telemetry {} → {} — harness down, box asleep, or restarted; excused: {}",
+            d.from.to_rfc3339(),
+            d.to.to_rfc3339(),
+            d.excused_fids.join(", ")
+        );
         println!("\nDOWNTIME: {msg}");
         if alert {
-            hex::alert::notify(&hex::failures::alert_key("downtime",
-                &d.from.timestamp().to_string()), "telemetry gap", &msg);
+            hex::alert::notify(
+                &hex::failures::alert_key("downtime", &d.from.timestamp().to_string()),
+                "telemetry gap",
+                &msg,
+            );
         }
     }
     if !sigs.is_empty() {
         println!("\nFAILURE SIGNATURES (active in window; NEW first):");
         for s in &sigs {
-            if s.is_new { bad = true; }
-            println!("  [{}] {:>4}x  {}  {}  first {}  last {}",
-                if s.is_new { "NEW" } else { "old" }, s.count, s.fid, s.head,
-                s.first_seen, s.last_seen);
+            if s.is_new {
+                bad = true;
+            }
+            println!(
+                "  [{}] {:>4}x  {}  {}  first {}  last {}",
+                if s.is_new { "NEW" } else { "old" },
+                s.count,
+                s.fid,
+                s.head,
+                s.first_seen,
+                s.last_seen
+            );
         }
     }
     if !dups.is_empty() {
         println!("\nDUPLICATE FIRES (engine anomaly — >1 row per expected window):");
         for d in &dups {
-            println!("  {}  {} rows at {}", d.fid, d.rows_in_window,
-                d.window_start.to_rfc3339());
+            println!(
+                "  {}  {} rows at {}",
+                d.fid,
+                d.rows_in_window,
+                d.window_start.to_rfc3339()
+            );
         }
     }
     let event_fids: Vec<_> = regs.iter().filter(|t| t.cron.is_none()).collect();
@@ -1943,7 +2283,12 @@ fn run_failures(window: i64, alert: bool) -> i32 {
             println!("  {}", t.fid);
         }
     }
-    if bad { 1 } else { println!("\nall clear"); 0 }
+    if bad {
+        1
+    } else {
+        println!("\nall clear");
+        0
+    }
 }
 
 /// `hex failures probe` — out-of-process liveness probe. Alerts via osascript
@@ -1964,8 +2309,9 @@ fn run_failures_probe() -> i32 {
     let harness_listed = launchd.map(|o| o.status.success()).unwrap_or(false);
     let mut problems = Vec::new();
     match fresh {
-        Some(age) if age > stale_after_secs =>
-            problems.push(format!("events.db stale: last row {age}s ago")),
+        Some(age) if age > stale_after_secs => {
+            problems.push(format!("events.db stale: last row {age}s ago"))
+        }
         None => problems.push("events.db unreadable or empty".to_string()),
         _ => {}
     }
@@ -1982,7 +2328,10 @@ fn run_failures_probe() -> i32 {
         "display notification \"{}\" with title \"hex harness liveness probe\"",
         msg.replace('"', "'")
     );
-    let _ = std::process::Command::new("osascript").arg("-e").arg(&script).status();
+    let _ = std::process::Command::new("osascript")
+        .arg("-e")
+        .arg(&script)
+        .status();
     1
 }
 
@@ -1998,10 +2347,11 @@ const HARNESS_LABEL: &str = "com.hex.harness";
 ///   - args              = ["harness", "serve"]
 ///   - working_dir       = $HEX_DIR
 ///   - env               = HEX_DIR, III_URL, PATH (homebrew prepended),
-///                         GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
+///     GOOGLE_WORKSPACE_CLI_KEYRING_BACKEND=file
 ///   - keep_alive        = true (restart on crash)
 ///   - run_at_load       = true (start at login)
 ///   - log_path          = $HEX_DIR/.hex/logs/com.hex.harness.log
+///
 /// daemon-green guarantees the rendered plist omits the launchd login-session
 /// detach key (verified 2026-06-05: when present, keychain reads fail rc=36;
 /// when absent, rc=0). We deliberately do NOT — and CANNOT — set it here.
@@ -2054,7 +2404,11 @@ fn bootstrap_secrets_env(hex_dir: &std::path::Path) {
             }
         };
         for raw in content.lines() {
-            let line = raw.trim().strip_prefix("export").unwrap_or(raw.trim()).trim();
+            let line = raw
+                .trim()
+                .strip_prefix("export")
+                .unwrap_or(raw.trim())
+                .trim();
             if line.is_empty() || line.starts_with('#') {
                 continue;
             }
@@ -2110,7 +2464,10 @@ fn harness_start() -> i32 {
     } else if let Err(e) = mgr.start(hex::harness::supervise::WATCHDOG_LABEL) {
         eprintln!("hex harness start: watchdog start failed (non-fatal): {e}");
     } else {
-        eprintln!("hex harness start: {} loaded", hex::harness::supervise::WATCHDOG_LABEL);
+        eprintln!(
+            "hex harness start: {} loaded",
+            hex::harness::supervise::WATCHDOG_LABEL
+        );
     }
     rc
 }
@@ -2152,7 +2509,7 @@ fn harness_restart() -> i32 {
 /// hand or from a health gate). Exit 0 when healthy or re-bootstrapped; nonzero only if it
 /// acted and the engine still did not come up.
 fn harness_ensure() -> i32 {
-    use hex::harness::supervise::{ensure_once, engine_listening, EnsureAction, ENGINE_ADDR};
+    use hex::harness::supervise::{engine_listening, ensure_once, EnsureAction, ENGINE_ADDR};
     let hex_dir = get_hex_dir();
     match ensure_once(&hex_dir) {
         EnsureAction::NoOp => {
@@ -2220,6 +2577,9 @@ fn parse_since(s: &str) -> Result<chrono::Duration, String> {
     if s.is_empty() {
         return Err("empty --since value".into());
     }
+    // Boundary proof: the slice arm runs only when the last char is ASCII 'h' or
+    // 'd' (1 byte), so s.len() - 1 lands exactly at its start, a char boundary.
+    #[allow(clippy::string_slice)]
     let (num_str, unit) = match s.chars().last().unwrap() {
         'h' | 'd' => (&s[..s.len() - 1], s.chars().last().unwrap()),
         _ => (s, 'h'),
@@ -2269,6 +2629,415 @@ fn print_event_json(rows: &[telemetry::EventRow]) {
     println!("{}", serde_json::to_string_pretty(&items).unwrap());
 }
 
+/// Resolve the hex workspace for the HITL queue.
+///
+/// Unlike [`get_hex_dir`], this does NOT require a `CLAUDE.md` marker: the queue
+/// is a self-contained set of files under `$HEX_DIR/.hex/hitl/` and must work in
+/// any directory the operator points `HEX_DIR` at (e.g. a scratch dir). Loud
+/// error only when there is nowhere at all to resolve.
+fn hitl_hex_dir() -> PathBuf {
+    if let Ok(v) = std::env::var("HEX_DIR") {
+        return PathBuf::from(v);
+    }
+    if let Ok(home) = std::env::var("HOME") {
+        return PathBuf::from(home).join("hex");
+    }
+    eprintln!("hex hitl: neither HEX_DIR nor HOME is set");
+    std::process::exit(1);
+}
+
+fn hitl_parse_id_list(s: Option<&str>) -> Result<Vec<u64>, String> {
+    let Some(s) = s else { return Ok(Vec::new()) };
+    let mut out = Vec::new();
+    for part in s.split(',') {
+        let t = part.trim();
+        if t.is_empty() {
+            continue;
+        }
+        out.push(
+            t.parse::<u64>()
+                .map_err(|_| format!("invalid id {t:?} in --depends-on (want integers)"))?,
+        );
+    }
+    Ok(out)
+}
+
+fn hitl_resolve_body(body: Option<String>) -> Result<String, String> {
+    match body.as_deref() {
+        Some("-") => {
+            use std::io::Read;
+            let mut s = String::new();
+            io::stdin()
+                .read_to_string(&mut s)
+                .map_err(|e| format!("cannot read body from stdin: {e}"))?;
+            Ok(s)
+        }
+        Some(b) => Ok(b.to_string()),
+        None => Ok(String::new()),
+    }
+}
+
+fn hitl_is_blocked(it: &hex::hitl::store::Item, all: &[hex::hitl::store::Item]) -> bool {
+    it.depends_on.iter().any(|dep| {
+        all.iter()
+            .find(|o| o.id == *dep)
+            .map(|o| !o.status.is_closed())
+            .unwrap_or(false)
+    })
+}
+
+fn hitl_truncate(s: &str, max: usize) -> String {
+    if s.chars().count() <= max {
+        s.to_string()
+    } else {
+        let t: String = s.chars().take(max.saturating_sub(1)).collect();
+        format!("{t}…")
+    }
+}
+
+fn hitl_state_file(hex_dir: &std::path::Path, name: &str) -> PathBuf {
+    hex::hitl::store::state_dir(hex_dir).join(name)
+}
+
+fn hitl_ping_count(hex_dir: &std::path::Path, day: &str) -> u32 {
+    std::fs::read_to_string(hitl_state_file(hex_dir, &format!("pings-{day}")))
+        .ok()
+        .and_then(|s| s.trim().parse::<u32>().ok())
+        .unwrap_or(0)
+}
+
+fn hitl_incr_ping_count(hex_dir: &std::path::Path, day: &str) {
+    let dir = hex::hitl::store::state_dir(hex_dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("hex hitl: cannot create {}: {e}", dir.display());
+        return;
+    }
+    let next = hitl_ping_count(hex_dir, day) + 1;
+    let p = hitl_state_file(hex_dir, &format!("pings-{day}"));
+    if let Err(e) = std::fs::write(&p, next.to_string()) {
+        eprintln!("hex hitl: cannot write {}: {e}", p.display());
+    }
+}
+
+fn hitl_digest_sent(hex_dir: &std::path::Path, day: &str) -> bool {
+    hitl_state_file(hex_dir, &format!("digest-sent-{day}")).exists()
+}
+
+fn hitl_mark_digest_sent(hex_dir: &std::path::Path, day: &str) {
+    let dir = hex::hitl::store::state_dir(hex_dir);
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        eprintln!("hex hitl: cannot create {}: {e}", dir.display());
+        return;
+    }
+    let p = hitl_state_file(hex_dir, &format!("digest-sent-{day}"));
+    if let Err(e) = std::fs::write(&p, b"") {
+        eprintln!("hex hitl: cannot write {}: {e}", p.display());
+    }
+}
+
+/// Send the pings due right now. When `only_id` is set (the `add` path), restrict
+/// to that freshly-filed item so filing one item never fires unrelated pings.
+fn hitl_process_pings(
+    hex_dir: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+    only_id: Option<u64>,
+) -> Result<(), String> {
+    use hex::hitl::{policy, store, transport};
+
+    let cfg = store::load_config(hex_dir)?;
+
+    // Durably wake lapsed snoozes so the policy/digest treat them as open.
+    let items = store::load_items(hex_dir)?;
+    for it in &items {
+        if it.status == store::Status::Snoozed {
+            if let Some(until) = it.snooze_until {
+                if now.date_naive() >= until {
+                    let _ = store::reopen(hex_dir, it.id, now);
+                }
+            }
+        }
+    }
+    let items = store::load_items(hex_dir)?;
+
+    let day = now.format("%Y-%m-%d").to_string();
+    let sent_today = hitl_ping_count(hex_dir, &day);
+    let digest_done = hitl_digest_sent(hex_dir, &day);
+
+    let mut actions = policy::pings_due(&items, &cfg, now, sent_today, digest_done);
+    if let Some(id) = only_id {
+        actions.retain(|a| a.item_id == id);
+    }
+
+    let sender = transport::OsascriptSender;
+    for a in actions {
+        let Some(it) = items.iter().find(|i| i.id == a.item_id) else {
+            continue;
+        };
+        let text = format!(
+            "HITL {} — [{}] {} · {} (hex hitl show {})",
+            a.reason.as_str(),
+            it.priority,
+            it.title,
+            it.project,
+            it.id
+        );
+        transport::send(hex_dir, &cfg, &sender, Some(it.id), "ping", &text);
+        let _ = store::mark_pinged(hex_dir, it.id, now);
+        hitl_incr_ping_count(hex_dir, &day);
+    }
+    Ok(())
+}
+
+/// Compose + send the digest now. Returns the open count if a digest was sent.
+fn hitl_send_digest(
+    hex_dir: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+) -> Result<Option<usize>, String> {
+    use hex::hitl::{policy, store, transport};
+    let cfg = store::load_config(hex_dir)?;
+    let items = store::load_items(hex_dir)?;
+    match policy::compose_digest(&items, now) {
+        Some(digest) => {
+            let sender = transport::OsascriptSender;
+            transport::send(hex_dir, &cfg, &sender, None, "digest", &digest.render());
+            let day = now.format("%Y-%m-%d").to_string();
+            hitl_mark_digest_sent(hex_dir, &day);
+            Ok(Some(digest.total_open))
+        }
+        None => Ok(None),
+    }
+}
+
+fn hitl_close(
+    hex_dir: &std::path::Path,
+    id: u64,
+    status: hex::hitl::store::Status,
+    note: Option<String>,
+    now: chrono::DateTime<chrono::Utc>,
+) -> i32 {
+    match hex::hitl::store::close(hex_dir, id, status, note, now) {
+        Ok(it) => {
+            println!("hitl: item {} {}", it.id, it.status);
+            0
+        }
+        Err(e) => {
+            eprintln!("hex hitl: {e}");
+            1
+        }
+    }
+}
+
+fn run_hitl(command: HitlCommands) -> i32 {
+    use chrono::Timelike;
+    use hex::hitl::store;
+
+    let hex_dir = hitl_hex_dir();
+    let now = chrono::Utc::now();
+
+    match command {
+        HitlCommands::Add {
+            project,
+            title,
+            priority,
+            deadline,
+            est,
+            depends_on,
+            body,
+        } => {
+            let priority = match priority.parse::<store::Priority>() {
+                Ok(p) => p,
+                Err(e) => {
+                    eprintln!("hex hitl add: {e}");
+                    return 2;
+                }
+            };
+            let deadline = match deadline {
+                Some(s) => match s.parse::<chrono::NaiveDate>() {
+                    Ok(d) => Some(d),
+                    Err(_) => {
+                        eprintln!("hex hitl add: invalid --deadline {s:?} (want YYYY-MM-DD)");
+                        return 2;
+                    }
+                },
+                None => None,
+            };
+            let depends_on = match hitl_parse_id_list(depends_on.as_deref()) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("hex hitl add: {e}");
+                    return 2;
+                }
+            };
+            let body = match hitl_resolve_body(body) {
+                Ok(b) => b,
+                Err(e) => {
+                    eprintln!("hex hitl add: {e}");
+                    return 1;
+                }
+            };
+            let new = store::NewItem {
+                title,
+                project,
+                body,
+                priority: Some(priority),
+                deadline,
+                est_minutes: est,
+                depends_on,
+            };
+            let item = match store::create(&hex_dir, new, now) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("hex hitl add: {e}");
+                    return 1;
+                }
+            };
+            println!("{}", item.id);
+            if let Err(e) = hitl_process_pings(&hex_dir, now, Some(item.id)) {
+                eprintln!("hex hitl add: ping failed: {e}");
+            }
+            0
+        }
+        HitlCommands::List { all } => {
+            let items = match store::load_items(&hex_dir) {
+                Ok(v) => v,
+                Err(e) => {
+                    eprintln!("hex hitl list: {e}");
+                    return 1;
+                }
+            };
+            let rows: Vec<&store::Item> = items
+                .iter()
+                .filter(|i| all || !i.status.is_closed())
+                .collect();
+            if rows.is_empty() {
+                println!("(no items)");
+                return 0;
+            }
+            println!(
+                "{:>3}  {:<3}  {:<14}  {:<32}  {:<10}  blocked?",
+                "id", "pri", "project", "title", "deadline"
+            );
+            for it in rows {
+                let blocked = if hitl_is_blocked(it, &items) {
+                    "blocked"
+                } else {
+                    ""
+                };
+                let deadline = it.deadline.map(|d| d.to_string()).unwrap_or_default();
+                println!(
+                    "{:>3}  {:<3}  {:<14}  {:<32}  {:<10}  {}",
+                    it.id,
+                    it.priority,
+                    hitl_truncate(&it.project, 14),
+                    hitl_truncate(&it.title, 32),
+                    deadline,
+                    blocked
+                );
+            }
+            0
+        }
+        HitlCommands::Show { id } => {
+            let it = match store::load_item(&hex_dir, id) {
+                Ok(i) => i,
+                Err(e) => {
+                    eprintln!("hex hitl show: {e}");
+                    return 1;
+                }
+            };
+            println!("id:       {}", it.id);
+            println!("title:    {}", it.title);
+            println!("project:  {}", it.project);
+            println!("priority: {}", it.priority);
+            println!("status:   {}", it.status);
+            if let Some(d) = it.deadline {
+                println!("deadline: {d}");
+            }
+            if let Some(m) = it.est_minutes {
+                println!("est:      {m} min");
+            }
+            if !it.depends_on.is_empty() {
+                println!("depends:  {:?}", it.depends_on);
+            }
+            println!("created:  {}", it.created.to_rfc3339());
+            if let Some(s) = it.snooze_until {
+                println!("snoozed:  until {s}");
+            }
+            if let Some(c) = it.closed_at {
+                println!("closed:   {}", c.to_rfc3339());
+            }
+            if let Some(n) = &it.note {
+                println!("note:     {n}");
+            }
+            println!();
+            println!("{}", it.body);
+            0
+        }
+        HitlCommands::Done { id, note } => hitl_close(&hex_dir, id, store::Status::Done, note, now),
+        HitlCommands::Skip { id, note } => {
+            hitl_close(&hex_dir, id, store::Status::Skipped, note, now)
+        }
+        HitlCommands::Snooze { id, until } => {
+            let d = match until.parse::<chrono::NaiveDate>() {
+                Ok(d) => d,
+                Err(_) => {
+                    eprintln!("hex hitl snooze: invalid --until {until:?} (want YYYY-MM-DD)");
+                    return 2;
+                }
+            };
+            match store::snooze(&hex_dir, id, d, now) {
+                Ok(it) => {
+                    println!("hitl: item {} snoozed until {}", it.id, d);
+                    0
+                }
+                Err(e) => {
+                    eprintln!("hex hitl snooze: {e}");
+                    1
+                }
+            }
+        }
+        HitlCommands::Nudge => {
+            if let Err(e) = hitl_process_pings(&hex_dir, now, None) {
+                eprintln!("hex hitl nudge: {e}");
+                return 1;
+            }
+            let cfg = match store::load_config(&hex_dir) {
+                Ok(c) => c,
+                Err(e) => {
+                    eprintln!("hex hitl nudge: {e}");
+                    return 1;
+                }
+            };
+            let day = now.format("%Y-%m-%d").to_string();
+            if now.hour() == cfg.digest_hour && !hitl_digest_sent(&hex_dir, &day) {
+                match hitl_send_digest(&hex_dir, now) {
+                    Ok(Some(n)) => println!("hitl nudge: digest sent ({n} open)"),
+                    Ok(None) => {}
+                    Err(e) => {
+                        eprintln!("hex hitl nudge: digest failed: {e}");
+                        return 1;
+                    }
+                }
+            }
+            println!("hitl nudge: done");
+            0
+        }
+        HitlCommands::Digest => match hitl_send_digest(&hex_dir, now) {
+            Ok(Some(n)) => {
+                println!("hitl digest: sent ({n} open)");
+                0
+            }
+            Ok(None) => {
+                println!("hitl digest: queue empty, nothing sent");
+                0
+            }
+            Err(e) => {
+                eprintln!("hex hitl digest: {e}");
+                1
+            }
+        },
+    }
+}
+
 fn run_messages(command: MessagesCommands) -> i32 {
     let hex_dir = get_hex_dir();
     let db = hex::memory::db_path(&hex_dir);
@@ -2301,7 +3070,10 @@ fn run_messages(command: MessagesCommands) -> i32 {
                 for o in &p.options {
                     println!("  [{}] {} — {}", o.id, o.label, o.description);
                 }
-                println!("(reply: hex messages reply {} <id[,id]> [--text ...])", p.id);
+                println!(
+                    "(reply: hex messages reply {} <id[,id]> [--text ...])",
+                    p.id
+                );
             } else {
                 println!("{}", r.output);
             }
@@ -2320,7 +3092,11 @@ fn format_breach(b: &hex::resources::Breach) -> String {
             "BREACH floor: root free space {free_gb}G < {}G floor",
             hex::resources::FLOOR_FREE_GB
         ),
-        hex::resources::Breach::Trend { dir, growth_gb, window_hours } => {
+        hex::resources::Breach::Trend {
+            dir,
+            growth_gb,
+            window_hours,
+        } => {
             format!("BREACH trend: {dir} grew {growth_gb}G in {window_hours}h")
         }
     }
@@ -2612,6 +3388,19 @@ fn module_set_enabled(name: &str, enable: bool) -> i32 {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn open_ledger_sets_bounded_busy_timeout() {
+        // SQLite reports the effective timeout via PRAGMA busy_timeout; the
+        // default 0 is exactly the audit finding this guards against.
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("ledger.db");
+        let conn = super::open_ledger(&db).expect("open");
+        let ms: i64 = conn
+            .query_row("PRAGMA busy_timeout", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(ms, 5000, "ledger opens must wait out a mid-write applier");
+    }
+
     use super::*;
     use clap::CommandFactory;
     use clap_complete::Shell;
@@ -2625,7 +3414,7 @@ mod tests {
         assert!(
             output.contains("_hex"),
             "zsh completions must contain '_hex', got: {}",
-            &output[..200.min(output.len())]
+            output.get(..200.min(output.len())).unwrap_or(&output)
         );
     }
 }

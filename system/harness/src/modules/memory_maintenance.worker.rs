@@ -8,7 +8,7 @@
 //! - id `hex::memory::parse_transcripts`   command `hex memory parse-transcripts`   cron `0 */15 * * * * *`
 //! - id `hex::memory::consolidate_full`    command `hex memory consolidate full`    cron `0 0 3 * * * *`
 //! - id `hex::memory::maintain`            command `hex memory maintain --vacuum --backfill-facts`
-//!                                                                                  cron `0 33 4 * * SUN *`
+//!   cron `0 33 4 * * SUN *`
 //!
 //! The YAML file is intentionally left in place (additive migration — a later
 //! spec removes the YAML-host path).

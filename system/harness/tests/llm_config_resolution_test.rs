@@ -52,7 +52,7 @@ fn llm_config_resolution_layers() {
 
     let r = llm_config::resolve("consolidate_audit").expect("built-in default");
     assert_eq!(r.model, "anthropic/claude-sonnet-5");
-    assert_eq!(r.max_tokens, 4096);
+    assert_eq!(r.max_tokens, 16384);
 
     let r = llm_config::resolve("health_check").expect("built-in default");
     assert_eq!(r.model, "anthropic/claude-haiku-4.5");
@@ -85,10 +85,7 @@ max_tokens = 9999
     assert_eq!(r.max_tokens, 256);
 
     // ---- 3. Env var beats file --------------------------------------------
-    std::env::set_var(
-        "HEX_LLM_MODEL_MEMORY_EXTRACT",
-        "anthropic/from-env-extract",
-    );
+    std::env::set_var("HEX_LLM_MODEL_MEMORY_EXTRACT", "anthropic/from-env-extract");
     let r = llm_config::resolve("memory_extract").expect("env override");
     assert_eq!(r.model, "anthropic/from-env-extract");
     std::env::remove_var("HEX_LLM_MODEL_MEMORY_EXTRACT");

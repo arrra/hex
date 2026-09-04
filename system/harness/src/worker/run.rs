@@ -65,8 +65,8 @@ pub enum WorkerOutput {
 pub const OUTPUT_SCHEMA: &str = r#"{"type":"object","required":["kind"],"properties":{"kind":{"type":"string","enum":["answer","prompt"]},"text":{"type":"string"},"multi":{"type":"boolean"},"options":{"type":"array","items":{"type":"object","required":["id","label","description"],"properties":{"id":{"type":"string"},"label":{"type":"string"},"description":{"type":"string"}}}}}}"#;
 
 pub fn parse_worker_json(s: &str) -> Result<WorkerOutput, String> {
-    let v: serde_json::Value = serde_json::from_str(s.trim())
-        .map_err(|e| format!("worker output not JSON: {e}"))?;
+    let v: serde_json::Value =
+        serde_json::from_str(s.trim()).map_err(|e| format!("worker output not JSON: {e}"))?;
     match v.get("kind").and_then(|k| k.as_str()) {
         Some("answer") => {
             let t = v
@@ -126,9 +126,9 @@ pub fn parse_worker_json(s: &str) -> Result<WorkerOutput, String> {
 /// and CI-safe without a live LLM:
 ///   - unset            → live `claude --json-schema` (production)
 ///   - `echo`           → returns Answer(input) verbatim, so an e2e can assert the
-///                        pinned option *description* actually reached the worker
+///     pinned option *description* actually reached the worker
 ///   - `<path-to-json>` → returns parse_worker_json(file contents); point it at a
-///                        prompt fixture to deterministically make hex "ask".
+///     prompt fixture to deterministically make hex "ask".
 pub fn run_worker(input: &str) -> Result<WorkerOutput, String> {
     match std::env::var("HEX_QUESTION_WORKER").ok().as_deref() {
         Some("echo") => return Ok(WorkerOutput::Answer(input.to_string())),
@@ -145,9 +145,9 @@ pub fn run_worker(input: &str) -> Result<WorkerOutput, String> {
     let hex_dir = std::env::var("HEX_DIR").ok().map(std::path::PathBuf::from);
     let resolved = crate::claude_runs::resolve("harness_worker", hex_dir.as_deref())
         .map_err(|e| format!("claude_runs::resolve(harness_worker): {e}"))?;
-    let workspace = hex_dir
-        .clone()
-        .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from(".")));
+    let workspace = hex_dir.clone().unwrap_or_else(|| {
+        std::env::current_dir().unwrap_or_else(|_| std::path::PathBuf::from("."))
+    });
     let mcp_cfg = crate::claude_runs::McpConfig::load(&workspace)
         .map_err(|e| format!("McpConfig::load: {e}"))?;
     let lean_flags = resolved
@@ -194,9 +194,18 @@ pub fn run_worker(input: &str) -> Result<WorkerOutput, String> {
         .map_err(|e| format!("claude envelope not JSON: {e}"))?;
     // OBS-024: claude envelope usage (same shape as memory/claude_cli.rs).
     if let Some(usage) = envelope.get("usage") {
-        let in_tok = usage.get("input_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let out_tok = usage.get("output_tokens").and_then(|v| v.as_u64()).unwrap_or(0);
-        let cost = envelope.get("total_cost_usd").and_then(|v| v.as_f64()).unwrap_or(0.0);
+        let in_tok = usage
+            .get("input_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let out_tok = usage
+            .get("output_tokens")
+            .and_then(|v| v.as_u64())
+            .unwrap_or(0);
+        let cost = envelope
+            .get("total_cost_usd")
+            .and_then(|v| v.as_f64())
+            .unwrap_or(0.0);
         crate::llm_cost::record_llm_cost("worker-run", "question", in_tok, out_tok, cost, None);
     }
     let so = envelope
