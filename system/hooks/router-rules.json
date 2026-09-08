@@ -1,0 +1,119 @@
+[
+  {
+    "id": "gh-pr-merge-ci-green",
+    "tool": "^Bash$",
+    "match": "(?:^|[;&|({]\\s*|\\$\\(\\s*|\\n\\s*)(?:time\\s+|env\\s+(?:\\S+=\\S*\\s+)*)?gh\\s+pr\\s+merge\\b",
+    "decision": "prior",
+    "message": "Never merge while checks are pending; run `gh pr checks <n> --watch` first.",
+    "source": "me/learnings.md 2026-09-04 #290"
+  },
+  {
+    "id": "vitest-spawnsync",
+    "tool": "^(Edit|Write|MultiEdit|NotebookEdit)$",
+    "match": "^[^\\n]*\\.(test|spec)\\.[cm]?[jt]sx?\\b[^\\n]*\\n[\\s\\S]*spawnSync",
+    "decision": "prior",
+    "message": "spawnSync in a vitest test file risks the silent multi-hour CI hang class; use async spawn with a SIGKILL deadline instead.",
+    "source": "feedback_no_spawnsync_in_vitest_ci_hang (learnings 2026-09-05)"
+  },
+  {
+    "id": "git-stash-shared-checkout",
+    "tool": "^Bash$",
+    "match": "(?:^|[;&|({]\\s*|\\$\\(\\s*|\\n\\s*)(?:time\\s+|env\\s+(?:\\S+=\\S*\\s+)*)?git(\\s+-C\\s+\\S+)?\\s+stash\\b",
+    "unless_match": "stash\\s+(list|show|pop|apply|drop|branch)\\b",
+    "unless_cwd": "/worktrees/",
+    "decision": "deny",
+    "message": "Standing Order 7: no stash save/push in a shared checkout - it sweeps sibling agents' uncommitted work (2026-08-19/20, 23 files lost). Work in a git worktree. Recovery ops (pop/apply/drop/list/show) are allowed.",
+    "source": "learnings 2026-08-19/20"
+  },
+  {
+    "id": "git-push-force",
+    "tool": "^Bash$",
+    "match": "(?:^|[;&|({]\\s*|\\$\\(\\s*|\\n\\s*)(?:time\\s+|env\\s+(?:\\S+=\\S*\\s+)*)?git\\s+push\\b[^\\n;&|]*\\s--force\\b|(?:^|[;&|({]\\s*|\\$\\(\\s*|\\n\\s*)(?:time\\s+|env\\s+(?:\\S+=\\S*\\s+)*)?git\\s+push\\b[^\\n;&|]*\\s-f\\b",
+    "unless_match": "--force-with-lease",
+    "decision": "ask",
+    "message": "Force-push is ASK-FIRST (operator policy). NEVER on a stacked-PR branch (false-MERGED class) - use gh stack sync / gh stack push. Personal single branch after a rebase: confirm.",
+    "source": "feedback_stacked_pr_forcepush_false_merge"
+  },
+  {
+    "id": "git-push-force-with-lease",
+    "tool": "^Bash$",
+    "match": "(?:^|[;&|({]\\s*|\\$\\(\\s*|\\n\\s*)(?:time\\s+|env\\s+(?:\\S+=\\S*\\s+)*)?git\\s+push\\b[^\\n;&|]*--force-with-lease\\b",
+    "decision": "ask",
+    "message": "Force-with-lease push \u2014 confirm this is intended before overwriting remote history.",
+    "source": "feedback_stacked_pr_forcepush_false_merge"
+  },
+  {
+    "id": "git-destructive-ask",
+    "tool": "^Bash$",
+    "match": "(?:^|[;&|({]\\s*|\\$\\(\\s*|\\n\\s*)(?:time\\s+|env\\s+(?:\\S+=\\S*\\s+)*)?git\\s+(reset\\s+--hard|checkout\\s+--\\s|branch\\s+-D|clean\\s+-\\w*f)",
+    "decision": "ask",
+    "message": "Destructive git operation \u2014 on the operator ASK-FIRST list.",
+    "source": "operator ASK-FIRST list"
+  },
+  {
+    "id": "boi-dispatch-spec-priors",
+    "tool": "^Bash$",
+    "match": "(?:^|[;&|({]\\s*|\\$\\(\\s*|\\n\\s*)(?:time\\s+|env\\s+(?:\\S+=\\S*\\s+)*)?boi\\s+dispatch\\b",
+    "decision": "prior",
+    "message": "Before dispatching: PATH-prepend in command verifications, no absolute cd (cwd is the task worktree), no | tail on gates, intent verifications for worktree files, base-sha stamp + drift check, and know the STOP conditions.",
+    "source": "feedback_boi_spec_anti_hallucination / feedback_boi_dispatch_and_wait"
+  },
+  {
+    "id": "gh-fast-polling",
+    "tool": "^Bash$",
+    "match": "(?:^|[;&|({]\\s*|\\$\\(\\s*|\\n\\s*)(?:time\\s+|env\\s+(?:\\S+=\\S*\\s+)*)?(while|until)\\b.*\\bgh\\s+(pr|run)\\b.*\\bsleep\\s+([1-5]?\\d)\\b",
+    "decision": "ask",
+    "message": "Open-ended gh polling loop with sleep < 60s risks the 5,000/hr API budget; use sleep >= 60 or `gh run watch` / `gh pr checks --watch`.",
+    "source": "gh API rate-limit budget"
+  },
+  {
+    "id": "pipe-tail-masks-exit",
+    "tool": "^Bash$",
+    "match": "(?:^|[;&|({]\\s*|\\$\\(\\s*|\\n\\s*)(?:time\\s+|env\\s+(?:\\S+=\\S*\\s+)*)?(cargo\\s+test|vitest|pnpm\\s+test|npm\\s+test|pytest|python3?\\s+-m\\s+unittest)\\b[^|\\n]*\\|\\s*(tail|grep|head)\\b",
+    "unless_match": "pipefail|PIPESTATUS",
+    "decision": "prior",
+    "message": "Piping a test run into tail/grep/head makes the pipeline's exit status the filter's, not the tests'. Gate on the test command's own exit code (run it once to a log, then read the log); if you must match output, strip ANSI first - unittest/cargo print colored OK/FAILED.",
+    "source": "gate-verdict priors: never | tail on gates"
+  },
+  {
+    "id": "hex-events-flat-policy",
+    "tool": "^Write$",
+    "match": "^[^\\n]*\\.hex-events/policies/[^\\n]*\\.ya?ml[^\\n]*",
+    "unless_match": "\\nrules:|^rules:",
+    "decision": "prior",
+    "message": "Flat hex-events policies (top-level trigger/action) are silently skipped by the daemon; use the rules: list format and validate with `cd ~/.hex-events && venv/bin/python hex_events_cli.py validate`.",
+    "source": "feedback_hex_events_daemon_rules_format"
+  },
+  {
+    "id": "hex-memory-index-full",
+    "tool": "^Bash$",
+    "match": "(?:^|[;&|({]\\s*|\\$\\(\\s*|\\n\\s*)(?:time\\s+|env\\s+(?:\\S+=\\S*\\s+)*)?hex\\s+memory\\s+index\\b[^\\n;&|]*--full",
+    "decision": "ask",
+    "message": "A full memory reindex can resurrect stale facts from raw transcripts \u2014 confirm this is intended.",
+    "source": "hex memory index gotcha"
+  },
+  {
+    "id": "builtin-scheduler-tools",
+    "tool": "^(CronCreate|ScheduleWakeup)$",
+    "match": ".*",
+    "decision": "ask",
+    "message": "hex-events is the only automation system (CLAUDE.md). Built-in scheduling (CronCreate / ScheduleWakeup) is for a deliberate operator /loop only - approve if you asked for it; otherwise write a hex-events policy.",
+    "source": "CLAUDE.md hex-events NEVER-use list"
+  },
+  {
+    "id": "builtin-websearch",
+    "tool": "^WebSearch$",
+    "match": ".*",
+    "decision": "ask",
+    "message": "Exa is the default for web research, not the built-in WebSearch tool \u2014 confirm this is intentional.",
+    "source": "feedback_exa_default_for_browser_research"
+  },
+  {
+    "id": "backticks-in-unquoted-heredoc",
+    "tool": "^Bash$",
+    "match": "<<-?\\s*[A-Za-z_][A-Za-z0-9_]*\\s*\\n[\\s\\S]*`",
+    "decision": "prior",
+    "message": "Unquoted heredoc delimiter with a backtick in the body: the shell executes the backtick text as a command substitution (twice on 2026-09-06 a note was lost this way). Quote the delimiter (<<'EOF') or pass the text via a variable/file, then verify the artifact was written.",
+    "source": "me/learnings.md Tooling gotchas 2026-09-06"
+  }
+]

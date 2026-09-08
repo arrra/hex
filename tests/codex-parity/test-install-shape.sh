@@ -65,6 +65,10 @@ check "AGENTS.md exists"  test -f "$INSTALL_DIR/AGENTS.md"
 echo "[4] AGENTS.md is non-empty"
 check "AGENTS.md non-empty"  test -s "$INSTALL_DIR/AGENTS.md"
 
+echo "[4b] PreToolUse router hook + its rules file land together (router fail-opens silently without router-rules.json)"
+check ".hex/hooks/router-rules.json exists"            test -f "$INSTALL_DIR/.hex/hooks/router-rules.json"
+check ".hex/hooks/scripts/pretooluse-router.py exists" test -f "$INSTALL_DIR/.hex/hooks/scripts/pretooluse-router.py"
+
 echo "[5] Cleanup"
 TOTAL=$((TOTAL + 1))
 if rm -rf "$INSTALL_DIR" 2>/dev/null; then

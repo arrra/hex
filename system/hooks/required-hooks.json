@@ -3,6 +3,16 @@
     {
       "matcher": "Write|Edit|MultiEdit|NotebookEdit",
       "command": "hex hook worktree-guard"
+    },
+    {
+      "command": "python3 -I -S $HEX_DIR/.hex/hooks/scripts/pretooluse-router.py",
+      "_rust_alternative": "hex hook router",
+      "_rust_alternative_note": "Once the harness ships `hex hook router` (system/harness/src/hook/router.rs), that binary is a faster drop-in for the command above; both are pinned by the same tests (system/hooks/tests/test_router.py, system/hooks/scripts/router-probe.sh)."
+    }
+  ],
+  "PostToolUseFailure": [
+    {
+      "command": "python3 -I -S $HEX_DIR/.hex/hooks/scripts/posttoolusefailure-incident.py"
     }
   ]
 }
