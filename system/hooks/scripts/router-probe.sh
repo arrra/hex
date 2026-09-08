@@ -18,6 +18,16 @@
 #     ${CARGO_TARGET_DIR:-target}/release/hex under the repo root if unset).
 # Same fixtures, same PASS/FAIL line format, same exit-code contract in both
 # modes.
+#
+# REPO-LAYOUT SHIM (rust mode only). `hex hook router` resolves its rules at
+# `$HEX_DIR/.hex/hooks/router-rules.json` — the INSTALLED layout — while this
+# repo keeps the file at system/hooks/router-rules.json. When HEX_DIR does not
+# carry the installed path but the repo copy exists, the probe builds a temp
+# HEX_DIR (`.hex/version.txt` copied from system/version.txt, else
+# `0.0.0-probe`; `.hex/hooks` symlinked to $REPO_ROOT/system/hooks), drives the
+# rust runs with it, and removes it on exit. The binary's own resolution is
+# unchanged; python mode never uses the shim (the reference script resolves the
+# rules relative to itself).
 set -u
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
@@ -26,9 +36,24 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ROUTER_IMPL="${ROUTER_IMPL:-python}"
 HEX_ROUTER_BIN="${HEX_ROUTER_BIN:-${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/hex}"
 LEDGER_DIR="$(mktemp -d)"
-trap 'rm -rf "$LEDGER_DIR"' EXIT
+RUST_HEX_DIR="${HEX_DIR:-}"
+SHIM_DIR=""
+if [ "$ROUTER_IMPL" = "rust" ] \
+  && [ ! -f "${HEX_DIR:-/nonexistent}/.hex/hooks/router-rules.json" ] \
+  && [ -f "$REPO_ROOT/system/hooks/router-rules.json" ]; then
+  SHIM_DIR="$(mktemp -d)"
+  mkdir -p "$SHIM_DIR/.hex"
+  if [ -f "$REPO_ROOT/system/version.txt" ]; then
+    cp "$REPO_ROOT/system/version.txt" "$SHIM_DIR/.hex/version.txt"
+  else
+    printf '0.0.0-probe\n' > "$SHIM_DIR/.hex/version.txt"
+  fi
+  ln -s "$REPO_ROOT/system/hooks" "$SHIM_DIR/.hex/hooks"
+  RUST_HEX_DIR="$SHIM_DIR"
+fi
+trap 'rm -rf "$LEDGER_DIR"; [ -n "$SHIM_DIR" ] && rm -rf "$SHIM_DIR"' EXIT
 
-python3 - "$ROUTER" "$LEDGER_DIR" "$ROUTER_IMPL" "$HEX_ROUTER_BIN" "$REPO_ROOT" <<'PYEOF'
+python3 - "$ROUTER" "$LEDGER_DIR" "$ROUTER_IMPL" "$HEX_ROUTER_BIN" "$REPO_ROOT" "$RUST_HEX_DIR" <<'PYEOF'
 import json
 import os
 import subprocess
@@ -40,6 +65,8 @@ ledger_dir = Path(sys.argv[2])
 router_impl = sys.argv[3]
 hex_router_bin = sys.argv[4]
 repo_root = sys.argv[5]
+# HEX_DIR for rust runs: the caller's HEX_DIR, or the layout shim dir (see header).
+rust_hex_dir = sys.argv[6] if len(sys.argv) > 6 and sys.argv[6] else repo_root
 
 if router_impl not in ("python", "rust"):
     print(
@@ -204,7 +231,7 @@ def run(payload):
     env = dict(os.environ)
     env["HEX_LEDGER_DIR"] = str(ledger_dir)
     if router_impl == "rust":
-        env["HEX_DIR"] = repo_root
+        env["HEX_DIR"] = rust_hex_dir
         cmd = [hex_router_bin, "hook", "router"]
     else:
         cmd = [sys.executable, router]
