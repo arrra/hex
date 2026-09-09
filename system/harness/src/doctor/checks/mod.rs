@@ -9,6 +9,7 @@ pub mod distill_readiness;
 pub mod distill_strikes;
 pub mod env_sh;
 pub mod git;
+pub mod harness_buildable;
 pub mod hex_binary;
 pub mod hex_dir;
 pub mod hex_structure;
