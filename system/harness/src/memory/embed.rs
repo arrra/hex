@@ -11,9 +11,10 @@ use std::time::{Duration, SystemTime};
 const DOC_PREFIX: &str = "search_document: ";
 const QUERY_PREFIX: &str = "search_query: ";
 
-/// Read current resident set size (RSS) in MB on Linux via /proc/self/statm.
-/// Returns None on non-Linux or read failure. Used by OBS-019 diagnosis to
-/// pinpoint where memory blows up during indexing.
+/// Read current resident set size (RSS) in MB on Linux via /proc/self/statm,
+/// or on macOS via `proc_pidinfo(PROC_PIDTASKINFO)`. Returns None on other
+/// platforms or read failure. Used by OBS-019 diagnosis to pinpoint where
+/// memory blows up during indexing.
 pub fn rss_mb() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -23,7 +24,26 @@ pub fn rss_mb() -> Option<u64> {
         let page_size: u64 = 4096;
         Some(resident_pages * page_size / (1024 * 1024))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let pid = std::process::id() as libc::c_int;
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let ret = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTASKINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        if ret != size {
+            return None; // short read / failure — proc_pidinfo returns bytes written
+        }
+        Some(info.pti_resident_size / (1024 * 1024))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         None
     }
@@ -162,6 +182,40 @@ mod tests {
     #[test]
     fn clear_stale_locks_noop_on_missing_dir() {
         clear_stale_locks(Path::new("/tmp/does-not-exist-hex-fastembed"));
+    }
+
+    // RED (T7ngzd5vn task Tnp7675fh, spec Sb82zegf2): rss_mb() is Linux-only
+    // today (cfg(target_os = "linux") in the fn above), so on macOS this
+    // currently fails at the `.is_some()` assert. Pins the contract: Some(>0)
+    // on macOS, and a 64 MB touched allocation raises RSS by roughly that
+    // much (loose bound >= 32 MB delta — proves the read tracks real
+    // resident memory, not a timing assertion).
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rss_mb_reports_resident_memory_on_macos() {
+        let before = rss_mb();
+        assert!(
+            before.is_some(),
+            "rss_mb() should be Some on macOS, got None"
+        );
+        let before_mb = before.unwrap();
+        assert!(before_mb > 0, "rss_mb() should be > 0, got {before_mb}");
+
+        // Allocate and touch 64 MB so it's actually resident, not just
+        // reserved virtual address space.
+        let mut v: Vec<u8> = Vec::with_capacity(64 * 1024 * 1024);
+        for i in 0..(64 * 1024 * 1024) {
+            v.push((i % 256) as u8);
+        }
+        std::hint::black_box(&v);
+
+        let after_mb = rss_mb().expect("rss_mb() should still be Some on macOS");
+        let delta = after_mb.saturating_sub(before_mb);
+        assert!(
+            delta >= 32,
+            "expected RSS to grow by roughly 64 MB after touching a 64 MB vec, \
+             got before={before_mb} after={after_mb} delta={delta}"
+        );
     }
 
     // Model-dependent: requires the nomic ONNX weights. Run explicitly with

@@ -714,6 +714,215 @@ where
     stored
 }
 
+// ── Chunk-level vector reuse (spec S8c8rkzp9/T8gvpqh4g) ────────────────────────
+//
+// MEASURED 2026-09-06: one incremental `hex memory index` pass re-embeds every
+// chunk of any changed file (`content_hash` dedup in `run_index` is FILE-level
+// only), even when a single line changed one chunk out of dozens — e.g. 3
+// files, 232 new chunks all re-embedded for a handful of real edits. Cause:
+// `delete_chunks_for_file` (~line 491) drops every chunk_meta/vec_chunks row
+// for the file before `index_file` re-inserts, and `embed_and_store` above has
+// no way to know a "new" chunk is byte-identical to one that already had a
+// vector.
+//
+// `IndexOutcome`/`index_file_with_reuse` below are the fixed entry point this
+// task's tests pin: before deleting the file's old chunk rows, look up each
+// new chunk's `(heading.to_lowercase(), content_hash(content))` key — the same
+// key `chunk_by_heading`'s intra-file dedup already uses (~line 371) — against
+// the file's PREVIOUS chunk rows. A match copies the existing vector onto the
+// new chunk_rowid via a raw `vec_chunks` row copy instead of calling the
+// embedder; only misses are passed to `embed_and_store`. `full=true` (the CLI
+// `--full` flag) disables reuse entirely, matching today's re-embed-everything
+// contract.
+//
+// `index_file` itself is intentionally untouched (existing direct callers/tests
+// keep today's re-embed-everything behavior); `run_index` below calls
+// `index_file_with_reuse` instead.
+
+/// Per-file outcome of a chunk-level-reuse indexing pass: `reused + embedded
+/// == chunks` (a chunk is exactly one of "vector copied from a previous run"
+/// or "sent to the embedder").
+#[derive(Debug, PartialEq, Eq)]
+pub struct IndexOutcome {
+    pub chunks: usize,
+    pub reused: usize,
+    pub embedded: usize,
+}
+
+/// Fixed indexing entry point. Mirrors `index_file`'s parameters, generalized
+/// over an injectable embed closure (the same seam `embed_and_store` already
+/// uses) so tests can count embedder invocations without loading the real
+/// ONNX model, plus a `full` flag that bypasses reuse to match `--full`'s
+/// existing contract.
+#[allow(dead_code, clippy::too_many_arguments)]
+pub fn index_file_with_reuse<F>(
+    conn: &Connection,
+    filepath: &Path,
+    hex_root: &Path,
+    content: &str,
+    mtime: f64,
+    strategy: &str,
+    full: bool,
+    embed_batch: F,
+) -> rusqlite::Result<IndexOutcome>
+where
+    F: FnMut(&[String]) -> anyhow::Result<Vec<Vec<f32>>>,
+{
+    let rel_path = filepath
+        .strip_prefix(hex_root)
+        .map(|p| p.to_string_lossy().to_string())
+        .unwrap_or_else(|_| filepath.to_string_lossy().to_string());
+    let chash = content_hash(content);
+    let private_flag: i64 = if is_private(&rel_path) { 1 } else { 0 };
+
+    let is_old_tr = strategy == "summary";
+
+    let effective_content = if strategy == "summary" {
+        let s = extract_summaries(content);
+        if s.trim().is_empty() {
+            let existing_id: Option<i64> = conn
+                .query_row(
+                    "SELECT id FROM files WHERE path = ?",
+                    params![rel_path],
+                    |r| r.get(0),
+                )
+                .ok();
+            if let Some(fid) = existing_id {
+                delete_chunks_for_file(conn, fid)?;
+                conn.execute("DELETE FROM files WHERE id = ?", params![fid])?;
+            }
+            conn.execute(
+                "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) VALUES (?, ?, ?, ?, 0)",
+                params![rel_path, mtime, chash, Local::now().to_rfc3339()],
+            )?;
+            return Ok(IndexOutcome {
+                chunks: 0,
+                reused: 0,
+                embedded: 0,
+            });
+        }
+        s
+    } else {
+        content.to_string()
+    };
+
+    let chunks = chunk_by_heading(&effective_content, true);
+
+    let existing_id: Option<i64> = conn
+        .query_row(
+            "SELECT id FROM files WHERE path = ?",
+            params![rel_path],
+            |r| r.get(0),
+        )
+        .ok();
+
+    // Chunk-level vector reuse: BEFORE dropping the old file's chunk rows,
+    // key each one by (heading.lowercase(), content_hash(content)) — the same
+    // key `chunk_by_heading`'s intra-file dedup uses (~line 371) — and capture
+    // the raw `vec_chunks.embedding` blob for any old chunk that already has a
+    // vector. `full=true` bypasses this entirely (empty pool), matching
+    // `--full`'s re-embed-everything contract.
+    let mut reuse_pool: std::collections::HashMap<(String, String), Vec<u8>> =
+        std::collections::HashMap::new();
+    if !full {
+        if let Some(fid) = existing_id {
+            let mut stmt = conn.prepare(
+                "SELECT c.heading, c.content, v.embedding \
+                 FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.file_id = ?",
+            )?;
+            let rows = stmt.query_map(params![fid.to_string()], |r| {
+                Ok((
+                    r.get::<_, String>(0)?,
+                    r.get::<_, String>(1)?,
+                    r.get::<_, Vec<u8>>(2)?,
+                ))
+            })?;
+            for row in rows {
+                let (heading, chunk_content, embedding) = row?;
+                let key = (heading.to_lowercase(), content_hash(&chunk_content));
+                reuse_pool.insert(key, embedding);
+            }
+        }
+    }
+
+    if let Some(fid) = existing_id {
+        delete_chunks_for_file(conn, fid)?;
+        conn.execute("DELETE FROM files WHERE id = ?", params![fid])?;
+    }
+
+    conn.execute(
+        "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) VALUES (?, ?, ?, ?, ?)",
+        params![rel_path, mtime, chash, Local::now().to_rfc3339(), chunks.len() as i64],
+    )?;
+    let file_id: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+
+    let weight = get_source_weight(&rel_path, is_old_tr);
+
+    let mut miss_rowids: Vec<i64> = Vec::new();
+    let mut miss_contents: Vec<String> = Vec::new();
+    let mut reused = 0usize;
+
+    for (i, chunk) in chunks.iter().enumerate() {
+        conn.execute(
+            "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
+             VALUES (?, ?, ?, ?, ?, ?)",
+            params![
+                file_id.to_string(),
+                rel_path,
+                chunk.heading,
+                i.to_string(),
+                chunk.content,
+                private_flag
+            ],
+        )?;
+        let chunk_rowid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+        conn.execute(
+            "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, ?)",
+            params![chunk_rowid, weight],
+        )?;
+
+        let key = (chunk.heading.to_lowercase(), content_hash(&chunk.content));
+        if let Some(embedding) = reuse_pool.remove(&key) {
+            // `chunks` is a plain-rowid FTS5 table (no AUTOINCREMENT), so a
+            // freshly-inserted chunk_rowid is not guaranteed unused in
+            // `vec_chunks` — ~1834 legacy orphan vec_chunks rows (rows with no
+            // matching `chunks` row, V1's 74k-orphan era, see the "Orphan-vector
+            // invariant lock" tests below) already live in production and a
+            // vec0 INSERT on an existing rowid ERRORs instead of replacing.
+            // Mirror `insert_vec`'s self-heal DELETE-before-INSERT (vector.rs
+            // ~65-72, "Orphan-collision guard") so a collision overwrites the
+            // stale orphan instead of propagating an error via `?` — which
+            // would abort mid-loop *after* the new `files` row is already
+            // committed, permanently stranding the file behind the mtime fast
+            // path with a partial index.
+            conn.execute(
+                "DELETE FROM vec_chunks WHERE rowid = ?1",
+                params![chunk_rowid],
+            )?;
+            conn.execute(
+                "INSERT INTO vec_chunks(rowid, embedding) VALUES (?1, ?2)",
+                params![chunk_rowid, embedding],
+            )?;
+            reused += 1;
+        } else {
+            miss_rowids.push(chunk_rowid);
+            miss_contents.push(chunk.content.clone());
+        }
+    }
+
+    let embedded = miss_rowids.len();
+    if !miss_rowids.is_empty() {
+        embed_and_store(conn, &rel_path, &miss_rowids, &miss_contents, embed_batch);
+    }
+
+    Ok(IndexOutcome {
+        chunks: chunks.len(),
+        reused,
+        embedded,
+    })
+}
+
 // ── File discovery ────────────────────────────────────────────────────────────
 
 /// Collect all indexable files with their indexing strategy.
@@ -908,6 +1117,8 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
     let mut skipped_mtime = 0usize;
     let mut skipped_hash = 0usize;
     let mut total_chunks = 0usize;
+    let mut total_reused = 0usize;
+    let mut total_embedded = 0usize;
     let budget = run_budget();
     let mut over_budget = false;
 
@@ -975,19 +1186,32 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
             }
 
             // Actually re-index
-            match index_file(
-                &conn, filepath, hex_root, &content, mtime, strategy, &embedder,
+            match index_file_with_reuse(
+                &conn,
+                filepath,
+                hex_root,
+                &content,
+                mtime,
+                strategy,
+                full,
+                |batch| embedder.embed_documents(batch),
             ) {
-                Ok(n) => {
+                Ok(outcome) => {
+                    let n = outcome.chunks;
                     if n > 0 {
                         indexed += 1;
                         total_chunks += n;
+                        total_reused += outcome.reused;
+                        total_embedded += outcome.embedded;
                         let tag = if strategy != "full" {
                             format!(" [{strategy}]")
                         } else {
                             String::new()
                         };
-                        println!("  Indexed: {rel_path} ({n} chunks{tag})");
+                        println!(
+                            "  Indexed: {rel_path} ({n} chunks, {} reused, {} embedded{tag})",
+                            outcome.reused, outcome.embedded
+                        );
                     } else if strategy == "summary" {
                         println!("  Indexed: {rel_path} (0 chunks, no summaries found [summary])");
                     }
@@ -1008,19 +1232,32 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
             if content.trim().is_empty() {
                 continue;
             }
-            match index_file(
-                &conn, filepath, hex_root, &content, mtime, strategy, &embedder,
+            match index_file_with_reuse(
+                &conn,
+                filepath,
+                hex_root,
+                &content,
+                mtime,
+                strategy,
+                full,
+                |batch| embedder.embed_documents(batch),
             ) {
-                Ok(n) => {
+                Ok(outcome) => {
+                    let n = outcome.chunks;
                     if n > 0 {
                         indexed += 1;
                         total_chunks += n;
+                        total_reused += outcome.reused;
+                        total_embedded += outcome.embedded;
                         let tag = if strategy != "full" {
                             format!(" [{strategy}]")
                         } else {
                             String::new()
                         };
-                        println!("  Indexed: {rel_path} ({n} chunks{tag})");
+                        println!(
+                            "  Indexed: {rel_path} ({n} chunks, {} reused, {} embedded{tag})",
+                            outcome.reused, outcome.embedded
+                        );
                     } else if strategy == "summary" {
                         println!("  Indexed: {rel_path} (0 chunks, no summaries found [summary])");
                     }
@@ -1106,7 +1343,8 @@ pub fn run_index(hex_root: &Path, full: bool) -> i32 {
     println!(
         "\nDone in {elapsed:.2}s: {indexed} indexed, \
          {skipped_mtime} unchanged (mtime), {skipped_hash} unchanged (hash), \
-         {removed} removed, {total_chunks} new chunks"
+         {removed} removed, {total_chunks} new chunks, \
+         chunks reused={total_reused} embedded={total_embedded}"
     );
 
     0
@@ -1539,6 +1777,344 @@ mod tests {
         });
         assert_eq!(s16, 16);
         assert_eq!(vec_count(&conn), 16);
+    }
+
+    // ── Chunk-level vector reuse (spec S8c8rkzp9/T8gvpqh4g) ─────────────────
+    // Pin the contract `index_file_with_reuse` must satisfy: an unchanged
+    // chunk's vector is copied forward instead of re-embedded.
+
+    /// 40 chunks, distinct heading + distinct content each, so
+    /// `chunk_by_heading`'s intra-file dedup keeps all 40.
+    fn build_40_chunk_content() -> String {
+        let mut s = String::new();
+        for i in 0..40 {
+            s.push_str(&format!(
+                "## Heading {i}\nContent for chunk number {i}, unique text here.\n\n"
+            ));
+        }
+        s
+    }
+
+    #[test]
+    fn index_file_with_reuse_reembeds_only_the_changed_chunk() {
+        // Pre-fix baseline (MEASURED 2026-09-06, see comment above
+        // `index_file_with_reuse`): today's `index_file` has no chunk-level
+        // dedup — `delete_chunks_for_file` drops every vec_chunks row for the
+        // file and `embed_and_store` re-embeds the FULL chunk set on any
+        // content change, even a one-line edit touching 1 of 40 chunks.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("big.md");
+
+        let content_v1 = build_40_chunk_content();
+        let mut calls1 = 0usize;
+        let outcome1 = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                calls1 += batch.len();
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.1f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+        assert_eq!(outcome1.chunks, 40);
+        assert_eq!(
+            outcome1.embedded, 40,
+            "first-ever index has no prior chunks to reuse"
+        );
+        assert_eq!(calls1, 40);
+
+        // Change ONE line in ONE chunk (heading 17); the other 39 are untouched.
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        assert_ne!(content_v1, content_v2);
+
+        let mut calls2 = 0usize;
+        let outcome2 = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |batch| {
+                calls2 += batch.len();
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.2f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome2.chunks, 40);
+        assert!(
+            calls2 <= 2,
+            "embedder should be invoked for at most 2 chunks, got {calls2}"
+        );
+        assert!(
+            outcome2.reused >= 38,
+            "at least 38 chunks should be reused, got {}",
+            outcome2.reused
+        );
+        assert_eq!(outcome2.reused + outcome2.embedded, 40);
+    }
+
+    #[test]
+    fn index_file_with_reuse_identical_content_zero_embeds() {
+        // Mtime-only path unchanged: this exercises index_file_with_reuse
+        // directly (as if content DID look changed to the caller), and every
+        // one of the 40 chunks should dedup-hit against the prior run.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("stable.md");
+        let content = build_40_chunk_content();
+
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.3f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let mut calls = 0usize;
+        let outcome = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            2.0,
+            "full",
+            false,
+            |batch| {
+                calls += batch.len();
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.4f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(calls, 0, "identical content must not touch the embedder");
+        assert_eq!(outcome.embedded, 0);
+        assert_eq!(outcome.reused, 40);
+    }
+
+    #[test]
+    fn index_file_with_reuse_full_flag_reembeds_everything() {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("full.md");
+        let content = build_40_chunk_content();
+
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.5f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        // Unchanged content, but `--full` forces a full rebuild — reuse must
+        // be bypassed entirely, matching today's contract.
+        let mut calls = 0usize;
+        let outcome = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            2.0,
+            "full",
+            true,
+            |batch| {
+                calls += batch.len();
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.6f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(
+            calls, 40,
+            "--full must re-embed every chunk, ignoring reuse"
+        );
+        assert_eq!(outcome.embedded, 40);
+        assert_eq!(outcome.reused, 0);
+    }
+
+    #[test]
+    fn index_file_with_reuse_reused_vector_is_byte_identical() {
+        // The two passes use closures that return DIFFERENT fill values, so a
+        // mistaken re-embed of the untouched chunk (even one that happened to
+        // be deterministic against a real embedder) would still be caught
+        // here: the bytes would reflect the second closure's fill value
+        // instead of being copied forward from the first.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("byteid.md");
+        let content_v1 = build_40_chunk_content();
+
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.11f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let orig_bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT v.embedding FROM vec_chunks v JOIN chunks c ON c.rowid = v.rowid \
+                 WHERE c.heading = 'Heading 5'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.99f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let new_bytes: Vec<u8> = conn
+            .query_row(
+                "SELECT v.embedding FROM vec_chunks v JOIN chunks c ON c.rowid = v.rowid \
+                 WHERE c.heading = 'Heading 5'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        assert_eq!(
+            orig_bytes, new_bytes,
+            "an untouched chunk's vector must be copied byte-for-byte, not re-embedded"
+        );
+    }
+
+    #[test]
+    fn index_file_with_reuse_outcome_counts_partition_all_chunks() {
+        // Proxy for the per-file summary line ("Indexed: <path> (N chunks, R
+        // reused, E embedded)"): whatever prints that line reads these same
+        // fields, so pinning them here pins the printed contract too.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("counts.md");
+        let content_v1 = build_40_chunk_content();
+
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.7f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 3, unique text here.",
+            "Content for chunk number 3, CHANGED.",
+        );
+        let outcome = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.8f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome.chunks, 40);
+        assert_eq!(
+            outcome.reused + outcome.embedded,
+            outcome.chunks,
+            "every chunk must be counted as exactly one of reused/embedded"
+        );
+        assert!(outcome.embedded >= 1, "the edited chunk must be embedded");
+        assert!(outcome.reused >= 38);
     }
 
     #[test]
