@@ -16,6 +16,28 @@ pub struct DistillReport {
     pub updates: u32,
     pub noops: u32,
     pub flags: u32,
+    pub slice_timings: Vec<SliceTiming>,
+}
+
+/// Per-slice timing/RSS sample recorded by `run_on_file` (follow-up to B3,
+/// evolution/observations.md "[2026-09-06] B3 measured": `catchup-distill`
+/// was seen at 2016 MB RSS / 342% CPU for ~2.5 min with no per-step
+/// breakdown inside `run_on_file` to say which step dominates). Mirrors
+/// `consolidate::OpTiming`'s wall+RSS shape, but at slice granularity with
+/// one field per named step (`extract`/`judge`/`classify`/`write`) so the
+/// four steps a slice does can be compared directly.
+#[derive(Default, Debug)]
+pub struct SliceTiming {
+    pub slice_bytes: usize,
+    pub candidates: usize,
+    pub extract_ms: u128,
+    pub judge_ms: u128,
+    pub classify_ms: u128,
+    pub write_ms: u128,
+    /// `None` when `embed::rss_mb()` is unavailable rather than a measured
+    /// zero (matches `consolidate::OpTiming`'s convention).
+    pub rss_before_mb: Option<u64>,
+    pub rss_after_mb: Option<u64>,
 }
 
 /// Hard floor for the budget bisection. Cause-agnostic — handles output
@@ -170,6 +192,8 @@ pub fn run_on_file(
     let slice = &span[..cap_len];
 
     // --- Extract (with deterministic test seam) ---
+    let rss_before_mb = crate::memory::embed::rss_mb();
+    let extract_start = std::time::Instant::now();
     let candidates = match extract_or_forced_fail(slice) {
         Ok(c) => c,
         Err(e) => {
@@ -269,6 +293,18 @@ pub fn run_on_file(
         }
     };
 
+    let extract_ms = extract_start.elapsed().as_millis();
+    let candidates_count = candidates.len();
+    // Accumulate as `Duration`, not `u128` milliseconds: converting each
+    // per-candidate elapsed time to whole milliseconds before summing
+    // truncates every sub-millisecond call to 0, so repeated fast
+    // judge/classify/write calls silently sum to 0 and mask the true
+    // dominant step (G1, review round 2). Sum the raw Durations and convert
+    // to milliseconds once, after the loop.
+    let mut judge_dur = std::time::Duration::ZERO;
+    let mut classify_dur = std::time::Duration::ZERO;
+    let mut write_dur = std::time::Duration::ZERO;
+
     let new_offset = slice_end_offset;
     let mut tx = conn.transaction()?;
     for c in candidates {
@@ -293,17 +329,23 @@ pub fn run_on_file(
                 object: obj.clone(),
                 ..c.clone()
             };
+            let classify_start = std::time::Instant::now();
             let outcome = dedup::classify(&sp, &effective, None)?;
+            classify_dur += classify_start.elapsed();
             match outcome {
                 dedup::DedupOutcome::Noop { existing_id } => {
                     report.noops += 1;
+                    let write_start = std::time::Instant::now();
                     sp.execute(
                         "UPDATE facts SET access_count=access_count+1, last_accessed=datetime('now') WHERE id=?1",
                         [existing_id],
                     )?;
+                    write_dur += write_start.elapsed();
                 }
                 dedup::DedupOutcome::CleanAdd => {
+                    let write_start = std::time::Instant::now();
                     insert_fact_with_history(&sp, &c.subject, &pred, &obj, c.importance, path)?;
+                    write_dur += write_start.elapsed();
                     report.adds += 1;
                 }
                 dedup::DedupOutcome::Ambiguous { nearest_ids } => {
@@ -318,7 +360,10 @@ pub fn run_on_file(
                             .ok()
                         })
                         .collect();
-                    let decision = match judge::judge(&c.subject, &pred, &obj, "", &existing) {
+                    let judge_start = std::time::Instant::now();
+                    let judge_result = judge::judge(&c.subject, &pred, &obj, "", &existing);
+                    judge_dur += judge_start.elapsed();
+                    let decision = match judge_result {
                         Ok(d) => d,
                         Err(e) => {
                             // Judge ProviderError MUST NOT discard the slice's
@@ -343,7 +388,9 @@ pub fn run_on_file(
                             return Ok(());
                         }
                     };
+                    let write_start = std::time::Instant::now();
                     apply_judge_decision(&sp, &c, &pred, &obj, decision, path, &mut report)?;
+                    write_dur += write_start.elapsed();
                 }
             }
             Ok(())
@@ -366,15 +413,71 @@ pub fn run_on_file(
             }
         }
     }
+    let watermark_start = std::time::Instant::now();
     watermark::advance_offset(&tx, path, new_offset)?;
     watermark::set_strikes(&tx, path, 0)?;
     tx.commit()?;
+    write_dur += watermark_start.elapsed();
+
+    // Convert to whole milliseconds once, after summing the raw Durations
+    // (see the comment above `judge_dur`'s declaration) — this is the only
+    // point where sub-millisecond precision is discarded.
+    let judge_ms = judge_dur.as_millis();
+    let classify_ms = classify_dur.as_millis();
+    let write_ms = write_dur.as_millis();
+
+    let rss_after_mb = crate::memory::embed::rss_mb();
+    println!(
+        "distill file={} slice_bytes={} candidates={} extract_ms={} judge_ms={} classify_ms={} write_ms={} rss_before_mb={} rss_after_mb={}",
+        path,
+        cap_len,
+        candidates_count,
+        extract_ms,
+        judge_ms,
+        classify_ms,
+        write_ms,
+        rss_before_mb
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+        rss_after_mb
+            .map(|v| v.to_string())
+            .unwrap_or_else(|| "none".to_string()),
+    );
+    report.slice_timings.push(SliceTiming {
+        slice_bytes: cap_len,
+        candidates: candidates_count,
+        extract_ms,
+        judge_ms,
+        classify_ms,
+        write_ms,
+        rss_before_mb,
+        rss_after_mb,
+    });
+
     telemetry_slice(path, offset, cap_len as i64, est_tokens, "ok", 0, None);
     Ok(report)
 }
 
+/// Monotonic per-process counter appended to `facts.valid_from`. Plain SQLite
+/// `datetime('now')` has 1-second resolution, which ties whenever a judge
+/// Update chain runs faster than a second — exactly what happens inside one
+/// distill transaction (old row invalidated, new row inserted). A tied
+/// `valid_from` makes `ORDER BY valid_from` return supersede-chain history in
+/// arbitrary order instead of true insertion order (closed-loop-plan
+/// ACCEPTANCE d). The counter's own strict monotonicity (not the wall-clock
+/// prefix) is what guarantees ordering.
+static VALID_FROM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+fn next_valid_from() -> String {
+    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
+    let seq = VALID_FROM_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+    format!("{ts}#{seq:020}")
+}
+
 /// Insert a fact plus its ADD history row. fact_history.fact_id references the
-/// fact created here, so the FK is satisfied by construction.
+/// fact created here, so the FK is satisfied by construction. `valid_from` is
+/// stamped now (closed-loop-plan-2026-09-06 §4 FIX item 2) so the row is
+/// immediately orderable in fact version history.
 fn insert_fact_with_history(
     conn: &rusqlite::Connection,
     subject: &str,
@@ -384,10 +487,11 @@ fn insert_fact_with_history(
     path: &str,
 ) -> anyhow::Result<String> {
     let id = Ulid::new().to_string();
+    let valid_from = next_valid_from();
     conn.execute(
-        "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,source_ref)
-         VALUES (?1,?2,?3,?4,?5,datetime('now'),datetime('now'),?6)",
-        rusqlite::params![id, subject, pred, obj, importance, path],
+        "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,source_ref,valid_from)
+         VALUES (?1,?2,?3,?4,?5,datetime('now'),datetime('now'),?6,?7)",
+        rusqlite::params![id, subject, pred, obj, importance, path, valid_from],
     )?;
     conn.execute(
         "INSERT INTO fact_history (fact_id,op,new_value,ts) VALUES (?1,'ADD',?2,datetime('now'))",
@@ -430,12 +534,42 @@ fn apply_judge_decision(
         }
         judge::Action::Update => {
             if let Some(tid) = decision.target_id {
-                let prev: String =
-                    conn.query_row("SELECT object FROM facts WHERE id=?1", [&tid], |r| r.get(0))?;
-                conn.execute(
-                    "UPDATE facts SET object=?1, updated_at=datetime('now') WHERE id=?2",
-                    rusqlite::params![obj, tid],
+                // Supersede, never overwrite (closed-loop-plan-2026-09-06 §4
+                // FIX item 2): the old row's `object` must survive so recall
+                // history stays queryable — the BOI-version bug was exactly
+                // this UPDATE ... SET object=... clobbering the past. Insert a
+                // new live row, then mark the old one invalid and point it at
+                // the replacement, all on the same connection/transaction the
+                // caller already holds.
+                // Fetch `private` alongside `object`: a supersede must carry
+                // the old row's privacy classification forward (spec Sqgggn2h8
+                // review G2, 2026-09-06) — insert_fact_with_history has no
+                // `private` param and defaults to 0, so a private fact that
+                // gets version-bumped would otherwise silently become
+                // non-private and leak through exclude_private recall.
+                let (prev, prev_private): (String, i64) = conn.query_row(
+                    "SELECT object, private FROM facts WHERE id=?1",
+                    [&tid],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
                 )?;
+                let new_id =
+                    insert_fact_with_history(conn, &c.subject, pred, obj, c.importance, path)?;
+                conn.execute(
+                    "UPDATE facts SET private=?1 WHERE id=?2",
+                    rusqlite::params![prev_private, new_id],
+                )?;
+                conn.execute(
+                    "UPDATE facts SET invalid_at=datetime('now'), superseded_by=?1, updated_at=datetime('now') WHERE id=?2",
+                    rusqlite::params![new_id, tid],
+                )?;
+                // fact_history.op is CHECK-constrained to
+                // ('ADD','UPDATE','DELETE','FLAG') and that table's schema is
+                // out of scope for this change (spec exclusion) — record the
+                // supersede as an 'UPDATE' history row (prev/new still
+                // captured) rather than widening the CHECK constraint. This
+                // encoding is Contract Amendment A1, operator decision
+                // Ddtqweb8z (recorded 2026-09-06, phase_run Pcyvr2f32) —
+                // authorization, not improvisation.
                 conn.execute(
                     "INSERT INTO fact_history (fact_id,op,prev_value,new_value,ts) VALUES (?1,'UPDATE',?2,?3,datetime('now'))",
                     rusqlite::params![tid, prev, obj],
@@ -498,6 +632,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
         crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
         conn
     }
 
@@ -868,6 +1003,466 @@ mod tests {
             watermark::strikes(&conn, &path_str).unwrap(),
             0,
             "a clean run must leave zero strikes"
+        );
+    }
+
+    /// RED for T7ngzd5vn (follow-up to B3, evolution/observations.md
+    /// "[2026-09-06] B3 measured"): B3 found `catchup-distill` at 2016 MB RSS /
+    /// 342% CPU for ~2.5 min with zero per-step breakdown inside
+    /// `run_on_file`. Pin the contract: every slice `run_on_file` processes
+    /// reports its own extract/judge/classify/write wall time plus an RSS
+    /// before/after sample, aggregated onto `DistillReport` (mirrors
+    /// `ConsolidateReport::op_timings` — `memory::consolidate::
+    /// consolidate_report_includes_per_op_timing`). Per PRIORS (wall-clock/RSS
+    /// numbers are printed, never asserted — shared loaded box), this checks
+    /// structure/counts/types only, never a specific ms or MB value. Fails now
+    /// (does not compile): `DistillReport` has no `slice_timings` field and no
+    /// `SliceTiming` type exists yet.
+    #[test]
+    fn distill_report_includes_per_slice_timing() {
+        let (hex_tmp, _g) = crate::telemetry::test_support::isolate();
+        let hex_dir = hex_tmp.path();
+
+        std::fs::create_dir_all(hex_dir.join(".hex/config")).unwrap();
+        std::fs::write(
+            hex_dir.join(".hex/config/llm.toml"),
+            "[use_cases.memory_extract]\ntransport = \"claude-cli\"\n\n[use_cases.memory_judge]\ntransport = \"claude-cli\"\n",
+        )
+        .unwrap();
+
+        let candidates = r#"[{"subject":"Ada Lovelace","predicate":"prefers","object":"tables over prose in status reports","importance":0.8},{"subject":"Project Analytical Engine","predicate":"prefers","object":"weekly written updates over meetings","importance":0.5}]"#;
+        let envelope = serde_json::json!({
+            "type": "result",
+            "subtype": "success",
+            "is_error": false,
+            "result": candidates,
+        })
+        .to_string();
+        let shim_dir = hex_dir.join("shim");
+        std::fs::create_dir_all(&shim_dir).unwrap();
+        let script = format!("#!/bin/sh\ncat > /dev/null\nprintf '%s' '{}'\n", envelope);
+        let shim = shim_dir.join("claude");
+        std::fs::write(&shim, script).unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&shim, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let old_path = std::env::var("PATH").ok();
+        std::env::set_var(
+            "PATH",
+            match &old_path {
+                Some(p) => format!("{}:{}", shim_dir.display(), p),
+                None => shim_dir.display().to_string(),
+            },
+        );
+
+        std::fs::create_dir_all(hex_dir.join("raw/transcripts")).unwrap();
+        let transcript = hex_dir.join("raw/transcripts/2026-09-07.md");
+        std::fs::write(
+            &transcript,
+            "# session\n\nAda Lovelace said she prefers tables over prose in status \
+             reports. The Analytical Engine project runs on weekly written updates.\n",
+        )
+        .unwrap();
+        let path_str = transcript.to_string_lossy().to_string();
+
+        let mut conn = fixture_conn();
+        let report = run_on_file(&mut conn, &path_str, 1).expect("golden path must succeed");
+
+        match old_path {
+            Some(p) => std::env::set_var("PATH", p),
+            None => std::env::remove_var("PATH"),
+        }
+
+        assert_eq!(
+            report.slice_timings.len(),
+            1,
+            "run_on_file must record one SliceTiming per slice processed: {report:?}"
+        );
+        let st = &report.slice_timings[0];
+        assert_eq!(
+            st.candidates, 2,
+            "the slice's candidate count must reflect what extract returned"
+        );
+        assert!(
+            st.slice_bytes > 0,
+            "slice_bytes must reflect the byte length of the processed span"
+        );
+        // Structural-only checks per PRIORS: wall-clock/RSS numbers are
+        // printed, never asserted as specific values (shared loaded box).
+        let _: u128 = st.extract_ms;
+        let _: u128 = st.judge_ms;
+        let _: u128 = st.classify_ms;
+        let _: u128 = st.write_ms;
+        let _: Option<u64> = st.rss_before_mb;
+        let _: Option<u64> = st.rss_after_mb;
+    }
+
+    /// RED for closed-loop-plan-2026-09-06 §4 / ACCEPTANCE (b): the BOI-version
+    /// correction replayed. A judge Update must SUPERSEDE, never overwrite —
+    /// the old row keeps its object text intact, gets `invalid_at` set, and
+    /// records `superseded_by` pointing at the new live row. Fails now because
+    /// `apply_judge_decision`'s Update arm still does an in-place
+    /// `UPDATE facts SET object=...` and the `invalid_at`/`superseded_by`
+    /// columns don't exist yet (schema_version 4).
+    #[test]
+    fn judge_update_supersedes_old_row_without_overwriting() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let old_id = insert_fact_with_history(
+            &conn,
+            "boi",
+            "has",
+            "installed and live version 3.3.2",
+            0.7,
+            "/tmp/seed.md",
+        )
+        .unwrap();
+
+        let update_cand = Candidate {
+            subject: "boi".into(),
+            predicate: "has".into(),
+            object: "installed and live version 3.9.0".into(),
+            importance: 0.7,
+        };
+        let update_decision = judge::Decision {
+            action: judge::Action::Update,
+            target_id: Some(old_id.clone()),
+            reason: "version bump".into(),
+        };
+        apply_judge_decision(
+            &conn,
+            &update_cand,
+            "has",
+            "installed and live version 3.9.0",
+            update_decision,
+            "/tmp/update.md",
+            &mut report,
+        )
+        .unwrap();
+
+        let (old_object, invalid_at, superseded_by): (String, Option<String>, Option<String>) =
+            conn.query_row(
+                "SELECT object, invalid_at, superseded_by FROM facts WHERE id=?1",
+                [&old_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            old_object, "installed and live version 3.3.2",
+            "old row's object text must never be overwritten by an Update"
+        );
+        assert!(
+            invalid_at.is_some(),
+            "old row must be marked invalid_at once superseded"
+        );
+        let new_id = superseded_by
+            .expect("old row must record superseded_by pointing at the replacement row");
+        let new_object: String = conn
+            .query_row("SELECT object FROM facts WHERE id=?1", [&new_id], |r| {
+                r.get(0)
+            })
+            .unwrap();
+        assert_eq!(new_object, "installed and live version 3.9.0");
+        assert_ne!(
+            new_id, old_id,
+            "supersede must insert a NEW row, not reuse the old id"
+        );
+    }
+
+    /// RED for ACCEPTANCE (c) + (d): a second Update chains — the 3.9.0 row's
+    /// `superseded_by` must point at the 3.9.1 row — and the full version
+    /// history must be queryable in `valid_from` order. Fails now for the same
+    /// reason as above (no supersede chain, no `valid_from` column).
+    #[test]
+    fn judge_update_chain_and_history_query_in_valid_from_order() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let v332_id = insert_fact_with_history(
+            &conn,
+            "boi",
+            "has",
+            "installed and live version 3.3.2",
+            0.7,
+            "/tmp/seed.md",
+        )
+        .unwrap();
+
+        let update1 = Candidate {
+            subject: "boi".into(),
+            predicate: "has".into(),
+            object: "installed and live version 3.9.0".into(),
+            importance: 0.7,
+        };
+        apply_judge_decision(
+            &conn,
+            &update1,
+            "has",
+            "installed and live version 3.9.0",
+            judge::Decision {
+                action: judge::Action::Update,
+                target_id: Some(v332_id.clone()),
+                reason: "bump".into(),
+            },
+            "/tmp/u1.md",
+            &mut report,
+        )
+        .unwrap();
+        let v390_id: String = conn
+            .query_row(
+                "SELECT id FROM facts WHERE subject='boi' AND predicate='has' \
+                 AND object='installed and live version 3.9.0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let update2 = Candidate {
+            subject: "boi".into(),
+            predicate: "has".into(),
+            object: "installed and live version 3.9.1".into(),
+            importance: 0.7,
+        };
+        apply_judge_decision(
+            &conn,
+            &update2,
+            "has",
+            "installed and live version 3.9.1",
+            judge::Decision {
+                action: judge::Action::Update,
+                target_id: Some(v390_id.clone()),
+                reason: "bump".into(),
+            },
+            "/tmp/u2.md",
+            &mut report,
+        )
+        .unwrap();
+        let v391_id: String = conn
+            .query_row(
+                "SELECT id FROM facts WHERE subject='boi' AND predicate='has' \
+                 AND object='installed and live version 3.9.1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let chained_superseded_by: Option<String> = conn
+            .query_row(
+                "SELECT superseded_by FROM facts WHERE id=?1",
+                [&v390_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            chained_superseded_by.as_deref(),
+            Some(v391_id.as_str()),
+            "3.9.0's superseded_by must chain to the 3.9.1 row"
+        );
+
+        let ordered_objects: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT object FROM facts WHERE subject='boi' AND predicate='has' \
+                     ORDER BY valid_from",
+                )
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect()
+        };
+        assert_eq!(
+            ordered_objects,
+            vec![
+                "installed and live version 3.3.2".to_string(),
+                "installed and live version 3.9.0".to_string(),
+                "installed and live version 3.9.1".to_string(),
+            ],
+            "history must be queryable in valid_from order (rowid chance-ordering is not enough)"
+        );
+    }
+
+    /// RED for review G1 / Contract Amendment A1 (closed-loop-plan-2026-09-06
+    /// §4, operator decision Ddtqweb8z, recorded 2026-09-06 from phase_run
+    /// Pcyvr2f32): fact_history's CHECK constraint permits only
+    /// ADD/UPDATE/DELETE/FLAG and that table's definition is out of scope
+    /// (spec exclusion), so a supersede is encoded with the EXISTING ops
+    /// rather than a new 'SUPERSEDE' value. One judge Update must write
+    /// EXACTLY two fact_history rows: {fact_id=old id, op='UPDATE',
+    /// prev_value=old object, new_value=new object} and {fact_id=new id,
+    /// op='ADD', prev_value=NULL, new_value=new object} — nothing else.
+    /// Prior review rounds blocked because no test pinned this row set and
+    /// no recorded decision authorized the UPDATE encoding; this test closes
+    /// both gaps.
+    #[test]
+    fn judge_update_writes_exactly_the_amendment_a1_history_row_set() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let old_id = insert_fact_with_history(
+            &conn,
+            "boi",
+            "has",
+            "installed and live version 3.3.2",
+            0.7,
+            "/tmp/seed.md",
+        )
+        .unwrap();
+        // The seed insert above writes its own ADD row; only rows written by
+        // the Update-under-test matter, so record the count before it runs.
+        let history_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_history", [], |r| r.get(0))
+            .unwrap();
+
+        apply_judge_decision(
+            &conn,
+            &Candidate {
+                subject: "boi".into(),
+                predicate: "has".into(),
+                object: "installed and live version 3.9.0".into(),
+                importance: 0.7,
+            },
+            "has",
+            "installed and live version 3.9.0",
+            judge::Decision {
+                action: judge::Action::Update,
+                target_id: Some(old_id.clone()),
+                reason: "version bump".into(),
+            },
+            "/tmp/update.md",
+            &mut report,
+        )
+        .unwrap();
+
+        let new_id: String = conn
+            .query_row(
+                "SELECT superseded_by FROM facts WHERE id=?1",
+                [&old_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        let history_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM fact_history", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            history_after - history_before,
+            2,
+            "a supersede must write exactly two new fact_history rows"
+        );
+
+        // old_id already carries its seed ADD row from insert_fact_with_history
+        // above; filter to the row the supersede itself wrote so this doesn't
+        // spuriously match that pre-existing ADD row.
+        let old_row: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT op, prev_value, new_value FROM fact_history WHERE fact_id=?1 AND op='UPDATE'",
+                [&old_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            old_row,
+            (
+                "UPDATE".to_string(),
+                Some("installed and live version 3.3.2".to_string()),
+                Some("installed and live version 3.9.0".to_string()),
+            ),
+            "old fact's history row must be op=UPDATE with prev/new captured (Amendment A1)"
+        );
+        let old_update_rows: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM fact_history WHERE fact_id=?1 AND op='UPDATE'",
+                [&old_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            old_update_rows, 1,
+            "exactly one UPDATE row for the old fact"
+        );
+
+        let new_row: (String, Option<String>, Option<String>) = conn
+            .query_row(
+                "SELECT op, prev_value, new_value FROM fact_history WHERE fact_id=?1",
+                [&new_id],
+                |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            new_row,
+            (
+                "ADD".to_string(),
+                None,
+                Some("installed and live version 3.9.0".to_string()),
+            ),
+            "new fact's history row must be op=ADD with no prev_value (Amendment A1)"
+        );
+    }
+
+    /// RED for spec Sqgggn2h8 review_b redo (2026-09-06, G2): the row a
+    /// supersede creates MUST carry the OLD row's `private` flag forward.
+    /// `insert_fact_with_history` takes no `private` parameter at all, so
+    /// every supersede-created row lands at the schema default (private=0)
+    /// no matter what it replaced — a private fact that gets version-bumped
+    /// silently becomes non-private, and `facts_recall(exclude_private=true)`
+    /// leaks it. Fails now: the replacement's `private` column reads 0, and
+    /// it comes back on an exclude_private recall for the new object text.
+    #[test]
+    fn judge_update_supersede_carries_private_flag_forward() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let old_id = insert_fact_with_history(
+            &conn,
+            "boi",
+            "has",
+            "installed and live version 3.3.2",
+            0.7,
+            "/tmp/seed.md",
+        )
+        .unwrap();
+        conn.execute("UPDATE facts SET private = 1 WHERE id = ?1", [&old_id])
+            .unwrap();
+
+        apply_judge_decision(
+            &conn,
+            &Candidate {
+                subject: "boi".into(),
+                predicate: "has".into(),
+                object: "installed and live version 3.9.0".into(),
+                importance: 0.7,
+            },
+            "has",
+            "installed and live version 3.9.0",
+            judge::Decision {
+                action: judge::Action::Update,
+                target_id: Some(old_id.clone()),
+                reason: "version bump".into(),
+            },
+            "/tmp/update.md",
+            &mut report,
+        )
+        .unwrap();
+
+        let new_private: i64 = conn
+            .query_row(
+                "SELECT private FROM facts WHERE subject='boi' AND predicate='has' \
+                 AND object='installed and live version 3.9.0'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            new_private, 1,
+            "supersede-created row must carry the old row's private flag forward"
+        );
+
+        let hits =
+            crate::memory::recall::facts_recall(&conn, "boi version 3.9.0", 5, None, true).unwrap();
+        assert!(
+            hits.iter()
+                .all(|(f, _)| f.object != "installed and live version 3.9.0"),
+            "exclude_private recall must never return a supersede replacement of a private fact"
         );
     }
 }

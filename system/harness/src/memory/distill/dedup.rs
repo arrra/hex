@@ -13,10 +13,13 @@ pub fn classify(
     candidate: &Candidate,
     _embedding: Option<&[f32]>,
 ) -> anyhow::Result<DedupOutcome> {
-    // Phase 1.5: exact (subject, predicate, object) match → Noop
+    // Phase 1.5: exact (subject, predicate, object) match → Noop. Superseded
+    // rows are history, not current truth — an old object must not shadow a
+    // clean re-assertion of today's value as a Noop (ACCEPTANCE e).
     let exact: Option<String> = conn
         .query_row(
-            "SELECT id FROM facts WHERE subject=?1 AND predicate=?2 AND object=?3 LIMIT 1",
+            "SELECT id FROM facts WHERE subject=?1 AND predicate=?2 AND object=?3 \
+             AND invalid_at IS NULL LIMIT 1",
             rusqlite::params![candidate.subject, candidate.predicate, candidate.object],
             |r| r.get(0),
         )
@@ -25,10 +28,12 @@ pub fn classify(
         return Ok(DedupOutcome::Noop { existing_id: id });
     }
 
-    // Phase 1.5b: same (subject, predicate), different object → Ambiguous
+    // Phase 1.5b: same (subject, predicate), different object → Ambiguous.
+    // Same live-only filter: a superseded conflict must not block a clean add.
     let conflict: Option<String> = conn
         .query_row(
-            "SELECT id FROM facts WHERE subject=?1 AND predicate=?2 LIMIT 1",
+            "SELECT id FROM facts WHERE subject=?1 AND predicate=?2 \
+             AND invalid_at IS NULL LIMIT 1",
             rusqlite::params![candidate.subject, candidate.predicate],
             |r| r.get(0),
         )
@@ -66,6 +71,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
         crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
         conn
     }
 
@@ -118,5 +124,58 @@ mod tests {
         };
         let outcome = classify(&conn, &cand, None).unwrap();
         assert!(matches!(outcome, DedupOutcome::CleanAdd));
+    }
+
+    /// RED for closed-loop-plan-2026-09-06 §4 / ACCEPTANCE (e): dedup must
+    /// classify over LIVE rows only. Re-asserting the current (live) value is
+    /// a Noop; re-asserting an old, superseded value must be Ambiguous — NOT
+    /// a Noop, since the row that would make it a Noop is stale history, and
+    /// NOT silently swallowed either. Fails now because `classify` has no
+    /// `invalid_at` column to filter on (schema_version 4) and, once that
+    /// column exists, would otherwise match the superseded row via the exact
+    /// (subject,predicate,object) branch and misreport it as a Noop.
+    #[test]
+    fn reasserting_current_value_after_supersede_is_noop_reasserting_stale_is_ambiguous() {
+        let conn = fixture_conn();
+        conn.execute(
+            "INSERT INTO facts \
+             (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by) \
+             VALUES ('old1','boi','has','installed and live version 3.3.2',0.7,\
+             '2026-01-01','2026-01-01','2026-01-01','2026-02-01','new1')",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO facts \
+             (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by) \
+             VALUES ('new1','boi','has','installed and live version 3.9.1',0.7,\
+             '2026-02-01','2026-02-01','2026-02-01',NULL,NULL)",
+            [],
+        )
+        .unwrap();
+
+        let reassert_current = Candidate {
+            subject: "boi".into(),
+            predicate: "has".into(),
+            object: "installed and live version 3.9.1".into(),
+            importance: 0.7,
+        };
+        let outcome = classify(&conn, &reassert_current, None).unwrap();
+        assert!(
+            matches!(outcome, DedupOutcome::Noop { .. }),
+            "re-asserting the live current value must be a Noop, got {outcome:?}"
+        );
+
+        let reassert_stale = Candidate {
+            subject: "boi".into(),
+            predicate: "has".into(),
+            object: "installed and live version 3.3.2".into(),
+            importance: 0.7,
+        };
+        let outcome2 = classify(&conn, &reassert_stale, None).unwrap();
+        assert!(
+            matches!(outcome2, DedupOutcome::Ambiguous { .. }),
+            "re-asserting a superseded object must be Ambiguous, not Noop; got {outcome2:?}"
+        );
     }
 }
