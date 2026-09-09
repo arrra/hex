@@ -1068,7 +1068,7 @@ mod tests {
         let raw = make_payload_default(
             "Edit",
             json!({
-                "file_path": "/Users/x/.hex-events/policies/foo.yaml",
+                "file_path": "/tmp/hex-home/x/.hex-events/policies/foo.yaml",
                 "old_string": "timeout: 60",
                 "new_string": "timeout: 120",
             }),
@@ -1523,8 +1523,8 @@ mod tests {
                     .args(["hook", "router"])
                     // Pin HEX_DIR to the staged fixture workspace, not
                     // whatever HEX_DIR happens to be set to in the ambient
-                    // test environment (e.g. a developer's live ~/hex
-                    // checkout) — otherwise the subprocess reads a
+                    // test environment (e.g. a developer's live HEX_DIR
+                    // workspace checkout) — otherwise the subprocess reads a
                     // different, possibly stale or lookaround-using,
                     // router-rules.json than the one this test just diffed
                     // against the Python reference.
