@@ -1435,13 +1435,23 @@ mod tests {
     /// override, else prefer a release build (the task's declared
     /// verification runs `cargo build --release --locked` first), else the
     /// debug build a plain `cargo test` produces automatically.
+    ///
+    /// `hex-harness` is a member of the workspace rooted two levels above
+    /// `CARGO_MANIFEST_DIR` (`<repo_root>/system/harness`), and cargo places
+    /// a workspace's build artifacts under `<repo_root>/target`, not under
+    /// the member crate's own directory — so the fallback must walk up to
+    /// the workspace root before joining `target`.
     fn rust_binary_path() -> PathBuf {
         if let Ok(p) = std::env::var("HEX_ROUTER_BIN") {
             return PathBuf::from(p);
         }
         let target_dir = std::env::var("CARGO_TARGET_DIR")
             .map(PathBuf::from)
-            .unwrap_or_else(|_| Path::new(env!("CARGO_MANIFEST_DIR")).join("target"));
+            .unwrap_or_else(|_| {
+                Path::new(env!("CARGO_MANIFEST_DIR"))
+                    .join("../..")
+                    .join("target")
+            });
         let release = target_dir.join("release").join("hex");
         if release.exists() {
             release
