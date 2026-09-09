@@ -93,17 +93,17 @@ fn run_check(hex_dir: &Path) -> CheckResult {
         ));
     }
 
-    let harness_dir = worktree_path.join("system/harness");
+    let harness_dir = worktree_path.join(".hex/harness");
     if !harness_dir.is_dir() {
         return CheckResult::fail(format!(
-            "system/harness -> missing from a fresh git checkout (not tracked, or gitignored) — \
-             fix: git add it (checked {})",
+            ".hex/harness -> missing from a fresh git checkout (not tracked, or gitignored) — \
+             fix: git add it or install it from .hex/.upgrade-cache (checked {})",
             harness_dir.display()
         ));
     }
 
     // Step 2: `cargo metadata --locked` catches both a missing path
-    // dependency (e.g. the `system/code-intel` path dep hidden by a local
+    // dependency (e.g. the `.hex/code-intel` path dep hidden by a local
     // `.git/info/exclude`) and a Cargo.lock that isn't tracked at all —
     // `--locked` refuses to generate/update one, so a fresh checkout with no
     // lockfile fails immediately (no network needed to detect that), rather
@@ -132,9 +132,9 @@ fn run_check(hex_dir: &Path) -> CheckResult {
     {
         Ok(o) if !o.status.success() => {
             return CheckResult::fail(format!(
-                "system/harness -> `cargo metadata` failed in a fresh git checkout \
+                ".hex/harness -> `cargo metadata` failed in a fresh git checkout \
                  (missing/out-of-date Cargo.lock or a missing path dependency) — \
-                 fix: git add it: {}",
+                 fix: git add it or install it from .hex/.upgrade-cache: {}",
                 String::from_utf8_lossy(&o.stderr).trim()
             ));
         }
@@ -171,7 +171,7 @@ fn run_check(hex_dir: &Path) -> CheckResult {
             .join("\n");
         CheckResult::fail(format!(
             "{} include target(s) referenced by the harness are missing from git — \
-             fix: git add it",
+             fix: git add it or install it from .hex/.upgrade-cache",
             missing.len()
         ))
         .with_details(details)
