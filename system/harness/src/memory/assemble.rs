@@ -240,7 +240,7 @@ fn fact_select_sql(extra_where: &str, order: &str) -> String {
     format!(
         "SELECT subject, predicate, object, importance, private, created_at \
          FROM facts \
-         WHERE tombstone = 0 {} \
+         WHERE tombstone = 0 AND invalid_at IS NULL {} \
          ORDER BY {} LIMIT ?",
         extra_where, order
     )
@@ -443,7 +443,7 @@ fn m3_predicate(
     for pred in &preds {
         let mut sql = String::from(
             "SELECT subject, predicate, object, importance, private, created_at \
-             FROM facts WHERE tombstone = 0 AND predicate = ?",
+             FROM facts WHERE tombstone = 0 AND invalid_at IS NULL AND predicate = ?",
         );
         let mut params: Vec<Value> = vec![Value::Text((*pred).to_string())];
         if for_agent {
@@ -500,7 +500,7 @@ fn m4_temporal(
     }
     let mut sql = String::from(
         "SELECT subject, predicate, object, importance, private, created_at \
-         FROM facts WHERE tombstone = 0",
+         FROM facts WHERE tombstone = 0 AND invalid_at IS NULL",
     );
     let mut params: Vec<Value> = Vec::new();
     if for_agent {
@@ -882,6 +882,7 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         // Production form: chunks IS the FTS5 vtable (see search.rs setup_db
         // and index.rs:379). search_fts_public queries `chunks MATCH ?` so
         // the column layout must match.
@@ -970,6 +971,52 @@ mod tests {
         assert!(
             objects.iter().any(|o| o.contains("rust")),
             "M2-covered fact missing from merge"
+        );
+    }
+
+    /// RED for FIX item 4 (Twbqe1c12) — the ACCEPTANCE (a) replay at the
+    /// entity-filter move (`fact_select_sql`, ~line 161): the OLD (higher
+    /// importance, so it wins the tie-break both in `fact_select_sql`'s own
+    /// ORDER BY and in the merge's dedup-by-subject+predicate collision
+    /// against the NEW row) must never surface once it has been superseded.
+    /// Today `fact_select_sql` gates only on `tombstone = 0`; the OLD row
+    /// isn't tombstoned (never deleted), so it wins the dedup collision and
+    /// the merge drops the live fact entirely — the exact "stale value
+    /// served for weeks" bug this task fixes.
+    #[test]
+    fn m2_entity_filter_skips_superseded_fact() {
+        let c = fresh_db();
+        crate::memory::schema::apply_plan3(&c).unwrap();
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+             VALUES ('a-old','person:alice','prefers','python',0.9,'2026-01-01','2026-01-01','2026-01-01','2026-02-01','a-new')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from)
+             VALUES ('a-new','person:alice','prefers','rust',0.7,'2026-02-01','2026-02-01','2026-02-01')",
+            [],
+        )
+        .unwrap();
+
+        let r = assemble(&c, "what does alice prefer", false, MAX_CONTEXT_CHARS, None);
+
+        let objects: Vec<&str> = r
+            .candidates
+            .iter()
+            .filter_map(|c| match &c.kind {
+                CandidateKind::Fact(f) => Some(f.object.as_str()),
+                _ => None,
+            })
+            .collect();
+        assert!(
+            objects.contains(&"rust"),
+            "the live fact must surface, got {objects:?}"
+        );
+        assert!(
+            !objects.contains(&"python"),
+            "the superseded fact must never surface, got {objects:?}"
         );
     }
 

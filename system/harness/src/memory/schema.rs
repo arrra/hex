@@ -263,6 +263,50 @@ fn facts_fts_needs_widening(conn: &Connection) -> Result<bool> {
     Ok(has_subject == 0)
 }
 
+/// Versioning columns so a judge Update can SUPERSEDE a fact instead of
+/// overwriting its `object` in place (closed-loop-plan-2026-09-06 §4). A live
+/// row has `invalid_at IS NULL`; a superseded row keeps its original `object`
+/// text forever and points at its replacement via `superseded_by`.
+pub const PLAN3_INDEX_DDL: &str = r#"
+CREATE INDEX IF NOT EXISTS facts_live_idx ON facts(subject, predicate) WHERE invalid_at IS NULL;
+"#;
+
+/// Migrate a Plan 2 (schema_version 4) database to Plan 3 (schema_version 5):
+/// adds `valid_from`/`invalid_at`/`superseded_by` to `facts`, backfills
+/// `valid_from = created_at` on pre-existing rows (which stay live —
+/// `invalid_at` is left NULL), and adds the live-rows partial index. Uses the
+/// same guarded-ALTER idiom as `apply_plan2`'s `transcript_files` backfill so
+/// re-running against an already-migrated database is a no-op, not an error.
+pub fn apply_plan3(conn: &Connection) -> Result<()> {
+    for (col, ddl) in [
+        ("valid_from", "ALTER TABLE facts ADD COLUMN valid_from TEXT"),
+        ("invalid_at", "ALTER TABLE facts ADD COLUMN invalid_at TEXT"),
+        (
+            "superseded_by",
+            "ALTER TABLE facts ADD COLUMN superseded_by TEXT",
+        ),
+    ] {
+        if let Err(e) = conn.execute(ddl, []) {
+            let msg = e.to_string();
+            if !msg.contains("duplicate column") {
+                eprintln!("[schema] facts.{col} backfill failed: {e}");
+                return Err(e);
+            }
+        }
+    }
+    conn.execute(
+        "UPDATE facts SET valid_from = created_at WHERE valid_from IS NULL",
+        [],
+    )?;
+    conn.execute_batch(PLAN3_INDEX_DDL)?;
+    conn.execute(
+        "INSERT INTO schema_version (version, applied_at) VALUES (5, datetime('now'))
+         ON CONFLICT(version) DO NOTHING",
+        [],
+    )?;
+    Ok(())
+}
+
 /// Create the minimal Plan 1 schema baseline needed by tests that exercise Plan 2.
 pub fn apply_plan1_baseline_for_test(conn: &Connection) -> Result<()> {
     conn.execute_batch(
@@ -414,5 +458,62 @@ mod tests {
             .collect();
         assert!(col_check.contains(&"access_count".to_string()));
         assert!(col_check.contains(&"tombstone".to_string()));
+    }
+
+    /// RED for closed-loop-plan-2026-09-06 §4 / FIX item 1: the versioning
+    /// migration (schema_version 5) must run against a DB already shaped by
+    /// `apply_plan2` (v4) with existing rows — not only a fresh DB. Existing
+    /// rows must be backfilled `valid_from = created_at`, `invalid_at NULL`,
+    /// and a second apply must be a no-op (idempotent: no duplicate-column
+    /// error, version stays 5). Fails now because `apply_plan3` does not
+    /// exist yet.
+    #[test]
+    fn apply_plan3_backfills_valid_from_and_is_idempotent_on_v4_db() {
+        crate::memory::vector::register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        apply_plan1_baseline_for_test(&conn).unwrap();
+        apply_plan2(&conn).unwrap();
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,created_at,updated_at)
+             VALUES ('f1','boi','has','installed and live version 3.3.2','2026-01-01','2026-01-01')",
+            [],
+        )
+        .unwrap();
+
+        apply_plan3(&conn).unwrap();
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version, 5,
+            "schema_version should record version=5 after apply_plan3"
+        );
+
+        let (valid_from, invalid_at): (String, Option<String>) = conn
+            .query_row(
+                "SELECT valid_from, invalid_at FROM facts WHERE id='f1'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            valid_from, "2026-01-01",
+            "existing rows must be backfilled with valid_from = created_at"
+        );
+        assert!(
+            invalid_at.is_none(),
+            "existing rows must remain live (invalid_at NULL) after migration"
+        );
+
+        // Idempotent: re-run must not error (guarded ALTER) and must leave version 5.
+        apply_plan3(&conn).unwrap();
+        let version2: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            version2, 5,
+            "re-applying apply_plan3 must stay at version 5"
+        );
     }
 }

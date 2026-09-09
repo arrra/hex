@@ -145,7 +145,7 @@ pub fn knn_facts(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result
            FROM (SELECT fact_id, distance FROM facts_vec
                   WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2) v
            JOIN facts f ON f.id = v.fact_id
-          WHERE f.tombstone = 0
+          WHERE f.tombstone = 0 AND f.invalid_at IS NULL
           ORDER BY v.distance",
     )?;
     let rows = stmt.query_map(params![f32s_to_le_bytes(query), k as i64], |r| {
@@ -288,6 +288,35 @@ mod tests {
         assert!(
             !hits.iter().any(|(rowid, _)| *rowid == nearest_rowid),
             "tombstoned fact must be excluded"
+        );
+    }
+
+    /// RED for FIX item 4 (Twbqe1c12) — a superseded row (`invalid_at` set,
+    /// `superseded_by` pointing at its replacement) is never deleted or
+    /// tombstoned, so it must be excluded from `knn_facts` by its OWN
+    /// column, not by piggybacking on the tombstone check.
+    #[test]
+    fn knn_facts_excludes_superseded() {
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+             VALUES ('01HFACT-SUP','project:hex','uses','old superseded object',0.5,'2026-06-11','2026-06-11','2026-06-11','2026-09-05','01HFACT-NEW')",
+            [],
+        )
+        .unwrap();
+        let v: Vec<f32> = (0..EMBED_DIM).map(|d| d as f32 * 0.001).collect();
+        insert_fact_vec(&conn, "01HFACT-SUP", &v).unwrap();
+
+        let hits = knn_facts(&conn, &v, 3).unwrap();
+        assert!(
+            hits.is_empty(),
+            "superseded fact must be excluded from the KNN join, got {:?}",
+            hits
         );
     }
 }

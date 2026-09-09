@@ -4,6 +4,11 @@ use std::path::Path;
 pub struct StatsReport {
     pub files_indexed: i64,
     pub total_facts: i64,
+    /// Facts with `invalid_at` set — superseded by a supersede-not-overwrite
+    /// Update (spec Sqgggn2h8 FIX item 2), kept forever for history. Counted
+    /// separately from `total_facts` (live only) so the live/superseded split
+    /// is visible without a manual query (FIX item 4, ACCEPTANCE (f)).
+    pub superseded_facts: i64,
     pub top_predicates: Vec<(String, i64)>,
     pub top_subjects: Vec<(String, i64)>,
     pub db_size_bytes: u64,
@@ -63,14 +68,27 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
         .unwrap_or(0);
 
     let total_facts: i64 = conn
-        .query_row("SELECT COUNT(*) FROM facts WHERE tombstone = 0", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM facts WHERE tombstone = 0 AND invalid_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+
+    // Superseded (FIX item 2): invalid_at set by a judge Update that
+    // supersedes rather than overwrites. Kept forever for history — counted
+    // separately from the live total, never subtracted from it.
+    let superseded_facts: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM facts WHERE tombstone = 0 AND invalid_at IS NOT NULL",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
 
     let top_predicates: Vec<(String, i64)> = {
         let mut stmt = conn.prepare(
-            "SELECT predicate, COUNT(*) AS cnt FROM facts WHERE tombstone = 0 \
+            "SELECT predicate, COUNT(*) AS cnt FROM facts WHERE tombstone = 0 AND invalid_at IS NULL \
              GROUP BY predicate ORDER BY cnt DESC LIMIT 10",
         )?;
         let rows: Vec<(String, i64)> = stmt
@@ -82,7 +100,7 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
 
     let top_subjects: Vec<(String, i64)> = {
         let mut stmt = conn.prepare(
-            "SELECT subject, COUNT(*) AS cnt FROM facts WHERE tombstone = 0 \
+            "SELECT subject, COUNT(*) AS cnt FROM facts WHERE tombstone = 0 AND invalid_at IS NULL \
              GROUP BY subject ORDER BY cnt DESC LIMIT 5",
         )?;
         let rows: Vec<(String, i64)> = stmt
@@ -155,6 +173,7 @@ fn gather(conn: &Connection, db_path: &Path) -> rusqlite::Result<StatsReport> {
     Ok(StatsReport {
         files_indexed,
         total_facts,
+        superseded_facts,
         top_predicates,
         top_subjects,
         db_size_bytes,
@@ -179,6 +198,7 @@ fn print_table(r: &StatsReport) {
         r.orphan_vectors
     );
     println!("Facts (live):      {}", r.total_facts);
+    println!("Facts (superseded): {}", r.superseded_facts);
     println!(
         "DB size:           {:.1} KB",
         r.db_size_bytes as f64 / 1024.0
@@ -248,6 +268,7 @@ fn print_json(r: &StatsReport) {
     let v = serde_json::json!({
         "files_indexed": r.files_indexed,
         "total_facts": r.total_facts,
+        "superseded_facts": r.superseded_facts,
         "db_size_bytes": r.db_size_bytes,
         "schema_version": r.schema_version,
         "last_consolidated": r.last_consolidated,
@@ -319,8 +340,10 @@ mod tests {
         // Verify print_table output contains required section headers
         // by checking the function runs without panic
         print_table(&report);
-        // schema_version is set by apply_plan2
-        assert_eq!(report.schema_version, Some(4));
+        // open_db (called via seed_db's db_path setup) applies both plan2 and
+        // plan3, so schema_version is 5, not plan2's own 4 (Twbqe1c12: open_db
+        // now auto-applies apply_plan3 too).
+        assert_eq!(report.schema_version, Some(5));
     }
 
     #[test]
@@ -463,6 +486,44 @@ mod tests {
         assert_eq!(
             report.total_facts, 1,
             "tombstoned facts should not be counted"
+        );
+    }
+
+    /// RED for FIX item 4 (Twbqe1c12) — ACCEPTANCE (f): stats must report 1
+    /// live fact and 2 superseded facts separately (`Facts (superseded): N`,
+    /// spec FIX item 4). `StatsReport` has no `superseded_facts` field yet,
+    /// so this does not compile until it is added — that absence itself is
+    /// the missing behavior.
+    #[test]
+    fn stats_counts_live_and_superseded_facts_separately() {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        std::fs::create_dir_all(hex_root.join(".hex")).unwrap();
+
+        let db_path = super::super::db_path(hex_root);
+        let conn = super::super::open_db(&db_path).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
+        crate::memory::index::init_db(&conn).unwrap();
+
+        conn.execute_batch(
+            "INSERT INTO facts (id, subject, predicate, object, created_at, updated_at, valid_from, invalid_at, superseded_by)
+             VALUES ('f1', 'boi', 'has', 'v3.3.2', '2025-01-01', '2025-01-01', '2025-01-01', '2025-02-01', 'f2');
+             INSERT INTO facts (id, subject, predicate, object, created_at, updated_at, valid_from, invalid_at, superseded_by)
+             VALUES ('f2', 'boi', 'has', 'v3.9.0', '2025-02-01', '2025-02-01', '2025-02-01', '2025-03-01', 'f3');
+             INSERT INTO facts (id, subject, predicate, object, created_at, updated_at, valid_from)
+             VALUES ('f3', 'boi', 'has', 'v3.9.1', '2025-03-01', '2025-03-01', '2025-03-01');",
+        )
+        .unwrap();
+
+        let report = gather(&conn, &db_path).unwrap();
+        assert_eq!(
+            report.total_facts, 1,
+            "only the live row (f3) counts as a live fact"
+        );
+        assert_eq!(
+            report.superseded_facts, 2,
+            "the two invalid_at-stamped rows must count as superseded"
         );
     }
 }

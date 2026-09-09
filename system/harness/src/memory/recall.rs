@@ -300,7 +300,7 @@ pub(crate) fn facts_recall_with_config(
         conn.prepare(&format!(
             "SELECT facts_fts.rowid
              FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
-             WHERE facts_fts MATCH ?1 AND f.tombstone = 0{privacy}
+             WHERE facts_fts MATCH ?1 AND f.tombstone = 0 AND f.invalid_at IS NULL{privacy}
              ORDER BY bm25(facts_fts, {weights}), f.importance DESC LIMIT ?2",
         ))?
         .query_map(rusqlite::params![fts_query, (k * 3) as i64], |r| r.get(0))?
@@ -351,7 +351,7 @@ pub(crate) fn facts_recall_with_config(
         let ids: Vec<i64> = conn
             .prepare(&format!(
                 "SELECT rowid FROM facts f
-                 WHERE tombstone = 0{privacy} AND (
+                 WHERE tombstone = 0 AND invalid_at IS NULL{privacy} AND (
                      subject LIKE '%:' || ?1 || '%' ESCAPE '\\' OR
                      subject LIKE '%-' || ?1 || '%' ESCAPE '\\' OR
                      subject LIKE '%\\_' || ?1 || '%' ESCAPE '\\' OR
@@ -402,7 +402,9 @@ pub(crate) fn facts_recall_with_config(
     let mut pred_ids: Vec<i64> = Vec::new();
     if !qtoks.is_empty() {
         let matched_preds: Vec<String> = conn
-            .prepare("SELECT DISTINCT predicate FROM facts WHERE tombstone = 0")?
+            .prepare(
+                "SELECT DISTINCT predicate FROM facts WHERE tombstone = 0 AND invalid_at IS NULL",
+            )?
             .query_map([], |r| r.get::<_, String>(0))?
             .filter_map(Result::ok)
             .filter(|pred| {
@@ -420,7 +422,7 @@ pub(crate) fn facts_recall_with_config(
             let ids: Vec<i64> = conn
                 .prepare(&format!(
                     "SELECT rowid FROM facts f
-                     WHERE predicate = ?1 AND tombstone = 0{privacy}
+                     WHERE predicate = ?1 AND tombstone = 0 AND invalid_at IS NULL{privacy}
                      ORDER BY importance DESC LIMIT ?2",
                 ))?
                 .query_map(rusqlite::params![pred, (k * 3) as i64], |r| r.get(0))?
@@ -478,7 +480,7 @@ pub(crate) fn facts_recall_with_config(
     for (rowid, score) in &keep {
         let row = conn.query_row(
             "SELECT subject, predicate, object, importance, private
-             FROM facts WHERE rowid = ?1 AND tombstone = 0",
+             FROM facts WHERE rowid = ?1 AND tombstone = 0 AND invalid_at IS NULL",
             [rowid],
             |r| {
                 Ok(FactHit {
@@ -871,6 +873,7 @@ mod plan2_tests {
         let c = rusqlite::Connection::open(&db_path).unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
              VALUES ('f1','project:hex','prefers','vim keybindings',0.9,'2026-06-04','2026-06-04',0)",
@@ -927,6 +930,7 @@ mod plan2_tests {
         let c = rusqlite::Connection::open(&db_path).unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         // A fact M3 can surface via the predicate cue ("decided").
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
@@ -1016,6 +1020,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
 
         // Fact A: FTS-matchable by the query tokens ("vector", "store").
         c.execute(
@@ -1083,6 +1088,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         for i in 0..8 {
             c.execute(
                 "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
@@ -1132,6 +1138,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
              VALUES ('bs','person:bart-smith','likes','strong coffee',0.9,'2026-06-11','2026-06-11')",
@@ -1169,6 +1176,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
              VALUES ('hg','hexagon','is','a six sided polygon',0.9,'2026-06-11','2026-06-11')",
@@ -1205,6 +1213,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
              VALUES ('fc','fleet_coordinator','owns','the deploy queue',0.9,'2026-06-11','2026-06-11')",
@@ -1237,6 +1246,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
              VALUES ('hv','hex-v2-arch','describes','the second architecture',0.9,'2026-06-11','2026-06-11')",
@@ -1266,6 +1276,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         for i in 0..8 {
             c.execute(
                 "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,private)
@@ -1304,6 +1315,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,tombstone)
              VALUES ('fd','person:dead','was','zzqx qqzz',0.9,'2026-06-11','2026-06-11',1)",
@@ -1325,6 +1337,132 @@ mod plan2_tests {
         );
     }
 
+    /// RED for FIX item 4 (Twbqe1c12) — the ACCEPTANCE (a) replay of the
+    /// BOI-version bug: a superseded row (invalid_at set, never deleted, so
+    /// `tombstone` stays 0) must never leak through the FTS content arm. The
+    /// FTS arm SQL (recall.rs ~line 138) today gates only on
+    /// `tombstone = 0`, so the stale "3.3.2" row still MATCHes and is fetched
+    /// alongside the live "3.9.0" row.
+    #[test]
+    fn facts_recall_fts_arm_skips_superseded() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
+
+        // Old row: superseded, kept forever for history (never deleted).
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+             VALUES ('boi-old','boi','has','installed and live version 3.3.2',0.9,'2026-07-01','2026-07-01','2026-07-01','2026-09-05','boi-new')",
+            [],
+        )
+        .unwrap();
+        // New row: the live current value.
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from)
+             VALUES ('boi-new','boi','has','installed and live version 3.9.0',0.9,'2026-09-05','2026-09-05','2026-09-05')",
+            [],
+        )
+        .unwrap();
+
+        let hits: Vec<FactHit> = facts_recall(&c, "boi version", 5, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert!(
+            hits.iter().any(|f| f.object.contains("3.9.0")),
+            "current object must surface via the FTS arm, got {:?}",
+            hits.iter().map(|f| &f.object).collect::<Vec<_>>()
+        );
+        assert!(
+            !hits.iter().any(|f| f.object.contains("3.3.2")),
+            "superseded object must NEVER surface via the FTS arm, got {:?}",
+            hits.iter().map(|f| &f.object).collect::<Vec<_>>()
+        );
+    }
+
+    /// RED for FIX item 4 (Twbqe1c12) — same replay, isolated to the slug
+    /// arm (recall.rs ~line 162, `WHERE subject LIKE ?1 AND tombstone = 0`).
+    /// Query tokens are chosen so NEITHER row's object/predicate/subject
+    /// tokenizes to an exact FTS match ("boi" as a whole token never matches
+    /// the "boiapp" token inside "system:boiapp") — only the slug LIKE
+    /// pattern (`%:boi%`) fires, isolating this arm the same way
+    /// `slug_arm_survives_full_fts_window` isolates it above.
+    #[test]
+    fn facts_recall_slug_arm_skips_superseded() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
+
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+             VALUES ('boiapp-old','system:boiapp','has','installed and live version 3.3.2',0.9,'2026-07-01','2026-07-01','2026-07-01','2026-09-05','boiapp-new')",
+            [],
+        )
+        .unwrap();
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from)
+             VALUES ('boiapp-new','system:boiapp','has','installed and live version 3.9.0',0.9,'2026-09-05','2026-09-05','2026-09-05')",
+            [],
+        )
+        .unwrap();
+
+        let hits: Vec<FactHit> = facts_recall(&c, "what does boi need", 5, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert!(
+            hits.iter().any(|f| f.object.contains("3.9.0")),
+            "current object must surface via the slug arm, got {:?}",
+            hits.iter().map(|f| &f.object).collect::<Vec<_>>()
+        );
+        assert!(
+            !hits.iter().any(|f| f.object.contains("3.3.2")),
+            "superseded object must NEVER surface via the slug arm, got {:?}",
+            hits.iter().map(|f| &f.object).collect::<Vec<_>>()
+        );
+    }
+
+    /// RED for FIX item 4 (Twbqe1c12) — same replay, isolated to the KNN
+    /// arm. Mirrors `facts_recall_knn_arm_skips_tombstoned` above but the
+    /// row is live-by-tombstone (never deleted) and only `invalid_at` marks
+    /// it superseded — the leak this task's GROUND TRUTH names at
+    /// `vector.rs` ~line 145 and the row fetch at `recall.rs` ~line 220.
+    #[test]
+    fn facts_recall_knn_arm_skips_superseded() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
+
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+             VALUES ('boi-old','boi','has','installed and live version 3.3.2',0.9,'2026-07-01','2026-07-01','2026-07-01','2026-09-05','boi-new')",
+            [],
+        )
+        .unwrap();
+        let qv = vec![0.1f32; crate::memory::vector::EMBED_DIM];
+        crate::memory::vector::insert_fact_vec(&c, "boi-old", &qv).unwrap();
+
+        let fused: Vec<FactHit> =
+            facts_recall(&c, "anything relevant here at all", 5, Some(&qv), false)
+                .unwrap()
+                .into_iter()
+                .map(|(f, _)| f)
+                .collect();
+        assert!(
+            !fused.iter().any(|f| f.object.contains("3.3.2")),
+            "superseded fact must not surface via the KNN arm, got {:?}",
+            fused.iter().map(|f| &f.object).collect::<Vec<_>>()
+        );
+    }
+
     /// Spec Tx4px1hxf guarantee, checked end-to-end at the ranking layer: the
     /// live path (`facts_recall`, which delegates to `RecallConfig::default()`)
     /// must produce the SAME fused ordering and native scores as an explicit
@@ -1341,6 +1479,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         // A mix that exercises the content arm, the entity arm, and the slug
         // arm so the fusion order is non-trivial and sensitive to every
         // lifted constant (arm weights + RRF k).
@@ -1458,6 +1597,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         let rows = [
             (
                 "f1",
@@ -1517,6 +1657,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
              VALUES ('f1','person:alice','is','a sample person',0.95,'2026-05-23','2026-05-23')",
@@ -1554,6 +1695,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
              VALUES ('kc','person:dana','knowsAbout','distributed consensus protocols',0.5,'2026-06-04','2026-06-04')",
@@ -1593,6 +1735,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
              VALUES ('v','project:hex','uses','the v2 arch pipeline',0.5,'2026-06-04','2026-06-04')",
@@ -1658,6 +1801,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c.execute(
             "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
              VALUES ('p','project:orbit','uses','the parallax alignment protocol',0.5,'2026-06-04','2026-06-04')",
@@ -1710,6 +1854,7 @@ mod plan2_tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         // 60 facts (> UBIQUITOUS_MIN_CORPUS). `hex` appears in EVERY subject
         // (100% > 50% -> corpus-ubiquitous). ONE fact carries the distinctive
         // object token `parallax`; the rest carry only routine filler.
@@ -1767,6 +1912,7 @@ mod plan2_tests {
         let small = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&small).unwrap();
         crate::memory::schema::apply_plan2(&small).unwrap();
+        crate::memory::schema::apply_plan3(&small).unwrap();
         for i in 0..4 {
             small
                 .execute(
@@ -1797,6 +1943,7 @@ mod injection_tax_tests {
         let c = Connection::open(&db_path).unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         // Many large facts + chunks so an uncapped render would blow past 3k.
         for i in 0..30 {
             c.execute(
@@ -1938,6 +2085,7 @@ mod embedder_contract_tests {
         let c = Connection::open(&db_path).unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         // One fact so retrieval has *something* to do, ensuring every arm
         // (M1, M2, M3, M4) of assemble() runs.
         c.execute(

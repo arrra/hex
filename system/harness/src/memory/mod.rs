@@ -43,6 +43,9 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     if let Err(e) = schema::apply_plan2(&conn) {
         eprintln!("[memory] Plan 2 schema migration warning: {e}");
     }
+    if let Err(e) = schema::apply_plan3(&conn) {
+        eprintln!("[memory] Plan 3 schema migration warning: {e}");
+    }
     if let Err(e) = schema::apply_messages_schema(&conn) {
         eprintln!("[memory] messages schema migration warning: {e}");
     }
