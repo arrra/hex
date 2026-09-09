@@ -199,9 +199,11 @@ fn fts_query_tokens(conn: &rusqlite::Connection, query: &str) -> Vec<String> {
     }
     // Corpus-size gate: below the floor, df is not a stable signal.
     let total: i64 = conn
-        .query_row("SELECT COUNT(*) FROM facts WHERE tombstone = 0", [], |r| {
-            r.get(0)
-        })
+        .query_row(
+            "SELECT COUNT(*) FROM facts WHERE tombstone = 0 AND invalid_at IS NULL",
+            [],
+            |r| r.get(0),
+        )
         .unwrap_or(0);
     if total < UBIQUITOUS_MIN_CORPUS {
         return base;
@@ -219,7 +221,7 @@ fn fts_query_tokens(conn: &rusqlite::Connection, query: &str) -> Vec<String> {
         let df: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid \
-                 WHERE facts_fts MATCH ?1 AND f.tombstone = 0",
+                 WHERE facts_fts MATCH ?1 AND f.tombstone = 0 AND f.invalid_at IS NULL",
                 rusqlite::params![tok],
                 |r| r.get(0),
             )

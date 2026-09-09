@@ -250,8 +250,14 @@ fn op_fact_canonicalize(conn: &mut Connection) -> anyhow::Result<()> {
     // TEXT PRIMARY KEY, which SQLite permits) cannot be canonicalized or
     // referenced by fact_history. Count and warn rather than silently skipping;
     // the `id IS NOT NULL` filter below keeps such rows out of the pass.
+    //
+    // Both queries also require `invalid_at IS NULL`: `tombstone` alone is the
+    // legacy dedup/prune flag, but a bi-temporally superseded fact (schema v5,
+    // `invalid_at` set, `superseded_by` pointing at its replacement) keeps
+    // `tombstone = 0`. Without this guard a stale superseded row could win a
+    // canonicalization group as "leader" and tombstone its own live successor.
     let null_ids: i64 = conn.query_row(
-        "SELECT COUNT(*) FROM facts WHERE tombstone = 0 AND id IS NULL",
+        "SELECT COUNT(*) FROM facts WHERE tombstone = 0 AND invalid_at IS NULL AND id IS NULL",
         [],
         |r| r.get(0),
     )?;
@@ -266,7 +272,7 @@ fn op_fact_canonicalize(conn: &mut Connection) -> anyhow::Result<()> {
         let mut stmt = conn.prepare(
             "SELECT id, subject, predicate, object, updated_at
                FROM facts
-              WHERE tombstone = 0 AND id IS NOT NULL",
+              WHERE tombstone = 0 AND invalid_at IS NULL AND id IS NOT NULL",
         )?;
         let rows = stmt.query_map([], |r| {
             Ok(CanonFact {

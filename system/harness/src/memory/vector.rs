@@ -137,20 +137,29 @@ pub fn knn(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(
 /// `facts_vec`. `facts_vec` keys rows by the fact's TEXT ULID id (NOT an
 /// integer — it cannot be parsed as i64), so hits join back to `facts` to
 /// return the integer rowid: the RRF fusion key shared with the facts_fts
-/// arm. Tombstoned facts are excluded (their vectors are swept weekly, not
-/// live). Same relevance floor as [`knn`].
+/// arm. Tombstoned/superseded facts are excluded (their vectors are swept
+/// weekly, not live). Same relevance floor as [`knn`].
+///
+/// The raw vec0 KNN subquery is overfetched (well past `k`) before the
+/// tombstone/`invalid_at` join-filter runs, then re-capped at `k` in the outer
+/// query: limiting to `k` inside the subquery FIRST would truncate the
+/// candidate window before stale vectors are filtered out, letting them
+/// consume slots a live fact should have won.
 pub fn knn_facts(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(i64, f64)>> {
+    let overfetch = k.saturating_mul(4).max(k + 16);
     let mut stmt = conn.prepare(
         "SELECT f.rowid, v.distance
            FROM (SELECT fact_id, distance FROM facts_vec
                   WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2) v
            JOIN facts f ON f.id = v.fact_id
           WHERE f.tombstone = 0 AND f.invalid_at IS NULL
-          ORDER BY v.distance",
+          ORDER BY v.distance
+          LIMIT ?3",
     )?;
-    let rows = stmt.query_map(params![f32s_to_le_bytes(query), k as i64], |r| {
-        Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
-    })?;
+    let rows = stmt.query_map(
+        params![f32s_to_le_bytes(query), overfetch as i64, k as i64],
+        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)),
+    )?;
     let hits: Vec<(i64, f64)> = rows.collect::<rusqlite::Result<_>>()?;
     Ok(filter_by_distance(hits, max_distance()))
 }
