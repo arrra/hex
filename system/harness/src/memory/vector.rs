@@ -250,6 +250,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
         crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
 
         // ULID-style TEXT ids — deliberately NOT parseable as integers.
         for (i, id) in ["01HFACT-A", "01HFACT-B", "01HFACT-C"].iter().enumerate() {

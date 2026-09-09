@@ -553,6 +553,7 @@ mod tests {
         let conn = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
         crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
         conn.execute_batch(
             "CREATE VIRTUAL TABLE chunks USING fts5(
                 file_id UNINDEXED,

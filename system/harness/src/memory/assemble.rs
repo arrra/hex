@@ -172,7 +172,10 @@ fn detect_entity_subjects(conn: &Connection, query: &str) -> Vec<String> {
             // Broadening M2's match surface raises its firing rate; the
             // entity-intersection window fix (task T8s8bq3th) is what keeps the
             // wider match from flooding the merge.
-            let slug = lower.splitn(2, ':').nth(1).unwrap_or(lower.as_str());
+            let slug = lower
+                .split_once(':')
+                .map(|(_, s)| s)
+                .unwrap_or(lower.as_str());
             for piece in slug.split([':', '-', '_', '/', ' ']) {
                 if piece.len() >= 3 && toks.contains(piece) {
                     hit = true;
@@ -467,7 +470,7 @@ fn m3_predicate(
             Err(_) => continue,
         };
         let collected: Vec<(FactHit, f64)> =
-            match stmt.query_map(rusqlite::params_from_iter(params), |r| fact_from_row(r)) {
+            match stmt.query_map(rusqlite::params_from_iter(params), fact_from_row) {
                 Ok(rows) => rows.filter_map(Result::ok).collect(),
                 Err(_) => Vec::new(),
             };
@@ -524,7 +527,7 @@ fn m4_temporal(
         Err(_) => return (true, Vec::new()),
     };
     let hits: Vec<(FactHit, f64)> = stmt
-        .query_map(rusqlite::params_from_iter(params), |r| fact_from_row(r))
+        .query_map(rusqlite::params_from_iter(params), fact_from_row)
         .map(|rows| rows.filter_map(Result::ok).collect())
         .unwrap_or_default();
     let cands = facts_to_candidates(hits, MoveId::M4TemporalSelect, true, cfg);
@@ -711,6 +714,7 @@ pub fn assemble_with_chunk_cap(
 /// isolates the one arm it means to measure (spec Sdnap37he, task Ttrmaca6q;
 /// exclusion: do not regress existing arms). Offline semantic callers pass the
 /// same vector to both (see [`assemble_with_chunk_cap`]).
+#[allow(clippy::too_many_arguments)]
 pub fn assemble_with_config(
     conn: &Connection,
     query: &str,
