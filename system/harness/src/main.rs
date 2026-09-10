@@ -2823,10 +2823,32 @@ fn hitl_digest_due(local_hour: u32, digest_hour: u32, already_sent_today: bool) 
     local_hour == digest_hour && !already_sent_today
 }
 
-/// Compose + send the digest now. Returns the open count if a digest was sent.
+/// Derive the local hour and the local calendar day from ONE localized
+/// moment, so the two can never disagree (F1, arrra/hex PR #11 review round
+/// 1). Before this helper, the digest dedup key was a fresh `now.format(...)`
+/// on the raw UTC timestamp while `hitl_digest_due`'s hour came from a
+/// separately localized clock; in a fractional-offset zone (UTC+09:30,
+/// digest_hour=9) local 09:00 and 09:30 both land in the digest hour but
+/// straddle UTC midnight, so the two calls disagreed on "day" and let a
+/// second digest go out for the same local day.
+fn hitl_local_hour_and_day<Tz>(local_now: chrono::DateTime<Tz>) -> (u32, String)
+where
+    Tz: chrono::TimeZone,
+    Tz::Offset: std::fmt::Display,
+{
+    use chrono::Timelike;
+    (local_now.hour(), local_now.format("%Y-%m-%d").to_string())
+}
+
+/// Compose + send the digest now. `day` is the LOCAL calendar day (from
+/// [`hitl_local_hour_and_day`]) — the same key the caller used to look up
+/// `hitl_digest_sent`, so the record this writes can never land under a
+/// different key than the lookup that gated it. Returns the open count if a
+/// digest was sent.
 fn hitl_send_digest(
     hex_dir: &std::path::Path,
     now: chrono::DateTime<chrono::Utc>,
+    day: &str,
 ) -> Result<Option<usize>, String> {
     use hex::hitl::{policy, store, transport};
     let cfg = store::load_config(hex_dir)?;
@@ -2835,8 +2857,7 @@ fn hitl_send_digest(
         Some(digest) => {
             let sender = transport::OsascriptSender;
             transport::send(hex_dir, &cfg, &sender, None, "digest", &digest.render());
-            let day = now.format("%Y-%m-%d").to_string();
-            hitl_mark_digest_sent(hex_dir, &day);
+            hitl_mark_digest_sent(hex_dir, day);
             Ok(Some(digest.total_open))
         }
         None => Ok(None),
@@ -2863,14 +2884,16 @@ fn hitl_close(
 }
 
 fn run_hitl(command: HitlCommands) -> i32 {
-    use chrono::Timelike;
     use hex::hitl::store;
 
     let hex_dir = hitl_hex_dir();
     let now = chrono::Utc::now();
-    // The operator's actual local hour, not `now`'s UTC hour — quiet hours
-    // and the digest gate on this (see `hitl::policy::in_quiet_hours`).
-    let local_hour = now.with_timezone(&chrono::Local).hour();
+    // The operator's actual local hour AND local calendar day, derived from
+    // ONE localized moment (see `hitl_local_hour_and_day`) — never `now`'s
+    // raw UTC hour or UTC date. Quiet hours and the digest dedup key both
+    // gate on this pair (see `hitl::policy::in_quiet_hours`,
+    // `hitl_digest_due`).
+    let (local_hour, local_day) = hitl_local_hour_and_day(now.with_timezone(&chrono::Local));
 
     match command {
         HitlCommands::Add {
@@ -3045,13 +3068,12 @@ fn run_hitl(command: HitlCommands) -> i32 {
                     return 1;
                 }
             };
-            let day = now.format("%Y-%m-%d").to_string();
             if hitl_digest_due(
                 local_hour,
                 cfg.digest_hour,
-                hitl_digest_sent(&hex_dir, &day),
+                hitl_digest_sent(&hex_dir, &local_day),
             ) {
-                match hitl_send_digest(&hex_dir, now) {
+                match hitl_send_digest(&hex_dir, now, &local_day) {
                     Ok(Some(n)) => println!("hitl nudge: digest sent ({n} open)"),
                     Ok(None) => {}
                     Err(e) => {
@@ -3063,7 +3085,7 @@ fn run_hitl(command: HitlCommands) -> i32 {
             println!("hitl nudge: done");
             0
         }
-        HitlCommands::Digest => match hitl_send_digest(&hex_dir, now) {
+        HitlCommands::Digest => match hitl_send_digest(&hex_dir, now, &local_day) {
             Ok(Some(n)) => {
                 println!("hitl digest: sent ({n} open)");
                 0
@@ -3584,6 +3606,42 @@ mod tests {
                 hitl_digest_due(9, 9, false),
                 "local hour == digest_hour and not sent today -- digest must fire"
             );
+        }
+
+        // F1 (arrra/hex PR #11, review round 1): the digest dedup key's
+        // "day" must come from the SAME localized timestamp that produces
+        // `local_hour` (see `main.rs` around line 3048), never from `now`'s
+        // raw UTC date. In a fractional-offset zone (UTC+09:30,
+        // digest_hour=9), local 09:00 and local 09:30 both land in the
+        // digest hour but straddle UTC midnight -- deriving the day from
+        // UTC gives the two nudges different dedup keys and lets a second
+        // digest go out for the same local day. `hitl_local_hour_and_day`
+        // (not yet implemented) is the pure helper the fix must introduce:
+        // it derives (local_hour, local_day) from ONE localized moment so
+        // they can never disagree the way `now.format(...)` vs
+        // `now.with_timezone(&Local).hour()` can today.
+        #[test]
+        fn digest_day_key_matches_across_utc_midnight_within_one_local_hour() {
+            let offset = chrono::FixedOffset::east_opt(9 * 3600 + 30 * 60).unwrap();
+            // local 2026-07-10T09:00:00+09:30
+            let now_0900 = ts("2026-07-09T23:30:00Z").with_timezone(&offset);
+            // local 2026-07-10T09:30:00+09:30 -- 30 minutes later locally,
+            // but UTC has already ticked over to the next calendar day.
+            let now_0930 = ts("2026-07-10T00:00:00Z").with_timezone(&offset);
+
+            let (hour_0900, day_0900) = hitl_local_hour_and_day(now_0900);
+            let (hour_0930, day_0930) = hitl_local_hour_and_day(now_0930);
+
+            assert_eq!(hour_0900, 9);
+            assert_eq!(hour_0930, 9);
+            assert_eq!(
+                day_0900, day_0930,
+                "both nudges fall in the same local digest hour on the same \
+                 local calendar day (2026-07-10) even though their UTC \
+                 calendar dates differ -- the dedup key must agree so only \
+                 one digest goes out"
+            );
+            assert_eq!(day_0900, "2026-07-10");
         }
     }
 }
