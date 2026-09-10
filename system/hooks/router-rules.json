@@ -46,9 +46,9 @@
   {
     "id": "git-destructive-ask",
     "tool": "^Bash$",
-    "match": "@PREFIX@git\\s+@GITOPTS@(reset\\s+(?:\\S+\\s+)*--hard\\b|checkout\\s+(?:\\S+\\s+)*--\\s|branch\\s+-D|clean\\s+(?:\\S+\\s+)*(?:--force\\b|-\\w*f\\w*\\b))",
+    "match": "@PREFIX@git\\s+@GITOPTS@(reset\\s+(?:[^\\s;&|]+[ \\t]+)*--hard\\b|checkout\\s+(?:[^\\s;&|]+[ \\t]+)*--\\s|branch\\s+-D|clean\\s+(?:[^\\s;&|]+[ \\t]+)*(?:--force\\b|-\\w*f\\w*\\b))",
     "decision": "ask",
-    "message": "Destructive git operation \u2014 on the operator ASK-FIRST list. (F6: matches regardless of option order/long forms.)",
+    "message": "Destructive git operation \u2014 on the operator ASK-FIRST list. (F6: matches regardless of option order/long forms. F2: the option scan cannot cross ;/&&/| or a newline into an unrelated command.)",
     "source": "operator ASK-FIRST list"
   },
   {

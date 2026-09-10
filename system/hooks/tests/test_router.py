@@ -1334,6 +1334,23 @@ class TestDestructiveArgumentFormsAskFirst(RouterTestCase):
                 self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F6 near miss)")
                 self.assertEqual(read_ledger(ledger_dir), [])
 
+    def test_option_scan_does_not_cross_a_command_separator(self):
+        """F2 (review round 1 redo): `(?:\\S+\\s+)*` treats `;`/`&&`/`|` as
+        ordinary whitespace-separated tokens, so a non-destructive command
+        followed by an unrelated command containing a destructive-looking
+        flag (e.g. `rm -rf`) was scanned as one option run and asked. The
+        option-skip must stop at `;`, `&`, and `|`."""
+        cases = (
+            "git clean -n; rm -rf build",
+            "git checkout -b feat && printf -- '%s' x",
+            "git reset --soft HEAD~1 && ls --hard",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2 near miss)")
+                self.assertEqual(read_ledger(ledger_dir), [])
+
 
 class TestMultilinePollingLoopScope(RouterTestCase):
     """F11: rules compile with MULTILINE, not DOTALL, so the polling rule's

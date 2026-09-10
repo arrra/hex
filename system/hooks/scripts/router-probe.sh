@@ -285,6 +285,18 @@ EXTRA_FIXTURES = [
         positive={"command": "git checkout HEAD -- tracked-file"},
         near_miss={"command": "git checkout -b newbranch"},
     ),
+    # F2 (review round 1 redo): `(?:\S+\s+)*` treated `;`/`&&`/`|` as
+    # ordinary whitespace-separated tokens, so a non-destructive command
+    # followed by an unrelated command containing a destructive-looking
+    # flag (e.g. `rm -rf`) was scanned as one option run and asked. The
+    # option-skip must stop at `;`, `&`, and `|`.
+    dict(
+        id="git-destructive-ask",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git reset HEAD~1 --hard"},
+        near_miss={"command": "git clean -n; rm -rf build"},
+    ),
     # F11: a normal multiline while/until loop must ask the same as its
     # one-line equivalent (rules compile MULTILINE, not DOTALL); an
     # out-of-loop gh call before an unrelated loop must stay abstain.
