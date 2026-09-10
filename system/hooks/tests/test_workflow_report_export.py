@@ -962,6 +962,7 @@ class TerminalStateAndFailureBranchCoverage(unittest.TestCase):
             rc, out, err = _run_export(hex_dir, projects)
             self.assertEqual(rc, 0, err)
             self.assertIn("nonterminal=1", out)
+            self.assertEqual(err.strip(), "", "a merely-running record must not produce any WARN")
             self.assertEqual(
                 list(Path(hex_dir, "projects").rglob("*.md")), [], "a running record must not be exported"
             )
@@ -983,9 +984,17 @@ class TerminalStateAndFailureBranchCoverage(unittest.TestCase):
             rc, out, err = _run_export(hex_dir, projects)
             self.assertEqual(rc, 0, err)
             self.assertIn("wrote=2", out)
-            reports = {p.name for p in Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md")}
+            self.assertEqual(err.strip(), "", "two cleanly-mapped terminal records must not produce any WARN")
+            report_dir = Path(hex_dir, "projects", "acme-repo", "workflow-reports")
+            reports = {p.name: p for p in report_dir.glob("*.md")}
             self.assertTrue(any("wf_fail1" in n for n in reports), reports)
             self.assertTrue(any("wf_kill1" in n for n in reports), reports)
+            fail_content = next(p.read_text() for n, p in reports.items() if "wf_fail1" in n)
+            self.assertIn("wf_fail1", fail_content)
+            self.assertIn("**Status:** failed", fail_content)
+            kill_content = next(p.read_text() for n, p in reports.items() if "wf_kill1" in n)
+            self.assertIn("wf_kill1", kill_content)
+            self.assertIn("**Status:** killed", kill_content)
 
     def test_unmappable_record_lands_in_unmapped_with_a_warning(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1003,10 +1012,15 @@ class TerminalStateAndFailureBranchCoverage(unittest.TestCase):
             rc, out, err = _run_export(hex_dir, projects)
             self.assertEqual(rc, 0, err)
             self.assertIn("unmapped=1", out)
+            self.assertIn("workflow-report-export: WARN", err)
             self.assertIn("wf_nopath1", err)
             self.assertIn("_unmapped", err)
             reports = list(Path(hex_dir, "projects", "_unmapped", "workflow-reports").glob("*.md"))
             self.assertEqual(len(reports), 1, reports)
+            content = reports[0].read_text()
+            self.assertIn("wf_nopath1", content)
+            self.assertIn("**Status:** completed", content)
+            self.assertIn("no filesystem path anywhere in here", content)
 
     def test_unparsable_json_is_reported_and_the_run_continues_with_exit_1(self):
         with tempfile.TemporaryDirectory() as td:
@@ -1026,10 +1040,15 @@ class TerminalStateAndFailureBranchCoverage(unittest.TestCase):
             Path(wf_dir, "wf_z_valid4.json").write_text(json.dumps(valid))
             rc, out, err = _run_export(hex_dir, projects)
             self.assertEqual(rc, 1, "unparsable JSON must fail the overall run")
+            self.assertIn("workflow-report-export: WARN", err)
             self.assertIn("wf_a_badjson", err)
+            self.assertIn("workflow-report-export: FATAL 1 unreadable", err)
             self.assertIn("unreadable=1", out)
             reports = list(Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md"))
             self.assertEqual(len(reports), 1, "the run must continue past the unparsable record")
+            content = reports[0].read_text()
+            self.assertIn("wf_z_valid4", content)
+            self.assertIn("**Status:** completed", content)
 
 
 if __name__ == "__main__":
