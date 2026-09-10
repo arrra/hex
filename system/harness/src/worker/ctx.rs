@@ -127,9 +127,6 @@ pub fn exit_error(program: &str, out: &std::process::Output) -> Option<Error> {
     Some(anyhow!("`{program}` exited {code}: {detail}"))
 }
 
-impl Ctx {
-}
-
 impl Default for Ctx {
     fn default() -> Self {
         Self::new()
