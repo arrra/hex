@@ -233,6 +233,8 @@ def load_project_map(hex_dir: str) -> list[tuple[str, str]]:
         data = tomllib.load(fh)
     out = []
     for i, entry in enumerate(data.get("map", []), start=1):
+        if not isinstance(entry, dict):
+            raise ValueError(f"workflow-projects.toml: rule {i}: must be a table (got {type(entry).__name__})")
         match = entry.get("match")
         if not isinstance(match, str) or not match:
             raise ValueError(

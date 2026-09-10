@@ -875,6 +875,21 @@ class InvalidMappingRulesRejected(unittest.TestCase):
             msg = str(ctx.exception)
             self.assertIn("match", msg, "the offending field name must be named in the error")
 
+    def test_non_table_rule_is_rejected_naming_the_rule_index(self):
+        # review r1 F2 (round-2 finding): `[[map]]` entries that aren't
+        # tables (e.g. a bare string) reached entry.get("match") unchecked
+        # and raised AttributeError naming neither rule index nor field.
+        with tempfile.TemporaryDirectory() as hex_dir:
+            cfg = Path(hex_dir) / ".hex" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "workflow-projects.toml").write_text('map = ["acme"]\n')
+            m = load_script()
+            with self.assertRaises(Exception) as ctx:
+                m.load_project_map(hex_dir)
+            msg = str(ctx.exception)
+            self.assertNotIsInstance(ctx.exception, AttributeError, "must be a diagnosed error, not a raw crash")
+            self.assertRegex(msg, r"\b1\b", "the offending rule's index must be named in the error")
+
     def test_invalid_mapping_config_fails_the_whole_run(self):
         with tempfile.TemporaryDirectory() as td:
             hex_dir = os.path.join(td, "hex")
