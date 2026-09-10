@@ -254,10 +254,38 @@ mod tests {
         );
     }
 
-    /// Run a git command in `dir`, panicking with its args/output on failure.
+    /// An empty, never-populated directory used as `core.hooksPath` for
+    /// fixture commits below (F18) — created once per test binary and
+    /// shared read-only, so no per-call temp-dir churn and no risk of two
+    /// concurrent tests racing on the same path.
+    fn empty_hooks_dir() -> &'static std::path::Path {
+        static DIR: std::sync::OnceLock<tempfile::TempDir> = std::sync::OnceLock::new();
+        DIR.get_or_init(|| tempfile::tempdir().expect("create empty hooks dir"))
+            .path()
+    }
+
+    /// Run a git command in `dir`, panicking with its args/output on
+    /// failure.
+    ///
+    /// F18: a `commit` invocation gets `-c commit.gpgsign=false -c
+    /// core.hooksPath=<empty dir>` prepended, command-local — a machine or
+    /// fixture with `commit.gpgsign`/`core.hooksPath` configured locally
+    /// must not be able to require a developer's signing credentials or
+    /// run unrelated hooks just to create a test fixture. Command-local `-c`
+    /// flags (not process-global env mutation) keep this safe under
+    /// concurrent test execution.
     fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let mut full_args: Vec<String> = Vec::new();
+        if args.first() == Some(&"commit") {
+            full_args.push("-c".to_string());
+            full_args.push("commit.gpgsign=false".to_string());
+            full_args.push("-c".to_string());
+            full_args.push(format!("core.hooksPath={}", empty_hooks_dir().display()));
+        }
+        full_args.extend(args.iter().map(|s| s.to_string()));
+
         let output = std::process::Command::new("git")
-            .args(args)
+            .args(&full_args)
             .current_dir(dir)
             .env("GIT_AUTHOR_NAME", "hex-test")
             .env("GIT_AUTHOR_EMAIL", "hex-test@example.com")
@@ -268,7 +296,7 @@ mod tests {
         assert!(
             output.status.success(),
             "git {:?} failed in {}: {}",
-            args,
+            full_args,
             dir.display(),
             String::from_utf8_lossy(&output.stderr)
         );
@@ -588,6 +616,331 @@ mod tests {
             worktree_count(tmp.path()),
             1,
             "the check's temp `git worktree` must be removed after a FAIL run"
+        );
+    }
+
+    // ---- tests for task Thcdrea2q (arrra/hex PR #7 review round 1:
+    // F15/F16, F13, F20, F18, F14, F12) ----
+
+    /// Registers `path` as a git worktree of `dir` at HEAD, then deletes its
+    /// on-disk directory WITHOUT deregistering it — exactly the "missing
+    /// worktree" administrative state that a repo-wide `git worktree prune`
+    /// cleans up. Used to prove F15/F16: this check's cleanup must never
+    /// touch worktree registrations it did not create itself.
+    fn register_dangling_worktree(dir: &std::path::Path) {
+        let wt_tmp = tempfile::tempdir().unwrap();
+        let wt_path = wt_tmp.keep();
+        run_git(
+            dir,
+            &[
+                "worktree",
+                "add",
+                "--detach",
+                wt_path.to_str().unwrap(),
+                "HEAD",
+            ],
+        );
+        std::fs::remove_dir_all(&wt_path).unwrap();
+    }
+
+    #[test]
+    fn test_unrelated_dangling_worktree_survives_a_passing_check() {
+        let tmp = init_repo_committed_include();
+        register_dangling_worktree(tmp.path());
+        assert_eq!(
+            worktree_count(tmp.path()),
+            2,
+            "sanity: main worktree + the unrelated dangling registration"
+        );
+
+        let ctx = Context {
+            hex_dir: tmp.path().to_path_buf(),
+            home: PathBuf::from("/tmp"),
+            fix: false,
+        };
+        let results = Runner::filtered("harness-buildable-from-git").run(&ctx);
+        let (_, result) = results
+            .iter()
+            .find(|(name, _)| name == "harness-buildable-from-git")
+            .unwrap();
+        assert_eq!(
+            result.status,
+            Status::Pass,
+            "sanity: fixture is fully buildable, got {:?}",
+            result
+        );
+        assert_eq!(
+            worktree_count(tmp.path()),
+            2,
+            "F15/F16: an unrelated dangling worktree registration must survive \
+             a PASSING check — cleanup must remove only this invocation's own \
+             worktree, never run a repo-wide `git worktree prune`"
+        );
+    }
+
+    #[test]
+    fn test_unrelated_dangling_worktree_survives_a_failing_check() {
+        let tmp = init_repo_missing_lockfile();
+        register_dangling_worktree(tmp.path());
+        assert_eq!(
+            worktree_count(tmp.path()),
+            2,
+            "sanity: main worktree + the unrelated dangling registration"
+        );
+
+        let ctx = Context {
+            hex_dir: tmp.path().to_path_buf(),
+            home: PathBuf::from("/tmp"),
+            fix: false,
+        };
+        let results = Runner::filtered("harness-buildable-from-git").run(&ctx);
+        let (_, result) = results
+            .iter()
+            .find(|(name, _)| name == "harness-buildable-from-git")
+            .unwrap();
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "sanity: fixture has no lockfile and must fail cargo metadata, got {:?}",
+            result
+        );
+        assert_eq!(
+            worktree_count(tmp.path()),
+            2,
+            "F15/F16: an unrelated dangling worktree registration must survive \
+             a FAILING check — cleanup must remove only this invocation's own \
+             worktree, never run a repo-wide `git worktree prune`"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_worktree_does_not_run_checkout_hooks() {
+        let tmp = init_repo_committed_include();
+        // A `post-checkout` hook that leaves a sentinel if it ever runs.
+        // `git worktree add` triggers this hook by default and honors the
+        // repo's `core.hooksPath` — F13 requires the diagnostic to override
+        // that to an empty directory for this command only, so no checkout
+        // automation (state mutation, network access) ever runs during an
+        // ordinary health check.
+        let hooks_dir = tmp.path().join("hostile-hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let sentinel = tmp.path().join("hook-ran.sentinel");
+        std::fs::write(
+            hooks_dir.join("post-checkout"),
+            format!("#!/bin/sh\ntouch '{}'\n", sentinel.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                hooks_dir.join("post-checkout"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        run_git(
+            tmp.path(),
+            &["config", "core.hooksPath", hooks_dir.to_str().unwrap()],
+        );
+
+        let ctx = Context {
+            hex_dir: tmp.path().to_path_buf(),
+            home: PathBuf::from("/tmp"),
+            fix: false,
+        };
+        let _ = Runner::filtered("harness-buildable-from-git").run(&ctx);
+
+        assert!(
+            !sentinel.exists(),
+            "F13: the diagnostic `git worktree add` must not run the \
+             repository's post-checkout hook (core.hooksPath must be \
+             overridden to an empty dir for that command only)"
+        );
+    }
+
+    #[test]
+    fn test_diagnostic_worktree_materializes_full_checkout_despite_caller_sparse() {
+        let tmp = init_repo_committed_include();
+        // Turn the CALLER's checkout sparse, excluding the required tracked
+        // include target. `core.sparseCheckout` and `info/sparse-checkout`
+        // live in the shared git dir, so a naive `git worktree add` inherits
+        // them into the new worktree too. F20: the diagnostic must
+        // materialize a full checkout regardless, scoped to that worktree.
+        run_git(tmp.path(), &["config", "core.sparseCheckout", "true"]);
+        std::fs::write(
+            tmp.path().join(".git/info/sparse-checkout"),
+            "/*\n!/.hex/harness/data/\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["read-tree", "-m", "-u", "HEAD"]);
+        assert!(
+            !tmp.path().join(".hex/harness/data/foo.txt").exists(),
+            "sanity: sparse-checkout must have excluded the data dir from the \
+             caller's own working copy"
+        );
+
+        let ctx = Context {
+            hex_dir: tmp.path().to_path_buf(),
+            home: PathBuf::from("/tmp"),
+            fix: false,
+        };
+        let results = Runner::filtered("harness-buildable-from-git").run(&ctx);
+        let (_, result) = results
+            .iter()
+            .find(|(name, _)| name == "harness-buildable-from-git")
+            .unwrap();
+        assert_eq!(
+            result.status,
+            Status::Pass,
+            "F20: a tracked include target excluded only by the CALLER's \
+             sparse-checkout patterns must still be present in the \
+             diagnostic worktree, got {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_fixture_commit_survives_inherited_signing_and_hooks_config() {
+        // F18: a machine with `commit.gpgsign` and `core.hooksPath`
+        // configured locally must not be able to break fixture setup —
+        // `run_git`'s commit step must override both, command-local, without
+        // ever mutating process-global env (tests run concurrently).
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        run_git(tmp.path(), &["config", "commit.gpgsign", "true"]);
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "gpg.program",
+                "/nonexistent-hex-doctor-f18-fixture-gpg",
+            ],
+        );
+        let hooks_dir = tmp.path().join("hostile-hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        std::fs::write(
+            hooks_dir.join("pre-commit"),
+            "#!/bin/sh\necho blocked by hostile pre-commit hook >&2\nexit 1\n",
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                hooks_dir.join("pre-commit"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        run_git(
+            tmp.path(),
+            &["config", "core.hooksPath", hooks_dir.to_str().unwrap()],
+        );
+
+        std::fs::write(tmp.path().join("file.txt"), "x").unwrap();
+        run_git(tmp.path(), &["add", "file.txt"]);
+        // Must succeed despite the hostile local config above — today this
+        // panics inside `run_git` because it inherits both settings
+        // unmodified.
+        run_git(tmp.path(), &["commit", "-q", "-m", "fixture commit"]);
+    }
+
+    #[test]
+    fn test_harness_buildable_bounds_command_runtime_when_git_hangs() {
+        // F14: every external command this check spawns must run under a
+        // deadline. Review finding F14 names "Git checkout filters can
+        // block" as a hang vector distinct from checkout HOOKS — a content
+        // filter driver (`.gitattributes` `filter=`) is not neutralized by
+        // F13's `core.hooksPath` override (verified: a hostile
+        // `post-checkout` HOOK is correctly suppressed by that override and
+        // can no longer simulate a hang here), so a hanging `smudge` filter
+        // is the mechanism that actually exercises this deadline during
+        // `git worktree add`'s checkout.
+        let tmp = init_repo_committed_include();
+        run_git(
+            tmp.path(),
+            &["config", "filter.hex-doctor-f14-hang.clean", "cat"],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-f14-hang.smudge",
+                "sleep 30 && cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &["config", "filter.hex-doctor-f14-hang.required", "true"],
+        );
+        std::fs::write(
+            tmp.path().join(".hex/harness/data/.gitattributes"),
+            "foo.txt filter=hex-doctor-f14-hang\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", ".hex/harness/data/.gitattributes"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add hanging smudge filter for foo.txt",
+            ],
+        );
+
+        let start = std::time::Instant::now();
+        // `run_check_with_timeout` does not exist yet — this is the
+        // testable entry point F14 asks for ("configurable via the check's
+        // params"), a thin wrapper the production `run_check` should call
+        // with a much larger default deadline.
+        let result = crate::doctor::checks::harness_buildable::run_check_with_timeout(
+            tmp.path(),
+            std::time::Duration::from_millis(500),
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "F14: a hung external command must be killed at its deadline \
+             instead of blocking for the hook's full 30s hang — took {:?}",
+            elapsed
+        );
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "a timed-out diagnostic command must be reported as a failure, \
+             got {:?}",
+            result
+        );
+        let msg = result.message.to_lowercase();
+        assert!(
+            msg.contains("timeout") || msg.contains("timed out"),
+            "the failure must name the timeout as the cause, got: {}",
+            result.message
+        );
+    }
+
+    #[test]
+    fn test_host_triple_runs_rustc_with_given_current_dir() {
+        // F12: `host_triple` must resolve the toolchain in the SAME
+        // directory context `cargo metadata` uses (the harness dir inside
+        // the diagnostic worktree), not doctor's own ambient cwd. Passing a
+        // directory that does not exist proves the argument is actually
+        // honored (spawning `rustc` there must fail) rather than silently
+        // falling back to the ambient cwd.
+        let bogus_dir = std::path::Path::new("/nonexistent-hex-doctor-f12-fixture-dir");
+        assert!(
+            !bogus_dir.exists(),
+            "test precondition: fixture path must not exist"
+        );
+        let result = crate::doctor::checks::harness_buildable::host_triple(bogus_dir);
+        assert!(
+            result.is_none(),
+            "host_triple must run `rustc -vV` with current_dir set to the \
+             given directory (F12) — got a result even though that directory \
+             does not exist: {:?}",
+            result
         );
     }
 }

@@ -1,7 +1,17 @@
 use crate::doctor::check::{Category, CheckResult, Context, DoctorCheck};
 use regex::Regex;
+use std::io::Read;
 use std::path::{Path, PathBuf};
-use std::process::Command;
+use std::process::{Command, Output, Stdio};
+use std::time::{Duration, Instant};
+
+/// Default deadline for every external command this check spawns (F14):
+/// `cargo` can wait on a shared cache lock, `rustup` can perform toolchain
+/// setup despite `--offline`, and git checkout filters can block — none of
+/// that may wedge an ordinary health check. `run_check_with_timeout` is the
+/// configurable entry point; `run_check` (the one the doctor registry
+/// actually calls) applies this default.
+const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(120);
 
 /// B2: the harness must be buildable from a fresh `git worktree` of HEAD —
 /// i.e. everything `cargo metadata` and every `include_str!`/`include_bytes!`
@@ -36,28 +46,129 @@ impl DoctorCheck for HarnessBuildableFromGit {
 struct WorktreeGuard {
     repo_dir: PathBuf,
     worktree_path: PathBuf,
+    timeout: Duration,
     _tempdir: tempfile::TempDir,
+}
+
+impl WorktreeGuard {
+    /// Removes exactly this invocation's own worktree registration, verifies
+    /// it is actually gone, and reports failure instead of swallowing it.
+    ///
+    /// F15/F16: earlier code ran a repository-wide `git worktree prune` in
+    /// `Drop`, which can delete OTHER eligible worktree registrations too —
+    /// e.g. an unlocked worktree on a currently-unavailable mount — and lose
+    /// their administrative state. `prune` is gone entirely; cleanup here
+    /// only ever names `self.worktree_path`.
+    fn cleanup(&self) -> Result<(), String> {
+        let mut remove = Command::new("git");
+        remove
+            .args(["worktree", "remove", "--force"])
+            .arg(&self.worktree_path)
+            .current_dir(&self.repo_dir);
+        match run_with_timeout(&mut remove, self.timeout) {
+            Ok(o) if !o.status.success() => {
+                return Err(format!(
+                    "git worktree remove --force {} failed: {}",
+                    self.worktree_path.display(),
+                    String::from_utf8_lossy(&o.stderr).trim()
+                ));
+            }
+            Err(e) => return Err(format!("git worktree remove --force did not complete: {e}")),
+            Ok(_) => {}
+        }
+        // Bounded fallback (F14): a plain filesystem removal, never a
+        // subprocess that can block on a shared lock, guarantees nothing is
+        // left on disk even if the administrative removal above raced with
+        // something else.
+        let _ = std::fs::remove_dir_all(&self.worktree_path);
+        if self.worktree_path.exists() {
+            return Err(format!(
+                "residual worktree directory after cleanup: {}",
+                self.worktree_path.display()
+            ));
+        }
+        Ok(())
+    }
 }
 
 impl Drop for WorktreeGuard {
     fn drop(&mut self) {
-        let _ = Command::new("git")
+        // Best-effort fallback for early returns/panics that never reach
+        // the explicit `cleanup()` call in `run_check_with_timeout` —
+        // scoped to exactly this invocation's own worktree, same as
+        // `cleanup()`, and never a repo-wide `git worktree prune` (F15/F16).
+        let mut remove = Command::new("git");
+        remove
             .args(["worktree", "remove", "--force"])
             .arg(&self.worktree_path)
-            .current_dir(&self.repo_dir)
-            .output();
-        // Belt-and-braces: guarantee nothing is left on disk even if
-        // `git worktree add` itself never succeeded (so `remove` above
-        // has nothing registered to act on).
+            .current_dir(&self.repo_dir);
+        let _ = run_with_timeout(&mut remove, self.timeout);
         let _ = std::fs::remove_dir_all(&self.worktree_path);
-        let _ = Command::new("git")
-            .args(["worktree", "prune"])
-            .current_dir(&self.repo_dir)
-            .output();
     }
 }
 
+/// Runs `cmd` under a hard deadline using only `std`: spawn, then poll
+/// `try_wait` in a loop instead of blocking on `output()`/`wait()` (F14).
+/// Killing the child on timeout means a wedged external command — `cargo`
+/// stuck on a shared cache lock, `rustup` performing toolchain setup despite
+/// `--offline`, a blocking checkout filter — can never hang an ordinary
+/// health check. stdout/stderr are drained on background threads so a
+/// chatty child can't deadlock on a full pipe buffer while we poll.
+fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<Output, String> {
+    let mut child = cmd
+        .stdin(Stdio::null())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .map_err(|e| format!("failed to spawn command: {e}"))?;
+
+    let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
+    let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
+    let stdout_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stdout_pipe.read_to_end(&mut buf);
+        buf
+    });
+    let stderr_thread = std::thread::spawn(move || {
+        let mut buf = Vec::new();
+        let _ = stderr_pipe.read_to_end(&mut buf);
+        buf
+    });
+
+    let start = Instant::now();
+    let status = loop {
+        match child.try_wait() {
+            Ok(Some(status)) => break Ok(status),
+            Ok(None) => {
+                if start.elapsed() >= timeout {
+                    let _ = child.kill();
+                    let _ = child.wait();
+                    break Err(format!("command timed out after {timeout:?}"));
+                }
+                std::thread::sleep(Duration::from_millis(20));
+            }
+            Err(e) => break Err(format!("failed to wait on command: {e}")),
+        }
+    }?;
+
+    let stdout = stdout_thread.join().unwrap_or_default();
+    let stderr = stderr_thread.join().unwrap_or_default();
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
+}
+
 fn run_check(hex_dir: &Path) -> CheckResult {
+    run_check_with_timeout(hex_dir, DEFAULT_COMMAND_TIMEOUT)
+}
+
+/// Same check as `run_check`, but every external command it spawns is bound
+/// to `timeout` instead of the default (F14 — "configurable via the check's
+/// params"; `run_check` is the thin wrapper the registry actually calls,
+/// applying `DEFAULT_COMMAND_TIMEOUT`).
+pub(crate) fn run_check_with_timeout(hex_dir: &Path, timeout: Duration) -> CheckResult {
     // `tempfile::tempdir()` uses `mkdtemp`-equivalent atomic creation, so the
     // path is guaranteed unique even when many doctor-check invocations (or
     // their tests) race concurrently — see the comment on `WorktreeGuard`.
@@ -70,26 +181,57 @@ fn run_check(hex_dir: &Path) -> CheckResult {
     };
     let worktree_path = tempdir.path().to_path_buf();
 
-    let _worktree_guard = WorktreeGuard {
+    let worktree_guard = WorktreeGuard {
         repo_dir: hex_dir.to_path_buf(),
         worktree_path: worktree_path.clone(),
+        timeout,
         _tempdir: tempdir,
     };
 
-    let add_output = match Command::new("git")
+    // F13: `git worktree add` invokes `post-checkout` and honors the
+    // repository's `core.hooksPath` by default — registering this check
+    // would otherwise make an ordinary doctor run execute arbitrary
+    // checkout automation (state mutation, network access). Override
+    // `core.hooksPath` to an empty directory for this command only; the
+    // repository's own configuration is never touched.
+    let empty_hooks_dir = match tempfile::Builder::new()
+        .prefix("hex-doctor-harness-buildable-empty-hooks-")
+        .tempdir()
+    {
+        Ok(t) => t,
+        Err(e) => return CheckResult::fail(format!("failed to create empty hooks dir: {e}")),
+    };
+    let mut add_cmd = Command::new("git");
+    add_cmd
+        .arg("-c")
+        .arg(format!(
+            "core.hooksPath={}",
+            empty_hooks_dir.path().display()
+        ))
         .args(["worktree", "add", "--detach"])
         .arg(&worktree_path)
         .arg("HEAD")
-        .current_dir(hex_dir)
-        .output()
-    {
+        .current_dir(hex_dir);
+    let add_output = match run_with_timeout(&mut add_cmd, timeout) {
         Ok(o) => o,
-        Err(e) => return CheckResult::fail(format!("failed to spawn `git worktree add`: {e}")),
+        Err(e) => return CheckResult::fail(format!("git worktree add did not complete: {e}")),
     };
     if !add_output.status.success() {
         return CheckResult::fail(format!(
             "git worktree add failed — cannot verify the harness builds from git: {}",
             String::from_utf8_lossy(&add_output.stderr).trim()
+        ));
+    }
+
+    // F20: `git worktree add` copies the CALLER's sparse-checkout patterns
+    // and `core.sparseCheckout` setting into the new worktree — a tracked
+    // file excluded only by the caller's own sparse patterns would then
+    // read as "missing from git" below. Materialize a full checkout scoped
+    // to this worktree's own (worktree-private) index, without touching the
+    // caller's config or sparse-checkout patterns at all.
+    if let Err(e) = materialize_full_checkout(&worktree_path, empty_hooks_dir.path(), timeout) {
+        return CheckResult::fail(format!(
+            "failed to materialize a full checkout in the diagnostic worktree: {e}"
         ));
     }
 
@@ -119,17 +261,21 @@ fn run_check(hex_dir: &Path) -> CheckResult {
     // permanent false FAIL. The host triple comes from `rustc -vV`'s
     // `host:` line; if `rustc` itself fails, fall back to no filter rather
     // than skip the check.
+    //
+    // F12: `host_triple_impl` runs with `current_dir` set to `harness_dir`
+    // — the same directory context `cargo metadata` below uses — rather
+    // than doctor's own ambient cwd, so a rustup directory override or
+    // `rust-toolchain.toml` can't select a different toolchain than the one
+    // Cargo actually resolves.
     let mut metadata_args = vec!["metadata", "--locked", "--offline", "--format-version", "1"];
-    let host_triple = host_triple();
+    let host_triple = host_triple_impl(&harness_dir, timeout);
     if let Some(host) = host_triple.as_deref() {
         metadata_args.push("--filter-platform");
         metadata_args.push(host);
     }
-    match Command::new("cargo")
-        .args(&metadata_args)
-        .current_dir(&harness_dir)
-        .output()
-    {
+    let mut metadata_cmd = Command::new("cargo");
+    metadata_cmd.args(&metadata_args).current_dir(&harness_dir);
+    match run_with_timeout(&mut metadata_cmd, timeout) {
         Ok(o) if !o.status.success() => {
             return CheckResult::fail(format!(
                 ".hex/harness -> `cargo metadata` failed in a fresh git checkout \
@@ -139,7 +285,7 @@ fn run_check(hex_dir: &Path) -> CheckResult {
             ));
         }
         Err(e) => {
-            return CheckResult::fail(format!("failed to spawn `cargo metadata`: {e}"));
+            return CheckResult::fail(format!("cargo metadata did not complete: {e}"));
         }
         Ok(_) => {}
     }
@@ -159,7 +305,7 @@ fn run_check(hex_dir: &Path) -> CheckResult {
         scan_file(&build_rs, &worktree_path, &mut checked, &mut missing);
     }
 
-    if missing.is_empty() {
+    let result = if missing.is_empty() {
         CheckResult::pass(format!(
             "harness builds from git ({checked} include target(s) present)"
         ))
@@ -175,15 +321,113 @@ fn run_check(hex_dir: &Path) -> CheckResult {
             missing.len()
         ))
         .with_details(details)
+    };
+
+    // F15/F16: clean up only this invocation's own worktree explicitly
+    // (never a repo-wide `git worktree prune`), verify it is gone, and
+    // report — rather than swallow — a cleanup failure. `Drop` remains a
+    // best-effort fallback for early returns/panics above.
+    match worktree_guard.cleanup() {
+        Ok(()) => result,
+        Err(e) => CheckResult {
+            message: format!("{} (cleanup warning: {e})", result.message),
+            ..result
+        },
     }
+}
+
+/// Clears any skip-worktree bits inherited into this worktree's own
+/// (worktree-private) index and checks the corresponding paths out, so a
+/// tracked file excluded only by the CALLER's sparse-checkout patterns is
+/// still present here (F20).
+///
+/// Deliberately does not use `git sparse-checkout disable` (which persists
+/// `extensions.worktreeConfig = true` into the shared repository config as
+/// a side effect) or a bare `-c core.sparseCheckout=false` override (which
+/// does not clear skip-worktree bits already set on index entries) — this
+/// touches neither the caller's config nor its sparse-checkout patterns,
+/// only this worktree's own private index and working tree.
+///
+/// The `checkout` step can itself trigger repository checkout automation
+/// (the same F13 concern as the initial `worktree add`), so it carries the
+/// same empty `core.hooksPath` override.
+fn materialize_full_checkout(
+    worktree_path: &Path,
+    empty_hooks_dir: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let mut ls_files = Command::new("git");
+    ls_files.args(["ls-files", "-v"]).current_dir(worktree_path);
+    let output = run_with_timeout(&mut ls_files, timeout)?;
+    if !output.status.success() {
+        return Err(format!(
+            "git ls-files -v failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let skipped: Vec<&str> = stdout
+        .lines()
+        .filter_map(|line| line.strip_prefix("S "))
+        .collect();
+    if skipped.is_empty() {
+        return Ok(());
+    }
+
+    let mut update_index = Command::new("git");
+    update_index
+        .args(["update-index", "--no-skip-worktree"])
+        .args(&skipped)
+        .current_dir(worktree_path);
+    let output = run_with_timeout(&mut update_index, timeout)?;
+    if !output.status.success() {
+        return Err(format!(
+            "git update-index --no-skip-worktree failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+
+    let mut checkout = Command::new("git");
+    checkout
+        .arg("-c")
+        .arg(format!("core.hooksPath={}", empty_hooks_dir.display()))
+        .args(["checkout", "HEAD", "--"])
+        .args(&skipped)
+        .current_dir(worktree_path);
+    let output = run_with_timeout(&mut checkout, timeout)?;
+    if !output.status.success() {
+        return Err(format!(
+            "git checkout HEAD -- <previously sparse-excluded paths> failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(())
 }
 
 /// Parses the `host: <triple>` line out of `rustc -vV` so `cargo metadata`
 /// can be scoped with `--filter-platform` to this machine's actual target.
-/// Returns `None` (rather than panicking) if `rustc` cannot be spawned or
-/// the expected line is absent — callers fall back to an unfiltered query.
-fn host_triple() -> Option<String> {
-    let output = Command::new("rustc").arg("-vV").output().ok()?;
+/// Returns `None` (rather than panicking) if `rustc` cannot be spawned, it
+/// times out, or the expected line is absent — callers fall back to an
+/// unfiltered query.
+///
+/// F12: runs with `current_dir` set to `dir`, matching how `run_check_with_timeout`
+/// calls it (the harness dir inside the diagnostic worktree — the same
+/// directory context `cargo metadata` uses), rather than doctor's own
+/// ambient cwd.
+///
+/// Test-only entry point: production code calls `host_triple_impl` directly
+/// (threading through the check's configured timeout); this single-arg
+/// wrapper exists so the F12 regression can call it without reaching into
+/// `host_triple_impl`'s timeout parameter.
+#[cfg(test)]
+pub(crate) fn host_triple(dir: &Path) -> Option<String> {
+    host_triple_impl(dir, DEFAULT_COMMAND_TIMEOUT)
+}
+
+fn host_triple_impl(dir: &Path, timeout: Duration) -> Option<String> {
+    let mut cmd = Command::new("rustc");
+    cmd.arg("-vV").current_dir(dir);
+    let output = run_with_timeout(&mut cmd, timeout).ok()?;
     if !output.status.success() {
         return None;
     }
