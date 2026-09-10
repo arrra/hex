@@ -72,17 +72,51 @@ pub fn insert_vec(conn: &Connection, rowid: i64, embedding: &[f32]) -> rusqlite:
 }
 
 /// Insert a fact embedding into `facts_vec` (vec0: `fact_id TEXT PRIMARY KEY,
-/// embedding FLOAT[768]`, schema.rs). Same blob serialization as [`insert_vec`].
-/// DELETE-before-insert for the same self-correcting reason as [`insert_vec`]:
-/// a vec0 INSERT on an existing key ERRORs rather than replacing. Currently a
-/// no-op (facts are insert-once — backfill selects only `id NOT IN facts_vec`),
-/// but symmetry keeps a future fact re-embed from silently retaining a stale
-/// vector.
+/// embedding FLOAT[768], is_live BOOLEAN`, schema.rs). Same blob serialization
+/// as [`insert_vec`]. DELETE-before-insert for the same self-correcting reason
+/// as [`insert_vec`]: a vec0 INSERT on an existing key ERRORs rather than
+/// replacing. Currently a no-op for fresh facts (facts are insert-once —
+/// backfill selects only `id NOT IN facts_vec`), but symmetry keeps a future
+/// fact re-embed from silently retaining a stale vector.
+///
+/// `is_live` is looked up from `facts.invalid_at` at insert time (decision
+/// `hex-knn-is-live-metadata-filter-2026-09-10.md` §3: synced in CODE, never
+/// triggers — a `facts` trigger corrupted the FTS5 external-content shadow
+/// tables in v1's F3). A fact with no matching `facts` row yet (embedded
+/// before its row is committed) defaults to live. [`knn_facts`] filters on
+/// this column inside the vec0 KNN query itself. Every code path that sets
+/// `facts.invalid_at` / `superseded_by` (supersede-not-overwrite) MUST call
+/// [`mark_fact_vec_superseded`] in the same transaction to keep this column
+/// in sync — see that function's doc comment.
 pub fn insert_fact_vec(conn: &Connection, fact_id: &str, vec: &[f32]) -> rusqlite::Result<()> {
+    let is_live: i64 = conn
+        .query_row(
+            "SELECT CASE WHEN invalid_at IS NULL THEN 1 ELSE 0 END FROM facts WHERE id = ?1",
+            params![fact_id],
+            |r| r.get(0),
+        )
+        .unwrap_or(1);
     conn.execute("DELETE FROM facts_vec WHERE fact_id = ?1", params![fact_id])?;
     conn.execute(
-        "INSERT INTO facts_vec(fact_id, embedding) VALUES (?1, ?2)",
-        params![fact_id, f32s_to_le_bytes(vec)],
+        "INSERT INTO facts_vec(fact_id, embedding, is_live) VALUES (?1, ?2, ?3)",
+        params![fact_id, f32s_to_le_bytes(vec), is_live],
+    )?;
+    Ok(())
+}
+
+/// Flip a fact's `facts_vec` row to non-live. Decision
+/// `hex-knn-is-live-metadata-filter-2026-09-10.md` §3: every code path that
+/// sets `facts.invalid_at` / `superseded_by` (supersede-not-overwrite) MUST
+/// call this in the SAME transaction as that UPDATE, so `knn_facts`'s
+/// `is_live = 1` filter never drifts from `facts.invalid_at`. No `facts`
+/// trigger may do this instead — the v1 F3 valid_from trigger corrupted the
+/// FTS5 external-content shadow tables ("database disk image is malformed").
+/// No production writer sets those columns yet (only test fixtures insert
+/// them directly); this helper exists for the future supersede path to call.
+pub fn mark_fact_vec_superseded(conn: &Connection, fact_id: &str) -> rusqlite::Result<()> {
+    conn.execute(
+        "UPDATE facts_vec SET is_live = 0 WHERE fact_id = ?1",
+        params![fact_id],
     )?;
     Ok(())
 }
@@ -137,55 +171,41 @@ pub fn knn(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(
 /// `facts_vec`. `facts_vec` keys rows by the fact's TEXT ULID id (NOT an
 /// integer — it cannot be parsed as i64), so hits join back to `facts` to
 /// return the integer rowid: the RRF fusion key shared with the facts_fts
-/// arm. Tombstoned/superseded facts are excluded (their vectors are swept
-/// weekly, not live). Same relevance floor as [`knn`].
+/// arm. Same relevance floor as [`knn`].
 ///
-/// The raw vec0 KNN subquery is overfetched (well past `k`) before the
-/// tombstone/`invalid_at` join-filter runs, then re-capped at `k` in the outer
-/// query: limiting to `k` inside the subquery FIRST would truncate the
-/// candidate window before stale vectors are filtered out, letting them
-/// consume slots a live fact should have won.
+/// Superseded facts are excluded by the `is_live = 1` metadata constraint
+/// evaluated INSIDE the vec0 KNN query itself (decision
+/// `hex-knn-is-live-metadata-filter-2026-09-10.md`, closing PR#9 R2 G1):
+/// `facts_vec`'s `is_live` column (schema.rs) is kept in sync with
+/// `facts.invalid_at` in code, not by a trigger (see
+/// [`mark_fact_vec_superseded`]). This replaces the PR#9 r1 F2 / R2 F5
+/// adaptive-overfetch-and-clamp design, which fetched extra rows past `k`
+/// before join-filtering and widened/clamped that window to stay under
+/// sqlite-vec's `VEC0_K_MAX` hard cap on a vec0 KNN `LIMIT` (4096): a fixed
+/// overfetch window can never see past a wall of MORE than 4096 superseded
+/// neighbors ranked nearer than the query's live matches, no matter how far
+/// it widens. Filtering `is_live` inside the vec0 MATCH itself has no such
+/// wall — `k` passes straight through with no overfetch or clamp.
 ///
-/// A fixed overfetch window can still be exhausted by a wall of superseded
-/// neighbors nearer than every eligible one (PR#9 r1 F2): if the join-filtered
-/// result has fewer than `k` hits and the window hasn't already covered every
-/// candidate in `facts_vec`, the window is widened and the query re-run —
-/// repeating until either `k` eligible hits are found or the candidate set is
-/// exhausted.
-///
-/// The window is also clamped to [`VEC0_K_MAX`] (R2 review F5): sqlite-vec
-/// 0.1.9 hard-rejects any vec0 KNN `LIMIT` above that cap with
-/// `SQLITE_ERROR` ("k value in knn query too large"), so widening past it
-/// would turn a partial-hit table into a hard error. Reaching the clamped
-/// cap counts as exhaustion, same as reaching `total`.
-const VEC0_K_MAX: usize = 4096;
-
+/// `tombstone` is NOT tracked in `facts_vec` metadata (only `invalid_at` is),
+/// so a freshly-tombstoned fact's vector can still be `is_live = 1` between
+/// maintenance sweeps (`maintain_facts::backfill` removes it from `facts_vec`
+/// entirely, but only periodically) — the outer join keeps excluding those.
 pub fn knn_facts(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(i64, f64)>> {
-    let total: i64 = conn.query_row("SELECT COUNT(*) FROM facts_vec", [], |r| r.get(0))?;
-    let total = total.max(0) as usize;
-    let cap = total.min(VEC0_K_MAX);
-    let mut overfetch = k.saturating_mul(4).max(k + 16);
-    loop {
-        let window = overfetch.min(cap);
-        let mut stmt = conn.prepare(
-            "SELECT f.rowid, v.distance
-               FROM (SELECT fact_id, distance FROM facts_vec
-                      WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2) v
-               JOIN facts f ON f.id = v.fact_id
-              WHERE f.tombstone = 0 AND f.invalid_at IS NULL
-              ORDER BY v.distance
-              LIMIT ?3",
-        )?;
-        let rows = stmt.query_map(
-            params![f32s_to_le_bytes(query), window as i64, k as i64],
-            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)),
-        )?;
-        let hits: Vec<(i64, f64)> = rows.collect::<rusqlite::Result<_>>()?;
-        if hits.len() >= k || window >= cap {
-            return Ok(filter_by_distance(hits, max_distance()));
-        }
-        overfetch = overfetch.saturating_mul(4).max(overfetch + 16);
-    }
+    let mut stmt = conn.prepare(
+        "SELECT f.rowid, v.distance
+           FROM (SELECT fact_id, distance FROM facts_vec
+                  WHERE embedding MATCH ?1 AND k = ?2 AND is_live = 1
+                  ORDER BY distance) v
+           JOIN facts f ON f.id = v.fact_id
+          WHERE f.tombstone = 0
+          ORDER BY v.distance",
+    )?;
+    let rows = stmt.query_map(params![f32s_to_le_bytes(query), k as i64], |r| {
+        Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?))
+    })?;
+    let hits: Vec<(i64, f64)> = rows.collect::<rusqlite::Result<_>>()?;
+    Ok(filter_by_distance(hits, max_distance()))
 }
 
 #[cfg(test)]
@@ -354,13 +374,15 @@ mod tests {
         );
     }
 
-    /// RED for PR#9 r1 F2 (major): the live-row filter in `knn_facts` runs
-    /// AFTER the inner vec0 KNN subquery's overfetch `LIMIT`. For `k = 1`
-    /// the overfetch window is 17 (`k.saturating_mul(4).max(k + 16)`); if 20
-    /// superseded facts all rank nearer to the query than the single
-    /// eligible live fact, that live fact never enters the subquery's
-    /// candidate window and is silently dropped, even though it is the
-    /// only real answer.
+    /// Regression pin for PR#9 r1 F2 (major), now closed by G1's
+    /// metadata-filtered KNN: `knn_facts` filters `is_live = 1` INSIDE the
+    /// vec0 MATCH itself (see [`knn_facts`]'s doc comment), so a live fact
+    /// is found regardless of how many superseded neighbors rank nearer —
+    /// there is no overfetch window past which they could hide it. 20 stale
+    /// facts is a small case; [`knn_facts_returns_live_neighbor_behind_a_wall_exceeding_the_vec0_k_cap`]
+    /// below pins the same contract at a much larger scale (F2's original
+    /// fixed-overfetch-window design could pass this smaller case but not
+    /// that one).
     #[test]
     fn knn_facts_returns_live_neighbor_behind_a_wall_of_superseded_ones() {
         register_sqlite_vec();
@@ -414,16 +436,16 @@ mod tests {
         );
     }
 
-    /// RED for R2 review F5 (major, regression introduced by the F2 fix):
-    /// the adaptive overfetch window was clamped only to `COUNT(*) FROM
-    /// facts_vec`, never to sqlite-vec's own hard cap on a vec0 KNN `LIMIT`
-    /// (`SQLITE_VEC_VEC0_K_MAX = 4096`, sqlite-vec.c:7111). With `k = 1` the
-    /// window sequence is 17 -> 68 -> 272 -> 1088 -> 4352; against a table of
-    /// 4097 all-superseded vectors, an unclamped window of 4097 (or the next
-    /// step, 4352) exceeds 4096 and sqlite-vec raises `SQLITE_ERROR` ("k
-    /// value in knn query too large") instead of returning the (empty) set
-    /// of eligible hits. `knn_facts` must clamp the window to
-    /// `min(total, 4096)` and treat reaching that clamped cap as exhaustion.
+    /// Regression pin for R2 review F5 (major, regression introduced by the
+    /// original F2 overfetch fix): F5 clamped the overfetch window to stay
+    /// under sqlite-vec's hard cap on a vec0 KNN `LIMIT`
+    /// (`SQLITE_VEC_VEC0_K_MAX = 4096`, sqlite-vec.c:7111) instead of
+    /// erroring past it. G1's metadata-filtered KNN (see [`knn_facts`])
+    /// removes the overfetch window entirely — `k` passes straight through
+    /// with no clamp needed — so this table of 4097 all-superseded vectors
+    /// with `k = 1` exercises the same "no live match anywhere" case purely
+    /// through the `is_live = 1` filter: it must return an empty result,
+    /// not an error, with no window-widening logic left to clamp.
     #[test]
     fn knn_facts_clamps_overfetch_to_sqlite_vec_k_max() {
         register_sqlite_vec();
@@ -461,6 +483,155 @@ mod tests {
         assert!(
             hits.unwrap().is_empty(),
             "with no live facts at all, the clamped-exhaustion result must be empty, not partial"
+        );
+    }
+
+    /// RED for G1 (major, Codex R2) / decision
+    /// `hex-knn-is-live-metadata-filter-2026-09-10.md`: the real bug the
+    /// F2/F5 adaptive-overfetch-and-clamp design cannot close. sqlite-vec
+    /// hard-caps a vec0 KNN `LIMIT` at `VEC0_K_MAX` (4096, "R2 review F5"
+    /// above), so once exactly 4096 superseded facts all rank nearer to the
+    /// query than the one live, eligible fact, the overfetch window clamps
+    /// at 4096 and the live fact — ranked 4097th — can never enter the
+    /// subquery's candidate window no matter how far the widening loop
+    /// runs. `knn_facts` returns empty instead of the live fact.
+    ///
+    /// (The decision doc's illustrative wall of N=64 is deliberately NOT
+    /// used here: at N=64 the current adaptive-overfetch loop already
+    /// widens past the whole candidate set and succeeds today — it is only
+    /// once N reaches sqlite-vec's own hard k-cap that the design
+    /// structurally cannot see past the wall, which is exactly Codex R2's
+    /// finding. Only a metadata-filtered KNN — `is_live = 1` evaluated
+    /// INSIDE the vec0 MATCH, not a post-hoc join over an overfetched
+    /// window — closes this.)
+    #[test]
+    fn knn_facts_returns_live_neighbor_behind_a_wall_exceeding_the_vec0_k_cap() {
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
+
+        // 4096 superseded facts — sqlite-vec's own vec0 KNN LIMIT cap —
+        // each strictly nearer to the query than the live fact below. Scale
+        // is 1e-6 (not the 1e-4 other fixtures in this module use): at 4096
+        // facts the per-dimension offset needed to keep every stale point
+        // strictly nearer than the live one (offset = fact index, up to
+        // 4095) pushes the live point's raw L2 distance
+        // (sqrt(EMBED_DIM) * 4096 * scale) past KNN_MAX_DISTANCE at the
+        // larger scale — that's a fixture-construction ceiling on the
+        // relevance floor, not the bug under test, so it must stay clear of
+        // it here.
+        const SCALE: f32 = 0.000001;
+        for i in 0..4096 {
+            let id = format!("01HFACT-WALL-{i:04}");
+            conn.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+                 VALUES (?1,'project:hex','uses','stale object',0.5,'2026-06-11','2026-06-11','2026-06-11','2026-09-05','01HFACT-NEW')",
+                params![id],
+            )
+            .unwrap();
+            let v: Vec<f32> = (0..EMBED_DIM)
+                .map(|d| (i as f32 + d as f32) * SCALE)
+                .collect();
+            insert_fact_vec(&conn, &id, &v).unwrap();
+        }
+
+        // The one live, eligible fact — farther from the query than all
+        // 4096 stale facts above, so it ranks 4097th by distance.
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('01HFACT-LIVE','project:hex','uses','live object',0.5,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+        let live_v: Vec<f32> = (0..EMBED_DIM)
+            .map(|d| (4096.0 + d as f32) * SCALE)
+            .collect();
+        insert_fact_vec(&conn, "01HFACT-LIVE", &live_v).unwrap();
+
+        let query: Vec<f32> = (0..EMBED_DIM).map(|d| d as f32 * SCALE).collect();
+
+        let hits = knn_facts(&conn, &query, 1).unwrap();
+
+        let found_live = hits.iter().any(|(rowid, _)| {
+            let id: String = conn
+                .query_row("SELECT id FROM facts WHERE rowid = ?1", [*rowid], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            id == "01HFACT-LIVE"
+        });
+        assert!(
+            found_live,
+            "the live fact must be returned even though 4096 superseded facts (sqlite-vec's own vec0 KNN cap) rank nearer — a fixed overfetch window structurally cannot see past this wall; only a metadata-filtered KNN can, got {:?}",
+            hits
+        );
+    }
+
+    /// RED for G1 item 3 (decision doc §3, "sync in CODE, never triggers"):
+    /// the `facts_vec` insert path must write `is_live = (invalid_at IS
+    /// NULL)` looked up from `facts` at insert time, and `knn_facts` must
+    /// filter on that column. Fails now on two counts: `facts_vec` has no
+    /// `is_live` column at all (the raw SELECT below errors), and
+    /// `insert_fact_vec` never looks at `facts.invalid_at`.
+    #[test]
+    fn insert_fact_vec_writes_is_live_from_facts_invalid_at() {
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('01HFACT-LIVE','project:hex','uses','a live object',0.5,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+        let v: Vec<f32> = (0..EMBED_DIM).map(|d| d as f32 * 0.001).collect();
+        insert_fact_vec(&conn, "01HFACT-LIVE", &v).unwrap();
+
+        let is_live: i64 = conn
+            .query_row(
+                "SELECT is_live FROM facts_vec WHERE fact_id = '01HFACT-LIVE'",
+                [],
+                |r| r.get(0),
+            )
+            .expect(
+                "facts_vec must carry an is_live metadata column and insert_fact_vec must populate it from facts.invalid_at",
+            );
+        assert_eq!(
+            is_live, 1,
+            "a fresh live fact's facts_vec row must have is_live = 1"
+        );
+
+        // Supersede it directly on `facts` and re-embed: the insert path
+        // must recompute is_live from the CURRENT invalid_at, not default
+        // to always-live.
+        conn.execute(
+            "UPDATE facts SET invalid_at = '2026-09-05', superseded_by = '01HFACT-NEW' WHERE id = '01HFACT-LIVE'",
+            [],
+        )
+        .unwrap();
+        insert_fact_vec(&conn, "01HFACT-LIVE", &v).unwrap();
+        let is_live_after: i64 = conn
+            .query_row(
+                "SELECT is_live FROM facts_vec WHERE fact_id = '01HFACT-LIVE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            is_live_after, 0,
+            "re-embedding a now-superseded fact must write is_live = 0"
+        );
+
+        let hits = knn_facts(&conn, &v, 1).unwrap();
+        assert!(
+            hits.is_empty(),
+            "knn_facts must filter is_live = 0 rows out of the metadata-constrained KNN, got {:?}",
+            hits
         );
     }
 }

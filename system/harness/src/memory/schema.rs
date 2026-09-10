@@ -271,19 +271,75 @@ pub const PLAN3_INDEX_DDL: &str = r#"
 CREATE INDEX IF NOT EXISTS facts_live_idx ON facts(subject, predicate) WHERE invalid_at IS NULL;
 "#;
 
+/// vec0 tables cannot `ALTER TABLE ADD COLUMN`, so giving `facts_vec` the
+/// `is_live` metadata column (G1, decision
+/// `hex-knn-is-live-metadata-filter-2026-09-10.md`) needs a rebuild. The
+/// vendored sqlite-vec 0.1.9 vec0 module registers `xRename = 0`
+/// (sqlite-vec.c, citing upstream issue asg017/sqlite-vec#43): `ALTER TABLE
+/// ... RENAME TO` on a vec0 table is unimplemented and leaves its shadow
+/// tables (`..._rowids`, `..._chunks`, `..._info`) under the OLD name,
+/// verified against this vendored build with a create-`facts_vec_new`/
+/// copy/DROP-old/RENAME sequence — the RENAME step left `facts_vec` querying
+/// a since-renamed `facts_vec_rowids` shadow table and failed with "no such
+/// table: main.facts_vec_rowids". Same end state (embeddings preserved,
+/// `is_live` derived from each fact's CURRENT `invalid_at`, `facts_vec` rows
+/// with no matching `facts` row dropped) reached without RENAME instead:
+/// buffer every existing row into memory, drop the old table, then recreate
+/// `facts_vec` directly under its final name and reinsert. Idempotent:
+/// skipped once `facts_vec` already carries the column (probed with `SELECT
+/// is_live FROM facts_vec LIMIT 0`, exactly as the task names it), so
+/// re-running never re-buffers or re-derives `is_live` from a possibly-stale
+/// `invalid_at` snapshot.
+fn rebuild_facts_vec_with_is_live(conn: &Connection) -> Result<()> {
+    if conn
+        .prepare("SELECT is_live FROM facts_vec LIMIT 0")
+        .is_ok()
+    {
+        return Ok(());
+    }
+    let mut stmt = conn.prepare(
+        "SELECT v.fact_id, v.embedding, (f.invalid_at IS NULL)
+           FROM facts_vec v
+           JOIN facts f ON f.id = v.fact_id",
+    )?;
+    let rows: Vec<(String, Vec<u8>, i64)> = stmt
+        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+        .collect::<Result<_>>()?;
+    drop(stmt);
+    conn.execute_batch("DROP TABLE facts_vec;")?;
+    conn.execute_batch(
+        "CREATE VIRTUAL TABLE facts_vec USING vec0(
+            fact_id TEXT PRIMARY KEY,
+            embedding FLOAT[768],
+            is_live BOOLEAN
+        );",
+    )?;
+    for (fact_id, embedding, is_live) in rows {
+        conn.execute(
+            "INSERT INTO facts_vec(fact_id, embedding, is_live) VALUES (?1, ?2, ?3)",
+            (fact_id, embedding, is_live),
+        )?;
+    }
+    Ok(())
+}
+
 /// Migrate a Plan 2 (schema_version 4) database to Plan 3 (schema_version 5):
 /// adds `valid_from`/`invalid_at`/`superseded_by` to `facts`, backfills
 /// `valid_from = created_at` on pre-existing rows (which stay live —
-/// `invalid_at` is left NULL), and adds the live-rows partial index. Uses the
-/// same guarded-ALTER idiom as `apply_plan2`'s `transcript_files` backfill so
-/// re-running against an already-migrated database is a no-op, not an error.
+/// `invalid_at` is left NULL), adds the live-rows partial index, and rebuilds
+/// `facts_vec` with the `is_live` metadata column (see
+/// `rebuild_facts_vec_with_is_live`) so `knn_facts` can filter superseded
+/// facts inside the vector query itself. Uses the same guarded-ALTER idiom as
+/// `apply_plan2`'s `transcript_files` backfill so re-running against an
+/// already-migrated database is a no-op, not an error.
 ///
-/// Skips the ALTER/backfill/index work entirely once `schema_version` already
-/// records version 5 (PR#9 r1 F4): those steps are safe to repeat, but every
-/// `open_db` call would otherwise re-run three guarded `ALTER TABLE` attempts
-/// and a table scan on every process start for no effect. A DB whose migration
-/// only partially landed (columns present but no version-5 row, or vice versa)
-/// still has no version-5 marker, so it still retries the full sequence.
+/// Skips the ALTER/backfill/index/facts_vec-rebuild work entirely once
+/// `schema_version` already records version 5 (PR#9 r1 F4): those steps are
+/// safe to repeat, but every `open_db` call would otherwise re-run three
+/// guarded `ALTER TABLE` attempts and a table scan on every process start for
+/// no effect. A DB whose migration only partially landed (columns present but
+/// no version-5 row, or vice versa) still has no version-5 marker, so it
+/// still retries the full sequence.
 pub fn apply_plan3(conn: &Connection) -> Result<()> {
     let already_applied: i64 = conn
         .query_row(
@@ -316,6 +372,7 @@ pub fn apply_plan3(conn: &Connection) -> Result<()> {
         [],
     )?;
     conn.execute_batch(PLAN3_INDEX_DDL)?;
+    rebuild_facts_vec_with_is_live(conn)?;
     conn.execute(
         "INSERT INTO schema_version (version, applied_at) VALUES (5, datetime('now'))
          ON CONFLICT(version) DO NOTHING",
@@ -573,6 +630,154 @@ mod tests {
         assert!(
             result.is_ok(),
             "apply_plan3 must skip its write work (not error) once version 5 is already recorded: {result:?}"
+        );
+    }
+
+    /// RED for G1 (major, Codex R2) / decision
+    /// `hex-knn-is-live-metadata-filter-2026-09-10.md` item 1: `facts_vec`
+    /// must gain an `is_live BOOLEAN` metadata column as part of reaching
+    /// schema version 5 — vec0 tables cannot `ALTER TABLE ADD COLUMN`, so
+    /// this requires the create-`facts_vec_new`/copy/drop/rename sequence
+    /// the decision spells out. Probed exactly as the task names it:
+    /// `SELECT is_live FROM facts_vec LIMIT 0`. Fails now because
+    /// `apply_plan3` never touches `facts_vec` — it is still the plain
+    /// `vec0(fact_id, embedding)` shape from `PLAN2_VEC_DDL`.
+    #[test]
+    fn apply_plan3_rebuilds_facts_vec_with_is_live_column() {
+        crate::memory::vector::register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        apply_plan1_baseline_for_test(&conn).unwrap();
+        apply_plan2(&conn).unwrap();
+
+        apply_plan3(&conn).unwrap();
+
+        let probe = conn.prepare("SELECT is_live FROM facts_vec LIMIT 0");
+        assert!(
+            probe.is_ok(),
+            "facts_vec must carry an is_live BOOLEAN metadata column once schema version 5 is reached, got {:?}",
+            probe.err()
+        );
+    }
+
+    /// RED for G1 item 1/4: migrating a v4 DB that ALREADY has `facts_vec`
+    /// rows (the real production shape — `maintain_facts::backfill` embeds
+    /// live facts under the old 2-column table) must rebuild `facts_vec` to
+    /// the 3-column `is_live` shape WITHOUT losing any embedding, and must
+    /// set `is_live` from each row's CURRENT `facts.invalid_at`. Simulates a
+    /// crash-mid-migration DB (bi-temporal columns already ALTERed onto
+    /// `facts`, but no version-5 marker written yet — the exact case
+    /// `apply_plan3`'s own doc comment calls out) so a live and a superseded
+    /// fact both already exist with real `invalid_at` values BEFORE the
+    /// facts_vec rebuild runs. Also pins idempotency (item 4: "apply_plan3
+    /// twice is a no-op") by re-running and checking the rebuilt row is
+    /// untouched. Fails now: `apply_plan3` never rebuilds `facts_vec`, so
+    /// the `is_live` column does not exist and the SELECT below errors.
+    #[test]
+    fn apply_plan3_migrates_v4_facts_vec_preserving_embeddings_and_setting_is_live() {
+        crate::memory::vector::register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        apply_plan1_baseline_for_test(&conn).unwrap();
+        apply_plan2(&conn).unwrap(); // v4: facts_vec is still (fact_id, embedding)
+
+        // Partial-migration simulation: bi-temporal columns already present
+        // on `facts`, no version-5 marker yet.
+        conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT", [])
+            .unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN invalid_at TEXT", [])
+            .unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN superseded_by TEXT", [])
+            .unwrap();
+
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+             VALUES ('01HFACT-LIVE','project:hex','uses','a live object',0.5,'2026-06-11','2026-06-11','2026-06-11',NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+             VALUES ('01HFACT-SUP','project:hex','uses','a superseded object',0.5,'2026-06-11','2026-06-11','2026-06-11','2026-09-05','01HFACT-NEW')",
+            [],
+        )
+        .unwrap();
+
+        // facts_vec already populated under the OLD 2-column shape.
+        let live_vec: Vec<f32> = (0..crate::memory::vector::EMBED_DIM)
+            .map(|d| d as f32 * 0.001)
+            .collect();
+        let sup_vec: Vec<f32> = (0..crate::memory::vector::EMBED_DIM)
+            .map(|d| (d as f32 + 1.0) * 0.001)
+            .collect();
+        conn.execute(
+            "INSERT INTO facts_vec(fact_id, embedding) VALUES (?1, ?2)",
+            rusqlite::params![
+                "01HFACT-LIVE",
+                crate::memory::vector::f32s_to_le_bytes(&live_vec)
+            ],
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO facts_vec(fact_id, embedding) VALUES (?1, ?2)",
+            rusqlite::params![
+                "01HFACT-SUP",
+                crate::memory::vector::f32s_to_le_bytes(&sup_vec)
+            ],
+        )
+        .unwrap();
+
+        apply_plan3(&conn).unwrap();
+
+        let version: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version, 5, "migration must reach schema version 5");
+
+        let is_live_map: std::collections::HashMap<String, i64> = {
+            let mut stmt = conn
+                .prepare("SELECT fact_id, is_live FROM facts_vec")
+                .unwrap();
+            stmt.query_map([], |r| Ok((r.get::<_, String>(0)?, r.get::<_, i64>(1)?)))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect()
+        };
+        assert_eq!(
+            is_live_map.get("01HFACT-LIVE"),
+            Some(&1),
+            "pre-existing live fact must be rebuilt with is_live = 1"
+        );
+        assert_eq!(
+            is_live_map.get("01HFACT-SUP"),
+            Some(&0),
+            "pre-existing superseded fact must be rebuilt with is_live = 0"
+        );
+
+        let stored: Vec<u8> = conn
+            .query_row(
+                "SELECT embedding FROM facts_vec WHERE fact_id = '01HFACT-LIVE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            crate::memory::vector::f32s_to_le_bytes(&live_vec),
+            "embedding bytes must survive the facts_vec rebuild unchanged"
+        );
+
+        // Idempotent: a second apply_plan3 call must not error or corrupt
+        // the rebuilt shape/values.
+        apply_plan3(&conn).unwrap();
+        let is_live_after: i64 = conn
+            .query_row(
+                "SELECT is_live FROM facts_vec WHERE fact_id = '01HFACT-LIVE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            is_live_after, 1,
+            "second apply_plan3 call must be a no-op, not corrupt is_live"
         );
     }
 }
