@@ -3864,7 +3864,8 @@ mod tests {
                 .filter(|e| e.event == "digest-sent" || e.event == "digest-fallback")
                 .count();
             assert_eq!(
-                digest_sends, 1,
+                digest_sends,
+                1,
                 "exactly one digest must be sent across both calls to the \
                  production nudge path even though the second call's UTC \
                  date has advanced -- got events: {:?}",
