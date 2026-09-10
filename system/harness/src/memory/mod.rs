@@ -43,11 +43,66 @@ pub fn open_db(path: &Path) -> rusqlite::Result<Connection> {
     if let Err(e) = schema::apply_plan2(&conn) {
         eprintln!("[memory] Plan 2 schema migration warning: {e}");
     }
-    if let Err(e) = schema::apply_plan3(&conn) {
-        eprintln!("[memory] Plan 3 schema migration warning: {e}");
-    }
+    // Required — every bi-temporal reader (recall, KNN) unconditionally
+    // depends on valid_from/invalid_at/superseded_by existing on `facts`.
+    // A connection missing them is not a degraded-but-usable connection, so
+    // this one propagates instead of warn-and-continue.
+    schema::apply_plan3(&conn).map_err(|e| {
+        eprintln!("[memory] Plan 3 schema migration failed: {e}");
+        e
+    })?;
     if let Err(e) = schema::apply_messages_schema(&conn) {
         eprintln!("[memory] messages schema migration warning: {e}");
     }
     Ok(conn)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// RED for PR#9 r1 F1 (blocker): `open_db` currently logs
+    /// `schema::apply_plan3` errors and continues (warn-and-continue),
+    /// returning `Ok` with a connection that is missing `valid_from` /
+    /// `invalid_at` / `superseded_by`. Every bi-temporal reader added in
+    /// this port unconditionally requires those columns, so a failed
+    /// required migration must fail `open_db` loudly instead of handing
+    /// back an incompatible connection.
+    ///
+    /// Forces a real (non "duplicate column") failure inside
+    /// `apply_plan3`'s `ALTER TABLE` by pre-seeding a Plan 2 (v4) database
+    /// and then making the file read-only: the write hits SQLITE_READONLY,
+    /// not the idempotent duplicate-column path.
+    #[test]
+    fn open_db_fails_when_required_plan3_migration_fails() {
+        vector::register_sqlite_vec();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("memory.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            schema::apply_plan1_baseline_for_test(&conn).unwrap();
+            schema::apply_plan2(&conn).unwrap();
+        }
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+
+        let result = open_db(&db_path);
+
+        // Restore write perms (owner rw) so the TempDir can clean itself up
+        // regardless of the assertion outcome below.
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        assert!(
+            result.is_err(),
+            "open_db must return Err when the required Plan 3 migration fails, not silently return Ok with an incompatible connection"
+        );
+    }
 }
