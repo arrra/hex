@@ -401,7 +401,8 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE TABLE IF NOT EXISTS chunk_meta (
             chunk_rowid INTEGER PRIMARY KEY,
-            source_weight REAL NOT NULL DEFAULT 1.0
+            source_weight REAL NOT NULL DEFAULT 1.0,
+            file_id INTEGER NOT NULL DEFAULT 0
         );
         ",
     )?;
@@ -480,6 +481,43 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+
+    // F5 (minor, arrra/hex PR #8 round 1): the reuse-pool lookup in
+    // `index_file_with_reuse` joined `chunks` (FTS5) to `vec_chunks` (vec0) on
+    // `WHERE c.file_id = ?` — a plain-column equality filter FTS5 cannot index,
+    // so it degraded to a full scan of every chunk row for every changed file
+    // (confirmed by `EXPLAIN QUERY PLAN` — `SCAN c VIRTUAL TABLE INDEX 0:`).
+    // `chunk_meta` is a normal (non-virtual) table, so it CAN carry a real
+    // b-tree index on `file_id`; the reuse lookup now finds a file's chunk
+    // rowids there first, then fetches from `chunks`/`vec_chunks` by rowid —
+    // both virtual tables serve rowid lookups natively (`SEARCH`, not `SCAN`).
+    // Migration: add file_id to chunk_meta if missing (old DBs), backfilled
+    // from `chunks.file_id` (already present on every chunk row).
+    let chunk_meta_has_file_id: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(chunk_meta)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .flatten()
+            .collect();
+        cols.iter().any(|c| c == "file_id")
+    };
+    if !chunk_meta_has_file_id {
+        conn.execute(
+            "ALTER TABLE chunk_meta ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+        conn.execute(
+            "UPDATE chunk_meta SET file_id = COALESCE(
+                (SELECT CAST(c.file_id AS INTEGER) FROM chunks c WHERE c.rowid = chunk_meta.chunk_rowid),
+                0
+            )",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chunk_meta_file_id ON chunk_meta(file_id)",
+        [],
+    )?;
 
     super::vector::init_vec_table(conn)?;
 
@@ -617,8 +655,8 @@ pub fn index_file(
         let chunk_rowid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
         chunk_rowids.push(chunk_rowid);
         conn.execute(
-            "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, ?)",
-            params![chunk_rowid, weight],
+            "INSERT INTO chunk_meta (chunk_rowid, source_weight, file_id) VALUES (?, ?, ?)",
+            params![chunk_rowid, weight, file_id],
         )?;
     }
 
@@ -862,12 +900,23 @@ where
             std::collections::HashMap::new();
         if !full {
             if let Some(fid) = existing_id {
+                // F5 (minor, arrra/hex PR #8 round 1): route the lookup
+                // through `chunk_meta.file_id`, which carries a real b-tree
+                // index (`idx_chunk_meta_file_id`, see `init_db`), instead of
+                // filtering the FTS5 `chunks` virtual table directly — FTS5
+                // has no secondary index for plain column equality, so
+                // `WHERE c.file_id = ?` degraded to a full scan of every
+                // chunk row in the index for every changed file. `chunks`
+                // and `vec_chunks` are then hit by rowid, which both virtual
+                // tables serve natively.
                 let mut stmt = conn.prepare(
                     "SELECT c.heading, c.content, v.embedding \
-                     FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
-                     WHERE c.file_id = ?",
+                     FROM chunk_meta cm \
+                     JOIN chunks c ON c.rowid = cm.chunk_rowid \
+                     JOIN vec_chunks v ON v.rowid = cm.chunk_rowid \
+                     WHERE cm.file_id = ?",
                 )?;
-                let rows = stmt.query_map(params![fid.to_string()], |r| {
+                let rows = stmt.query_map(params![fid], |r| {
                     Ok((
                         r.get::<_, String>(0)?,
                         r.get::<_, String>(1)?,
@@ -915,8 +964,8 @@ where
             let chunk_rowid: i64 =
                 conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
             conn.execute(
-                "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, ?)",
-                params![chunk_rowid, weight],
+                "INSERT INTO chunk_meta (chunk_rowid, source_weight, file_id) VALUES (?, ?, ?)",
+                params![chunk_rowid, weight, file_id],
             )?;
 
             // F3 (blocker): `chunks` is a plain-rowid FTS5 table (no
@@ -2759,8 +2808,8 @@ mod tests {
                 .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
                 .unwrap();
             conn.execute(
-                "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, 1.0)",
-                params![rowid],
+                "INSERT INTO chunk_meta (chunk_rowid, source_weight, file_id) VALUES (?, 1.0, ?)",
+                params![rowid, fid],
             )
             .unwrap();
             super::super::vector::insert_vec(
@@ -3021,18 +3070,20 @@ mod tests {
     }
 
     // F5 (minor, arrra/hex PR #8 round 1): the reuse-pool lookup at
-    // `index_file_with_reuse` (~line 866) filters the FTS5 `chunks` virtual
-    // table on a plain column equality (`WHERE c.file_id = ?`). FTS5 has no
-    // secondary index on non-MATCH column filters, so this degrades to a
-    // linear scan of every chunk row in the whole index for every changed
+    // `index_file_with_reuse` (~line 903) used to filter the FTS5 `chunks`
+    // virtual table on a plain column equality (`WHERE c.file_id = ?`). FTS5
+    // has no secondary index on non-MATCH column filters, so that degraded to
+    // a linear scan of every chunk row in the whole index for every changed
     // file — the "whole-index work even when almost every vector is reused"
-    // the finding calls out. `EXPLAIN QUERY PLAN` on the deployed schema
-    // (below) confirms it: SQLite reports `SCAN c VIRTUAL TABLE INDEX 0:` —
-    // an unfiltered scan of the `c` (chunks) side — not a `SEARCH`. This
+    // the finding calls out (confirmed on the deployed schema: SQLite
+    // reported `SCAN c VIRTUAL TABLE INDEX 0:`, an unfiltered scan of the `c`
+    // (chunks) side, not a `SEARCH`). The fix routes the file->chunk lookup
+    // through `chunk_meta`, a normal table that (unlike `chunks`/`vec_chunks`,
+    // both virtual) can carry a real b-tree index on `file_id`
+    // (`idx_chunk_meta_file_id`, added in `init_db`); `chunks`/`vec_chunks`
+    // are then hit by rowid, which both virtual tables serve natively. This
     // pins the contract (no full scan of the chunks table for a per-file
-    // lookup), not any particular fix shape: it currently FAILS, and should
-    // start passing once the lookup is switched to an indexed file->chunk
-    // mapping per the finding's remediation.
+    // lookup), not any particular fix shape.
     #[test]
     fn index_file_with_reuse_lookup_avoids_full_chunk_table_scan() {
         let tmp = TempDir::new().unwrap();
@@ -3055,27 +3106,55 @@ mod tests {
                     params![file_id.to_string(), format!("file{f}.md"), format!("h{c}"), c.to_string(), "content", 0],
                 )
                 .unwrap();
+                let chunk_rowid: i64 = conn
+                    .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
+                    .unwrap();
+                conn.execute(
+                    "INSERT INTO chunk_meta (chunk_rowid, source_weight, file_id) VALUES (?, 1.0, ?)",
+                    params![chunk_rowid, file_id],
+                )
+                .unwrap();
             }
         }
         // Identical to the reuse-pool query in `index_file_with_reuse`
-        // (~line 866-868): `SELECT c.heading, c.content, v.embedding FROM
-        // chunks c JOIN vec_chunks v ON v.rowid = c.rowid WHERE c.file_id = ?`.
+        // (~line 903-907): `SELECT c.heading, c.content, v.embedding FROM
+        // chunk_meta cm JOIN chunks c ON c.rowid = cm.chunk_rowid JOIN
+        // vec_chunks v ON v.rowid = cm.chunk_rowid WHERE cm.file_id = ?`.
         let mut stmt = conn
             .prepare(
                 "EXPLAIN QUERY PLAN SELECT c.heading, c.content, v.embedding \
-                 FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
-                 WHERE c.file_id = ?",
+                 FROM chunk_meta cm \
+                 JOIN chunks c ON c.rowid = cm.chunk_rowid \
+                 JOIN vec_chunks v ON v.rowid = cm.chunk_rowid \
+                 WHERE cm.file_id = ?",
             )
             .unwrap();
         let plan: Vec<String> = stmt
-            .query_map(params!["1"], |r| r.get::<_, String>(3))
+            .query_map(params![1i64], |r| r.get::<_, String>(3))
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
+        // FTS5/vec0 virtual tables report EVERY access as "SCAN <alias>
+        // VIRTUAL TABLE INDEX N:<ops>" — even a fast rowid `=` lookup says
+        // "SCAN", never "SEARCH" (confirmed against sqlite3 3.43.2, the
+        // version this workspace builds against: `EXPLAIN QUERY PLAN SELECT
+        // ... FROM chunks WHERE rowid = 1` also prints "SCAN chunks VIRTUAL
+        // TABLE INDEX 0:="). The distinguishing signal is the operator
+        // suffix after the colon: a genuine unconstrained per-row scan ends
+        // with a bare colon (no operator characters); a pushed-down
+        // constraint (rowid equality, or `idx_chunk_meta_file_id` on the
+        // `cm` side) appends one or more operator characters after it.
+        let is_unconstrained_scan = |step: &str| -> bool {
+            const MARKER: &str = "VIRTUAL TABLE INDEX ";
+            step.split_once(MARKER)
+                .and_then(|(_, rest)| rest.split_once(':'))
+                .map(|(_, ops)| ops.is_empty())
+                .unwrap_or(false)
+        };
         assert!(
-            !plan.iter().any(|step| step.starts_with("SCAN c ")),
-            "F5: reuse lookup does a full unindexed scan of the chunks \
-             table instead of a per-file indexed lookup: {plan:?}"
+            !plan.iter().any(|step| is_unconstrained_scan(step)),
+            "F5: reuse lookup does a full unindexed scan of the chunks/vector \
+             tables instead of a per-file indexed lookup: {plan:?}"
         );
     }
 }
