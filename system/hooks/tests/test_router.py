@@ -1389,6 +1389,23 @@ class TestMultilinePollingLoopScope(RouterTestCase):
             self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F11 near miss)")
             self.assertEqual(read_ledger(ledger_dir), [])
 
+    def test_gh_call_between_an_earlier_loops_done_and_a_later_loop_abstains(self):
+        """F3 (review round 1 redo): the loop-body gap used a lazy
+        `[\\s\\S]*?` that is not bounded to its OWN `done` -- it can skip
+        past an earlier, unrelated loop's `done` and pick up a `gh`/`sleep`
+        pair that sits between two loops, plus a `for` loop after it, and
+        ask. The gap must not cross any `done` token."""
+        cmd = (
+            "while read x; do echo $x; done < f\n"
+            "gh pr checks 123\n"
+            "sleep 5\n"
+            "for p in 1 2; do echo; done"
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F3 near miss)")
+            self.assertEqual(read_ledger(ledger_dir), [])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -314,6 +314,25 @@ EXTRA_FIXTURES = [
         positive={"command": "until false; do\n  gh pr checks 123\n  sleep 5\ndone"},
         near_miss={"command": "for n in 293 294 295; do gh pr checks $n; sleep 2; done"},
     ),
+    # F3 (review round 1 redo): the loop-body gaps are lazy but not bounded
+    # to their OWN `done` -- they can skip past an earlier, unrelated
+    # loop's closing `done` while hunting for a gh+sleep pair that belongs
+    # to a later loop. A candidate spanning more than one `done` must be
+    # rejected (see `_polling_loop_bounded` in pretooluse-router.py).
+    dict(
+        id="gh-fast-polling",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "while true; do\n  gh pr checks 123\n  sleep 5\ndone"},
+        near_miss={
+            "command": (
+                "while read x; do echo $x; done < f\n"
+                "gh pr checks 123\n"
+                "sleep 5\n"
+                "for p in 1 2; do echo; done"
+            )
+        },
+    ),
 ]
 
 

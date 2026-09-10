@@ -519,6 +519,30 @@ def _effective_checkout(scan_text, match_start, matched_text, payload_cwd):
     return payload_cwd
 
 
+# --- Loop-body bound for gh-fast-polling (F3) --------------------------
+#
+# gh-fast-polling's `match` spans a while/until keyword, the CLI call, the
+# sleep call, and a closing `\bdone\b`, joined by lazy `[\s\S]*?` gaps --
+# lazy, but not BOUNDED to the loop's own `done`: the gaps can skip
+# straight past an earlier, unrelated loop's closing `done` (e.g. a
+# `while read` loop that has nothing to do with polling) while hunting for
+# a CLI-call+sleep pair that actually belongs to a LATER loop. The natural
+# fix is a negative lookahead on `done` inside each gap, but Rust's
+# `regex` crate (the byte-identical port target) has no lookaround at
+# all, so that can't live in the JSON `match` field (see
+# TestNoLookaroundInRules). Same shape as F4's `_effective_checkout`: keep
+# the JSON regex simple and lookaround-free, and validate the candidate in
+# Python -- a match is only genuine if its own span contains exactly one
+# `done` word boundary (the one that closes it); two or more means an
+# earlier loop's `done` already ended the body before the CLI+sleep pair
+# was found.
+_DONE_WORD_RE = re.compile(r"\bdone\b")
+
+
+def _polling_loop_bounded(matched_text):
+    return len(_DONE_WORD_RE.findall(matched_text)) <= 1
+
+
 def canonical_text(tool_name, tool_input):
     """Canonical arg text a rule's `match` regex is applied to."""
     if tool_name == "Bash":
@@ -621,9 +645,15 @@ def evaluate(payload):
         if unless_re is None:
             m = None
             for candidate in all_matches:
-                if not _cwd_exempts(candidate):
-                    m = candidate
-                    break
+                if _cwd_exempts(candidate):
+                    continue
+                # F3: gh-fast-polling's own bound check (see
+                # `_polling_loop_bounded`) -- keeps the JSON `match` field
+                # lookaround-free for the Rust port.
+                if rule["id"] == "gh-fast-polling" and not _polling_loop_bounded(candidate.group(0)):
+                    continue
+                m = candidate
+                break
             if m is None:
                 continue
         elif scope == "shell":

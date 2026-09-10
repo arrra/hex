@@ -64,7 +64,7 @@
     "tool": "^Bash$",
     "match": "@PREFIX@(while|until)\\b[\\s\\S]*?\\bgh\\s+(pr|run)\\b[\\s\\S]*?\\bsleep\\s+([1-5]?\\d)\\b[\\s\\S]*?\\bdone\\b",
     "decision": "ask",
-    "message": "Open-ended gh polling loop with sleep < 60s risks the 5,000/hr API budget; use sleep >= 60 or `gh run watch` / `gh pr checks --watch`. (F11: matches a multiline loop body too, bounded to its own `done`.)",
+    "message": "Open-ended gh polling loop with sleep < 60s risks the 5,000/hr API budget; use sleep >= 60 or `gh run watch` / `gh pr checks --watch`. (F11: matches a multiline loop body too, bounded to its own `done`. F3: the router rejects a candidate whose span crosses an earlier loop's own `done` -- see pretooluse-router.py, no lookaround available for the Rust port.)",
     "source": "gh API rate-limit budget"
   },
   {
