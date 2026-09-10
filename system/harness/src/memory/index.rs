@@ -1019,10 +1019,38 @@ where
     })();
 
     match result {
-        Ok(outcome) => {
-            conn.execute_batch("RELEASE index_file_with_reuse")?;
-            Ok(outcome)
-        }
+        Ok(outcome) => match conn.execute_batch("RELEASE index_file_with_reuse") {
+            Ok(()) => Ok(outcome),
+            Err(release_err) => {
+                // F1 (major, arrra/hex PR #8 round 2): if the outermost
+                // RELEASE itself fails (e.g. SQLITE_BUSY at commit-time lock
+                // upgrade while another connection holds a read transaction
+                // in rollback-journal mode), `?` would have returned Err with
+                // the SAVEPOINT still open — later calls then nest a new
+                // savepoint under this still-open one and can return Ok
+                // without ever reaching disk, and dropping the connection
+                // discards it all. Unwind explicitly back to the connection's
+                // entry (autocommit) state before surfacing the error.
+                //
+                // A plain `ROLLBACK` — not `ROLLBACK TO ...; RELEASE ...` —
+                // is required here: `RELEASE` of the outermost savepoint is a
+                // COMMIT, which (like the RELEASE that just failed) needs the
+                // same EXCLUSIVE lock upgrade to finalize the rollback
+                // journal, so retrying it fails again for the identical
+                // reason. A full `ROLLBACK` aborts the whole top-level
+                // transaction and drops the reservation without that
+                // finalization step, so it succeeds even while the blocking
+                // reader is still active. A secondary failure to unwind is
+                // logged loudly (S6) but does not shadow the original error.
+                if let Err(unwind_err) = conn.execute_batch("ROLLBACK") {
+                    eprintln!(
+                        "  ERROR: failed to unwind index_file_with_reuse savepoint after a \
+                         failed RELEASE ({release_err}): {unwind_err}"
+                    );
+                }
+                Err(release_err.into())
+            }
+        },
         Err(e) => {
             conn.execute_batch("ROLLBACK TO index_file_with_reuse; RELEASE index_file_with_reuse")?;
             Err(e)
@@ -3156,5 +3184,275 @@ mod tests {
             "F5: reuse lookup does a full unindexed scan of the chunks/vector \
              tables instead of a per-file indexed lookup: {plan:?}"
         );
+    }
+
+    // F1 (major, arrra/hex PR #8 round 2): the `Ok(outcome)` arm does
+    // `conn.execute_batch("RELEASE index_file_with_reuse")?` — if that
+    // RELEASE itself fails, `?` returns Err immediately with the SAVEPOINT
+    // still open. The connection is left mid-transaction: the previous
+    // file's row/chunks/vectors sit inside the still-open savepoint instead
+    // of being rolled back to, and the NEXT `index_file_with_reuse` call
+    // nests a new savepoint under the still-open one — it can return Ok
+    // without ever reaching disk, and dropping the connection discards it
+    // all. Force a real RELEASE failure the way the finding describes: put
+    // the connection in rollback-journal mode and hold a second connection's
+    // read transaction open — conn's SAVEPOINT can acquire the RESERVED lock
+    // and perform every write, but its RELEASE (a commit) needs to upgrade
+    // to EXCLUSIVE, which SQLite refuses (SQLITE_BUSY) while the second
+    // connection's SHARED lock is still held. `busy_timeout(0)` makes the
+    // failure immediate instead of retrying for the default 5s.
+    #[test]
+    fn index_file_with_reuse_release_failure_unwinds_and_next_call_persists() {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let db_path = tmp.path().join("memory.db");
+        let conn = super::super::open_db(&db_path).unwrap();
+        init_db(&conn).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mode, "delete",
+            "test setup: must be off WAL to reproduce a commit-time lock-upgrade failure"
+        );
+        conn.busy_timeout(std::time::Duration::from_millis(0))
+            .unwrap();
+        let filepath = hex_root.join("release-fail.md");
+
+        let content_v1 = build_40_chunk_content();
+        let old_chash = content_hash(&content_v1);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.21f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let old_heading17_vec: Vec<u8> = conn
+            .query_row(
+                "SELECT v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.heading = 'Heading 17'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // A second connection holding an open read transaction: its SHARED
+        // lock blocks `conn`'s RESERVED->EXCLUSIVE upgrade at commit time.
+        let conn2 = Connection::open(&db_path).unwrap();
+        conn2.execute_batch("BEGIN;").unwrap();
+        let _: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        let result = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.99f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        );
+        assert!(
+            result.is_err(),
+            "a failed RELEASE must surface as an error, not a silent success"
+        );
+
+        assert!(
+            conn.is_autocommit(),
+            "F1: a failed RELEASE must unwind (ROLLBACK TO + RELEASE) back to \
+             the connection's entry (autocommit) state, not leave the \
+             savepoint open"
+        );
+
+        let chash_after_failed_release: String = conn
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'release-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            chash_after_failed_release, old_chash,
+            "F1: the previous file's content_hash must survive a failed RELEASE"
+        );
+        let heading17_vec: Vec<u8> = conn
+            .query_row(
+                "SELECT v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.heading = 'Heading 17'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            heading17_vec, old_heading17_vec,
+            "F1: the previous chunk's vector must survive a failed RELEASE"
+        );
+
+        // Let the blocking reader go, then a subsequent unimpeded call must
+        // commit durably — not nest under a still-open outer savepoint left
+        // behind by the failed RELEASE.
+        conn2.execute_batch("COMMIT;").unwrap();
+        drop(conn2);
+
+        let content_v3 = content_v1.replace(
+            "Content for chunk number 3, unique text here.",
+            "Content for chunk number 3, EDITED again.",
+        );
+        let new_chash = content_hash(&content_v3);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v3,
+            3.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.42f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        drop(conn);
+        let reopened = super::super::open_db(&db_path).unwrap();
+        let durable_chash: String = reopened
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'release-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            durable_chash, new_chash,
+            "F1: a subsequent successful call must persist durably to disk — \
+             not be discarded when the connection is dropped"
+        );
+    }
+
+    // F9 (minor, arrra/hex PR #8 round 2): the `chunk_meta.file_id` migration
+    // is `ALTER TABLE ... ADD COLUMN file_id ... DEFAULT 0` followed by a
+    // SEPARATE `UPDATE ... backfill`, gated only on `if
+    // !chunk_meta_has_file_id`. An interruption between the two statements
+    // (or a failed UPDATE) leaves the column present with every row at the
+    // default 0 — and the next run's migration sees the column already
+    // exists and skips both statements forever, so the reuse lookup (`WHERE
+    // cm.file_id = ?`) never matches a row for that file again and the file
+    // is fully re-embedded on every run.
+    #[test]
+    fn init_db_backfills_file_id_from_interrupted_state() {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("interrupted.md");
+
+        let content = build_40_chunk_content();
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.33f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let file_id: i64 = conn
+            .query_row(
+                "SELECT id FROM files WHERE path = 'interrupted.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // Simulate the interrupted state: the ALTER already ran (the column
+        // exists, as it does here since init_db already added it) but the
+        // UPDATE backfill never completed — every chunk_meta row is stuck at
+        // the default 0 despite `chunks.file_id`/`files.id` holding the real
+        // value.
+        conn.execute("UPDATE chunk_meta SET file_id = 0", [])
+            .unwrap();
+        let non_zero: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunk_meta WHERE file_id != 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            non_zero, 0,
+            "test setup: all chunk_meta rows must start at 0"
+        );
+
+        // The next run re-invokes init_db against this already-migrated (but
+        // never-backfilled) database — exactly what happens on restart.
+        init_db(&conn).unwrap();
+
+        let backfilled: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunk_meta WHERE file_id = ?",
+                params![file_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            backfilled, 40,
+            "F9: init_db must repair file_id = 0 rows that have a matching \
+             chunk instead of skipping the backfill because the column \
+             already exists"
+        );
+
+        // The reuse lookup must now actually find the vectors: reindexing
+        // the SAME content should reuse every chunk, not re-embed any of
+        // them.
+        let outcome = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            2.0,
+            "full",
+            false,
+            |_batch| anyhow::bail!("must not need to embed anything — everything should reuse"),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.reused, 40,
+            "F9: a self-healed file_id backfill must make the reuse lookup \
+             find the existing vectors instead of re-embedding the whole file"
+        );
+        assert_eq!(outcome.embedded, 0);
     }
 }
