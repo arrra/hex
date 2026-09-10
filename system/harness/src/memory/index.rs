@@ -3019,4 +3019,41 @@ mod tests {
             .unwrap();
         assert_eq!(meta_count, n as i64);
     }
+
+    #[test]
+    fn f5_scratch_explain_plan() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        for f in 0..5 {
+            conn.execute(
+                "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) VALUES (?, ?, ?, ?, ?)",
+                params![format!("file{f}.md"), 0.0, "h", Local::now().to_rfc3339(), 10],
+            )
+            .unwrap();
+            let file_id: i64 = conn
+                .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
+                .unwrap();
+            for c in 0..10 {
+                conn.execute(
+                    "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) VALUES (?, ?, ?, ?, ?, ?)",
+                    params![file_id.to_string(), format!("file{f}.md"), format!("h{c}"), c.to_string(), "content", 0],
+                )
+                .unwrap();
+            }
+        }
+        let mut stmt = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT c.heading, c.content, v.embedding \
+                 FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.file_id = ?",
+            )
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(params!["1"], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        eprintln!("F5 PLAN (before): {plan:?}");
+    }
 }
