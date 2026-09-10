@@ -743,6 +743,74 @@ class RecordScopedFailureHandling(unittest.TestCase):
             self.assertEqual(leftover_tmp, [], f"temp files left behind after a write failure: {leftover_tmp}")
 
 
+    def test_numeric_runid_field_does_not_abort_a_later_valid_record(self):
+        # review r1 F1: a non-string runId (e.g. the harness ever emits a raw
+        # numeric id) reached redact() unchecked and raised TypeError, which
+        # only the *outer* try/except in the test harness's own crash guard
+        # caught -- aborting the scan before the later valid record was ever
+        # reached. validate_record() must reject this per-record instead.
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            wf_dir = os.path.join(projects, "-Users-x-hex", "sess1", "workflows")
+            os.makedirs(wf_dir)
+            bad = {
+                "runId": 123,
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            Path(wf_dir, "wf_a_numericrunid.json").write_text(json.dumps(bad))
+            valid = {
+                "runId": "wf_z_valid4",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            Path(wf_dir, "wf_z_valid4.json").write_text(json.dumps(valid))
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 1, "a record with a malformed field (numeric runId) must fail the run")
+            reports = list(Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(reports), 1, "the later valid record must still be written")
+            self.assertIn("wf_a_numericrunid", err, "the malformed record must be named on stderr")
+
+    def test_numeric_phases_field_does_not_abort_a_later_valid_record(self):
+        # review r1 F1: a non-list `phases` reached build_report() unchecked
+        # (`phases or []` treats a truthy int as-is) and raised TypeError
+        # iterating it, escaping the write-only OSError guard entirely.
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            wf_dir = os.path.join(projects, "-Users-x-hex", "sess1", "workflows")
+            os.makedirs(wf_dir)
+            bad = {
+                "runId": "wf_a_numericphases",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "phases": 7,
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            Path(wf_dir, "wf_a_numericphases.json").write_text(json.dumps(bad))
+            valid = {
+                "runId": "wf_z_valid5",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            Path(wf_dir, "wf_z_valid5.json").write_text(json.dumps(valid))
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 1, "a record with a malformed field (numeric phases) must fail the run")
+            reports = list(Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(reports), 1, "the later valid record must still be written")
+            self.assertIn("wf_a_numericphases", err, "the malformed record must be named on stderr")
+
+
 class MissingSourceRootDiagnostics(unittest.TestCase):
     """F9 — an explicitly supplied --claude-projects root that does not exist
     must be diagnosed (WARN + non-zero exit), not read as a healthy empty
