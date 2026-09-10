@@ -1650,7 +1650,12 @@ mod tests {
         run_git(tmp.path(), &["add", "-A"]);
         run_git(
             tmp.path(),
-            &["commit", "-q", "-m", "committed local dep, missing dep include"],
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "committed local dep, missing dep include",
+            ],
         );
 
         let result = run_harness_buildable(tmp.path());
@@ -1874,7 +1879,10 @@ mod tests {
         )
         .unwrap();
         run_git(tmp.path(), &["add", "-A"]);
-        run_git(tmp.path(), &["commit", "-q", "-m", "escaping symlink include"]);
+        run_git(
+            tmp.path(),
+            &["commit", "-q", "-m", "escaping symlink include"],
+        );
 
         let result = run_harness_buildable(tmp.path());
         assert_eq!(
@@ -1924,7 +1932,10 @@ mod tests {
         std::os::unix::fs::symlink(".", harness.join("src/a")).unwrap();
         std::os::unix::fs::symlink(".", harness.join("src/b")).unwrap();
         run_git(tmp.path(), &["add", "-A"]);
-        run_git(tmp.path(), &["commit", "-q", "-m", "directory symlink cycle"]);
+        run_git(
+            tmp.path(),
+            &["commit", "-q", "-m", "directory symlink cycle"],
+        );
         tmp
     }
 
@@ -2053,7 +2064,10 @@ mod tests {
                 &format!("chmod 000 {target_rel_path}; cat"),
             ],
         );
-        run_git(tmp, &["config", &format!("filter.{filter_name}.clean"), "cat"]);
+        run_git(
+            tmp,
+            &["config", &format!("filter.{filter_name}.clean"), "cat"],
+        );
         run_git(
             tmp,
             &["config", &format!("filter.{filter_name}.required"), "true"],
