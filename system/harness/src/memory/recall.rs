@@ -302,7 +302,7 @@ pub(crate) fn facts_recall_with_config(
         conn.prepare(&format!(
             "SELECT facts_fts.rowid
              FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
-             WHERE facts_fts MATCH ?1 AND f.tombstone = 0 AND f.invalid_at IS NULL{privacy}
+             WHERE facts_fts MATCH ?1 AND f.tombstone = 0{privacy}
              ORDER BY bm25(facts_fts, {weights}), f.importance DESC LIMIT ?2",
         ))?
         .query_map(rusqlite::params![fts_query, (k * 3) as i64], |r| r.get(0))?
@@ -1385,6 +1385,66 @@ mod plan2_tests {
         );
     }
 
+    /// F6 (Codex round 1) — the test above uses one superseded row and one
+    /// live row with k = 5, leaving 14 free slots in the FTS arm's k*3 = 15
+    /// candidate window. Both rows become candidates regardless of the
+    /// arm's own `invalid_at IS NULL` predicate, and the FINAL row-fetch
+    /// guard (recall.rs, the per-rowid SELECT that also filters
+    /// `invalid_at IS NULL`) quietly drops the superseded one — so that test
+    /// still passed with the arm's early filter deleted. Here k = 1 shrinks
+    /// the window to exactly 3, and five superseded rows with a bare-token
+    /// object out-rank the live row's long, diluted sentence on bm25 (higher
+    /// term density, shorter doc). Without the arm's early filter those five
+    /// would fill all 3 slots themselves, and the live rowid would never
+    /// become a candidate at all — no later guard could recover it. Verified
+    /// by temporarily deleting `AND f.invalid_at IS NULL` from the
+    /// `fts_arm` closure's SQL and re-running: this test fails (see
+    /// adjudication).
+    #[test]
+    fn facts_recall_fts_arm_skips_superseded_saturated_window() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
+
+        // Five superseded rows: terse single-token objects that out-rank the
+        // live row's long diluted sentence on bm25, enough to saturate the
+        // FTS arm's k*3 = 3 candidate window (k = 1 below) on their own.
+        for i in 0..5 {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+                 VALUES (?1,?2,'has','zzqxfrobnicate',0.9,'2026-07-01','2026-07-01','2026-07-01','2026-09-05','live-zzqxfrobnicate')",
+                rusqlite::params![format!("noise-fts-{i}"), format!("noise-subject-fts-{i}")],
+            )
+            .unwrap();
+        }
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from)
+             VALUES ('live-zzqxfrobnicate','livezzqxfrobnicatetarget','has','the system currently has zzqxfrobnicate installed for production use today across all services',0.9,'2026-09-05','2026-09-05','2026-09-05')",
+            [],
+        )
+        .unwrap();
+
+        let hits: Vec<FactHit> = facts_recall(&c, "zzqxfrobnicate", 1, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert!(
+            hits
+                .iter()
+                .any(|f| f.object.contains("currently has zzqxfrobnicate installed")),
+            "live fact must survive a saturated FTS window crowded with superseded matches, got {:?}",
+            hits.iter().map(|f| &f.object).collect::<Vec<_>>()
+        );
+        assert!(
+            !hits.iter().any(|f| f.subject.starts_with("noise-subject-fts-")),
+            "superseded facts must never surface via the FTS arm, got {:?}",
+            hits.iter().map(|f| &f.subject).collect::<Vec<_>>()
+        );
+    }
+
     /// RED for FIX item 4 (Twbqe1c12) — same replay, isolated to the slug
     /// arm (recall.rs ~line 162, `WHERE subject LIKE ?1 AND tombstone = 0`).
     /// Query tokens are chosen so NEITHER row's object/predicate/subject
@@ -1426,6 +1486,62 @@ mod plan2_tests {
         assert!(
             !hits.iter().any(|f| f.object.contains("3.3.2")),
             "superseded object must NEVER surface via the slug arm, got {:?}",
+            hits.iter().map(|f| &f.object).collect::<Vec<_>>()
+        );
+    }
+
+    /// F6 (Codex round 1) — same gap as
+    /// `facts_recall_fts_arm_skips_superseded_saturated_window`, but for the
+    /// slug arm's `LIMIT 3` (recall.rs, per query token — fixed, independent
+    /// of `k`). The test above it uses one superseded row and one live row,
+    /// so both fit inside the 3-slot window regardless of the arm's own
+    /// `invalid_at IS NULL` predicate, and the final row-fetch guard quietly
+    /// drops the superseded one. Here three superseded rows (importance 0.9)
+    /// out-rank the live row (importance 0.1) under the slug arm's own
+    /// `ORDER BY importance DESC` and, without the arm's early filter, would
+    /// fill all 3 slots themselves — the live rowid would never become a
+    /// slug-arm candidate. The query text ("what does <token> need") mirrors
+    /// `facts_recall_slug_arm_skips_superseded` above, which already proved
+    /// this phrasing keeps the FTS/predicate arms from also surfacing the
+    /// slug target, so this test isolates the slug arm's own predicate.
+    /// Verified by temporarily deleting `invalid_at IS NULL` from the
+    /// slug-arm SQL and re-running: this test fails (see adjudication).
+    #[test]
+    fn facts_recall_slug_arm_skips_superseded_saturated_window() {
+        crate::memory::vector::register_sqlite_vec();
+        let c = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
+        crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
+
+        for i in 0..3 {
+            c.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+                 VALUES (?1,?2,'has','installed and live version 3.3.2',0.9,'2026-07-01','2026-07-01','2026-07-01','2026-09-05','zzqxblorp-live')",
+                rusqlite::params![format!("blorp-old-{i}"), format!("system:zzqxblorpcache{i}")],
+            )
+            .unwrap();
+        }
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from)
+             VALUES ('zzqxblorp-live','system:zzqxblorpcache-live','has','installed and live version 3.9.0',0.1,'2026-09-05','2026-09-05','2026-09-05')",
+            [],
+        )
+        .unwrap();
+
+        let hits: Vec<FactHit> = facts_recall(&c, "what does zzqxblorp need", 5, None, false)
+            .unwrap()
+            .into_iter()
+            .map(|(f, _)| f)
+            .collect();
+        assert!(
+            hits.iter().any(|f| f.object.contains("3.9.0")),
+            "live fact must survive a saturated slug window crowded with superseded matches, got {:?}",
+            hits.iter().map(|f| &f.object).collect::<Vec<_>>()
+        );
+        assert!(
+            !hits.iter().any(|f| f.object.contains("3.3.2")),
+            "superseded object must never surface via the slug arm, got {:?}",
             hits.iter().map(|f| &f.object).collect::<Vec<_>>()
         );
     }
