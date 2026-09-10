@@ -1,5 +1,5 @@
 use crate::doctor::check::{Category, CheckResult, Context, DoctorCheck};
-use regex::Regex;
+use std::collections::HashSet;
 use std::io::Read;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -335,53 +335,114 @@ fn diagnose(worktree_path: &Path, empty_hooks_dir: &Path, timeout: Duration) -> 
     }
     let mut metadata_cmd = Command::new("cargo");
     metadata_cmd.args(&metadata_args).current_dir(&harness_dir);
-    match run_with_timeout(&mut metadata_cmd, timeout) {
+    let metadata_stdout = match run_with_timeout(&mut metadata_cmd, timeout) {
         Ok(o) if !o.status.success() => {
-            return CheckResult::fail(format!(
-                ".hex/harness -> `cargo metadata` failed in a fresh git checkout \
-                 (missing/out-of-date Cargo.lock or a missing path dependency) — \
-                 fix: git add it or install it from .hex/.upgrade-cache: {}",
-                String::from_utf8_lossy(&o.stderr).trim()
-            ));
+            // F1: an `--offline` failure can mean two very different things —
+            // a registry/git dependency the lockfile resolves to is simply
+            // not present in the LOCAL CARGO CACHE (nothing to do with git
+            // tracking; classify as inconclusive), or a repository input
+            // (path dependency, Cargo.lock itself) is genuinely missing from
+            // the checkout (a real FAIL). Cargo's own offline-mode diagnostic
+            // text is the only reliable signal here — both the registry case
+            // ("...you're using offline mode (--offline)...") and the git
+            // dependency case ("...you are in the offline mode (--offline)")
+            // include this phrase; a missing local path dependency or a
+            // missing/unusable Cargo.lock never does.
+            return classify_metadata_failure(&String::from_utf8_lossy(&o.stderr));
         }
         Err(e) => {
             return CheckResult::fail(format!("cargo metadata did not complete: {e}"));
         }
-        Ok(_) => {}
-    }
+        Ok(o) => String::from_utf8_lossy(&o.stdout).into_owned(),
+    };
 
-    // Step 3: every `include_str!`/`include_bytes!` target the harness
-    // references at compile time must actually be present in the worktree.
-    let mut checked = 0usize;
-    let mut missing: Vec<(String, String)> = Vec::new();
-    for dir_name in ["src", "tests"] {
-        let dir = harness_dir.join(dir_name);
-        if dir.is_dir() {
-            scan_dir(&dir, worktree_path, &mut checked, &mut missing);
+    // Step 3: every `include_str!`/`include_bytes!`/`include!` target the
+    // harness references at compile time must actually be present in the
+    // worktree (F2/F6: driven by metadata's own local packages and target
+    // entry points, not a blind directory guess).
+    let local_packages = match parse_local_packages(&metadata_stdout) {
+        Ok(p) => p,
+        Err(e) => {
+            return CheckResult::fail(format!("failed to interpret `cargo metadata` output: {e}"));
+        }
+    };
+
+    let mut state = ScanState::new(worktree_path.to_path_buf());
+    for pkg in &local_packages {
+        for entry in &pkg.target_entry_points {
+            state.scan_file_and_follow(entry, true);
+        }
+        for dir_name in ["src", "tests"] {
+            let dir = pkg.root.join(dir_name);
+            if dir.is_dir() {
+                state.scan_dir(&dir);
+            }
+        }
+        let build_rs = pkg.root.join("build.rs");
+        if build_rs.is_file() {
+            state.scan_file_and_follow(&build_rs, true);
         }
     }
-    let build_rs = harness_dir.join("build.rs");
-    if build_rs.is_file() {
-        scan_file(&build_rs, worktree_path, &mut checked, &mut missing);
-    }
 
-    if missing.is_empty() {
-        CheckResult::pass(format!(
-            "harness builds from git ({checked} include target(s) present)"
+    // F9: a directory or file the scan could not read means this check
+    // cannot certify anything — surface it loudly (with the path) rather
+    // than silently treating an incomplete scan as "nothing missing".
+    if !state.errors.is_empty() {
+        return CheckResult::fail(format!(
+            "{} error(s) while scanning the harness for include targets — the \
+             scan could not complete, so this check cannot certify the harness \
+             builds from git: {}",
+            state.errors.len(),
+            state.errors.join("; ")
         ))
-    } else {
-        let details = missing
-            .iter()
-            .map(|(referencing, target)| format!("{referencing} -> {target}"))
-            .collect::<Vec<_>>()
-            .join("\n");
-        CheckResult::fail(format!(
+        .with_details(state.errors.join("\n"));
+    }
+    if !state.missing.is_empty() {
+        return CheckResult::fail(format!(
             "{} include target(s) referenced by the harness are missing from git — \
              fix: git add it or install it from .hex/.upgrade-cache",
-            missing.len()
+            state.missing.len()
         ))
-        .with_details(details)
+        .with_details(state.missing.join("\n"));
     }
+    if !state.inconclusive.is_empty() {
+        return CheckResult::warn(format!(
+            "harness builds from git ({} include target(s) present), but {} \
+             target(s) could not be conclusively verified — a non-literal \
+             include! argument, or a target gated behind an #[cfg(...)] this \
+             check cannot evaluate",
+            state.checked,
+            state.inconclusive.len()
+        ))
+        .with_details(state.inconclusive.join("\n"));
+    }
+    CheckResult::pass(format!(
+        "harness builds from git ({} include target(s) present)",
+        state.checked
+    ))
+}
+
+/// F1: classifies an `--offline` `cargo metadata` failure as either
+/// "dependency cache unavailable" (WARN — nothing to do with git tracking)
+/// or a genuine repository-input FAIL. See the call site for why the
+/// substring check is reliable.
+fn classify_metadata_failure(stderr: &str) -> CheckResult {
+    if stderr.to_lowercase().contains("offline mode (--offline)") {
+        return CheckResult::warn(format!(
+            ".hex/harness -> a dependency the lockfile resolves to is not present \
+             in the local Cargo registry/git cache (dependency cache unavailable — \
+             this is not a missing-from-git problem) — fix: warm the cache with \
+             network access before running doctor offline, or run `cargo fetch` \
+             once online: {}",
+            stderr.trim()
+        ));
+    }
+    CheckResult::fail(format!(
+        ".hex/harness -> `cargo metadata` failed in a fresh git checkout \
+         (missing/out-of-date Cargo.lock or a missing path dependency) — \
+         fix: git add it or install it from .hex/.upgrade-cache: {}",
+        stderr.trim()
+    ))
 }
 
 /// Always runs `guard.cleanup()` regardless of `result`'s status (G1), and
@@ -503,62 +564,776 @@ fn host_triple_impl(dir: &Path, timeout: Duration) -> Option<String> {
         .map(|s| s.trim().to_string())
 }
 
-fn include_regex() -> Regex {
-    // Only matches a plain string-literal argument, so `concat!(env!(...), "...")`
-    // forms (which start with `concat!`, not `"`) are skipped automatically.
-    Regex::new(r#"include_(?:str|bytes)!\s*\(\s*"([^"]*)"\s*\)"#).expect("static regex is valid")
-}
-
-fn scan_dir(
-    dir: &Path,
-    repo_root: &Path,
-    checked: &mut usize,
-    missing: &mut Vec<(String, String)>,
-) {
-    let entries = match std::fs::read_dir(dir) {
-        Ok(e) => e,
-        Err(_) => return,
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path.is_dir() {
-            scan_dir(&path, repo_root, checked, missing);
-        } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-            scan_file(&path, repo_root, checked, missing);
-        }
-    }
-}
-
-fn scan_file(
-    path: &Path,
-    repo_root: &Path,
-    checked: &mut usize,
-    missing: &mut Vec<(String, String)>,
-) {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
-        Err(_) => return,
-    };
-    let re = include_regex();
-    for cap in re.captures_iter(&content) {
-        let literal = &cap[1];
-        *checked += 1;
-        let resolved = match path.parent() {
-            Some(p) => p.join(literal),
-            None => PathBuf::from(literal),
-        };
-        if !resolved.exists() {
-            missing.push((
-                display_rel(path, repo_root),
-                display_rel(&resolved, repo_root),
-            ));
-        }
-    }
-}
-
 fn display_rel(path: &Path, repo_root: &Path) -> String {
     match path.strip_prefix(repo_root) {
         Ok(rel) => rel.display().to_string(),
         Err(_) => path.display().to_string(),
+    }
+}
+
+// ---------------------------------------------------------------------
+// F2/F6: metadata-driven local-package/target discovery
+// ---------------------------------------------------------------------
+
+/// A local (non-registry, non-git) package `cargo metadata` resolved —
+/// either the harness itself or a local path dependency (e.g. the
+/// `.hex/code-intel` -> `scipd` path dep) — with every target entry point
+/// (`lib`/`bin`/`test`/`custom-build`, including custom `path = "..."`
+/// targets) it declares.
+struct LocalPackage {
+    root: PathBuf,
+    target_entry_points: Vec<PathBuf>,
+}
+
+/// Parses `cargo metadata --format-version 1` JSON and returns every LOCAL
+/// package (a package whose `"source"` field is `null` — i.e. resolved from
+/// the filesystem, not a registry or git checkout) with its target entry
+/// points. Uses `serde_json::Value` rather than typed structs so unrelated
+/// metadata fields (there are many, and they vary by cargo version) never
+/// need to round-trip through this check.
+fn parse_local_packages(metadata_json: &str) -> Result<Vec<LocalPackage>, String> {
+    let doc: serde_json::Value = serde_json::from_str(metadata_json)
+        .map_err(|e| format!("failed to parse `cargo metadata` JSON output: {e}"))?;
+    let packages = doc
+        .get("packages")
+        .and_then(|p| p.as_array())
+        .ok_or_else(|| "cargo metadata output has no `packages` array".to_string())?;
+    let mut out = Vec::new();
+    for pkg in packages {
+        // Local (path/workspace) packages always have a null "source";
+        // registry and git dependencies carry a non-null source string.
+        if pkg.get("source").map(|s| !s.is_null()).unwrap_or(false) {
+            continue;
+        }
+        let manifest_path = match pkg.get("manifest_path").and_then(|m| m.as_str()) {
+            Some(m) => PathBuf::from(m),
+            None => continue,
+        };
+        let root = manifest_path
+            .parent()
+            .map(Path::to_path_buf)
+            .unwrap_or_else(|| manifest_path.clone());
+        let mut target_entry_points = Vec::new();
+        if let Some(targets) = pkg.get("targets").and_then(|t| t.as_array()) {
+            for target in targets {
+                if let Some(src) = target.get("src_path").and_then(|s| s.as_str()) {
+                    target_entry_points.push(PathBuf::from(src));
+                }
+            }
+        }
+        out.push(LocalPackage {
+            root,
+            target_entry_points,
+        });
+    }
+    Ok(out)
+}
+
+// ---------------------------------------------------------------------
+// F3/F7/F21: hand-written Rust-aware include/mod scanner
+// ---------------------------------------------------------------------
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum IncludeKind {
+    Str,
+    Bytes,
+    /// `include!` — inlines another Rust source file, so a resolved target
+    /// is itself recursively scanned for further `mod`/include references.
+    Include,
+}
+
+impl IncludeKind {
+    fn macro_name(self) -> &'static str {
+        match self {
+            IncludeKind::Str => "include_str",
+            IncludeKind::Bytes => "include_bytes",
+            IncludeKind::Include => "include",
+        }
+    }
+}
+
+struct ParsedModDecl {
+    name: String,
+    path_override: Option<String>,
+    cfg_gated: bool,
+}
+
+struct ParsedMacroCall {
+    kind: IncludeKind,
+    /// `Some(decoded)` when the argument was a single string literal
+    /// (plain or raw, with escapes decoded); `None` for any other
+    /// expression (const, `concat!`, ...) — F3 requires these be reported
+    /// as inconclusive, never silently treated as present.
+    literal: Option<String>,
+    cfg_gated: bool,
+}
+
+struct ParsedSource {
+    mods: Vec<ParsedModDecl>,
+    macros: Vec<ParsedMacroCall>,
+}
+
+fn is_ident_start(c: char) -> bool {
+    c.is_alphabetic() || c == '_'
+}
+fn is_ident_continue(c: char) -> bool {
+    c.is_alphanumeric() || c == '_'
+}
+
+/// Small hand-written scanner (no parser dependency, per design guardrails):
+/// walks the source once, skipping `//`/`/* */` comments and string/char
+/// literals, and records exactly two things: `mod x;` declarations (with
+/// any immediately-preceding `#[path = "..."]` override and whether an
+/// immediately-preceding `#[cfg(...)]` this scanner can't evaluate gates
+/// the item) and `include_str!`/`include_bytes!`/`include!` invocations
+/// (matched on the exact macro identifier — never `optional_include_str!`
+/// or similar suffix matches — with the same cfg-gating).
+///
+/// cfg-gating heuristic (F8): any `#[cfg(...)]` attribute is treated as
+/// unevaluated (this scanner does not implement cfg evaluation), and gates
+/// every `mod`/include item up to the end of that item — the next `;` or
+/// matching `}` at the same brace depth the attribute was seen at.
+fn scan_source(src: &str) -> ParsedSource {
+    let chars: Vec<char> = src.chars().collect();
+    let n = chars.len();
+    let mut i = 0usize;
+    let mut depth: i32 = 0;
+    let mut pending_cfg: Option<i32> = None;
+    let mut pending_path: Option<(i32, String)> = None;
+    let mut mods = Vec::new();
+    let mut macros = Vec::new();
+
+    while i < n {
+        let c = chars[i];
+
+        if c == '/' && i + 1 < n && chars[i + 1] == '/' {
+            i += 2;
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            i += 2;
+            let mut bd = 1;
+            while i < n && bd > 0 {
+                if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
+                    bd += 1;
+                    i += 2;
+                } else if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
+                    bd -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if let Some((_, end)) = try_parse_string_literal(&chars, i) {
+            i = end;
+            continue;
+        }
+        if c == '\'' {
+            i = skip_char_literal_or_lifetime(&chars, i);
+            continue;
+        }
+        if c == '#' && i + 1 < n && chars[i + 1] == '[' {
+            let (inner, end) = scan_balanced_generic(&chars, i + 1, '[', ']');
+            let trimmed = inner.trim();
+            let is_cfg_attr = trimmed
+                .strip_prefix("cfg")
+                .map(|rest| rest.trim_start().starts_with('('))
+                .unwrap_or(false);
+            if is_cfg_attr {
+                pending_cfg = Some(depth);
+            } else if let Some(rest) = trimmed.strip_prefix("path") {
+                if let Some((_, rhs)) = rest.split_once('=') {
+                    let rhs = rhs.trim();
+                    let rhs_chars: Vec<char> = rhs.chars().collect();
+                    if let Some((val, _)) = try_parse_string_literal(&rhs_chars, 0) {
+                        pending_path = Some((depth, val));
+                    }
+                }
+            }
+            i = end;
+            continue;
+        }
+        if c == '{' {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if c == '}' {
+            depth -= 1;
+            i += 1;
+            if pending_cfg == Some(depth) {
+                pending_cfg = None;
+            }
+            if pending_path.as_ref().map(|(d, _)| *d) == Some(depth) {
+                pending_path = None;
+            }
+            continue;
+        }
+        if c == ';' {
+            if pending_cfg == Some(depth) {
+                pending_cfg = None;
+            }
+            if pending_path.as_ref().map(|(d, _)| *d) == Some(depth) {
+                pending_path = None;
+            }
+            i += 1;
+            continue;
+        }
+        if is_ident_start(c) {
+            let start = i;
+            i += 1;
+            while i < n && is_ident_continue(chars[i]) {
+                i += 1;
+            }
+            let ident: String = chars[start..i].iter().collect();
+            match ident.as_str() {
+                "mod" => {
+                    let mut j = i;
+                    while j < n && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if j < n && is_ident_start(chars[j]) {
+                        let name_start = j;
+                        j += 1;
+                        while j < n && is_ident_continue(chars[j]) {
+                            j += 1;
+                        }
+                        let name: String = chars[name_start..j].iter().collect();
+                        let mut k = j;
+                        while k < n && chars[k].is_whitespace() {
+                            k += 1;
+                        }
+                        if k < n && chars[k] == ';' {
+                            mods.push(ParsedModDecl {
+                                name,
+                                path_override: pending_path.take().map(|(_, p)| p),
+                                cfg_gated: pending_cfg.is_some(),
+                            });
+                            if pending_cfg == Some(depth) {
+                                pending_cfg = None;
+                            }
+                            i = k + 1;
+                            continue;
+                        }
+                        // `mod name { ... }` (inline body) or malformed —
+                        // not a file reference; leave pending_cfg/path
+                        // untouched, they clear at the real item boundary.
+                    }
+                    continue;
+                }
+                "include_str" | "include_bytes" | "include" => {
+                    let kind = match ident.as_str() {
+                        "include_str" => IncludeKind::Str,
+                        "include_bytes" => IncludeKind::Bytes,
+                        _ => IncludeKind::Include,
+                    };
+                    let mut j = i;
+                    while j < n && chars[j].is_whitespace() {
+                        j += 1;
+                    }
+                    if j < n && chars[j] == '!' {
+                        j += 1;
+                        while j < n && chars[j].is_whitespace() {
+                            j += 1;
+                        }
+                        if j < n && (chars[j] == '(' || chars[j] == '[' || chars[j] == '{') {
+                            let open = chars[j];
+                            let close = match open {
+                                '(' => ')',
+                                '[' => ']',
+                                _ => '}',
+                            };
+                            let (arg_text, end) = scan_balanced_generic(&chars, j, open, close);
+                            let trimmed = arg_text.trim();
+                            let arg_chars: Vec<char> = trimmed.chars().collect();
+                            let literal = try_parse_string_literal(&arg_chars, 0)
+                                .filter(|(_, end)| *end == arg_chars.len())
+                                .map(|(val, _)| val);
+                            macros.push(ParsedMacroCall {
+                                kind,
+                                literal,
+                                cfg_gated: pending_cfg.is_some(),
+                            });
+                            i = end;
+                            continue;
+                        }
+                    }
+                    continue;
+                }
+                _ => {}
+            }
+            continue;
+        }
+        i += 1;
+    }
+
+    ParsedSource { mods, macros }
+}
+
+/// Attempts to parse a Rust string literal (plain `"..."` or raw
+/// `r"..."`/`r#"..."#`/...) starting exactly at `pos`. Returns the decoded
+/// value and the index just past the closing delimiter, or `None` if `pos`
+/// is not the start of a string literal.
+fn try_parse_string_literal(chars: &[char], pos: usize) -> Option<(String, usize)> {
+    if pos >= chars.len() {
+        return None;
+    }
+    if chars[pos] == '"' {
+        return parse_plain_string(chars, pos);
+    }
+    if chars[pos] == 'r' {
+        let mut p = pos + 1;
+        let mut hashes = 0usize;
+        while p < chars.len() && chars[p] == '#' {
+            hashes += 1;
+            p += 1;
+        }
+        if p < chars.len() && chars[p] == '"' {
+            return parse_raw_string(chars, hashes, p);
+        }
+    }
+    None
+}
+
+fn parse_plain_string(chars: &[char], pos: usize) -> Option<(String, usize)> {
+    let n = chars.len();
+    let mut i = pos + 1;
+    let mut out = String::new();
+    while i < n {
+        let c = chars[i];
+        if c == '"' {
+            return Some((out, i + 1));
+        }
+        if c == '\\' && i + 1 < n {
+            let esc = chars[i + 1];
+            match esc {
+                'n' => {
+                    out.push('\n');
+                    i += 2;
+                }
+                't' => {
+                    out.push('\t');
+                    i += 2;
+                }
+                'r' => {
+                    out.push('\r');
+                    i += 2;
+                }
+                '\\' => {
+                    out.push('\\');
+                    i += 2;
+                }
+                '"' => {
+                    out.push('"');
+                    i += 2;
+                }
+                '\'' => {
+                    out.push('\'');
+                    i += 2;
+                }
+                '0' => {
+                    out.push('\0');
+                    i += 2;
+                }
+                'x' if i + 3 < n => {
+                    let hex: String = chars[i + 2..i + 4].iter().collect();
+                    match u8::from_str_radix(&hex, 16) {
+                        Ok(v) => {
+                            out.push(v as char);
+                            i += 4;
+                        }
+                        Err(_) => i += 2,
+                    }
+                }
+                'u' if i + 2 < n && chars[i + 2] == '{' => {
+                    let mut j = i + 3;
+                    let mut hex = String::new();
+                    while j < n && chars[j] != '}' {
+                        hex.push(chars[j]);
+                        j += 1;
+                    }
+                    if j < n {
+                        if let Ok(cp) = u32::from_str_radix(&hex, 16) {
+                            if let Some(ch) = char::from_u32(cp) {
+                                out.push(ch);
+                            }
+                        }
+                        i = j + 1;
+                    } else {
+                        i += 2;
+                    }
+                }
+                '\n' => {
+                    // String continuation: the backslash-newline and any
+                    // leading whitespace on the next line are elided.
+                    i += 2;
+                    while i < n && chars[i].is_whitespace() {
+                        i += 1;
+                    }
+                }
+                other => {
+                    out.push(other);
+                    i += 2;
+                }
+            }
+            continue;
+        }
+        out.push(c);
+        i += 1;
+    }
+    None
+}
+
+fn parse_raw_string(chars: &[char], hashes: usize, quote_pos: usize) -> Option<(String, usize)> {
+    let n = chars.len();
+    let mut i = quote_pos + 1;
+    let content_start = i;
+    while i < n {
+        if chars[i] == '"' {
+            let mut ok = true;
+            for h in 0..hashes {
+                if i + 1 + h >= n || chars[i + 1 + h] != '#' {
+                    ok = false;
+                    break;
+                }
+            }
+            if ok {
+                let content: String = chars[content_start..i].iter().collect();
+                return Some((content, i + 1 + hashes));
+            }
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Skips a char literal (`'a'`, `'\n'`, `'\x41'`, `'\u{2764}'`) or, when the
+/// `'` is actually the start of a lifetime (`'a`, no closing quote), just
+/// the tick itself — either way, never mistakes an apostrophe for the start
+/// of a string.
+fn skip_char_literal_or_lifetime(chars: &[char], pos: usize) -> usize {
+    let n = chars.len();
+    if pos + 1 >= n {
+        return pos + 1;
+    }
+    if chars[pos + 1] == '\\' {
+        let mut i = pos + 2;
+        if i < n && chars[i] == 'x' && i + 2 < n {
+            i += 3;
+        } else if i < n && chars[i] == 'u' && i + 1 < n && chars[i + 1] == '{' {
+            i += 2;
+            while i < n && chars[i] != '}' {
+                i += 1;
+            }
+            if i < n {
+                i += 1;
+            }
+        } else if i < n {
+            i += 1;
+        }
+        if i < n && chars[i] == '\'' {
+            return i + 1;
+        }
+        return i;
+    }
+    if pos + 2 < n && chars[pos + 2] == '\'' {
+        return pos + 3;
+    }
+    pos + 1
+}
+
+/// Scans forward from `open_pos` (which must point at `open`) to the
+/// matching `close`, skipping nested strings/comments and matching nested
+/// occurrences of `open`/`close` themselves, and returns the text strictly
+/// between the outer pair plus the index just past `close`. Falls back to
+/// "rest of input" if unterminated (never panics/loops on malformed input).
+fn scan_balanced_generic(
+    chars: &[char],
+    open_pos: usize,
+    open: char,
+    close: char,
+) -> (String, usize) {
+    let n = chars.len();
+    let mut i = open_pos + 1;
+    let content_start = i;
+    let mut depth = 1i32;
+    while i < n {
+        let c = chars[i];
+        if let Some((_, end)) = try_parse_string_literal(chars, i) {
+            i = end;
+            continue;
+        }
+        if c == '/' && i + 1 < n && chars[i + 1] == '/' {
+            while i < n && chars[i] != '\n' {
+                i += 1;
+            }
+            continue;
+        }
+        if c == '/' && i + 1 < n && chars[i + 1] == '*' {
+            i += 2;
+            let mut bd = 1;
+            while i < n && bd > 0 {
+                if chars[i] == '/' && i + 1 < n && chars[i + 1] == '*' {
+                    bd += 1;
+                    i += 2;
+                } else if chars[i] == '*' && i + 1 < n && chars[i + 1] == '/' {
+                    bd -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            continue;
+        }
+        if c == open {
+            depth += 1;
+            i += 1;
+            continue;
+        }
+        if c == close {
+            depth -= 1;
+            if depth == 0 {
+                let content: String = chars[content_start..i].iter().collect();
+                return (content, i + 1);
+            }
+            i += 1;
+            continue;
+        }
+        i += 1;
+    }
+    let content: String = chars[content_start..n].iter().collect();
+    (content, n)
+}
+
+// ---------------------------------------------------------------------
+// F4/F10: containment + readability validation
+// ---------------------------------------------------------------------
+
+/// Validates an include target for repository-containment (F4/F10):
+/// rejects absolute-path arguments outright, canonicalizes against the
+/// checkout root and rejects anything that resolves outside it (an
+/// escaping relative path OR a symlink whose target escapes), requires a
+/// readable regular file, and — for `include_str!` specifically — requires
+/// valid UTF-8. Returns the canonicalized target on success (used by
+/// `include!` to recurse into it as further Rust source).
+fn validate_include_target(
+    referencing_file: &Path,
+    literal: &str,
+    checkout_root: &Path,
+    kind: IncludeKind,
+) -> Result<PathBuf, String> {
+    if Path::new(literal).is_absolute() {
+        return Err("absolute path; not something git tracks".to_string());
+    }
+    let candidate = referencing_file
+        .parent()
+        .unwrap_or(referencing_file)
+        .join(literal);
+    let canonical_root = std::fs::canonicalize(checkout_root)
+        .map_err(|e| format!("failed to canonicalize checkout root: {e}"))?;
+    let canonical_target = std::fs::canonicalize(&candidate)
+        .map_err(|_| "not tracked by git (missing from a fresh checkout)".to_string())?;
+    if !canonical_target.starts_with(&canonical_root) {
+        return Err("resolves outside the checkout root (escaping path or symlink)".to_string());
+    }
+    let meta = std::fs::metadata(&canonical_target)
+        .map_err(|e| format!("could not stat resolved target: {e}"))?;
+    if !meta.is_file() {
+        return Err("resolves to a directory, not a readable regular file".to_string());
+    }
+    if kind == IncludeKind::Str {
+        let bytes = std::fs::read(&canonical_target)
+            .map_err(|e| format!("could not read resolved target: {e}"))?;
+        if std::str::from_utf8(&bytes).is_err() {
+            return Err("is not valid UTF-8, required by include_str!".to_string());
+        }
+    }
+    Ok(canonical_target)
+}
+
+/// The module-resolution base directory `mod x;` (without `#[path]`)
+/// resolves against: the same directory for a crate root (a target entry
+/// point) or an explicit `mod.rs`, otherwise a subdirectory named after the
+/// current file's own stem — the standard (non-`#[path]`) Rust 2018+ rule.
+fn module_dir_for(path: &Path, is_root: bool) -> PathBuf {
+    let parent = path.parent().unwrap_or_else(|| Path::new("."));
+    let is_mod_rs = path.file_name().and_then(|n| n.to_str()) == Some("mod.rs");
+    if is_root || is_mod_rs {
+        parent.to_path_buf()
+    } else {
+        let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+        parent.join(stem)
+    }
+}
+
+// ---------------------------------------------------------------------
+// F5/F9: symlink-safe, error-propagating traversal
+// ---------------------------------------------------------------------
+
+/// Accumulates scan results across every local package. `errors` (F9) are
+/// checked first by the caller and always force a non-PASS result; `missing`
+/// (F2/F4/F5-adjacent) are real FAILs; `inconclusive` (F3/F8) downgrade an
+/// otherwise-clean scan to WARN instead of a false PASS.
+struct ScanState {
+    worktree_path: PathBuf,
+    checked: usize,
+    missing: Vec<String>,
+    inconclusive: Vec<String>,
+    errors: Vec<String>,
+    visited: HashSet<PathBuf>,
+}
+
+impl ScanState {
+    fn new(worktree_path: PathBuf) -> Self {
+        Self {
+            worktree_path,
+            checked: 0,
+            missing: Vec::new(),
+            inconclusive: Vec::new(),
+            errors: Vec::new(),
+            visited: HashSet::new(),
+        }
+    }
+
+    fn rel(&self, path: &Path) -> String {
+        display_rel(path, &self.worktree_path)
+    }
+
+    /// Symlink-aware recursive directory walk (F5): a directory ENTRY that
+    /// is itself a symlink is never recursed into (this alone prevents the
+    /// `src/a -> .`, `src/b -> .` cycle — there is nothing left to
+    /// re-enter), and every `read_dir`/entry/`file_type` error is recorded
+    /// with its path rather than silently skipped (F9).
+    fn scan_dir(&mut self, dir: &Path) {
+        let entries = match std::fs::read_dir(dir) {
+            Ok(e) => e,
+            Err(e) => {
+                self.errors.push(format!("{}: {e}", self.rel(dir)));
+                return;
+            }
+        };
+        for entry in entries {
+            let entry = match entry {
+                Ok(e) => e,
+                Err(e) => {
+                    self.errors.push(format!("{}: {e}", self.rel(dir)));
+                    continue;
+                }
+            };
+            let path = entry.path();
+            let file_type = match entry.file_type() {
+                Ok(ft) => ft,
+                Err(e) => {
+                    self.errors.push(format!("{}: {e}", self.rel(&path)));
+                    continue;
+                }
+            };
+            if file_type.is_symlink() {
+                continue;
+            }
+            if file_type.is_dir() {
+                self.scan_dir(&path);
+            } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
+                self.scan_file_and_follow(&path, false);
+            }
+        }
+    }
+
+    /// Scans one Rust source file for `mod`/include references and follows
+    /// them (F2/F6). `is_root` marks a metadata target entry point (or
+    /// `build.rs`) — the module-resolution basis for any bare `mod x;` it
+    /// declares. Dedupes on canonicalized path, which also makes this safe
+    /// against `include!`/`mod` cycles.
+    fn scan_file_and_follow(&mut self, path: &Path, is_root: bool) {
+        let canonical = match std::fs::canonicalize(path) {
+            Ok(p) => p,
+            Err(e) => {
+                self.errors.push(format!("{}: {e}", self.rel(path)));
+                return;
+            }
+        };
+        if !self.visited.insert(canonical) {
+            return;
+        }
+        let content = match std::fs::read_to_string(path) {
+            Ok(c) => c,
+            Err(e) => {
+                self.errors.push(format!("{}: {e}", self.rel(path)));
+                return;
+            }
+        };
+        let parsed = scan_source(&content);
+        let dir_for_submodules = module_dir_for(path, is_root);
+
+        for m in parsed.mods {
+            // F8: a `mod` this scanner cannot evaluate the cfg-gate for is
+            // skipped entirely rather than validated — Rust never expands
+            // an inactive module, so an absent target there must never FAIL.
+            if m.cfg_gated {
+                continue;
+            }
+            let resolved = match &m.path_override {
+                Some(p) => path.parent().unwrap_or(path).join(p),
+                None => {
+                    let same_name = dir_for_submodules.join(format!("{}.rs", m.name));
+                    if same_name.is_file() {
+                        same_name
+                    } else {
+                        dir_for_submodules.join(&m.name).join("mod.rs")
+                    }
+                }
+            };
+            if resolved.is_file() {
+                self.scan_file_and_follow(&resolved, false);
+            } else {
+                self.missing.push(format!(
+                    "{} -> {} (mod `{}` not tracked by git)",
+                    self.rel(path),
+                    self.rel(&resolved),
+                    m.name,
+                ));
+            }
+        }
+
+        for mc in parsed.macros {
+            if mc.cfg_gated {
+                self.inconclusive.push(format!(
+                    "{} -> {}!(...) is gated by an #[cfg(...)] this check cannot \
+                     evaluate — treated as inconclusive",
+                    self.rel(path),
+                    mc.kind.macro_name(),
+                ));
+                continue;
+            }
+            let literal = match &mc.literal {
+                Some(l) => l,
+                None => {
+                    self.inconclusive.push(format!(
+                        "{} -> {}!(...) argument is not a string literal — \
+                         treated as inconclusive",
+                        self.rel(path),
+                        mc.kind.macro_name(),
+                    ));
+                    continue;
+                }
+            };
+            match validate_include_target(path, literal, &self.worktree_path, mc.kind) {
+                Ok(resolved) => {
+                    self.checked += 1;
+                    if mc.kind == IncludeKind::Include {
+                        self.scan_file_and_follow(&resolved, false);
+                    }
+                }
+                Err(reason) => {
+                    self.missing
+                        .push(format!("{} -> {literal} ({reason})", self.rel(path),));
+                }
+            }
+        }
     }
 }
