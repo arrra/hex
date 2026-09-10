@@ -1260,6 +1260,23 @@ class TestStashExemptionEffectiveCheckout(RouterTestCase):
             )
             self.assertEqual(read_ledger(ledger_dir), [])
 
+    def test_relative_cd_within_worktree_cwd_still_abstains(self):
+        """F4 (review round 1 redo): a relative `cd sub` from a /worktrees/
+        payload cwd is resolvable against that cwd (not uncertain) and stays
+        inside the same worktree checkout, so it must abstain -- the prior
+        fix over-denied this by treating the unresolved relative literal as
+        a non-worktree target."""
+        cmd = "cd sub && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"relative cd within a worktree checkout must abstain (F4): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
 
 class TestForceRefspecAsksFirst(RouterTestCase):
     """F5: a leading `+` on any push refspec forces the update, the same as

@@ -241,6 +241,18 @@ EXTRA_FIXTURES = [
         near_miss={"command": f"cd /worktrees/x; cd {WORKTREE_CWD} && git stash"},
         near_miss_cwd=DEFAULT_CWD,
     ),
+    # F4 (review round 1 redo): a relative `cd sub` from a /worktrees/
+    # payload cwd is resolvable against that cwd (not "uncertain") and
+    # stays inside the same worktree checkout -- must abstain.
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": "git -C /other/shared stash"},
+        cwd=WORKTREE_CWD,
+        near_miss={"command": "cd sub && git stash"},
+        near_miss_cwd=WORKTREE_CWD,
+    ),
     # F5: a leading `+` on a push refspec forces the update, same as
     # --force/-f, but neither original rule alternative matched it.
     dict(

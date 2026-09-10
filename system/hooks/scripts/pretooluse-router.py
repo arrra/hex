@@ -495,17 +495,27 @@ def _looks_like_resolvable_path(token):
     return not any(c in token for c in ("$", "`", "*", "~"))
 
 
+def _resolve_against_cwd(path, payload_cwd):
+    """A relative literal path (no leading `/`) is resolvable against the
+    hook payload's own cwd -- it isn't "uncertain", it just needs joining
+    (F4: a bare `cd sub` from a /worktrees/ cwd stays inside that same
+    worktree checkout and must not be treated as an unresolvable target)."""
+    if path.startswith("/") or not payload_cwd:
+        return path
+    return os.path.normpath(os.path.join(payload_cwd, path))
+
+
 def _effective_checkout(scan_text, match_start, matched_text, payload_cwd):
     if _GIT_DIR_RE.search(matched_text):
         return None
     c_matches = list(_DASH_C_RE.finditer(matched_text))
     if c_matches:
         path = c_matches[-1].group(1)
-        return path if _looks_like_resolvable_path(path) else None
+        return _resolve_against_cwd(path, payload_cwd) if _looks_like_resolvable_path(path) else None
     cd_matches = list(_CD_RE.finditer(scan_text[:match_start]))
     if cd_matches:
         path = cd_matches[-1].group(1)
-        return path if _looks_like_resolvable_path(path) else None
+        return _resolve_against_cwd(path, payload_cwd) if _looks_like_resolvable_path(path) else None
     return payload_cwd
 
 
