@@ -253,11 +253,42 @@ def infer_project(rec: dict, project_map: list[tuple[str, str]]) -> str | None:
     return None
 
 
-def redact(text: str, warnings: list[str], run_id: str) -> str:
+def redact(text: str, warnings: list[str] | None = None, label: str = "record") -> str:
+    """Strip credential-shaped substrings from `text` (F1).
+
+    `label` is used only to annotate a diagnostic in `warnings` — it must
+    itself be safe to print (e.g. a file path), never the raw text being
+    redacted, or the "what got redacted" note would leak the secret it is
+    reporting on (F2).
+    """
+    if not text:
+        return text
     out, n = SECRET_RE.subn("[REDACTED]", text)
-    if n:
-        warnings.append(f"{run_id}: redacted {n} credential-shaped string(s)")
+    if n and warnings is not None:
+        warnings.append(f"{label}: redacted {n} credential-shaped string(s)")
     return out
+
+
+def unsafe_component_reason(s: str | None) -> str | None:
+    """F4 — why `s` is unsafe as a single path component, or None if safe
+    (non-empty, no separators, not "." / "..", not absolute)."""
+    if not s:
+        return "empty"
+    if os.path.isabs(s):
+        return "absolute path"
+    if s in (".", ".."):
+        return "path traversal"
+    if "/" in s or (os.sep != "/" and os.sep in s) or (os.altsep and os.altsep in s):
+        return "path separator"
+    return None
+
+
+def _is_contained(child_dir: str, parent_dir: str) -> bool:
+    """F4 — True if the resolved (symlink-following) `child_dir` is
+    `parent_dir` itself or lives under it."""
+    child = os.path.realpath(child_dir)
+    parent = os.path.realpath(parent_dir)
+    return child == parent or child.startswith(parent + os.sep)
 
 
 def render_result(result) -> str:
@@ -281,6 +312,10 @@ def render_result(result) -> str:
 
 
 def build_report(rec: dict, path: str, warnings: list[str]) -> str:
+    # F2 — the on-disk record path can itself embed a credential-shaped
+    # runId (the harness names wf_*.json after it), so it is not safe to use
+    # as a diagnostic label as-is; sanitize once and label with that.
+    path_label = redact(path)
     run_id = rec.get("runId") or os.path.basename(path).removesuffix(".json")
     name = rec.get("workflowName") or "workflow"
     ts = rec.get("timestamp") or ""
@@ -289,6 +324,7 @@ def build_report(rec: dict, path: str, warnings: list[str]) -> str:
     session = os.path.basename(os.path.dirname(os.path.dirname(path)))
 
     body = render_result(rec.get("result"))
+    body = redact(body, warnings, path_label)  # F3 — redact before truncating, not after
     if len(body) > RESULT_CAP:
         cut = len(body) - RESULT_CAP
         body = body[:RESULT_CAP] + f"\n\n**[truncated {cut} chars — full record at {path}]**"
@@ -326,7 +362,8 @@ def build_report(rec: dict, path: str, warnings: list[str]) -> str:
         "\n".join(log_lines) or "_(none)_",
         "",
     ]
-    return redact("\n".join(md), warnings, run_id)
+    # F2 — label with the sanitized path, never the raw run_id/path.
+    return redact("\n".join(md), warnings, path_label)
 
 
 def main() -> int:
@@ -347,34 +384,90 @@ def main() -> int:
 
     # <claude-projects>/<project-key>/<session-id>/workflows/wf_<id>.json
     records = sorted(glob.glob(os.path.join(a.claude_projects, "*", "*", "workflows", "wf_*.json")))
+    projects_root = os.path.join(a.hex_dir, "projects")
     wrote = skipped = unmapped = nonterminal = unreadable = 0
     warnings: list[str] = []
 
     for path in records:
+        # F2 — the on-disk record path can itself embed a credential-shaped
+        # runId (the harness names wf_*.json after it), so it is not safe to
+        # use as a diagnostic label as-is; sanitize once and label with that.
+        path_label = redact(path)
         try:
-            rec = json.load(open(path))
+            with open(path) as fh:
+                rec = json.load(fh)
         except Exception as e:  # loud: counted below and fails the run, but keep scanning the rest
             unreadable += 1
-            warnings.append(f"{path}: unreadable ({e})")
+            warnings.append(f"{path_label}: unreadable ({redact(str(e))})")
             continue
         status = rec.get("status")
         if status not in TERMINAL:
             nonterminal += 1
             continue
-        run_id = rec.get("runId") or os.path.basename(path).removesuffix(".json")
+
+        # F2 — redact credential-shaped identifiers before they ever become
+        # part of a path or a diagnostic message.
+        run_id_raw = rec.get("runId") or os.path.basename(path).removesuffix(".json")
+        run_id = redact(run_id_raw, warnings, path_label)
+        workflow_name = redact(rec.get("workflowName") or "workflow", warnings, path_label)
+
         ts = rec.get("timestamp")
         try:
             date = datetime.fromisoformat(ts.replace("Z", "+00:00")).astimezone(timezone.utc).date().isoformat()
         except Exception:
             date = "undated"
             warnings.append(f"{run_id}: no usable timestamp")
+
         project = infer_project(rec, project_map)
+        if project is not None:
+            project = redact(project, warnings, path_label)
+
+        # F4 — project and runId must each be safe single path components;
+        # anything else routes to _unmapped with a WARN naming the reason.
+        routed_unmapped = False
         if project is None:
+            warnings.append(f"{run_id} ({workflow_name}): project not inferable -> projects/_unmapped/")
             project = "_unmapped"
+            routed_unmapped = True
+        else:
+            reason = unsafe_component_reason(project)
+            if reason:
+                warnings.append(
+                    f"{run_id} ({workflow_name}): project {project!r} rejected ({reason}) -> projects/_unmapped/"
+                )
+                project = "_unmapped"
+                routed_unmapped = True
+
+        run_id_component = run_id
+        rid_reason = unsafe_component_reason(run_id)
+        if rid_reason:
+            warnings.append(f"{run_id!r}: runId rejected ({rid_reason}) -> using a sanitized id")
+            run_id_component = slug(run_id) or "run"
+            if not routed_unmapped:
+                project = "_unmapped"
+                routed_unmapped = True
+
+        if routed_unmapped:
             unmapped += 1
-            warnings.append(f"{run_id} ({rec.get('workflowName')}): project not inferable -> projects/_unmapped/")
-        out_dir = os.path.join(a.hex_dir, "projects", project, "workflow-reports")
-        out = os.path.join(out_dir, f"{date}-{slug(rec.get('workflowName'))}-{run_id}.md")
+
+        out_dir = os.path.join(projects_root, project, "workflow-reports")
+        out = os.path.join(out_dir, f"{date}-{slug(workflow_name)}-{run_id_component}.md")
+
+        # F4 — belt-and-braces: the resolved destination (following symlinks)
+        # must stay under $HEX_DIR/projects/, even when project/runId passed
+        # the string-level checks above but a symlink on disk escapes.
+        if not _is_contained(out_dir, projects_root):
+            warnings.append(f"{run_id}: destination for project {project!r} escapes {projects_root} -> _unmapped")
+            if not routed_unmapped:
+                unmapped += 1
+                routed_unmapped = True
+            project = "_unmapped"
+            out_dir = os.path.join(projects_root, project, "workflow-reports")
+            out = os.path.join(out_dir, f"{date}-{slug(workflow_name)}-{run_id_component}.md")
+            if not _is_contained(out_dir, projects_root):
+                warnings.append(f"{run_id}: refusing to write outside {projects_root}")
+                continue
+
         if os.path.exists(out):
             skipped += 1
             continue
@@ -382,12 +475,26 @@ def main() -> int:
             print(f"would write {out}")
             wrote += 1
             continue
+
         os.makedirs(out_dir, exist_ok=True)
-        tmp = out + ".tmp"
-        with open(tmp, "w") as fh:
-            fh.write(build_report(rec, path, warnings))
-        os.replace(tmp, out)
-        wrote += 1
+        # F5 — a unique temp file per process, published with an atomic
+        # no-clobber link+unlink so two overlapping exporters can never
+        # truncate each other's in-progress write.
+        fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(out)}.", suffix=".tmp", dir=out_dir)
+        try:
+            with os.fdopen(fd, "w") as fh:
+                fh.write(build_report(rec, path, warnings))
+            try:
+                os.link(tmp, out)
+            except FileExistsError:
+                skipped += 1
+            else:
+                wrote += 1
+        finally:
+            try:
+                os.unlink(tmp)
+            except OSError:
+                pass
 
     for w in warnings:
         print(f"workflow-report-export: WARN {w}", file=sys.stderr)
@@ -409,5 +516,5 @@ if __name__ == "__main__":
     try:
         sys.exit(main())
     except Exception as e:
-        print(f"workflow-report-export: FATAL {type(e).__name__}: {e}", file=sys.stderr)
+        print(f"workflow-report-export: FATAL {type(e).__name__}: {redact(str(e))}", file=sys.stderr)
         sys.exit(1)
