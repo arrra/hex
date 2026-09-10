@@ -67,3 +67,7 @@ When migrating a live refresh job (Slack bot token, X OAuth2) into a bundle:
 - Harness: `system/scripts/hex-integration-check.sh` — single-probe runner with atomic state + locks + transition events.
 - Template: `templates/integrations/_template/` — copy for every new integration.
 - Reference instance: the hex instance that develops the foundation. If you maintain a private hex instance alongside this foundation repo, its `projects/integrations/modular-integration-architecture.md` contains the design doc that led to this version.
+
+## Other system/scripts utilities
+
+Not every script under `system/scripts/` is an integration bundle tool. `system/scripts/workflow-report-export.py` exports finished Claude Code Workflow run records into `$HEX_DIR/projects/<project>/workflow-reports/` so `hex memory index` can pick them up; it ships with no hardcoded project names and reads an optional `$HEX_DIR/.hex/config/workflow-projects.toml` mapping file (falling back to a guessed repo basename, then `_unmapped`). Run it with `--help` for the mapping-file format.
