@@ -506,16 +506,30 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             "ALTER TABLE chunk_meta ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
             [],
         )?;
-        conn.execute(
-            "UPDATE chunk_meta SET file_id = COALESCE(
-                (SELECT CAST(c.file_id AS INTEGER) FROM chunks c WHERE c.rowid = chunk_meta.chunk_rowid),
-                0
-            )",
-            [],
-        )?;
     }
     conn.execute(
         "CREATE INDEX IF NOT EXISTS idx_chunk_meta_file_id ON chunk_meta(file_id)",
+        [],
+    )?;
+    // F9 (minor, arrra/hex PR #8 round 2): previously the backfill UPDATE
+    // ran only inside the `if !chunk_meta_has_file_id` branch above, as a
+    // separate statement after the ALTER — an interruption between the two
+    // (or a failed UPDATE) left the column present with every row stuck at
+    // the default 0, and the next run's `chunk_meta_has_file_id` check saw
+    // the column already exists and skipped the backfill forever. The reuse
+    // lookup (`WHERE cm.file_id = ?`) then never matches those rows again,
+    // so the file is fully re-embedded on every run instead of reusing
+    // vectors. Run the backfill unconditionally instead — idempotent (it
+    // only ever touches rows still at the default 0) and cheap on repeat
+    // runs thanks to idx_chunk_meta_file_id just above — so a DB left in
+    // that interrupted state self-heals on the next init_db instead of
+    // staying broken until manually rebuilt.
+    conn.execute(
+        "UPDATE chunk_meta SET file_id = (
+            SELECT CAST(c.file_id AS INTEGER) FROM chunks c WHERE c.rowid = chunk_meta.chunk_rowid
+         )
+         WHERE file_id = 0
+           AND EXISTS (SELECT 1 FROM chunks c WHERE c.rowid = chunk_meta.chunk_rowid)",
         [],
     )?;
 
