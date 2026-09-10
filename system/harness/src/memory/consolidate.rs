@@ -5,6 +5,10 @@ use std::path::Path;
 pub struct ConsolidateReport {
     pub ok: Vec<String>,
     pub failed: Vec<(String, String)>,
+    /// Ops that are registered but not yet implemented. Reported once on
+    /// stdout by the orchestrator — NOT on stderr per op, where they read as
+    /// errors and led every failure digest for months (2026-06 → 2026-09).
+    pub skipped: Vec<String>,
 }
 
 pub fn run(conn: &mut Connection) -> anyhow::Result<ConsolidateReport> {
@@ -25,8 +29,12 @@ pub fn run(conn: &mut Connection) -> anyhow::Result<ConsolidateReport> {
     iso!("orientation-snapshot", op_orientation_snapshot(conn));
     iso!("catchup-distill", op_catchup_distill(conn));
     iso!("fact-canonicalize", op_fact_canonicalize(conn));
-    iso!("dedup", op_dedup(conn));
-    iso!("contradiction-sweep", op_contradiction_sweep(conn));
+    // Not yet implemented (stubs kept out of the op loop so they do not read as
+    // per-op errors on stderr; reported once as `skipped` by the orchestrator):
+    //   dedup               — vector-cluster near-duplicate facts, LLM-judge merge
+    //   contradiction-sweep — resolve fact_history.op='FLAG' rows via LLM judge
+    r.skipped.push("dedup".to_string());
+    r.skipped.push("contradiction-sweep".to_string());
     // PAUSED (Mike, 2026-06-11 — me/decisions/fact-prune-paused-until-access-counter):
     // prune tombstones on access_count=0 + age>60d, but NOTHING increments
     // access_count yet, so expiry was effectively universal for non-exempt
@@ -34,7 +42,8 @@ pub fn run(conn: &mut Connection) -> anyhow::Result<ConsolidateReport> {
     // recall/search bump access_count/last_accessed on facts they serve
     // (FIX-013 follow-up). Deliberately not deleted: the re-enable is one line.
     // iso!("prune",             op_prune(conn));
-    iso!("topic-rollup", op_topic_rollup(conn));
+    //   topic-rollup        — maintain topics/fact_topics rollup
+    r.skipped.push("topic-rollup".to_string());
 
     // Record when consolidation last ran so `hex memory stats` can report it.
     // This is advisory bookkeeping: log loudly on failure (Rule S6) but do NOT
@@ -82,11 +91,6 @@ fn op_catchup_distill(conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn op_dedup(_conn: &mut Connection) -> anyhow::Result<()> {
-    // Not yet implemented: vector-cluster near-duplicate facts, feed to LLM judge for merge.
-    eprintln!("consolidate op 'dedup': not yet implemented");
-    Ok(())
-}
 
 // ---------------------------------------------------------------------------
 // Conservative fact canonicalization (recall-fix task Tsfwg7d2v; diagnosis root
@@ -398,11 +402,6 @@ fn tombstone_duplicate_fact(
     Ok(())
 }
 
-fn op_contradiction_sweep(_conn: &mut Connection) -> anyhow::Result<()> {
-    // Not yet implemented: resolve fact_history.op='FLAG' rows via LLM judge.
-    eprintln!("consolidate op 'contradiction-sweep': not yet implemented");
-    Ok(())
-}
 
 // PAUSED — see the op registration above. Kept compiled (not deleted) so the
 // re-enable diff is one line once the access counter ships.
@@ -419,10 +418,6 @@ fn op_prune(conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-fn op_topic_rollup(_conn: &mut Connection) -> anyhow::Result<()> {
-    // Not yet implemented: maintain topics/fact_topics rollup.
-    Ok(())
-}
 
 /// One quick tick may not hold the consolidate lock indefinitely — the
 /// nightly full run needs it (lock_wait_budget = 45m). 10 minutes processes
