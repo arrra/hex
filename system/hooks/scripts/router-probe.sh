@@ -236,6 +236,29 @@ EXTRA_FIXTURES = [
         positive={"command": "git push origin +HEAD:main"},
         near_miss={"command": "git push origin HEAD:main"},
     ),
+    # F6: destructive git arguments in equivalent spellings/positions must
+    # still ask (long options, reordered options, checkout-with-tree).
+    dict(
+        id="git-destructive-ask",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git clean --force -d"},
+        near_miss={"command": "git clean -n"},
+    ),
+    dict(
+        id="git-destructive-ask",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git reset HEAD~1 --hard"},
+        near_miss={"command": "git reset --soft HEAD~1"},
+    ),
+    dict(
+        id="git-destructive-ask",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git checkout HEAD -- tracked-file"},
+        near_miss={"command": "git checkout -b newbranch"},
+    ),
 ]
 
 

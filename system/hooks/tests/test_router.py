@@ -1256,5 +1256,37 @@ class TestForceRefspecAsksFirst(RouterTestCase):
                 self.assertEqual(read_ledger(ledger_dir), [])
 
 
+class TestDestructiveArgumentFormsAskFirst(RouterTestCase):
+    """F6: the destructive-git rule only recognized specific argument
+    spellings/positions. Equivalent forms with long options, reordered
+    options, or checkout-with-tree must ask just the same; non-destructive
+    near misses must keep abstaining."""
+
+    def test_equivalent_destructive_forms_ask(self):
+        cases = (
+            "git clean --force -d",
+            "git reset HEAD~1 --hard",
+            "git checkout HEAD -- tracked-file",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F6)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_non_destructive_near_misses_abstain(self):
+        cases = (
+            "git clean -n",
+            "git reset --soft",
+            "git checkout -b newbranch",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F6 near miss)")
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+
 if __name__ == "__main__":
     unittest.main()
