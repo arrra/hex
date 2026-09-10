@@ -51,6 +51,7 @@ import json
 import os
 import re
 import sys
+import tempfile
 import tomllib
 from datetime import datetime, timezone
 
@@ -58,9 +59,20 @@ TERMINAL = {"completed", "failed", "killed"}
 RESULT_CAP = 60_000  # chars of rendered result before an explicit truncation marker
 LOG_CAP = 150
 
+# F1 — current credential shapes: sk-* (with or without a provider infix, over
+# a mixed alphabet), github_pat_*, the gh[pousr]_ classic token family,
+# xox[abps]- Slack tokens, AKIA AWS keys, Bearer headers, pit- tokens,
+# key=/token=/password=/secret= value pairs, and PEM private-key blocks.
 SECRET_RE = re.compile(
-    r"(sk-[A-Za-z0-9]{20,}|ghp_[A-Za-z0-9]{20,}|AKIA[A-Z0-9]{12,}|xox[bp]-[A-Za-z0-9-]{10,}"
-    r"|Bearer [A-Za-z0-9._-]{20,}|pit-[a-f0-9-]{20,})"
+    r"sk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}"
+    r"|github_pat_[A-Za-z0-9_]{20,}"
+    r"|gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|xox[abps]-[A-Za-z0-9-]{10,}"
+    r"|AKIA[A-Z0-9]{12,}"
+    r"|Bearer [A-Za-z0-9._-]{20,}"
+    r"|pit-[a-f0-9-]{20,}"
+    r"|(?:key|token|password|secret)=\S+"
+    r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
 )
 
 # Absolute paths with at least two segments, e.g. /home/x/repo or /home/x/proj/src.
@@ -68,6 +80,11 @@ ABS_PATH_RE = re.compile(r"/[\w][\w.\-]*(?:/[\w][\w.\-]*)+")
 
 # A short alnum extension at the end of a path segment, e.g. "main.py", "data.json".
 FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
+
+# F7/F16 — a URL's "//host/path" shape reads as a plausible absolute path;
+# skip anything under a scheme so a URL never gets mistaken for a filesystem
+# path (e.g. "https://example.com/api/v1" must not become project "v1").
+URL_RE = re.compile(r"[A-Za-z][A-Za-z0-9+.\-]*://\S*")
 
 
 # Directories that are never a repository root themselves — stripped from the
@@ -103,13 +120,28 @@ def repo_root_of(path: str) -> str | None:
     for i, seg in enumerate(parts):
         if seg in CLONE_HOSTS and len(parts) > i + 2:
             return "/".join(parts[: i + 3])
-    while len(parts) > 2 and FILE_EXT_RE.search(parts[-1]):
-        parts.pop()
-    while len(parts) > 2 and parts[-1] in NON_REPO_DIRS:
-        parts.pop()
-    if len(parts) < 2:
+
+    work = list(parts)
+    # F8 — only trust a trailing segment as a stray file (and strip it) when
+    # there is enough structure left afterward that the remainder isn't just
+    # a generic top-level directory. Without this, a dotted directory like
+    # "service.api" sitting right under "/tmp" gets mistaken for a filename
+    # and stripped down to "tmp".
+    if len(work) > 3 and FILE_EXT_RE.search(work[-1]):
+        work.pop()
+
+    # F15 — truncate at the shallowest recognized non-repo/source-directory
+    # boundary, if any. This also absorbs unrecognized nested directories
+    # below it: ".../acme-repo/src/auth/main.py" must resolve via the "src"
+    # boundary to "acme-repo", never stop early at "auth".
+    for i, seg in enumerate(work):
+        if seg in NON_REPO_DIRS:
+            work = work[:i]
+            break
+
+    if len(work) < 2:
         return None
-    return "/".join(parts)
+    return "/".join(work)
 
 
 def repo_dir_basename(path: str) -> str | None:
@@ -169,11 +201,41 @@ def load_project_map(hex_dir: str) -> list[tuple[str, str]]:
     return out
 
 
+def _looks_truncated_by_space(text: str, end: int) -> bool:
+    """True if a path match ends right at a space that is followed by more
+    path-like text — a strong signal the real path continued past the space
+    and the match is only a truncated prefix (e.g. ".../Jane Doe/repo/...":
+    the match stops at "Jane" but "Doe/..." keeps going)."""
+    if end >= len(text) or text[end] != " ":
+        return False
+    return bool(re.match(r"[\w.\-]+/", text[end + 1 :]))
+
+
+def _extract_repo_path(text: str) -> str | None:
+    """First complete absolute filesystem path in free text (F7/F16): skip
+    anything inside a URL, and reject a match that is really just the
+    truncated prefix of a space-broken path rather than accepting it as-is."""
+    pos = 0
+    while pos < len(text):
+        um = URL_RE.search(text, pos)
+        pm = ABS_PATH_RE.search(text, pos)
+        if pm and (not um or pm.start() < um.start()):
+            if _looks_truncated_by_space(text, pm.end()):
+                pos = pm.end() + 1
+                continue
+            return pm.group(0)
+        if um:
+            pos = um.end()
+            continue
+        break
+    return None
+
+
 def infer_project(rec: dict, project_map: list[tuple[str, str]]) -> str | None:
     blob = " ".join(
         [
             json.dumps(rec.get("result"), ensure_ascii=False),
-            (rec.get("script") or "")[:8000],
+            rec.get("script") or "",  # F17 — search the full script, no cutoff
             rec.get("workflowName") or "",
             rec.get("scriptPath") or "",
         ]
@@ -185,9 +247,9 @@ def infer_project(rec: dict, project_map: list[tuple[str, str]]) -> str | None:
             counts.sort(key=lambda c: (-c[0], c[1]))
             return counts[0][2]
     result_blob = json.dumps(rec.get("result"), ensure_ascii=False)
-    m = ABS_PATH_RE.search(result_blob)
-    if m:
-        return repo_dir_basename(m.group(0))
+    found = _extract_repo_path(result_blob)
+    if found:
+        return repo_dir_basename(found)
     return None
 
 
