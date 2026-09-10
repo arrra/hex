@@ -166,18 +166,30 @@ pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<O
     // collapsing to a zero-length window when the main loop above already
     // consumed the whole `timeout` (e.g. the child itself was killed for
     // running over).
-    let drain_budget = timeout
-        .saturating_sub(start.elapsed())
-        .max(Duration::from_millis(200));
-    let stdout = stdout_rx.recv_timeout(drain_budget).map_err(|_| {
+    //
+    // G2 (follow-up): a single `drain_budget` value handed unchanged to
+    // BOTH `recv_timeout` calls let a pipe that closes quickly "refund"
+    // nothing to the other — stdout succeeding after using most of the
+    // budget still let stderr wait for a second FULL budget on top, so a
+    // staggered stdout/stderr closure could push total drain time to
+    // roughly double the intended bound. Use one absolute deadline for the
+    // whole drain phase instead, and recompute the remaining time before
+    // each call so the two receives share a single window.
+    let drain_deadline = Instant::now()
+        + timeout
+            .saturating_sub(start.elapsed())
+            .max(Duration::from_millis(200));
+    let stdout_budget = drain_deadline.saturating_duration_since(Instant::now());
+    let stdout = stdout_rx.recv_timeout(stdout_budget).map_err(|_| {
         format!(
-            "command exited but its stdout was not closed within {drain_budget:?} \
+            "command exited but its stdout was not closed within {stdout_budget:?} \
              (a descendant process may still be holding the pipe open)"
         )
     })?;
-    let stderr = stderr_rx.recv_timeout(drain_budget).map_err(|_| {
+    let stderr_budget = drain_deadline.saturating_duration_since(Instant::now());
+    let stderr = stderr_rx.recv_timeout(stderr_budget).map_err(|_| {
         format!(
-            "command exited but its stderr was not closed within {drain_budget:?} \
+            "command exited but its stderr was not closed within {stderr_budget:?} \
              (a descendant process may still be holding the pipe open)"
         )
     })?;

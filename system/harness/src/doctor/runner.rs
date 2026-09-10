@@ -966,12 +966,24 @@ mod tests {
         let _ = std::fs::remove_dir_all(path);
     }
 
-    /// Sweeps the OS temp dir for any `hex-doctor-harness-buildable-*`
-    /// prefixed directory (the check's own `tempfile::Builder` prefix) and
-    /// force-removes it. Used before/after the G1 fault-injection tests
-    /// below so a cleanup failure this test deliberately causes doesn't
-    /// leak a permission-locked directory into `/tmp` for the rest of the
-    /// suite (or the next CI run) to trip over.
+    /// Sweeps the OS temp dir for leaked `hex-doctor-harness-buildable-*`
+    /// directories that carry THIS test module's own fault-injection
+    /// signature (`.hex/harness/aaa_locked`, written only by
+    /// `add_self_locking_cleanup_trap` below) and force-removes them. Used
+    /// before/after the G1 fault-injection tests below so a cleanup failure
+    /// they deliberately cause doesn't leak a permission-locked directory
+    /// into `/tmp` for the rest of the suite (or the next CI run) to trip
+    /// over.
+    ///
+    /// G3: an earlier version matched on the check's own tempdir PREFIX
+    /// alone and force-removed every match. Under `cargo test`'s default
+    /// parallelism (or a real `hex doctor` run happening concurrently on
+    /// the same host), that prefix is shared with every OTHER in-flight
+    /// `harness-buildable-from-git` diagnostic worktree — the sweep could
+    /// delete a live worktree belonging to an unrelated, still-running
+    /// check. Only this fault injection ever creates
+    /// `.hex/harness/aaa_locked`, so gating removal on that path's
+    /// presence scopes the sweep to directories THIS test created.
     #[cfg(unix)]
     fn sweep_leaked_harness_buildable_tempdirs() {
         let base = std::env::temp_dir();
@@ -979,14 +991,49 @@ mod tests {
             return;
         };
         for entry in entries.flatten() {
-            if entry
+            let path = entry.path();
+            let is_our_own_fault_injection = entry
                 .file_name()
                 .to_string_lossy()
                 .starts_with("hex-doctor-harness-buildable-")
-            {
-                force_remove_dir_all(&entry.path());
+                && path.join(".hex/harness/aaa_locked").exists();
+            if is_our_own_fault_injection {
+                force_remove_dir_all(&path);
             }
         }
+    }
+
+    /// G3: an earlier version of `sweep_leaked_harness_buildable_tempdirs`
+    /// matched on the check's own tempdir PREFIX alone and force-removed
+    /// every match. Under `cargo test`'s default parallelism (or a real
+    /// `hex doctor` run happening concurrently on the same host), that
+    /// prefix is shared with every OTHER in-flight
+    /// `harness-buildable-from-git` diagnostic worktree — the sweep could
+    /// delete a live worktree belonging to an unrelated, still-running
+    /// check. Plant a decoy directory with the exact prefix but WITHOUT
+    /// this test module's own fault-injection signature
+    /// (`.hex/harness/aaa_locked`, written only by
+    /// `add_self_locking_cleanup_trap`) and assert the sweep leaves it
+    /// alone.
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_sweep_never_touches_an_unrelated_matching_prefix_tempdir() {
+        let decoy = tempfile::Builder::new()
+            .prefix("hex-doctor-harness-buildable-")
+            .tempdir()
+            .expect("failed to create decoy tempdir");
+        std::fs::create_dir_all(decoy.path().join("some-other-checks-live-worktree"))
+            .expect("failed to populate decoy");
+
+        sweep_leaked_harness_buildable_tempdirs();
+
+        assert!(
+            decoy.path().exists(),
+            "G3: the sweep must not delete an unrelated matching-prefix \
+             tempdir that lacks this test module's own fault-injection \
+             signature — doing so would delete another concurrently \
+             running check's live worktree"
+        );
     }
 
     /// Deterministically forces the check's OWN diagnostic worktree cleanup
@@ -1150,6 +1197,46 @@ mod tests {
             result.is_err(),
             "a drain that times out waiting for the descendant's pipe to \
              close must be reported as an error, got: {:?}",
+            result
+        );
+    }
+
+    #[test]
+    fn test_run_with_timeout_shares_one_drain_budget_across_stdout_and_stderr() {
+        // G2 (follow-up from review_b): the first fix computed a single
+        // `drain_budget` up front but then handed that SAME, un-shrunk
+        // value to BOTH `recv_timeout` calls — a stdout pipe that closes
+        // only after consuming most of the budget still let stderr wait for
+        // a second FULL budget on top, so a staggered stdout/stderr closure
+        // could push total drain time to roughly double the configured
+        // timeout. Here the first backgrounded descendant releases stdout
+        // only after 800ms (most of the 1000ms overall timeout, but still
+        // "within budget"), while a second descendant holds stderr open for
+        // 30s. A single shared deadline caps total elapsed near the
+        // configured 1000ms; reusing the full budget per pipe pushes it
+        // toward ~1800ms.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("(sleep 0.8 >&1 2>/dev/null &) ; (sleep 30 >/dev/null &) ; exit 0");
+        let start = std::time::Instant::now();
+        let result = crate::doctor::checks::harness_buildable::run_with_timeout(
+            &mut cmd,
+            std::time::Duration::from_millis(1000),
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_millis(1500),
+            "G2: stdout and stderr must share a single drain deadline, not \
+             each get the full configured timeout — a stdout pipe that \
+             closes late must not let stderr's wait start a fresh clock. \
+             Took {:?} (bug reuses the full budget per pipe, ~1.8s; fix \
+             shares one budget, ~1s)",
+            elapsed
+        );
+        assert!(
+            result.is_err(),
+            "stderr never closes in this fixture (30s sleep), so the \
+             overall call must still report a timeout error, got: {:?}",
             result
         );
     }
