@@ -108,7 +108,13 @@ def _expand_placeholders(pattern):
 # (including inside double quotes and unquoted heredoc bodies), because the
 # shell genuinely executes those. Heredoc bodies are bounded to their own
 # delimiter (F13: never scanned "past the terminator" into whatever trailing
-# commands follow).
+# commands follow). ONE exception to "same-length": an unquoted heredoc that
+# never finds its terminator gets a synthetic `\n<delim>\n` appended to the
+# END of the returned text (F8) — real shells consume such a heredoc to EOF,
+# and rule regexes must end at an ACTUAL terminator line (never a bare
+# `|\Z` escape hatch, which could otherwise match past a REAL terminator
+# into unrelated trailing code). This is safe because scan_text is only
+# ever indexed/sliced against itself, never against the original text.
 #
 # This is a quote/heredoc/comment-aware scanner, not a full shell grammar:
 # it tracks one quoting/heredoc state at a time in a single left-to-right
@@ -194,9 +200,11 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result):
     ACTUAL delimiter bounds the body, never `[\\s\\S]*` to end-of-string).
     A quoted delimiter (`<<'EOF'`/`<<"EOF"`) makes the whole body inert; an
     unquoted one still allows `$(...)`/backtick substitution in the body.
-    Returns the index just past the terminator line (or len(text) if the
-    heredoc is never terminated, matching real shell behavior of consuming
-    to EOF)."""
+    Returns `(index, terminated)`: index is just past the terminator line
+    (or len(text) if the heredoc is never terminated, matching real shell
+    behavior of consuming to EOF); `terminated` is False only in that
+    never-closed case (F8: callers use it to represent the EOF-close in
+    scan_text without ever scanning past a REAL terminator)."""
     n = len(text)
     i = start
     while True:
@@ -205,7 +213,7 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result):
         line = text[i:line_end]
         check_line = line.lstrip("\t") if strip_tabs else line
         if check_line == delim:
-            return n if nl == -1 else nl + 1
+            return (n if nl == -1 else nl + 1), True
         if quoted:
             for k in range(i, line_end):
                 if text[k] != "\n":
@@ -213,7 +221,7 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result):
         else:
             _mask_span_preserving_substitutions(text, i, line_end, result)
         if nl == -1:
-            return n
+            return n, False
         i = nl + 1
 
 
@@ -261,7 +269,21 @@ def executable_mask(text):
             i += 1
             while pending_heredocs:
                 delim, quoted, strip_tabs = pending_heredocs.pop(0)
-                i = _consume_heredoc_body(text, i, delim, quoted, strip_tabs, result)
+                i, terminated = _consume_heredoc_body(text, i, delim, quoted, strip_tabs, result)
+                if not terminated and not quoted:
+                    # F8: an unquoted heredoc that never finds its terminator
+                    # still consumes to EOF in real shells, so its backtick
+                    # substitutions run for the whole body. The
+                    # backticks-in-unquoted-heredoc rule's match regex must
+                    # end at an ACTUAL `\1` terminator line (F8: no bare
+                    # `|\Z` fallback, or it can scan past a REAL terminator
+                    # into unrelated trailing code). Append a synthetic
+                    # terminator line to scan_text only (never to the raw
+                    # command text used elsewhere) so that regex still
+                    # fires for the genuinely-unterminated case.
+                    result.append("\n")
+                    result.extend(delim)
+                    result.append("\n")
             continue
         i += 1
     return "".join(result)

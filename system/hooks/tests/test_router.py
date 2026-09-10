@@ -924,6 +924,27 @@ class TestHeredocBoundToItsDelimiter(RouterTestCase):
             )
             self.assertEqual(read_ledger(ledger_dir), [])
 
+    def test_unquoted_backtick_after_real_terminator_abstains(self):
+        """F8 (round-3 redo): a regression from F13's own fix (1d4ae36) — the
+        `backticks-in-unquoted-heredoc` rule's lazy pre-backtick scan must
+        not be able to cross a REAL terminator line via a bare `|\\Z`
+        fallback. An UNQUOTED backtick that appears in real code AFTER the
+        heredoc has already closed must abstain, exactly like F13's original
+        quoted case above, not fire `prior`."""
+        cases = (
+            "cat <<EOF\nhello\nEOF\necho `date`\n",
+            "cat <<EOF\nhello\nEOF\n\nls\nX=`pwd`\n",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    "the backtick is real code after the heredoc's actual terminator, "
+                    f"not part of the (already-closed) heredoc body (F8): {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
     def test_tab_indented_dash_terminator_still_fires(self):
         """F2 (round-2 redo): `<<-` allows the terminator line to be
         tab-indented — the canonical use of `<<-`. The rule must not
