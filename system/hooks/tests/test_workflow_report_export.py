@@ -625,5 +625,299 @@ class RunIdCollisionSafety(unittest.TestCase):
                 self.assertNotIn(secret_b, name)
 
 
+class RecordScopedFailureHandling(unittest.TestCase):
+    """F6/F18 — a per-record validation or write failure must not abort the
+    scan for unrelated records: the run continues, temp files are not left
+    behind, and the final exit status/aggregate counters reflect the
+    failure. Each case pairs one broken record with a later valid, writable
+    one and asserts the valid record's report still lands."""
+
+    def test_null_record_does_not_abort_a_later_valid_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            wf_dir = os.path.join(projects, "-Users-x-hex", "sess1", "workflows")
+            os.makedirs(wf_dir)
+            Path(wf_dir, "wf_a_null.json").write_text("null")  # sorts before the valid record
+            valid = {
+                "runId": "wf_z_valid1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            Path(wf_dir, "wf_z_valid1.json").write_text(json.dumps(valid))
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 1, "a malformed (null) record must fail the run")
+            reports = list(Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(reports), 1, "the later valid record must still be written")
+            self.assertIn("wf_a_null", err, "the malformed record must be named on stderr, not swallowed")
+
+    def test_numeric_summary_field_does_not_abort_a_later_valid_record(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            wf_dir = os.path.join(projects, "-Users-x-hex", "sess1", "workflows")
+            os.makedirs(wf_dir)
+            bad = {
+                "runId": "wf_a_numsummary",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "summary": 12345,
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            Path(wf_dir, "wf_a_numsummary.json").write_text(json.dumps(bad))
+            valid = {
+                "runId": "wf_z_valid2",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            Path(wf_dir, "wf_z_valid2.json").write_text(json.dumps(valid))
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 1, "a record with a malformed field (numeric summary) must fail the run")
+            reports = list(Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(reports), 1, "the later valid record must still be written")
+            self.assertIn("wf_a_numsummary", err, "the malformed record must be named on stderr")
+
+    def test_nonlist_logs_field_is_a_validation_failure_not_a_garbled_report(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            wf_dir = os.path.join(projects, "-Users-x-hex", "sess1", "workflows")
+            os.makedirs(wf_dir)
+            bad = {
+                "runId": "wf_a_strlogs",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "logs": "not-a-list",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            Path(wf_dir, "wf_a_strlogs.json").write_text(json.dumps(bad))
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 1, "a non-list logs field must be rejected, not silently rendered")
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(reports, [], "a record failing structural validation must not produce a report")
+            self.assertIn("wf_a_strlogs", err, "the malformed record must be named on stderr")
+
+    def test_unwritable_record_does_not_abort_the_scan(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            wf_dir = os.path.join(projects, "-Users-x-hex", "sess1", "workflows")
+            os.makedirs(wf_dir)
+            unwritable = {
+                "runId": "wf_a_unwritable",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/blockedproj/src/main.py"},
+            }
+            Path(wf_dir, "wf_a_unwritable.json").write_text(json.dumps(unwritable))
+            valid = {
+                "runId": "wf_z_valid3",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            Path(wf_dir, "wf_z_valid3.json").write_text(json.dumps(valid))
+            # A regular FILE named "blockedproj" where a project directory is
+            # expected makes os.makedirs(out_dir) raise OSError for that one
+            # record's write, without depending on filesystem permissions.
+            proj_root = os.path.join(hex_dir, "projects")
+            os.makedirs(proj_root)
+            Path(proj_root, "blockedproj").write_text("occupying the project directory slot")
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 1, "an OSError writing one record must fail the run")
+            reports = list(Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(reports), 1, "the later writable record must still be written")
+            leftover_tmp = [str(p) for p in Path(hex_dir).rglob("*") if ".tmp" in p.name]
+            self.assertEqual(leftover_tmp, [], f"temp files left behind after a write failure: {leftover_tmp}")
+
+
+class MissingSourceRootDiagnostics(unittest.TestCase):
+    """F9 — an explicitly supplied --claude-projects root that does not exist
+    must be diagnosed (WARN + non-zero exit), not read as a healthy empty
+    scan; the default root missing must stay a quiet empty scan."""
+
+    def test_explicit_missing_root_is_diagnosed_not_a_quiet_empty_scan(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            os.makedirs(hex_dir)
+            missing_root = os.path.join(td, "does-not-exist-claude-projects")
+            rc, out, err = _run_export(hex_dir, missing_root)
+            self.assertNotEqual(rc, 0, "a missing explicit --claude-projects root must fail, not exit 0")
+            self.assertIn(missing_root, err, "the missing root path must be named on stderr")
+
+    def test_default_root_missing_stays_a_quiet_empty_scan(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            os.makedirs(hex_dir)
+            fake_home = os.path.join(td, "fake-home")
+            os.makedirs(fake_home)  # ~/.claude/projects under this does not exist
+            m = load_script()
+            argv = ["workflow-report-export.py", "--hex-dir", hex_dir]
+            buf_out, buf_err = io.StringIO(), io.StringIO()
+            with contextlib.redirect_stdout(buf_out), contextlib.redirect_stderr(
+                buf_err
+            ), unittest.mock.patch.object(sys, "argv", argv), unittest.mock.patch.dict(
+                os.environ, {"HOME": fake_home}, clear=False
+            ):
+                rc = m.main()
+            self.assertEqual(rc, 0, "a missing DEFAULT root must stay a quiet, successful empty scan")
+            self.assertEqual(buf_err.getvalue(), "", "the default root missing must not warn")
+
+
+class InvalidMappingRulesRejected(unittest.TestCase):
+    """F11 — mapping rules missing match/project, or with non-string values,
+    must be rejected (rule index + field named) instead of silently dropped
+    or coerced; invalid config must fail the run."""
+
+    def test_rule_missing_project_field_is_rejected_not_silently_dropped(self):
+        with tempfile.TemporaryDirectory() as hex_dir:
+            cfg = Path(hex_dir) / ".hex" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "workflow-projects.toml").write_text(
+                '[[map]]\nmatch = "acme"\nproject = "acme-project"\n\n'
+                '[[map]]\nmatch = "widgets"\nproject_typo = "widgets-project"\n'
+            )
+            m = load_script()
+            with self.assertRaises(Exception) as ctx:
+                m.load_project_map(hex_dir)
+            msg = str(ctx.exception)
+            self.assertIn("project", msg, "the missing field name must be named in the error")
+            self.assertRegex(msg, r"\b[12]\b", "the offending rule's index must be named in the error")
+
+    def test_rule_with_non_string_match_is_rejected_not_silently_coerced(self):
+        with tempfile.TemporaryDirectory() as hex_dir:
+            cfg = Path(hex_dir) / ".hex" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "workflow-projects.toml").write_text('[[map]]\nmatch = 123\nproject = "num-project"\n')
+            m = load_script()
+            with self.assertRaises(Exception) as ctx:
+                m.load_project_map(hex_dir)
+            msg = str(ctx.exception)
+            self.assertIn("match", msg, "the offending field name must be named in the error")
+
+    def test_invalid_mapping_config_fails_the_whole_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            cfg = Path(hex_dir) / ".hex" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "workflow-projects.toml").write_text('[[map]]\nmatch = "acme"\nproject_typo = "acme-project"\n')
+            rec = {
+                "runId": "wf_1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": "acme",
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertNotEqual(rc, 0, "an invalid mapping file must fail the run, not silently drop the rule")
+
+
+class TerminalStateAndFailureBranchCoverage(unittest.TestCase):
+    """F14 — independent end-to-end coverage for excluding running records,
+    including failed/killed records, the _unmapped + WARN path, and
+    continuing after unparsable JSON with exit 1. Separate from the
+    idempotence happy path in `Idempotence` above."""
+
+    def test_running_record_is_excluded_no_report_written(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            rec = {
+                "runId": "wf_running1",
+                "workflowName": "wf",
+                "status": "running",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("nonterminal=1", out)
+            self.assertEqual(
+                list(Path(hex_dir, "projects").rglob("*.md")), [], "a running record must not be exported"
+            )
+
+    def test_failed_and_killed_records_are_included(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            for status, key in (("failed", "fail1"), ("killed", "kill1")):
+                rec = {
+                    "runId": f"wf_{key}",
+                    "workflowName": "wf",
+                    "status": status,
+                    "timestamp": "2026-09-09T12:00:00Z",
+                    "result": {"repo": "/tmp/acme-repo/src/main.py"},
+                }
+                _write_record(projects, rec, session=key)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("wrote=2", out)
+            reports = {p.name for p in Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md")}
+            self.assertTrue(any("wf_fail1" in n for n in reports), reports)
+            self.assertTrue(any("wf_kill1" in n for n in reports), reports)
+
+    def test_unmappable_record_lands_in_unmapped_with_a_warning(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            rec = {
+                "runId": "wf_nopath1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": "no filesystem path anywhere in here",
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("unmapped=1", out)
+            self.assertIn("wf_nopath1", err)
+            self.assertIn("_unmapped", err)
+            reports = list(Path(hex_dir, "projects", "_unmapped", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(reports), 1, reports)
+
+    def test_unparsable_json_is_reported_and_the_run_continues_with_exit_1(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            wf_dir = os.path.join(projects, "-Users-x-hex", "sess1", "workflows")
+            os.makedirs(wf_dir)
+            Path(wf_dir, "wf_a_badjson.json").write_text("{not valid json")
+            valid = {
+                "runId": "wf_z_valid4",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            Path(wf_dir, "wf_z_valid4.json").write_text(json.dumps(valid))
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 1, "unparsable JSON must fail the overall run")
+            self.assertIn("wf_a_badjson", err)
+            self.assertIn("unreadable=1", out)
+            reports = list(Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(reports), 1, "the run must continue past the unparsable record")
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -40,8 +40,13 @@ finds nothing, the run lands in projects/_unmapped/.
 
 Usage: workflow-report-export.py [--dry-run] [--hex-dir DIR] [--claude-projects DIR]
 Exit 0 on success (summary line on stdout), 1 on any error — including an
-unparsable run record (reported on stderr, then the scan continues so the
-readable records still get their reports before the run fails).
+unparsable run record, a structurally invalid record (e.g. `null`, a numeric
+`summary`, a non-list `logs`), a per-record write failure, an invalid
+workflow-projects.toml mapping rule, or an explicitly-supplied
+--claude-projects root that does not exist. Each of these is reported on
+stderr per record, then the scan continues so the unaffected records still
+get their reports before the run fails. (The default --claude-projects root
+being absent is not an error — it is a quiet, successful empty scan.)
 """
 from __future__ import annotations
 
@@ -215,19 +220,47 @@ def slug(s: str) -> str:
 
 
 def load_project_map(hex_dir: str) -> list[tuple[str, str]]:
-    """Load ordered (match, project) rules from the optional TOML mapping file."""
+    """Load ordered (match, project) rules from the optional TOML mapping file.
+
+    F11 — a rule missing `match`/`project`, or with a non-string/empty value
+    for either, is a configuration error: raise rather than silently drop or
+    coerce it, naming the 1-based rule index and the offending field.
+    """
     path = os.path.join(hex_dir, ".hex", "config", "workflow-projects.toml")
     if not os.path.isfile(path):
         return []
     with open(path, "rb") as fh:
         data = tomllib.load(fh)
     out = []
-    for entry in data.get("map", []):
+    for i, entry in enumerate(data.get("map", []), start=1):
         match = entry.get("match")
+        if not isinstance(match, str) or not match:
+            raise ValueError(
+                f"workflow-projects.toml: rule {i}: 'match' must be a nonempty string (got {match!r})"
+            )
         project = entry.get("project")
-        if match and project:
-            out.append((str(match), str(project)))
+        if not isinstance(project, str) or not project:
+            raise ValueError(
+                f"workflow-projects.toml: rule {i}: 'project' must be a nonempty string (got {project!r})"
+            )
+        out.append((match, project))
     return out
+
+
+def validate_record(rec: object) -> str | None:
+    """F6/F18 — structural validation of one workflow record. Returns a
+    human-readable reason the record is invalid, or None if it is well-formed
+    enough to render (a dict, with `summary` a string if present and `logs` a
+    list if present)."""
+    if not isinstance(rec, dict):
+        return f"record is not a JSON object (got {type(rec).__name__})"
+    summary = rec.get("summary")
+    if summary is not None and not isinstance(summary, str):
+        return f"'summary' must be a string (got {type(summary).__name__})"
+    logs = rec.get("logs")
+    if logs is not None and not isinstance(logs, list):
+        return f"'logs' must be a list (got {type(logs).__name__})"
+    return None
 
 
 # review_b G1: a name with MORE than one space ("Jane Doe Smith") was not
@@ -450,16 +483,30 @@ def main() -> int:
     )
     ap.add_argument("--dry-run", action="store_true")
     ap.add_argument("--hex-dir", default=os.environ.get("HEX_DIR") or os.path.expanduser("~/hex"))
-    ap.add_argument("--claude-projects", default=default_claude_projects())
+    ap.add_argument("--claude-projects", default=None)
     a = ap.parse_args()
+
+    # F9 — an EXPLICITLY supplied --claude-projects root that does not exist
+    # is a misconfiguration (e.g. a typo) and must be diagnosed, not read as
+    # a healthy empty scan; the default root missing is the ordinary case of
+    # a machine that has never run a Workflow, and stays a quiet empty scan.
+    claude_projects_explicit = a.claude_projects is not None
+    claude_projects = a.claude_projects if claude_projects_explicit else default_claude_projects()
 
     project_map = load_project_map(a.hex_dir)
 
+    source_root_missing = False
+    if claude_projects_explicit and not os.path.isdir(claude_projects):
+        source_root_missing = True
+
     # <claude-projects>/<project-key>/<session-id>/workflows/wf_<id>.json
-    records = sorted(glob.glob(os.path.join(a.claude_projects, "*", "*", "workflows", "wf_*.json")))
+    records = sorted(glob.glob(os.path.join(claude_projects, "*", "*", "workflows", "wf_*.json")))
     projects_root = os.path.join(a.hex_dir, "projects")
-    wrote = skipped = unmapped = nonterminal = unreadable = 0
+    wrote = skipped = unmapped = nonterminal = unreadable = invalid = failed = 0
     warnings: list[str] = []
+
+    if source_root_missing:
+        warnings.append(f"--claude-projects root does not exist: {claude_projects}")
 
     for path in records:
         # F2 — the on-disk record path can itself embed a credential-shaped
@@ -473,6 +520,17 @@ def main() -> int:
             unreadable += 1
             warnings.append(f"{path_label}: unreadable ({redact(str(e))})")
             continue
+
+        # F6/F18 — structurally invalid JSON (valid JSON, wrong shape: e.g.
+        # `null`, a numeric `summary`, a non-list `logs`) is a per-record
+        # failure, not a crash: name it, count it, and keep scanning.
+        invalid_reason = validate_record(rec)
+        if invalid_reason:
+            invalid += 1
+            fallback_id = os.path.basename(path).removesuffix(".json")
+            warnings.append(f"{fallback_id}: invalid record ({invalid_reason}) -> skipped")
+            continue
+
         status = rec.get("status")
         if status not in TERMINAL:
             nonterminal += 1
@@ -559,12 +617,17 @@ def main() -> int:
             wrote += 1
             continue
 
-        os.makedirs(out_dir, exist_ok=True)
-        # F5 — a unique temp file per process, published with an atomic
-        # no-clobber link+unlink so two overlapping exporters can never
-        # truncate each other's in-progress write.
-        fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(out)}.", suffix=".tmp", dir=out_dir)
+        # F6/F18 — the whole render + publish of ONE record is wrapped: an
+        # OSError writing one project's report (e.g. a blocked/unwritable
+        # destination) must not abort the scan for unrelated records. Any
+        # temp file created before the failure is cleaned up.
+        tmp = None
         try:
+            os.makedirs(out_dir, exist_ok=True)
+            # F5 — a unique temp file per process, published with an atomic
+            # no-clobber link+unlink so two overlapping exporters can never
+            # truncate each other's in-progress write.
+            fd, tmp = tempfile.mkstemp(prefix=f".{os.path.basename(out)}.", suffix=".tmp", dir=out_dir)
             with os.fdopen(fd, "w") as fh:
                 fh.write(build_report(rec, path, warnings))
             try:
@@ -573,24 +636,37 @@ def main() -> int:
                 skipped += 1
             else:
                 wrote += 1
+        except OSError as e:
+            failed += 1
+            warnings.append(f"{run_id}: write failed ({redact(str(e))}) -> {redact(out)}")
         finally:
-            try:
-                os.unlink(tmp)
-            except OSError:
-                pass
+            if tmp is not None:
+                try:
+                    os.unlink(tmp)
+                except OSError:
+                    pass
 
     for w in warnings:
         print(f"workflow-report-export: WARN {w}", file=sys.stderr)
     print(
         f"workflow-report-export: scanned={len(records)} wrote={wrote} skipped_existing={skipped} "
-        f"unmapped={unmapped} nonterminal={nonterminal} unreadable={unreadable} warnings={len(warnings)}"
-        + (" (dry-run)" if a.dry_run else "")
+        f"unmapped={unmapped} nonterminal={nonterminal} unreadable={unreadable} invalid={invalid} "
+        f"failed={failed} warnings={len(warnings)}" + (" (dry-run)" if a.dry_run else "")
     )
-    if unreadable:
+    # F6/F18 — a per-record validation or write failure fails the overall run
+    # (the aggregate count is loud, on stdout, above) without having stopped
+    # the scan of the remaining records.
+    if unreadable or invalid or failed:
         print(
-            f"workflow-report-export: FATAL {unreadable} record(s) could not be parsed",
+            f"workflow-report-export: FATAL {unreadable} unreadable, {invalid} invalid, "
+            f"{failed} failed to write",
             file=sys.stderr,
         )
+        return 1
+    # F9 — an explicitly supplied --claude-projects root that does not exist
+    # is a misconfiguration, even when it produced zero warnings otherwise
+    # (e.g. no records to warn about beyond the missing-root WARN above).
+    if source_root_missing:
         return 1
     return 0
 
