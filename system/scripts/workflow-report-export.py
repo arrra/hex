@@ -589,9 +589,21 @@ def main() -> int:
                 date = "undated"
                 warnings.append(f"{run_id}: no usable timestamp")
 
-            project = infer_project(rec, project_map)
-            if project is not None:
-                project = redact(project, warnings, path_label)
+            project_raw = infer_project(rec, project_map)
+            project = project_raw
+            if project_raw is not None:
+                project = redact(project_raw, warnings, path_label)
+                if project != project_raw:
+                    # review_b G1 (round 3) — redact() collapses every
+                    # credential-shaped project basename to the same literal
+                    # "[REDACTED]" string, so two records from distinct
+                    # credential-shaped repos collided on one destination and
+                    # the second was silently dropped as "already exported".
+                    # Append a short, non-reversible fingerprint of the RAW
+                    # project (never the raw value itself) so distinct raw
+                    # projects still land in distinct directories.
+                    fingerprint = hashlib.sha256(project_raw.encode("utf-8", "surrogateescape")).hexdigest()[:8]
+                    project = f"{project}-{fingerprint}"
 
             # F4 — project and runId must each be safe single path
             # components; anything else routes to _unmapped with a WARN

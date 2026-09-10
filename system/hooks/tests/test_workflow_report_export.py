@@ -655,6 +655,46 @@ class RunIdCollisionSafety(unittest.TestCase):
                 self.assertNotIn(secret_b, name)
 
 
+class ProjectCollisionSafety(unittest.TestCase):
+    """review_b G1 (round 3) — redact() turns any credential-shaped project
+    basename into the same literal "[REDACTED]" string, so two records that
+    share a runId/workflowName/timestamp but come from distinct
+    credential-shaped repository basenames collided on one destination path
+    and the second was silently skipped as "already exported". Each record
+    must still land its own report."""
+
+    def test_distinct_credential_shaped_projects_do_not_collide(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            secret_a = "sk-ant-" + "A" * 25
+            secret_b = "sk-ant-" + "B" * 25
+            for i, secret in enumerate([secret_a, secret_b]):
+                rec = {
+                    "runId": "wf_shared",
+                    "workflowName": "wf",
+                    "status": "completed",
+                    "timestamp": "2026-09-09T12:00:00Z",
+                    "result": {"repo": f"/tmp/{secret}-repo/src/main.py"},
+                }
+                _write_record(projects, rec, session=f"sess{i}")
+
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("wrote=2", out, out)
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(len(reports), 2, reports)
+            self.assertEqual(
+                len({p.parent.parent.name for p in reports}),
+                2,
+                "two distinct credential-shaped projects collided on one directory",
+            )
+            dump = "\n".join(str(p) for p in reports)
+            self.assertNotIn(secret_a, dump)
+            self.assertNotIn(secret_b, dump)
+
+
 class RecordScopedFailureHandling(unittest.TestCase):
     """F6/F18 — a per-record validation or write failure must not abort the
     scan for unrelated records: the run continues, temp files are not left
