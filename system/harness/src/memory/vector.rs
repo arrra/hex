@@ -152,12 +152,21 @@ pub fn knn(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(
 /// candidate in `facts_vec`, the window is widened and the query re-run —
 /// repeating until either `k` eligible hits are found or the candidate set is
 /// exhausted.
+///
+/// The window is also clamped to [`VEC0_K_MAX`] (R2 review F5): sqlite-vec
+/// 0.1.9 hard-rejects any vec0 KNN `LIMIT` above that cap with
+/// `SQLITE_ERROR` ("k value in knn query too large"), so widening past it
+/// would turn a partial-hit table into a hard error. Reaching the clamped
+/// cap counts as exhaustion, same as reaching `total`.
+const VEC0_K_MAX: usize = 4096;
+
 pub fn knn_facts(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(i64, f64)>> {
     let total: i64 = conn.query_row("SELECT COUNT(*) FROM facts_vec", [], |r| r.get(0))?;
     let total = total.max(0) as usize;
+    let cap = total.min(VEC0_K_MAX);
     let mut overfetch = k.saturating_mul(4).max(k + 16);
     loop {
-        let window = overfetch.min(total);
+        let window = overfetch.min(cap);
         let mut stmt = conn.prepare(
             "SELECT f.rowid, v.distance
                FROM (SELECT fact_id, distance FROM facts_vec
@@ -172,7 +181,7 @@ pub fn knn_facts(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result
             |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)),
         )?;
         let hits: Vec<(i64, f64)> = rows.collect::<rusqlite::Result<_>>()?;
-        if hits.len() >= k || window >= total {
+        if hits.len() >= k || window >= cap {
             return Ok(filter_by_distance(hits, max_distance()));
         }
         overfetch = overfetch.saturating_mul(4).max(overfetch + 16);
@@ -402,6 +411,56 @@ mod tests {
             found_live,
             "the live fact must be returned even though 20 superseded facts (more than the k=1 overfetch window of 17) rank nearer — got {:?}",
             hits
+        );
+    }
+
+    /// RED for R2 review F5 (major, regression introduced by the F2 fix):
+    /// the adaptive overfetch window was clamped only to `COUNT(*) FROM
+    /// facts_vec`, never to sqlite-vec's own hard cap on a vec0 KNN `LIMIT`
+    /// (`SQLITE_VEC_VEC0_K_MAX = 4096`, sqlite-vec.c:7111). With `k = 1` the
+    /// window sequence is 17 -> 68 -> 272 -> 1088 -> 4352; against a table of
+    /// 4097 all-superseded vectors, an unclamped window of 4097 (or the next
+    /// step, 4352) exceeds 4096 and sqlite-vec raises `SQLITE_ERROR` ("k
+    /// value in knn query too large") instead of returning the (empty) set
+    /// of eligible hits. `knn_facts` must clamp the window to
+    /// `min(total, 4096)` and treat reaching that clamped cap as exhaustion.
+    #[test]
+    fn knn_facts_clamps_overfetch_to_sqlite_vec_k_max() {
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
+
+        // 4097 superseded facts — one more than sqlite-vec's vec0 KNN LIMIT
+        // cap of 4096, and no live fact at all, so every window widening
+        // step keeps finding 0 eligible hits and must eventually exhaust
+        // against the clamped cap rather than erroring past it.
+        for i in 0..4097 {
+            let id = format!("01HFACT-WALL-{i:04}");
+            conn.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+                 VALUES (?1,'project:hex','uses','stale object',0.5,'2026-06-11','2026-06-11','2026-06-11','2026-09-05','01HFACT-NEW')",
+                params![id],
+            )
+            .unwrap();
+            let v: Vec<f32> = (0..EMBED_DIM)
+                .map(|d| (i as f32 + d as f32) * 0.0001)
+                .collect();
+            insert_fact_vec(&conn, &id, &v).unwrap();
+        }
+
+        let query: Vec<f32> = (0..EMBED_DIM).map(|d| d as f32 * 0.0001).collect();
+        let hits = knn_facts(&conn, &query, 1);
+
+        assert!(
+            hits.is_ok(),
+            "knn_facts must clamp its overfetch window to sqlite-vec's 4096 KNN cap instead of erroring past it, got {:?}",
+            hits
+        );
+        assert!(
+            hits.unwrap().is_empty(),
+            "with no live facts at all, the clamped-exhaustion result must be empty, not partial"
         );
     }
 }
