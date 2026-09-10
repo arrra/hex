@@ -1861,6 +1861,20 @@ mod tests {
         s
     }
 
+    /// Deterministic, content-derived, DISTINCT vector: fills the embedding
+    /// with a value derived from the SHA256 content hash (the same
+    /// `content_hash` the production reuse-matching key uses), so two chunks
+    /// with different content get provably different vectors. A constant
+    /// fill (e.g. `vec![0.1; DIM]` for every chunk in a pass) cannot catch a
+    /// bug that copies chunk A's vector onto chunk B — both would look
+    /// identical regardless (F6, arrra/hex PR #8 round 1).
+    fn content_derived_vec(content: &str) -> Vec<f32> {
+        let hash = content_hash(content);
+        let prefix = u32::from_str_radix(hash.get(0..8).unwrap(), 16).unwrap();
+        let v = 0.01 + (prefix as f32 / u32::MAX as f32) * 0.98;
+        vec![v; super::super::vector::EMBED_DIM]
+    }
+
     #[test]
     fn index_file_with_reuse_reembeds_only_the_changed_chunk() {
         // Pre-fix baseline (MEASURED 2026-09-06, see comment above
@@ -1868,6 +1882,15 @@ mod tests {
         // dedup — `delete_chunks_for_file` drops every vec_chunks row for the
         // file and `embed_and_store` re-embeds the FULL chunk set on any
         // content change, even a one-line edit touching 1 of 40 chunks.
+        //
+        // F6/F7 (major, arrra/hex PR #8 round 1): the old version of this
+        // test used a CONSTANT fill vector per pass, so it could not detect
+        // copying one unchanged chunk's vector onto another, and used
+        // `calls2 <= 2` / `reused >= 38`, which permitted over-invalidation
+        // (or even the changed chunk never being embedded at all). Vectors
+        // are now content-derived and distinct, counts are exact, and the
+        // COMPLETE chunk -> vector mapping is checked after reindexing,
+        // including the edited chunk's new vector.
         let tmp = TempDir::new().unwrap();
         let hex_root = tmp.path();
         let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
@@ -1886,10 +1909,7 @@ mod tests {
             false,
             |batch| {
                 calls1 += batch.len();
-                Ok(batch
-                    .iter()
-                    .map(|_| vec![0.1f32; super::super::vector::EMBED_DIM])
-                    .collect())
+                Ok(batch.iter().map(|c| content_derived_vec(c)).collect())
             },
         )
         .unwrap();
@@ -1918,25 +1938,158 @@ mod tests {
             false,
             |batch| {
                 calls2 += batch.len();
-                Ok(batch
-                    .iter()
-                    .map(|_| vec![0.2f32; super::super::vector::EMBED_DIM])
-                    .collect())
+                Ok(batch.iter().map(|c| content_derived_vec(c)).collect())
             },
         )
         .unwrap();
 
         assert_eq!(outcome2.chunks, 40);
-        assert!(
-            calls2 <= 2,
-            "embedder should be invoked for at most 2 chunks, got {calls2}"
+        assert_eq!(
+            calls2, 1,
+            "exactly the one edited chunk should reach the embedder, got {calls2} calls"
         );
-        assert!(
-            outcome2.reused >= 38,
-            "at least 38 chunks should be reused, got {}",
+        assert_eq!(
+            outcome2.embedded, 1,
+            "exactly 1 chunk should be embedded, got {}",
+            outcome2.embedded
+        );
+        assert_eq!(
+            outcome2.reused, 39,
+            "exactly 39 chunks should be reused, got {}",
             outcome2.reused
         );
         assert_eq!(outcome2.reused + outcome2.embedded, 40);
+
+        // Full chunk -> vector mapping: every one of the 40 headings must
+        // carry the vector for ITS OWN current (stored) content, not some
+        // other chunk's, and the edited chunk (heading 17) must carry a
+        // FRESH vector derived from its new content, not the stale one from
+        // pass 1 — a swap or a stale-copy bug is invisible to aggregate
+        // counts alone.
+        for i in 0..40 {
+            let heading = format!("Heading {i}");
+            let (stored_content, stored_bytes): (String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT c.content, v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                     WHERE c.heading = ?",
+                    params![heading],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            let expected_bytes =
+                super::super::vector::f32s_to_le_bytes(&content_derived_vec(&stored_content));
+            assert_eq!(
+                stored_bytes, expected_bytes,
+                "{heading}'s vector must match its own content-derived vector, \
+                 not a copy from a different chunk or a stale pass-1 vector"
+            );
+        }
+        let heading17_content: String = conn
+            .query_row(
+                "SELECT content FROM chunks WHERE heading = 'Heading 17'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            heading17_content.contains("EDITED"),
+            "heading 17's stored content must be the edited text, got {heading17_content:?}"
+        );
+    }
+
+    #[test]
+    fn index_file_with_reuse_preserves_associations_across_rowid_shifting_insertion() {
+        // F6/F7 (major): every reindex fully deletes and re-inserts a file's
+        // `chunks` rows (`delete_chunks_for_file` + fresh INSERTs in the loop
+        // above), so chunk rowids are NEVER stable across passes even for
+        // untouched chunks. Inserting a brand-new heading at the FRONT of the
+        // file shifts every existing chunk's `chunk_index` and rowid; this
+        // pins that the shift alone must not break any of the 40
+        // pre-existing associations — the reuse match must key purely on
+        // (heading, content_hash), never on rowid or insertion position.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("shift.md");
+
+        let content_v1 = build_40_chunk_content();
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| Ok(batch.iter().map(|c| content_derived_vec(c)).collect()),
+        )
+        .unwrap();
+
+        let mut content_v2 =
+            String::from("## Heading Inserted\nBrand-new leading chunk, never seen before.\n\n");
+        content_v2.push_str(&content_v1);
+
+        let mut calls2 = 0usize;
+        let outcome2 = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |batch| {
+                calls2 += batch.len();
+                Ok(batch.iter().map(|c| content_derived_vec(c)).collect())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome2.chunks, 41);
+        assert_eq!(
+            calls2, 1,
+            "only the brand-new leading chunk should be embedded, got {calls2}"
+        );
+        assert_eq!(outcome2.embedded, 1);
+        assert_eq!(
+            outcome2.reused, 40,
+            "all 40 pre-existing chunks must survive the rowid-shifting insertion, got {}",
+            outcome2.reused
+        );
+
+        for i in 0..40 {
+            let heading = format!("Heading {i}");
+            let (stored_content, stored_bytes): (String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT c.content, v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                     WHERE c.heading = ?",
+                    params![heading],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            let expected_bytes =
+                super::super::vector::f32s_to_le_bytes(&content_derived_vec(&stored_content));
+            assert_eq!(
+                stored_bytes, expected_bytes,
+                "{heading}'s vector must survive the rowid-shifting insertion unchanged"
+            );
+        }
+
+        let (new_content, new_bytes): (String, Vec<u8>) = conn
+            .query_row(
+                "SELECT c.content, v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.heading = 'Heading Inserted'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let expected_new_bytes =
+            super::super::vector::f32s_to_le_bytes(&content_derived_vec(&new_content));
+        assert_eq!(
+            new_bytes, expected_new_bytes,
+            "the newly-inserted chunk must get its own freshly-embedded vector"
+        );
     }
 
     #[test]
