@@ -110,10 +110,10 @@ fn job_log_lines(
 /// `.hex/logs/com.hex.harness.log`. Writers are injected (rather than hardcoded
 /// `println!`/`eprintln!`) so tests can exercise this exact log-forwarding
 /// logic — the one every job runner calls — without depending on `cargo
-/// test`'s stdout capture semantics. `Ctx::run` surfaces a non-zero exit as an
-/// `Err` (swallowing the captured `Output`), so the failure path logs what it
-/// has — the job id, elapsed wall time, and the error — rather than replaying
-/// `job_log_lines`, which needs a captured `Output` it doesn't get here.
+/// test`'s stdout capture semantics. Uses `Ctx::run_output` (Output regardless
+/// of exit) so a FAILING job's captured stdout/stderr are forwarded through
+/// `job_log_lines` too, and only then is the non-zero exit propagated as an
+/// `Err` via `exit_error` (spec-review finding G1).
 fn run_and_log_to<W: std::io::Write, E: std::io::Write>(
     job_id: &str,
     ctx: &Ctx,
@@ -122,14 +122,11 @@ fn run_and_log_to<W: std::io::Write, E: std::io::Write>(
     mut err: E,
 ) -> Result<()> {
     let started = std::time::Instant::now();
-    match ctx.run(argv) {
-        Ok(output) => {
-            let elapsed = started.elapsed();
-            for line in job_log_lines(job_id, &output, elapsed) {
-                let _ = writeln!(out, "{line}");
-            }
-            Ok(())
-        }
+    // G1 (spec review): capture the Output REGARDLESS of exit status so a
+    // failing job's stdout/stderr still reach the harness log through
+    // job_log_lines; only THEN judge the exit and propagate it as an Err.
+    let output = match ctx.run_output(argv) {
+        Ok(output) => output,
         Err(e) => {
             let elapsed = started.elapsed();
             let _ = writeln!(
@@ -137,9 +134,23 @@ fn run_and_log_to<W: std::io::Write, E: std::io::Write>(
                 "[{job_id}] exit=error elapsed_ms={} error={e}",
                 elapsed.as_millis()
             );
-            Err(e)
+            return Err(e);
         }
+    };
+    let elapsed = started.elapsed();
+    for line in job_log_lines(job_id, &output, elapsed) {
+        let _ = writeln!(out, "{line}");
     }
+    let program = argv.first().map(String::as_str).unwrap_or("");
+    if let Some(e) = hex::worker::ctx::exit_error(program, &output) {
+        let _ = writeln!(
+            err,
+            "[{job_id}] exit=error elapsed_ms={} error={e}",
+            elapsed.as_millis()
+        );
+        return Err(e);
+    }
+    Ok(())
 }
 
 /// Production entry point used by every job runner below — forwards to
@@ -212,6 +223,30 @@ mod tests {
     /// process-global stdout.
     ///
     /// Was RED: `job_log_lines` did not exist yet; now green.
+    /// Spec-review finding G1 (S2fmt9jyc): a FAILING job must not lose its
+    /// captured output. Both streams are forwarded through `job_log_lines`
+    /// (prefixed, plus the exit line), and the non-zero exit is STILL
+    /// propagated as an `Err`. Was RED: the old path matched on `Ctx::run`'s
+    /// `Err` and logged only the error line.
+    #[test]
+    fn failing_job_forwards_both_streams_then_propagates_nonzero_exit() {
+        let ctx = Ctx::new();
+        let argv: Vec<String> =
+            vec!["sh".into(), "-c".into(), "echo out1; echo err1 >&2; exit 3".into()];
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+
+        let res = run_and_log_to("hex::memory::index", &ctx, &argv, &mut out, &mut err);
+
+        assert!(res.is_err(), "a non-zero exit must still propagate as Err");
+        let out_s = String::from_utf8(out).expect("utf8");
+        let err_s = String::from_utf8(err).expect("utf8");
+        assert!(out_s.contains("[hex::memory::index] out1"), "stdout line lost: {out_s}");
+        assert!(out_s.contains("[hex::memory::index] err1"), "stderr line lost: {out_s}");
+        assert!(out_s.contains("exit=3"), "exit-status line missing: {out_s}");
+        assert!(err_s.contains("exited 3"), "propagated error missing: {err_s}");
+    }
+
     #[test]
     fn job_log_lines_prefixes_stdout_and_appends_exit_status_line() {
         let ctx = Ctx::new();
