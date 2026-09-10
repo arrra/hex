@@ -2747,6 +2747,7 @@ fn hitl_process_pings(
     hex_dir: &std::path::Path,
     now: chrono::DateTime<chrono::Utc>,
     local_hour: u32,
+    local_day: &str,
     only_id: Option<u64>,
 ) -> Result<(), String> {
     use hex::hitl::{policy, store, transport};
@@ -2768,7 +2769,13 @@ fn hitl_process_pings(
 
     let day = now.format("%Y-%m-%d").to_string();
     let sent_today = hitl_ping_count(hex_dir, &day);
-    let digest_done = hitl_digest_sent(hex_dir, &day);
+    // F1-minor (R3 reopen): the digest-sent lookup must use the same LOCAL
+    // day key `hitl_send_digest` records under (see main.rs:3074), not a
+    // freshly UTC-derived day — otherwise this call site and the digest path
+    // disagree on "day" in fractional-offset zones, the exact bug class F1
+    // fixed. Currently inert (policy::pings_due discards `digest_done`, see
+    // policy.rs:245) but wired correctly for when that changes.
+    let digest_done = hitl_digest_sent(hex_dir, local_day);
 
     let mut actions = policy::pings_due(&items, &cfg, now, local_hour, sent_today, digest_done);
     if let Some(id) = only_id {
@@ -2953,7 +2960,8 @@ fn run_hitl(command: HitlCommands) -> i32 {
                 }
             };
             println!("{}", item.id);
-            if let Err(e) = hitl_process_pings(&hex_dir, now, local_hour, Some(item.id)) {
+            if let Err(e) = hitl_process_pings(&hex_dir, now, local_hour, &local_day, Some(item.id))
+            {
                 eprintln!("hex hitl add: ping failed: {e}");
             }
             0
@@ -3057,7 +3065,7 @@ fn run_hitl(command: HitlCommands) -> i32 {
             }
         }
         HitlCommands::Nudge => {
-            if let Err(e) = hitl_process_pings(&hex_dir, now, local_hour, None) {
+            if let Err(e) = hitl_process_pings(&hex_dir, now, local_hour, &local_day, None) {
                 eprintln!("hex hitl nudge: {e}");
                 return 1;
             }
@@ -3564,7 +3572,8 @@ mod tests {
             let _env = HexDirEnvGuard::set(tmp.path());
             let now = ts("2026-07-10T01:00:00Z");
             let id = seed_due_p1(tmp.path(), now);
-            hitl_process_pings(tmp.path(), now, 18, None).expect("process pings");
+            let day = now.format("%Y-%m-%d").to_string();
+            hitl_process_pings(tmp.path(), now, 18, &day, None).expect("process pings");
             let it = store::load_item(tmp.path(), id).expect("load item");
             assert!(
                 it.last_pinged.is_some(),
@@ -3582,7 +3591,8 @@ mod tests {
             let _env = HexDirEnvGuard::set(tmp.path());
             let now = ts("2026-07-10T12:00:00Z");
             let id = seed_due_p1(tmp.path(), now);
-            hitl_process_pings(tmp.path(), now, 23, None).expect("process pings");
+            let day = now.format("%Y-%m-%d").to_string();
+            hitl_process_pings(tmp.path(), now, 23, &day, None).expect("process pings");
             let it = store::load_item(tmp.path(), id).expect("load item");
             assert!(
                 it.last_pinged.is_none(),
@@ -3709,6 +3719,79 @@ mod tests {
                 "second nudge at local 09:30 (same local day) must NOT be \
                  due -- one digest per LOCAL day even though the UTC date \
                  advanced"
+            );
+        }
+
+        // F1-minor (R3 reopen, operator guidance 2026-09-10): the nudge path
+        // (`hitl_process_pings`) still looked up `hitl_digest_sent` under a
+        // freshly UTC-derived day (`now.format("%Y-%m-%d")`) instead of the
+        // LOCAL day the digest path uses (`hitl_local_hour_and_day`, see the
+        // record at `hitl_send_digest`'s call site around main.rs:3074). The
+        // lookup's result is currently discarded by
+        // `policy::pings_due` (contract-stability parameter, see
+        // policy.rs:245) so this is inert for behavior today, but the two
+        // call sites disagreeing on the dedup key is exactly the bug class
+        // F1 fixed elsewhere -- so the nudge path must be threaded the same
+        // `local_day` the caller already computes, never re-derive it from
+        // `now`. Pinned by requiring `hitl_process_pings` to take
+        // `local_day` explicitly (no internal `now`-to-day / wall-clock
+        // derivation) and round-tripping it through the real
+        // `hitl_digest_sent` state across a local hour that straddles UTC
+        // midnight.
+        #[test]
+        fn nudge_digest_lookup_uses_local_day_not_utc_day_across_midnight() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _env = HexDirEnvGuard::set(tmp.path());
+            let offset = chrono::FixedOffset::east_opt(9 * 3600 + 30 * 60).unwrap();
+            let digest_hour = 9;
+            let cfg = store::Config {
+                digest_hour,
+                ..store::Config::default()
+            };
+            store::save_config(tmp.path(), &cfg).expect("save config");
+
+            // local 2026-07-10T09:00:00+09:30 == UTC 2026-07-09T23:30:00Z --
+            // the local calendar day (07-10) already differs from the UTC
+            // calendar day (07-09), which is exactly the divergence the bug
+            // exploited.
+            let now = ts("2026-07-09T23:30:00Z");
+            let (local_hour, local_day) = hitl_local_hour_and_day(now.with_timezone(&offset));
+            assert_eq!(local_day, "2026-07-10");
+            let utc_day = now.format("%Y-%m-%d").to_string();
+            assert_ne!(
+                utc_day, local_day,
+                "the test fixture must actually straddle UTC midnight for \
+                 this to prove anything"
+            );
+
+            // A digest was already recorded earlier under the LOCAL day --
+            // the key `hitl_send_digest` actually writes (F1 fix).
+            hitl_mark_digest_sent(tmp.path(), &local_day);
+
+            let id = seed_due_p1(tmp.path(), now);
+            hitl_process_pings(tmp.path(), now, local_hour, &local_day, None)
+                .expect("process pings");
+
+            // The nudge itself is unaffected by the digest flag (contract
+            // stability, policy.rs:245) -- the due P1 still pings regardless
+            // of which day the digest lookup used.
+            let it = store::load_item(tmp.path(), id).expect("load item");
+            assert!(
+                it.last_pinged.is_some(),
+                "local hour matches no quiet window -- the due P1 must ping"
+            );
+
+            // The dedup marker the nudge path is wired to read lives under
+            // the local day; nothing was ever recorded under the stale UTC
+            // day key.
+            assert!(
+                hitl_digest_sent(tmp.path(), &local_day),
+                "the digest-sent marker must be visible under the local day"
+            );
+            assert!(
+                !hitl_digest_sent(tmp.path(), &utc_day),
+                "no digest-sent marker should exist under the UTC day -- \
+                 only the local day key was ever written"
             );
         }
     }
