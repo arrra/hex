@@ -370,13 +370,40 @@ fn diagnose(worktree_path: &Path, empty_hooks_dir: &Path, timeout: Duration) -> 
 
     let mut state = ScanState::new(worktree_path.to_path_buf());
     for pkg in &local_packages {
+        // G1: `cargo metadata` resolves a LOCAL package's root wherever it
+        // lives on disk — including an absolute-path dependency that
+        // points entirely outside the checkout, which `git worktree add`
+        // never sees. Require every local package root to canonicalize
+        // inside the checkout root before trusting anything under it,
+        // the same containment discipline F4/F10 already applies to leaf
+        // include! targets.
+        if let Err(reason) = canonicalize_within_checkout(&pkg.root, worktree_path) {
+            return CheckResult::fail(format!(
+                "local package root {} escapes the checkout — {reason}",
+                pkg.root.display()
+            ));
+        }
         for entry in &pkg.target_entry_points {
+            if let Err(reason) = canonicalize_within_checkout(entry, worktree_path) {
+                return CheckResult::fail(format!(
+                    "target entry point {} escapes the checkout — {reason}",
+                    entry.display()
+                ));
+            }
             state.scan_file_and_follow(entry, true);
         }
+        // G3: only the metadata-reachable source graph (target entry
+        // points, followed via `mod`/`#[path]`/`include!`) counts toward
+        // whether the harness actually builds — a `.rs` file under
+        // `src`/`tests` that nothing ever `mod`-declares is never compiled
+        // by cargo, so a broken include! inside it must never fail this
+        // check. `check_dir_readable` still walks these directories, but
+        // only to surface genuine I/O errors (F9); it never interprets
+        // file content or reports a missing include target.
         for dir_name in ["src", "tests"] {
             let dir = pkg.root.join(dir_name);
             if dir.is_dir() {
-                state.scan_dir(&dir);
+                state.check_dir_readable(&dir);
             }
         }
         let build_rs = pkg.root.join("build.rs");
@@ -1128,8 +1155,25 @@ fn scan_balanced_generic(
 }
 
 // ---------------------------------------------------------------------
-// F4/F10: containment + readability validation
+// F4/F10, G1: containment + readability validation
 // ---------------------------------------------------------------------
+
+/// Canonicalizes `path` and confirms it resolves inside `checkout_root`
+/// (G1): a local package root, target entry point, or `mod` resolution
+/// reached only through an escaping absolute path or symlink must never
+/// be treated as present just because something exists there on this
+/// host — only content this check can prove came from the git checkout
+/// (i.e. lives inside the fresh `git worktree`) counts.
+fn canonicalize_within_checkout(path: &Path, checkout_root: &Path) -> Result<PathBuf, String> {
+    let canonical_root = std::fs::canonicalize(checkout_root)
+        .map_err(|e| format!("failed to canonicalize checkout root: {e}"))?;
+    let canonical = std::fs::canonicalize(path)
+        .map_err(|_| "not tracked by git (missing from a fresh checkout)".to_string())?;
+    if !canonical.starts_with(&canonical_root) {
+        return Err("resolves outside the checkout root (escaping path or symlink)".to_string());
+    }
+    Ok(canonical)
+}
 
 /// Validates an include target for repository-containment (F4/F10):
 /// rejects absolute-path arguments outright, canonicalizes against the
@@ -1151,24 +1195,28 @@ fn validate_include_target(
         .parent()
         .unwrap_or(referencing_file)
         .join(literal);
-    let canonical_root = std::fs::canonicalize(checkout_root)
-        .map_err(|e| format!("failed to canonicalize checkout root: {e}"))?;
-    let canonical_target = std::fs::canonicalize(&candidate)
-        .map_err(|_| "not tracked by git (missing from a fresh checkout)".to_string())?;
-    if !canonical_target.starts_with(&canonical_root) {
-        return Err("resolves outside the checkout root (escaping path or symlink)".to_string());
-    }
+    let canonical_target = canonicalize_within_checkout(&candidate, checkout_root)?;
     let meta = std::fs::metadata(&canonical_target)
         .map_err(|e| format!("could not stat resolved target: {e}"))?;
     if !meta.is_file() {
         return Err("resolves to a directory, not a readable regular file".to_string());
     }
-    if kind == IncludeKind::Str {
+    // G2: a regular file that exists but cannot actually be READ
+    // (permission denied) must never be counted as "present" — `stat`
+    // alone cannot see that. `include_str!` already reads the whole file
+    // to validate UTF-8, which would incidentally catch this; `include!`
+    // and `include_bytes!` did not, so open (and for `include!`, fully
+    // read — it's re-read as source text right after this returns) every
+    // kind here rather than only the `Str` branch.
+    if kind == IncludeKind::Str || kind == IncludeKind::Include {
         let bytes = std::fs::read(&canonical_target)
             .map_err(|e| format!("could not read resolved target: {e}"))?;
-        if std::str::from_utf8(&bytes).is_err() {
+        if kind == IncludeKind::Str && std::str::from_utf8(&bytes).is_err() {
             return Err("is not valid UTF-8, required by include_str!".to_string());
         }
+    } else {
+        std::fs::File::open(&canonical_target)
+            .map_err(|e| format!("could not read resolved target: {e}"))?;
     }
     Ok(canonical_target)
 }
@@ -1221,12 +1269,21 @@ impl ScanState {
         display_rel(path, &self.worktree_path)
     }
 
-    /// Symlink-aware recursive directory walk (F5): a directory ENTRY that
-    /// is itself a symlink is never recursed into (this alone prevents the
-    /// `src/a -> .`, `src/b -> .` cycle — there is nothing left to
-    /// re-enter), and every `read_dir`/entry/`file_type` error is recorded
-    /// with its path rather than silently skipped (F9).
-    fn scan_dir(&mut self, dir: &Path) {
+    /// Defensive readability probe (F9), independent of the
+    /// metadata-reachable module graph (G3): confirms every `.rs` file
+    /// under `src`/`tests` can actually be read, WITHOUT interpreting its
+    /// content — a `mod`/`include!` reference inside a file no target
+    /// entry point's module graph ever reaches is never compiled by
+    /// cargo, so a missing target there must never fail this check
+    /// (that was G3's bug: the directory walk used to call
+    /// `scan_file_and_follow` on every `.rs` file here, turning dead code
+    /// into a false FAIL). An outright I/O error reading the checkout
+    /// itself — this check's own diagnostic worktree materialization went
+    /// wrong somehow — is a different, always-relevant class of problem
+    /// and is still surfaced here, with the same symlink-skip and
+    /// error-propagation discipline the reachable-graph walk uses
+    /// (F5/F9).
+    fn check_dir_readable(&mut self, dir: &Path) {
         let entries = match std::fs::read_dir(dir) {
             Ok(e) => e,
             Err(e) => {
@@ -1254,9 +1311,18 @@ impl ScanState {
                 continue;
             }
             if file_type.is_dir() {
-                self.scan_dir(&path);
+                self.check_dir_readable(&path);
             } else if path.extension().and_then(|e| e.to_str()) == Some("rs") {
-                self.scan_file_and_follow(&path, false);
+                if let Ok(canonical) = std::fs::canonicalize(&path) {
+                    if self.visited.contains(&canonical) {
+                        // Already read via the metadata-reachable graph
+                        // walk — no need to probe it again.
+                        continue;
+                    }
+                }
+                if let Err(e) = std::fs::read(&path) {
+                    self.errors.push(format!("{}: {e}", self.rel(&path)));
+                }
             }
         }
     }
@@ -1305,15 +1371,30 @@ impl ScanState {
                     }
                 }
             };
-            if resolved.is_file() {
-                self.scan_file_and_follow(&resolved, false);
-            } else {
+            if !resolved.is_file() {
                 self.missing.push(format!(
                     "{} -> {} (mod `{}` not tracked by git)",
                     self.rel(path),
                     self.rel(&resolved),
                     m.name,
                 ));
+                continue;
+            }
+            // G1: `resolved.is_file()` follows symlinks — a `mod`
+            // resolved only through a symlink escaping the checkout root
+            // must be rejected the same way an escaping include! target
+            // already is (F4/F10), not silently followed and scanned as
+            // if it were checked-out content.
+            match canonicalize_within_checkout(&resolved, &self.worktree_path) {
+                Ok(_) => self.scan_file_and_follow(&resolved, false),
+                Err(reason) => {
+                    self.missing.push(format!(
+                        "{} -> {} (mod `{}` {reason})",
+                        self.rel(path),
+                        self.rel(&resolved),
+                        m.name,
+                    ));
+                }
             }
         }
 
