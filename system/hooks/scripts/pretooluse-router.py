@@ -465,6 +465,50 @@ def _window_bounds(sep_positions, text_len, start, end):
     return window_start, window_end
 
 
+# --- Effective-checkout resolution for `unless_cwd` (F4) --------------------
+#
+# `unless_cwd` used to be judged from the hook payload's own `cwd`, blanket
+# skipping the whole rule before the command was even inspected. That let a
+# shell change the EFFECTIVE checkout per invocation -- via the global
+# `-C <path>` option or a preceding `cd <path> &&` -- while the hook's own
+# cwd stayed inside `/worktrees/`, so a stash that actually targeted a
+# shared checkout escaped protection. `_effective_checkout` resolves the
+# real target of ONE invocation instead: a `-C <path>` on the invocation
+# itself wins first (the closest override), then the last `cd <path>` command
+# anywhere EARLIER in the same shell text (a `cd` persists for every
+# subsequent command until superseded, same as real shell state), and only
+# falls back to the hook's payload cwd when neither is present. Returns None
+# -- "uncertain" -- when the target can't be resolved as a literal path (a
+# shell variable, command substitution, or glob) or when `--git-dir=` is
+# present (it decouples the repo location from the working tree, so cwd
+# alone no longer describes the checkout); callers must treat None as "never
+# exempt" so an unresolvable target conservatively keeps protection rather
+# than guessing (a cwd substring alone must never exempt another target).
+_DASH_C_RE = re.compile(r"-C\s+(\S+)")
+_GIT_DIR_RE = re.compile(r"--git-dir=(\S+)")
+_CD_RE = re.compile(r"(?:^|[;&|(){}\n])\s*cd\s+(\S+)")
+
+
+def _looks_like_resolvable_path(token):
+    if not token or token.startswith("-"):
+        return False
+    return not any(c in token for c in ("$", "`", "*", "~"))
+
+
+def _effective_checkout(scan_text, match_start, matched_text, payload_cwd):
+    if _GIT_DIR_RE.search(matched_text):
+        return None
+    c_matches = list(_DASH_C_RE.finditer(matched_text))
+    if c_matches:
+        path = c_matches[-1].group(1)
+        return path if _looks_like_resolvable_path(path) else None
+    cd_matches = list(_CD_RE.finditer(scan_text[:match_start]))
+    if cd_matches:
+        path = cd_matches[-1].group(1)
+        return path if _looks_like_resolvable_path(path) else None
+    return payload_cwd
+
+
 def canonical_text(tool_name, tool_input):
     """Canonical arg text a rule's `match` regex is applied to."""
     if tool_name == "Bash":
@@ -545,15 +589,33 @@ def evaluate(payload):
     for rule in rules:
         if not rule["tool_re"].search(tool_name):
             continue
-        if rule["unless_cwd_re"] is not None and rule["unless_cwd_re"].search(cwd):
-            continue
         all_matches = list(rule["match_re"].finditer(scan_text))
         if not all_matches:
             continue
+
+        unless_cwd_re = rule["unless_cwd_re"]
+
+        def _cwd_exempts(candidate, _unless_cwd_re=unless_cwd_re):
+            # F4: judged per-invocation from the EFFECTIVE checkout (see
+            # `_effective_checkout`), never the blanket hook payload cwd --
+            # an unresolved target never exempts (keeps protection).
+            if _unless_cwd_re is None:
+                return False
+            eff_cwd = _effective_checkout(scan_text, candidate.start(), candidate.group(0), cwd)
+            if eff_cwd is None:
+                return False
+            return bool(_unless_cwd_re.search(eff_cwd))
+
         unless_re = rule["unless_match_re"]
         scope = rule["unless_scope"]
         if unless_re is None:
-            m = all_matches[0]
+            m = None
+            for candidate in all_matches:
+                if not _cwd_exempts(candidate):
+                    m = candidate
+                    break
+            if m is None:
+                continue
         elif scope == "shell":
             # Shell-wide, ORDER-sensitive (G2, review_b round 1): the
             # exemption is checked against the WHOLE text, for every
@@ -570,6 +632,8 @@ def evaluate(payload):
             # check, since that idiom is read AFTER the pipe by design.
             m = None
             for candidate in all_matches:
+                if _cwd_exempts(candidate):
+                    continue
                 exempted = False
                 for um in unless_re.finditer(scan_text):
                     if um.lastgroup == "before" and um.end() > candidate.start():
@@ -592,6 +656,8 @@ def evaluate(payload):
             # subcommand (a `stash push -m stash pop` invocation).
             m = None
             for candidate in all_matches:
+                if _cwd_exempts(candidate):
+                    continue
                 matched_text = candidate.group(0)
                 tail = re.search(r"\w+\Z", matched_text)
                 anchor = candidate.start() + (tail.start() if tail else len(matched_text))
@@ -604,7 +670,7 @@ def evaluate(payload):
             # Default, single occurrence: unchanged whole-text check (some
             # rules rely on a safety marker appearing ANYWHERE in the text,
             # not just next to the match).
-            if unless_re.search(scan_text):
+            if _cwd_exempts(all_matches[0]) or unless_re.search(scan_text):
                 continue
             m = all_matches[0]
         else:
@@ -615,6 +681,8 @@ def evaluate(payload):
             # dangerous sibling.
             m = None
             for candidate in all_matches:
+                if _cwd_exempts(candidate):
+                    continue
                 start, end = _window_bounds(
                     sep_positions, len(scan_text), candidate.start(), candidate.end()
                 )

@@ -199,6 +199,36 @@ RULE_FIXTURES = [
 
 assert len(RULE_FIXTURES) == 14, "expected exactly 14 seed rule fixtures"
 
+# Extra positive/near-miss pairs beyond the one-per-rule seed set above,
+# covering PR #5 round-1 findings F4/F5/F6/F11. Reuse the owning rule's own
+# `id` (the ledger fire is genuinely tagged with that rule) so the
+# ledger-count tally below still adds up: one new ledger line per positive
+# fixture here, zero per near miss, same as the seed set.
+WORKTREE_CWD = os.path.join(HOME_DIR, ".boi/v2/worktrees/Scnfz8k1f/T7w2t3bzf")
+
+EXTRA_FIXTURES = [
+    # F4: unless_cwd must track the EFFECTIVE checkout of the invocation
+    # (via -C / a preceding cd), not just the hook's own payload cwd.
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": "git -C /shared/checkout stash"},
+        cwd=WORKTREE_CWD,
+        near_miss={"command": f"git -C {WORKTREE_CWD} stash"},
+        near_miss_cwd=DEFAULT_CWD,
+    ),
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": "cd /shared/checkout && git stash"},
+        cwd=WORKTREE_CWD,
+        near_miss={"command": f"cd {WORKTREE_CWD} && git stash"},
+        near_miss_cwd=DEFAULT_CWD,
+    ),
+]
+
 
 def run(payload):
     env = dict(os.environ)
@@ -248,13 +278,19 @@ def read_ledger():
     return [l for l in ledger_path.read_text().splitlines() if l.strip()]
 
 
-for fx in RULE_FIXTURES:
+ALL_FIXTURES = [(fx["id"], fx) for fx in RULE_FIXTURES]
+extra_seen = {}
+for fx in EXTRA_FIXTURES:
+    extra_seen[fx["id"]] = extra_seen.get(fx["id"], 0) + 1
+    ALL_FIXTURES.append((f"{fx['id']}-extra{extra_seen[fx['id']]}", fx))
+
+for label, fx in ALL_FIXTURES:
     # Positive fixture: must fire with the rule's declared decision AND must
     # append exactly one ledger line stamped with THIS rule's own id — not
     # merely produce the right decision (which another rule could also
     # produce) and not merely bump a global counter another fire could pad.
     before = read_ledger()
-    proc = run(make_payload(fx["tool_name"], fx["positive"]))
+    proc = run(make_payload(fx["tool_name"], fx["positive"], cwd=fx.get("cwd", DEFAULT_CWD)))
     got = classify(proc)
     decision_ok = got == fx["decision"]
 
@@ -272,7 +308,7 @@ for fx in RULE_FIXTURES:
 
     ok = decision_ok and ledger_ok
     detail = "" if ok else f" (decision_ok={decision_ok} ledger_ok={ledger_ok} new_lines={len(new_lines)})"
-    print(f"{fx['id']} expected={fx['decision']} got={got} {'PASS' if ok else 'FAIL'}{detail}")
+    print(f"{label} expected={fx['decision']} got={got} {'PASS' if ok else 'FAIL'}{detail}")
     if not ok:
         failures += 1
 
@@ -281,16 +317,17 @@ for fx in RULE_FIXTURES:
     before = read_ledger()
     nm_tool = fx.get("near_miss_tool_name", fx["tool_name"])
     nm_input = fx.get("near_miss_input", fx.get("near_miss"))
-    proc = run(make_payload(nm_tool, nm_input))
+    nm_cwd = fx.get("near_miss_cwd", DEFAULT_CWD)
+    proc = run(make_payload(nm_tool, nm_input, cwd=nm_cwd))
     got = classify(proc)
     after = read_ledger()
     ok = got == "abstain" and len(after) == len(before)
-    print(f"{fx['id']}-near-miss expected=abstain got={got} {'PASS' if ok else 'FAIL'}")
+    print(f"{label}-near-miss expected=abstain got={got} {'PASS' if ok else 'FAIL'}")
     if not ok:
         failures += 1
 
 lines = read_ledger()
-expected_count = len(RULE_FIXTURES)
+expected_count = len(ALL_FIXTURES)
 count_ok = len(lines) == expected_count
 print(
     f"ledger-count expected={expected_count} got={len(lines)} "

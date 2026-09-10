@@ -1177,5 +1177,59 @@ class TestSubstitutionMaskingIsRecursive(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestStashExemptionEffectiveCheckout(RouterTestCase):
+    """F4 (arrra/hex PR #5 round 1): `unless_cwd` on git-stash-shared-checkout
+    must track the EFFECTIVE checkout of each invocation, not just the hook's
+    payload cwd. Running from a /worktrees/ cwd must not exempt a stash that
+    actually targets a different (shared) checkout via `-C` or a preceding
+    `cd`; conversely a stash that genuinely resolves to a /worktrees/
+    checkout must still abstain even when the hook's own cwd is not itself a
+    worktree. A cwd substring alone must never exempt another target."""
+
+    WORKTREE_CWD = "/tmp/hex-home/.boi/v2/worktrees/Scnfz8k1f/T7w2t3bzf"
+
+    def test_dash_c_to_shared_checkout_denies_even_from_worktree_cwd(self):
+        cmd = "git -C /shared/checkout stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_cd_to_shared_checkout_denies_even_from_worktree_cwd(self):
+        cmd = "cd /shared/checkout && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_genuine_worktree_local_checkout_still_abstains(self):
+        cmd = f"git -C {self.WORKTREE_CWD} stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=DEFAULT_CWD), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"genuine worktree-local stash must abstain (F4): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_unresolvable_target_keeps_protection(self):
+        cmd = "git -C $SHARED_CHECKOUT stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F4, unresolved target)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
