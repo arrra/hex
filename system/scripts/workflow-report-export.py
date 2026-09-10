@@ -64,21 +64,18 @@ LOG_CAP = 150
 # xox[abps]- Slack tokens, AKIA AWS keys, Bearer headers, pit- tokens,
 # key=/token=/password=/secret= value pairs, and PEM private-key blocks.
 #
-# R1 redo (F2 regression): github_pat_/gh[pousr]_/xox[abps]-/AKIA/pit- and
-# the key|token|password|secret= pairs are anchored with a negative
-# lookbehind so they only match at a genuine token boundary. "sk-" is left
-# unanchored on purpose — legitimate ids in this codebase embed it directly
-# after "_"/"-" with no boundary (e.g. a runId "wf_sk-ant-...", a filename
-# "deploy-sk-ant-..."), so a lookbehind on "-"/"_" would also block those.
-# Instead _redact_one() (see redact()) requires a digit somewhere in the
-# matched "sk-" text before treating it as a credential: every real sk-* key
-# carries a digit (a provider infix like "api03", or random chars), while the
-# ordinary hyphenated prose that used to false-positive here — "task-review-
-# changes-and-summarize" contains "sk-review-..." right after "ta"; "risk-
-# assessment-and-mitigation-plan" contains "sk-assessment-..." right after
-# "ri" — is plain lowercase letters and hyphens with no digit at all.
+# R2 redo (F2 regression, round 2): the digit-heuristic in _redact_one() was
+# not a fix — it still mangled hyphenated prose whose 20+ char tail happens
+# to contain a digit ("desk-lamp-and-chair-inventory-2024") and it opened a
+# hole for real all-letter keys ("sk-live-abcdefghijklmnopqrstuvwxyz"). The
+# correct fix is a lookbehind that requires "sk-" to be preceded by nothing,
+# or by a non-alnum character that is NOT a lowercase letter immediately
+# preceding it — i.e. block only when "sk-" is glued onto another lowercase
+# word ("ta"+"sk-", "ri"+"sk-", "de"+"sk-"). Legitimate ids in this codebase
+# embed "sk-" directly after "_"/"-" ("wf_sk-ant-...", "deploy-sk-ant-..."),
+# which this lookbehind still allows.
 SECRET_RE = re.compile(
-    r"sk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}"
+    r"(?<![A-Za-z0-9])sk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}"
     r"|(?<![A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}"
     r"|(?<![A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{20,}"
     r"|(?<![A-Za-z0-9_-])xox[abps]-[A-Za-z0-9-]{10,}"
@@ -88,8 +85,6 @@ SECRET_RE = re.compile(
     r"|(?<![A-Za-z0-9_])(?:key|token|password|secret)=\S+"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
 )
-
-_HAS_DIGIT_RE = re.compile(r"[0-9]")
 
 # Absolute paths with at least two segments, e.g. /home/x/repo or /home/x/proj/src.
 ABS_PATH_RE = re.compile(r"/[\w][\w.\-]*(?:/[\w][\w.\-]*)+")
@@ -281,13 +276,6 @@ def infer_project(rec: dict, project_map: list[tuple[str, str]]) -> str | None:
 
 
 def _redact_one(m: re.Match) -> str:
-    text = m.group(0)
-    # R1 redo (F2 regression) — the unanchored "sk-" alternative also
-    # matches ordinary hyphenated prose ("task-review-...", "risk-
-    # assessment-..."). Every real sk-* key carries a digit; plain-English
-    # hyphenated phrases don't, so leave those untouched.
-    if text.startswith("sk-") and not _HAS_DIGIT_RE.search(text):
-        return text
     return "[REDACTED]"
 
 

@@ -230,13 +230,37 @@ class RedactionCoverage(unittest.TestCase):
         # — "task-review-changes-and-summarize" contains "sk-review..." right
         # after "ta", and "risk-assessment-and-mitigation-plan" contains
         # "sk-assessment..." right after "ri". Neither is a credential.
+        #
+        # R2 redo regression: the interim "requires a digit" heuristic in
+        # _redact_one() still mangled "desk-lamp-and-chair-inventory-2024" —
+        # its 20+ char tail after "sk-" (from "de"+"sk-lamp-...") contains the
+        # digits in "2024", so the digit check treated it as a credential.
+        # The lookbehind fix blocks on "sk-" being glued to a lowercase
+        # letter, regardless of digits elsewhere in the match.
         warnings: list[str] = []
         for text in [
             "task-review-changes-and-summarize",
             "risk-assessment-and-mitigation-plan",
+            "desk-lamp-and-chair-inventory-2024",
         ]:
             out = self.m.redact(text, warnings, "wf_1")
             self.assertEqual(out, text, f"{text!r} was mangled by redaction")
+
+    def test_all_letter_sk_live_key_without_digits_is_redacted(self):
+        # R2 redo regression: the interim "requires a digit" heuristic left a
+        # coverage hole — a ledger-shaped all-letter key never gets redacted
+        # because it has no digit anywhere. The lookbehind fix has no digit
+        # requirement, so this still redacts.
+        m = load_script()
+        secret = "sk-live-abcdefghijklmnopqrstuvwxyz"
+        rec = {
+            "runId": "wf_allletter1",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": secret,
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(secret, report, "all-letter sk-live- key survived into the report")
 
 
 class HyphenatedWorkflowNamesSurviveRedaction(unittest.TestCase):
@@ -299,7 +323,13 @@ class ResultTruncationOrdering(unittest.TestCase):
         m = load_script()
         secret_tail = "S3CR3TVALUEAAAAAAAAAAAAAAAAAAA"  # >=20 chars after "sk-"
         secret = "sk-" + secret_tail
-        filler = "z" * (m.RESULT_CAP - 10)
+        # R2 redo (F2): SECRET_RE now requires "sk-" not be glued to another
+        # letter/digit (so "task-"/"risk-"/"desk-" prose survives). The filler
+        # must therefore end on a non-alnum separator rather than a bare "z",
+        # or the boundary token would fail to match for the same reason a
+        # real prose word would — unrelated to what this test is checking
+        # (redact-before-truncate ordering at the cap boundary).
+        filler = "z" * (m.RESULT_CAP - 11) + "_"
         rec = {
             "runId": "wf_cap1",
             "workflowName": "wf",
