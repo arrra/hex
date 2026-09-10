@@ -131,6 +131,26 @@ def _expand_placeholders(pattern):
 # expansion, or process substitution. That is sufficient for every rule and
 # fixture in this router; a construct needing more than that is out of scope
 # (spec STOP condition).
+#
+# G2 (review_b round 1): a QUOTED *argument* to an already-real, already-
+# anchored invocation is not inert the way a quoted standalone COMMAND
+# mention is — the shell still passes that exact literal text to the
+# command (quoting only suppresses expansion, it doesn't change the
+# argument). Blanking a quoted span down to pure spaces erased that
+# argument entirely, so a push refspec's quoted leading `+` and a reset's
+# quoted `--hard` abstained even if the shell would still force-push /
+# hard-reset exactly as it would with the flag unquoted. `_mask_literal_span`
+# (below) blanks only the quote delimiters themselves and any
+# `_SEPARATOR_CHARS` character found INSIDE the span — the only characters
+# that could fake a new command boundary (F2's actual concern, e.g. the `;`
+# in a `printf` call whose quoted string mentions a stash invocation) — and
+# leaves ordinary argument content (letters, digits, `+`, `-`, `:`, `~`,
+# ...) visible. A quoted MENTION like an `echo` of "please do not run a
+# stash here" still abstains under this: the protection there has never
+# come from blanking the word "stash" — it comes from the mentioned
+# subcommand not sitting at a valid `@PREFIX@` command-position anchor
+# (`echo`/"please do not run" aren't one of the wrapper keywords `@PREFIX@`
+# skips), independent of whether the letters are visible.
 
 _HEREDOC_START_RE = re.compile(r"<<(-)?\s*(?:'([^'\n]*)'|\"([^\"\n]*)\"|([A-Za-z_][A-Za-z0-9_]*))")
 
@@ -205,6 +225,17 @@ def _skip_double_quoted(text, start):
     return n
 
 
+def _mask_literal_span(text, start, end, result, quote_char):
+    """Blank `text[start:end)` to spaces in `result`, but ONLY the quote
+    delimiter itself (`quote_char`) and any `_SEPARATOR_CHARS` character
+    (G2, review_b round 1) — ordinary argument content stays visible. See
+    the executable-region-scanner comment above for why this is safe."""
+    for k in range(start, end):
+        ch = text[k]
+        if ch == quote_char or (ch in _SEPARATOR_CHARS and ch != "\n"):
+            result[k] = " "
+
+
 def _mask_span_preserving_substitutions(text, start, end, result):
     """Mask text[start:end) to spaces (newlines untouched), except `$(...)`
     and backtick spans, which stay visible because the shell still executes
@@ -247,9 +278,7 @@ def _mask_quotes_recursive(text, start, end, result):
         if ch == "'":
             j = text.find("'", i + 1)
             close = (j + 1) if (j != -1 and j < end) else end
-            for k in range(i, close):
-                if text[k] != "\n":
-                    result[k] = " "
+            _mask_literal_span(text, i, close, result, "'")
             i = close
             continue
         if ch == '"':
@@ -314,7 +343,10 @@ def _mask_double_quoted(text, start, result):
             _mask_quotes_recursive(text, i + 1, body_end, result)
             i = close
             continue
-        if ch != "\n":
+        if ch != "\n" and ch in _SEPARATOR_CHARS:
+            # G2: only a shell-metacharacter gets blanked here -- ordinary
+            # argument content inside the double-quoted span stays visible
+            # (see `_mask_literal_span`/executable-region-scanner comment).
             result[i] = " "
         i += 1
     return n
@@ -368,9 +400,7 @@ def executable_mask(text):
         if ch == "'":
             j = text.find("'", i + 1)
             end = (j + 1) if j != -1 else n
-            for k in range(i, end):
-                if text[k] != "\n":
-                    result[k] = " "
+            _mask_literal_span(text, i, end, result, "'")
             i = end
             continue
         if ch == '"':
@@ -509,29 +539,37 @@ def _looks_like_resolvable_path(token):
 
 def _read_token(text, pos):
     """Read one shell argument token starting at `pos` in the UNMASKED
-    canonical text. Returns None when the token can't be resolved to a
-    literal path: an unterminated quote, a double-quoted value that still
-    contains `$`/backtick (may expand to anything at runtime), or an
-    unquoted token with `$`/backtick/`*`/`~`/a leading `-` (a flag, not a
-    path). A single-quoted value is always literal -- single quotes
-    suppress all shell expansion, so its content is exactly the path."""
+    canonical text. Returns `(value_or_None, end_pos)` -- `end_pos` is the
+    offset just past the token itself (past the closing quote, or past the
+    unquoted run), so callers that need the token's own SPAN (G1, review_b
+    round 1: to check whether a `cd`'s effect is scoped to a subshell that
+    closes, or guarded by a `||`, before a later invocation is reached)
+    don't have to re-parse it. `value` is None when the token can't be
+    resolved to a literal path: an unterminated quote, a double-quoted
+    value that still contains `$`/backtick (may expand to anything at
+    runtime), or an unquoted token with `$`/backtick/`*`/`~`/a leading `-`
+    (a flag, not a path). A single-quoted value is always literal -- single
+    quotes suppress all shell expansion, so its content is exactly the
+    path."""
     n = len(text)
     while pos < n and text[pos] in " \t":
         pos += 1
     if pos < n and text[pos] == "'":
         end = text.find("'", pos + 1)
-        return None if end == -1 else text[pos + 1 : end]
+        if end == -1:
+            return None, n
+        return text[pos + 1 : end], end + 1
     if pos < n and text[pos] == '"':
         end = text.find('"', pos + 1)
         if end == -1:
-            return None
+            return None, n
         value = text[pos + 1 : end]
-        return None if any(c in value for c in ("$", "`")) else value
+        return (None if any(c in value for c in ("$", "`")) else value), end + 1
     start = pos
     while pos < n and text[pos] not in " \t\n;&|)":
         pos += 1
     token = text[start:pos]
-    return token if _looks_like_resolvable_path(token) else None
+    return (token if _looks_like_resolvable_path(token) else None), pos
 
 
 def _resolve_against_cwd(path, payload_cwd):
@@ -544,17 +582,66 @@ def _resolve_against_cwd(path, payload_cwd):
     return os.path.normpath(os.path.join(payload_cwd, path))
 
 
-def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd):
+def _paren_depths(scan_text):
+    """`depths[i]` = net unmatched `(` count over `scan_text[0:i]`, computed
+    ONCE per `evaluate()` call (same pattern as `sep_positions`/F14) rather
+    than re-walked per candidate. Masking already blanks quoted/commented
+    parens to spaces (they aren't real subshells), so only genuine `(...)`
+    subshells and the always-visible `$(...)`/backtick substitutions
+    (themselves real subshells) are counted here. Used by
+    `_effective_checkout` (G1, review_b round 1) to tell whether a `cd`'s
+    own enclosing subshell has already closed by the time a later
+    invocation is reached."""
+    depths = [0] * (len(scan_text) + 1)
+    d = 0
+    for i, ch in enumerate(scan_text):
+        if ch == "(":
+            d += 1
+        elif ch == ")":
+            d -= 1
+        depths[i + 1] = d
+    return depths
+
+
+_OR_GUARD_RE = re.compile(r"[ \t]*\|\|")
+
+
+def _cd_reaches(scan_text, paren_depths, token_start, token_end, target_pos):
+    """A `cd` whose own argument occupies `scan_text[token_start:token_end)`
+    actually changes the cwd by the time `target_pos` is reached only if
+    (G1, review_b round 1): (a) its own enclosing subshell -- if any -- is
+    still open at `target_pos`: `(cd /worktrees/x); <stash invocation>`
+    must not inherit the subshell-local `cd`, because the `)` closes it
+    before the stash ever runs; and (b) it isn't immediately guarded by
+    `||`: `cd /worktrees/x || <stash invocation>` only reaches that
+    right-hand side when the `cd` FAILED, meaning the directory never
+    actually changed. `paren_depths[token_start]` -- not
+    `paren_depths[cd_match.start()]` -- is the depth that governs: it's
+    measured AFTER the leading separator/`(` that opened `cd`'s own
+    enclosing scope has already been counted."""
+    if _OR_GUARD_RE.match(scan_text, token_end):
+        return False
+    enclosing = paren_depths[token_start]
+    return min(paren_depths[token_end : target_pos + 1]) >= enclosing
+
+
+def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd, paren_depths):
     invocation = scan_text[match_start:match_end]
     if _GIT_DIR_LOCATE_RE.search(invocation):
         return None
     c_locates = list(_DASH_C_LOCATE_RE.finditer(invocation))
     if c_locates:
-        value = _read_token(text, match_start + c_locates[-1].end())
+        value, _ = _read_token(text, match_start + c_locates[-1].end())
         return _resolve_against_cwd(value, payload_cwd) if value is not None else None
     cd_locates = list(_CD_LOCATE_RE.finditer(scan_text[:match_start]))
-    if cd_locates:
-        value = _read_token(text, cd_locates[-1].end())
+    for cd_match in reversed(cd_locates):
+        token_start = cd_match.end()
+        value, token_end = _read_token(text, token_start)
+        if not _cd_reaches(scan_text, paren_depths, token_start, token_end, match_start):
+            # G1: this `cd` never actually took effect by match_start (its
+            # subshell closed, or it's guarded by `||`) -- try whatever `cd`
+            # came before it instead of falling straight to payload_cwd.
+            continue
         return _resolve_against_cwd(value, payload_cwd) if value is not None else None
     return payload_cwd
 
@@ -576,11 +663,38 @@ def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd):
 # `done` word boundary (the one that closes it); two or more means an
 # earlier loop's `done` already ended the body before the CLI+sleep pair
 # was found.
-_DONE_WORD_RE = re.compile(r"\bdone\b")
+#
+# G3 (review_b round 1): counting `done` tokens and requiring AT MOST ONE
+# rejects a genuine outer loop that merely CONTAINS a fully-closed nested
+# loop (e.g. `while true; do for i in 1 2; do echo; done; <CLI call>;
+# sleep 5; done` has two `done`s -- one for the inner bounded `for`, one
+# for the outer `while` -- and both are legitimate). What actually
+# distinguishes that from the unrelated-sibling-loops bug this function
+# exists to reject is NESTING: a `do`/`done` depth count starting at 0
+# must return to exactly 0 for the FIRST time only at matched_text's own
+# final loop token. Two sibling loops concatenated (`while A; do...done
+# while B; do...done`) touch depth 0 again in the MIDDLE, after the first
+# closes, before the second even opens -- that mid-span return to 0 is
+# exactly the "crossed into an unrelated loop" case F3/F7 rejects.
+_LOOP_TOKEN_RE = re.compile(r"\b(?:do|done)\b")
 
 
 def _polling_loop_bounded(matched_text):
-    return len(_DONE_WORD_RE.findall(matched_text)) <= 1
+    tokens = list(_LOOP_TOKEN_RE.finditer(matched_text))
+    if not tokens:
+        return False
+    depth = 0
+    last = len(tokens) - 1
+    for i, tok in enumerate(tokens):
+        if tok.group() == "do":
+            depth += 1
+        else:
+            depth -= 1
+            if depth < 0:
+                return False
+            if depth == 0 and i != last:
+                return False
+    return depth == 0
 
 
 def canonical_text(tool_name, tool_input):
@@ -657,6 +771,7 @@ def evaluate(payload):
     # text (file paths/content) isn't Bash syntax, so it is used as-is.
     scan_text = executable_mask(text) if tool_name == "Bash" else text
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
+    paren_depths = _paren_depths(scan_text)
     rules = load_rules()
 
     fires = []
@@ -675,7 +790,7 @@ def evaluate(payload):
             # an unresolved target never exempts (keeps protection).
             if _unless_cwd_re is None:
                 return False
-            eff_cwd = _effective_checkout(text, scan_text, candidate.start(), candidate.end(), cwd)
+            eff_cwd = _effective_checkout(text, scan_text, candidate.start(), candidate.end(), cwd, paren_depths)
             if eff_cwd is None:
                 return False
             return bool(_unless_cwd_re.search(eff_cwd))

@@ -1334,6 +1334,44 @@ class TestStashExemptionEffectiveCheckout(RouterTestCase):
             )
             self.assertEqual(read_ledger(ledger_dir), [])
 
+    def test_subshell_local_cd_does_not_leak_to_a_later_invocation(self):
+        """G1 (review_b round 1): `_effective_checkout` picked up the LAST
+        `cd` anywhere earlier in the text, even one scoped to a `(...)`
+        subshell that already closed. A subshell-local `cd` must not
+        exempt a stash that runs OUTSIDE that subshell, back in the real
+        (shared) checkout."""
+        cmd = "(cd /worktrees/x); git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_or_guarded_cd_does_not_leak_to_its_failure_branch(self):
+        """G1: `cd X || match` only reaches `match` when the `cd` FAILED --
+        meaning the directory never actually changed. The pre-`cd` cwd (the
+        real, shared checkout) must still govern, not the attempted target."""
+        cmd = "cd /worktrees/x || git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_genuine_worktree_local_subshell_still_abstains(self):
+        """G1 near miss: when the `cd` AND the stash both run inside the
+        SAME subshell, the subshell-local checkout genuinely governs the
+        stash too -- must keep abstaining, not over-deny once subshell
+        scoping is enforced."""
+        cmd = "(cd /worktrees/x; git stash)"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"cd and stash inside the same subshell must abstain (G1): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
 
 class TestForceRefspecAsksFirst(RouterTestCase):
     """F5: a leading `+` on any push refspec forces the update, the same as
@@ -1358,6 +1396,28 @@ class TestForceRefspecAsksFirst(RouterTestCase):
                 proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
                 self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F5 near miss)")
                 self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_quoted_leading_plus_refspec_still_asks(self):
+        """G2 (review_b round 1): masking used to blank a quoted argument's
+        content down to pure spaces, so a QUOTED leading `+` was invisible
+        to the rule even though the shell passes that exact literal
+        refspec to the push -- abstained when it should ask."""
+        cmd = "git push origin '+HEAD:main'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G2)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_quoted_non_forcing_refspec_near_miss_abstains(self):
+        """G2 near miss: a quoted but non-forcing refspec must keep
+        abstaining -- unmasking the literal content must not make the
+        destructive-arg scan over-eager."""
+        cmd = "git push origin 'main'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (G2 near miss): {proc.stdout!r}")
+            self.assertEqual(read_ledger(ledger_dir), [])
 
 
 class TestDestructiveArgumentFormsAskFirst(RouterTestCase):
@@ -1407,6 +1467,34 @@ class TestDestructiveArgumentFormsAskFirst(RouterTestCase):
                 proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
                 self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2 near miss)")
                 self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_quoted_destructive_flags_still_ask(self):
+        """G2 (review_b round 1): masking used to blank a quoted flag's
+        content down to pure spaces, erasing it from the option scan -- a
+        quoted `--hard`/`--force` abstained even though the shell still
+        passes that exact literal flag to the command."""
+        cases = (
+            "git reset HEAD~1 '--hard'",
+            "git clean '--force' -d",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G2)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_quoted_literal_text_near_miss_abstains(self):
+        """G2 near miss: a destructive-looking flag spelled out as ordinary
+        quoted TEXT to an unrelated subcommand (not `reset`/`clean`/
+        `checkout`/`branch -D`) must keep abstaining -- unmasking literal
+        argument content must not make the destructive-arg scan cross into
+        an unrelated command's own arguments."""
+        cmd = "git commit -m 'reset --hard would be bad here'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (G2 near miss): {proc.stdout!r}")
+            self.assertEqual(read_ledger(ledger_dir), [])
 
 
 class TestMultilinePollingLoopScope(RouterTestCase):
@@ -1478,6 +1566,21 @@ class TestMultilinePollingLoopScope(RouterTestCase):
             proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
             self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F3 near miss)")
             self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_outer_loop_containing_a_genuine_nested_loop_still_asks(self):
+        """G3 (review_b round 1): `_polling_loop_bounded` rejected any span
+        with more than one `done` token, which also rejects a genuine OUTER
+        polling loop that merely CONTAINS a fully-closed nested bounded
+        loop (two `done`s here, one per loop, both legitimate). Must still
+        ask -- nesting is not the same thing as crossing into an unrelated
+        sibling loop (F3/F7's actual concern, covered by the near miss
+        above)."""
+        cmd = "while true; do\n  for i in 1 2; do\n    echo $i\n  done\n  gh pr checks 123\n  sleep 5\ndone"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
 
 
 if __name__ == "__main__":
