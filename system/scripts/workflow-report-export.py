@@ -36,7 +36,9 @@ basename of the first absolute path found in the run's result. If that also
 finds nothing, the run lands in projects/_unmapped/.
 
 Usage: workflow-report-export.py [--dry-run] [--hex-dir DIR] [--claude-projects DIR]
-Exit 0 on success (summary line on stdout), 1 on any error.
+Exit 0 on success (summary line on stdout), 1 on any error — including an
+unparsable run record (reported on stderr, then the scan continues so the
+readable records still get their reports before the run fails).
 """
 from __future__ import annotations
 
@@ -239,13 +241,14 @@ def main() -> int:
 
     # <claude-projects>/<project-key>/<session-id>/workflows/wf_<id>.json
     records = sorted(glob.glob(os.path.join(a.claude_projects, "*", "*", "workflows", "wf_*.json")))
-    wrote = skipped = unmapped = nonterminal = 0
+    wrote = skipped = unmapped = nonterminal = unreadable = 0
     warnings: list[str] = []
 
     for path in records:
         try:
             rec = json.load(open(path))
-        except Exception as e:  # loud, but keep going
+        except Exception as e:  # loud: counted below and fails the run, but keep scanning the rest
+            unreadable += 1
             warnings.append(f"{path}: unreadable ({e})")
             continue
         status = rec.get("status")
@@ -284,9 +287,15 @@ def main() -> int:
         print(f"workflow-report-export: WARN {w}", file=sys.stderr)
     print(
         f"workflow-report-export: scanned={len(records)} wrote={wrote} skipped_existing={skipped} "
-        f"unmapped={unmapped} nonterminal={nonterminal} warnings={len(warnings)}"
+        f"unmapped={unmapped} nonterminal={nonterminal} unreadable={unreadable} warnings={len(warnings)}"
         + (" (dry-run)" if a.dry_run else "")
     )
+    if unreadable:
+        print(
+            f"workflow-report-export: FATAL {unreadable} record(s) could not be parsed",
+            file=sys.stderr,
+        )
+        return 1
     return 0
 
 
