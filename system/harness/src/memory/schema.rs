@@ -365,12 +365,20 @@ fn rebuild_facts_vec_with_is_live(conn: &Connection) -> Result<()> {
 /// already-migrated database is a no-op, not an error.
 ///
 /// Skips the ALTER/backfill/index/facts_vec-rebuild work entirely once
-/// `schema_version` already records version 5 (PR#9 r1 F4): those steps are
-/// safe to repeat, but every `open_db` call would otherwise re-run three
-/// guarded `ALTER TABLE` attempts and a table scan on every process start for
-/// no effect. A DB whose migration only partially landed (columns present but
-/// no version-5 row, or vice versa) still has no version-5 marker, so it
-/// still retries the full sequence.
+/// `schema_version` already records version 5 (PR#9 r1 F4) AND `facts_vec`
+/// already carries the `is_live` column (PR#9 r2 G1, review_b R1 G1): those
+/// steps are safe to repeat, but every `open_db` call would otherwise re-run
+/// three guarded `ALTER TABLE` attempts and a table scan on every process
+/// start for no effect. The version-5 marker alone is not sufficient — a DB
+/// migrated by the pre-G1 code already has that row but never rebuilt
+/// `facts_vec`, so gating on the marker alone would skip the rebuild
+/// forever and leave `insert_fact_vec`/`knn_facts` broken (`no such column:
+/// is_live`). A DB whose migration only partially landed (columns present
+/// but no version-5 row, or vice versa, or is_live still missing) still
+/// fails one half of this check, so it still retries the full sequence —
+/// `rebuild_facts_vec_with_is_live` and the guarded `ALTER TABLE`s are each
+/// independently idempotent, so re-running the whole function is always
+/// safe.
 pub fn apply_plan3(conn: &Connection) -> Result<()> {
     let already_applied: i64 = conn
         .query_row(
@@ -379,7 +387,10 @@ pub fn apply_plan3(conn: &Connection) -> Result<()> {
             |r| r.get(0),
         )
         .unwrap_or(0);
-    if already_applied > 0 {
+    let facts_vec_has_is_live = conn
+        .prepare("SELECT is_live FROM facts_vec LIMIT 0")
+        .is_ok();
+    if already_applied > 0 && facts_vec_has_is_live {
         return Ok(());
     }
     for (col, ddl) in [
@@ -911,5 +922,93 @@ mod tests {
             is_live_after, 1,
             "second apply_plan3 call must be a no-op, not corrupt is_live"
         );
+    }
+
+    /// RED for review_b R1 G1 (major): a database migrated by the PRIOR
+    /// (pre-G1) code already carries a `schema_version = 5` row — that old
+    /// code's F4 short-circuit wrote the marker without ever giving
+    /// `facts_vec` the `is_live` column, since `is_live` did not exist yet.
+    /// `apply_plan3`'s guard at the top of the function must not trust the
+    /// version-5 marker alone: gating only on `schema_version` makes this
+    /// case skip forever, leaving `facts_vec` in the plain 2-column shape so
+    /// every later `insert_fact_vec`/`knn_facts` call breaks (`no such
+    /// column: is_live`). The guard must also probe `facts_vec` for
+    /// `is_live` and only skip when BOTH hold. Fails now because
+    /// `apply_plan3` returns `Ok(())` immediately on the version-5 row,
+    /// leaving the probe below failing forever.
+    #[test]
+    fn apply_plan3_rebuilds_facts_vec_when_old_v5_marker_lacks_is_live_column() {
+        crate::memory::vector::register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        apply_plan1_baseline_for_test(&conn).unwrap();
+        apply_plan2(&conn).unwrap(); // v4: facts_vec is still (fact_id, embedding)
+
+        // Simulate the OLD pre-G1 migration's end state: bi-temporal columns
+        // present, a version-5 marker already recorded, but facts_vec never
+        // touched.
+        conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT", [])
+            .unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN invalid_at TEXT", [])
+            .unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN superseded_by TEXT", [])
+            .unwrap();
+        conn.execute(
+            "INSERT INTO schema_version (version, applied_at) VALUES (5, datetime('now'))",
+            [],
+        )
+        .unwrap();
+
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+             VALUES ('01HFACT-OLD','project:hex','uses','a live object',0.5,'2026-06-11','2026-06-11','2026-06-11',NULL,NULL)",
+            [],
+        )
+        .unwrap();
+        let embedding: Vec<f32> = (0..crate::memory::vector::EMBED_DIM)
+            .map(|d| d as f32 * 0.001)
+            .collect();
+        conn.execute(
+            "INSERT INTO facts_vec(fact_id, embedding) VALUES (?1, ?2)",
+            rusqlite::params![
+                "01HFACT-OLD",
+                crate::memory::vector::f32s_to_le_bytes(&embedding)
+            ],
+        )
+        .unwrap();
+
+        // Precondition: this is exactly the buggy starting shape — version 5
+        // already recorded, is_live not yet present.
+        let version_before: i64 = conn
+            .query_row("SELECT MAX(version) FROM schema_version", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(version_before, 5);
+        assert!(
+            conn.prepare("SELECT is_live FROM facts_vec LIMIT 0")
+                .is_err(),
+            "test setup must reproduce the old pre-G1 shape: no is_live column yet"
+        );
+
+        apply_plan3(&conn).unwrap();
+
+        let probe = conn.prepare("SELECT is_live FROM facts_vec LIMIT 0");
+        assert!(
+            probe.is_ok(),
+            "apply_plan3 must rebuild facts_vec with is_live even when a stale \
+             version-5 marker is already present, got {:?}",
+            probe.err()
+        );
+        let (stored, is_live): (Vec<u8>, i64) = conn
+            .query_row(
+                "SELECT embedding, is_live FROM facts_vec WHERE fact_id = '01HFACT-OLD'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        assert_eq!(
+            stored,
+            crate::memory::vector::f32s_to_le_bytes(&embedding),
+            "embedding must survive the deferred rebuild unchanged"
+        );
+        assert_eq!(is_live, 1, "live fact must be rebuilt with is_live = 1");
     }
 }
