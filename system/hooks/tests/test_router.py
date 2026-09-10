@@ -786,5 +786,174 @@ class TestUnlessMatchField(RouterTestCase):
             )
 
 
+class TestInvocationLocalStashExemption(RouterTestCase):
+    """F1 (arrra/hex PR #5 round 1): `unless_match` for the stash rule must
+    be decided from the actual stash subcommand of EACH `git stash`
+    invocation, never from arbitrary safe-looking text elsewhere in the
+    canonical text (e.g. an echoed string or a commit message argument)."""
+
+    def test_misleading_safe_text_elsewhere_does_not_suppress_denial(self):
+        cases = (
+            "echo 'stash list'; git stash",
+            "git stash push -m 'stash pop'",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F1)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestShellPrefixNormalization(RouterTestCase):
+    """F3: leading whitespace, `NAME=value` assignment prefixes, and
+    wrappers such as `command` must be skipped before the subcommand is
+    matched; `git`'s global options (e.g. `-C <path>`) must be skipped
+    before the git subcommand is matched."""
+
+    def test_normalized_prefixes_still_trip_git_rules(self):
+        cases = {
+            " git stash": "deny",
+            "FOO=1 git stash": "deny",
+            "command git stash": "deny",
+            "git -C /shared push --force": "ask",
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), expected, cmd)
+
+
+class TestAssignmentPrefixReDoS(RouterTestCase):
+    """F9: `(?:\\S+=\\S*\\s+)*` lets `\\S+` and `\\S*` both absorb `=`
+    characters, so a token like `A=B=C` has more than one way to split
+    across the pattern. When the text never supplies the literal command the
+    rule expects, the regex engine explores every combination — exponential
+    in the number of repeated tokens. Restricting the assignment name to
+    `[A-Za-z_][A-Za-z0-9_]*` (F9's fix) removes the ambiguity."""
+
+    def test_env_repeated_ambiguous_assignments_does_not_hang(self):
+        # Empirically: this exact input makes the current (vulnerable) router
+        # exceed a 5s timeout (measured ~5s+ wall clock before this fix).
+        cmd = "env " + "A=B=C " * 24 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir, timeout=5)
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router hung (>5s) on adversarial env-assignment input — "
+                    "exponential backtracking in the assignment-prefix regex (F9)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "", "not a real git/gh invocation, must abstain")
+
+
+class TestPipefailIsShellWideAcrossPipelines(RouterTestCase):
+    """F10: the pipefail exemption is SHELL-wide for subsequent pipelines in
+    the same command, unlike the stash rule's invocation-local exemption
+    (F1/F3). Once `set -o pipefail` has been set, every later pipeline in
+    the same shell is protected, not just the first one the per-occurrence
+    window happens to cover."""
+
+    def test_multiple_pipelines_after_set_pipefail_abstain(self):
+        cmd = "set -o pipefail; pytest -q | tail -5; npm test | tail -5"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"pipefail must exempt both subsequent pipelines (F10): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestExecutableRegionScanner(RouterTestCase):
+    """F2: single/double-quoted text and QUOTED heredoc bodies are
+    non-executable and must not trip command rules; a real `$(...)`
+    command substitution must still be treated as executable."""
+
+    def test_quoted_text_and_quoted_heredoc_abstain(self):
+        cases = (
+            "printf '%s\\n' 'example; git stash'",
+            "cat <<'EOF2'\ngit stash\nEOF2\n",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"quoted/heredoc text must abstain (F2): {cmd!r} -> {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_command_substitution_still_denies(self):
+        cmd = "x=$(git stash)"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must still deny (F2)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestHeredocBoundToItsDelimiter(RouterTestCase):
+    """F13: heredoc detection must stop at the ACTUAL terminator instead of
+    scanning `[\\s\\S]*` into whatever trailing commands follow it."""
+
+    def test_backtick_after_heredoc_terminator_abstains(self):
+        cmd = "cat <<EOF\nhello\nEOF\nprintf '%s\\n' '`literal`'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                "the backtick text is after the heredoc terminator and is safely "
+                f"single-quoted, not part of the heredoc body (F13): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
+    """F14: `_window_bounds` must not rebuild the full separator list for
+    every candidate occurrence — a large all-exempt command must still
+    finish inside the existing 5s hang ceiling shared with
+    TestLatencySanityCeiling; no tighter wall-clock number is asserted
+    here (that would reintroduce F18)."""
+
+    def test_thousands_of_exempt_stash_list_invocations_stays_under_hang_ceiling(self):
+        # Empirically: 5000 repeats already exceeds a 5s timeout against the
+        # current (quadratic) implementation.
+        cmd = "git stash list; " * 5000
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir, timeout=5)
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on a large all-exempt "
+                    "input — quadratic rescanning in _window_bounds (F14)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+
+class TestPipeTailScopedToTestCommandPipeline(RouterTestCase):
+    """F20: the masked-test-exit prior must only fire when the
+    `| tail/grep/head` pipeline belongs to the test command's OWN pipeline,
+    not an unrelated command chained after it with `;` or `&&`."""
+
+    def test_unrelated_piped_command_after_test_command_abstains(self):
+        cases = (
+            "pytest -q; printf 'finished\\n' | tail -5",
+            "pytest -q && printf 'finished\\n' | tail -5",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"the tail pipeline belongs to printf, not the test command (F20): {cmd!r} -> {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+
 if __name__ == "__main__":
     unittest.main()
