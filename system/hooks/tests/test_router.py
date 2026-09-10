@@ -519,6 +519,19 @@ class TestPipeFilterVariants(RouterTestCase):
                 self.assertIn("additionalContext", json.loads(proc.stdout)["hookSpecificOutput"], cmd)
                 self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "pipe-tail-masks-exit")
 
+    def test_redirect_attached_ampersand_still_fires(self):
+        """F1 (round-2 redo): `2>&1` before the pipe is a stderr-to-stdout
+        redirect, not a `&` separator that should end the "same command"
+        scan — the F20 fix must not regress this to abstain."""
+        cmd = "cargo test 2>&1 | tail -20"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"2>&1 before the pipe must not be treated as a command separator: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "pipe-tail-masks-exit")
+
 
 class TestCombinedOutcomeSemantics(RouterTestCase):
     def test_deny_beats_prior_when_both_match(self):

@@ -70,7 +70,7 @@
   {
     "id": "pipe-tail-masks-exit",
     "tool": "^Bash$",
-    "match": "@PREFIX@(cargo\\s+test|vitest|pnpm\\s+test|npm\\s+test|pytest|python3?\\s+-m\\s+unittest)\\b[^|\\n;&]*\\|\\s*(tail|grep|head)\\b",
+    "match": "@PREFIX@(cargo\\s+test|vitest|pnpm\\s+test|npm\\s+test|pytest|python3?\\s+-m\\s+unittest)\\b(?:[^|\\n;&]|[<>]&|&>)*\\|\\s*(tail|grep|head)\\b",
     "unless_match": "pipefail|PIPESTATUS",
     "unless_scope": "shell",
     "decision": "prior",
