@@ -113,7 +113,7 @@
   {
     "id": "backticks-in-unquoted-heredoc",
     "tool": "^Bash$",
-    "match": "<<-?\\s*([A-Za-z_][A-Za-z0-9_]*)\\s*\\n([\\s\\S]*?`[\\s\\S]*?)\\n\\1(?:\\n|\\Z)",
+    "match": "<<-?\\s*([A-Za-z_][A-Za-z0-9_]*)\\b[^\\n]*\\n(?:[^\\n]*\\n)*?[^\\n]*`[^\\n]*\\n(?:[^\\n]*\\n)*?(?:\\t*\\1(?:\\n|\\Z)|\\Z)",
     "decision": "prior",
     "message": "Unquoted heredoc delimiter with a backtick in the body: the shell executes the backtick text as a command substitution (twice on 2026-09-06 a note was lost this way). Quote the delimiter (<<'EOF') or pass the text via a variable/file, then verify the artifact was written.",
     "source": "me/learnings.md Tooling gotchas 2026-09-06"

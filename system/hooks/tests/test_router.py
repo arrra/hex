@@ -924,6 +924,70 @@ class TestHeredocBoundToItsDelimiter(RouterTestCase):
             )
             self.assertEqual(read_ledger(ledger_dir), [])
 
+    def test_tab_indented_dash_terminator_still_fires(self):
+        """F2 (round-2 redo): `<<-` allows the terminator line to be
+        tab-indented — the canonical use of `<<-`. The rule must not
+        require an EXACT (unindented) terminator line to match."""
+        cmd = "cat <<-EOF\n\t`cmd`\n\tEOF\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"tab-indented <<- terminator must still be recognized: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "backticks-in-unquoted-heredoc")
+
+    def test_missing_terminator_still_fires(self):
+        """F2 (round-2 redo): a heredoc with no terminator at all runs to
+        end of script — the body (and its backtick) must still be caught,
+        not silently ignored because there is no closing delimiter line."""
+        cmd = "cat <<EOF\n`cmd`\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"missing-terminator heredoc body must still be scanned: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "backticks-in-unquoted-heredoc")
+
+    def test_sequential_heredocs_each_bounded_to_own_delimiter(self):
+        """F13 (round-2 redo): two sequential single-quoted heredocs must
+        each stay bounded to their own delimiter — neither body's `git
+        stash` line is executable, so the command abstains."""
+        cmd = "cat <<'A'\ngit stash\nA\ncat <<'B'\ngit stash\nB\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"both heredoc bodies are quoted and non-executable: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_same_line_multiple_heredocs_each_bounded_to_own_delimiter(self):
+        """F13 (round-2 redo): `<<'A' <<'B'` on one line attaches the first
+        body to A and the second to B — both are quoted/non-executable."""
+        cmd = "cat <<'A' <<'B'\ngit stash\nA\ngit stash\nB\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"both heredoc bodies (same-line delimiters) are non-executable: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_command_after_heredoc_terminator_still_denies(self):
+        """F13 (round-2 redo): a real command placed AFTER the heredoc's
+        own terminator is not part of the (quoted, non-executable) body
+        and must still be evaluated normally."""
+        cmd = "cat <<'A'\nhello\nA\ngit stash\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            out = json.loads(proc.stdout)
+            self.assertEqual(
+                out["hookSpecificOutput"].get("permissionDecision"), "deny",
+                f"the trailing `git stash` is a real command outside the heredoc body: {proc.stdout!r}",
+            )
+
 
 class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
     """F14: `_window_bounds` must not rebuild the full separator list for
