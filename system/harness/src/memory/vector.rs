@@ -2,7 +2,7 @@
 //! table, and vector insert / delete / KNN.
 
 use rusqlite::ffi::sqlite3_auto_extension;
-use rusqlite::{params, Connection};
+use rusqlite::{params, Connection, OptionalExtension};
 use sqlite_vec::sqlite3_vec_init;
 use std::os::raw::{c_char, c_int};
 use std::sync::Once;
@@ -95,6 +95,7 @@ pub fn insert_fact_vec(conn: &Connection, fact_id: &str, vec: &[f32]) -> rusqlit
             params![fact_id],
             |r| r.get(0),
         )
+        .optional()?
         .unwrap_or(1);
     conn.execute("DELETE FROM facts_vec WHERE fact_id = ?1", params![fact_id])?;
     conn.execute(
@@ -447,7 +448,7 @@ mod tests {
     /// through the `is_live = 1` filter: it must return an empty result,
     /// not an error, with no window-widening logic left to clamp.
     #[test]
-    fn knn_facts_clamps_overfetch_to_sqlite_vec_k_max() {
+    fn knn_facts_returns_empty_when_every_candidate_up_to_the_vec0_k_cap_is_superseded() {
         register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
@@ -455,9 +456,9 @@ mod tests {
         crate::memory::schema::apply_plan3(&conn).unwrap();
 
         // 4097 superseded facts — one more than sqlite-vec's vec0 KNN LIMIT
-        // cap of 4096, and no live fact at all, so every window widening
-        // step keeps finding 0 eligible hits and must eventually exhaust
-        // against the clamped cap rather than erroring past it.
+        // cap of 4096, and no live fact at all: the is_live = 1 filter
+        // inside the vec0 MATCH itself must exclude every one of them
+        // without erroring past the cap.
         for i in 0..4097 {
             let id = format!("01HFACT-WALL-{i:04}");
             conn.execute(
@@ -477,12 +478,12 @@ mod tests {
 
         assert!(
             hits.is_ok(),
-            "knn_facts must clamp its overfetch window to sqlite-vec's 4096 KNN cap instead of erroring past it, got {:?}",
+            "knn_facts must filter is_live = 0 rows inside the vec0 MATCH itself, up to and past the 4096 KNN cap, without erroring, got {:?}",
             hits
         );
         assert!(
             hits.unwrap().is_empty(),
-            "with no live facts at all, the clamped-exhaustion result must be empty, not partial"
+            "with no live facts at all, the metadata-filtered result must be empty, not partial"
         );
     }
 
@@ -632,6 +633,77 @@ mod tests {
             hits.is_empty(),
             "knn_facts must filter is_live = 0 rows out of the metadata-constrained KNN, got {:?}",
             hits
+        );
+    }
+
+    /// RED for the R1 review redo (`review-redo`, F2 major): `knn_facts`'s
+    /// doc comment says every supersede-not-overwrite writer MUST call
+    /// [`mark_fact_vec_superseded`] in the same transaction as the
+    /// `facts.invalid_at`/`superseded_by` UPDATE, but the helper itself had
+    /// zero coverage — the only path pinning "invalidating a fact flips
+    /// is_live" was the unrelated re-embed path in
+    /// `insert_fact_vec_writes_is_live_from_facts_invalid_at`. Pins the
+    /// actual supersede contract: a live fact is found by `knn_facts`, then
+    /// once its `facts` row is invalidated AND `mark_fact_vec_superseded` is
+    /// called (the exact pairing every real writer must do), `is_live` flips
+    /// to 0 and `knn_facts` excludes it.
+    #[test]
+    fn mark_fact_vec_superseded_flips_is_live_and_excludes_from_knn_facts() {
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
+
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('01HFACT-SUPERSEDE-ME','project:hex','uses','a live object',0.5,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+        let v: Vec<f32> = (0..EMBED_DIM).map(|d| d as f32 * 0.001).collect();
+        insert_fact_vec(&conn, "01HFACT-SUPERSEDE-ME", &v).unwrap();
+
+        let hits = knn_facts(&conn, &v, 1).unwrap();
+        assert!(
+            hits.iter().any(|(rowid, _)| {
+                let id: String = conn
+                    .query_row("SELECT id FROM facts WHERE rowid = ?1", [*rowid], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                id == "01HFACT-SUPERSEDE-ME"
+            }),
+            "the live fact must be found by knn_facts before it is superseded, got {:?}",
+            hits
+        );
+
+        // The pairing every supersede-not-overwrite writer must perform in
+        // the same transaction.
+        conn.execute(
+            "UPDATE facts SET invalid_at = '2026-09-05', superseded_by = '01HFACT-NEW' WHERE id = '01HFACT-SUPERSEDE-ME'",
+            [],
+        )
+        .unwrap();
+        mark_fact_vec_superseded(&conn, "01HFACT-SUPERSEDE-ME").unwrap();
+
+        let is_live: i64 = conn
+            .query_row(
+                "SELECT is_live FROM facts_vec WHERE fact_id = '01HFACT-SUPERSEDE-ME'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            is_live, 0,
+            "mark_fact_vec_superseded must flip is_live to 0"
+        );
+
+        let hits_after = knn_facts(&conn, &v, 1).unwrap();
+        assert!(
+            hits_after.is_empty(),
+            "knn_facts must exclude a fact right after mark_fact_vec_superseded flips its is_live, got {:?}",
+            hits_after
         );
     }
 }

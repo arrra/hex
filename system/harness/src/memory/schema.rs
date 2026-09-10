@@ -290,6 +290,18 @@ CREATE INDEX IF NOT EXISTS facts_live_idx ON facts(subject, predicate) WHERE inv
 /// is_live FROM facts_vec LIMIT 0`, exactly as the task names it), so
 /// re-running never re-buffers or re-derives `is_live` from a possibly-stale
 /// `invalid_at` snapshot.
+///
+/// Runs inside one `BEGIN IMMEDIATE` transaction — same idiom as
+/// `apply_plan2`'s `facts_fts` widening above: the write lock is taken up
+/// front, the is_live probe is RE-CHECKED under that lock (two fresh-process
+/// openers racing this path must have the loser see the winner's finished
+/// table and no-op, not drop it again), and the drop+recreate+reinsert
+/// commits atomically. Without this, a crash or injected error between the
+/// DROP and the last INSERT leaves `facts_vec` with the new is_live shape
+/// (so the guard's probe now passes and skips forever) but only PART of the
+/// original rows — every embedding after the failure point is silently lost
+/// until the weekly backfill re-embeds. On any error the transaction rolls
+/// back to the old, still-complete table and the next open retries.
 fn rebuild_facts_vec_with_is_live(conn: &Connection) -> Result<()> {
     if conn
         .prepare("SELECT is_live FROM facts_vec LIMIT 0")
@@ -297,30 +309,49 @@ fn rebuild_facts_vec_with_is_live(conn: &Connection) -> Result<()> {
     {
         return Ok(());
     }
-    let mut stmt = conn.prepare(
-        "SELECT v.fact_id, v.embedding, (f.invalid_at IS NULL)
-           FROM facts_vec v
-           JOIN facts f ON f.id = v.fact_id",
-    )?;
-    let rows: Vec<(String, Vec<u8>, i64)> = stmt
-        .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
-        .collect::<Result<_>>()?;
-    drop(stmt);
-    conn.execute_batch("DROP TABLE facts_vec;")?;
-    conn.execute_batch(
-        "CREATE VIRTUAL TABLE facts_vec USING vec0(
-            fact_id TEXT PRIMARY KEY,
-            embedding FLOAT[768],
-            is_live BOOLEAN
-        );",
-    )?;
-    for (fact_id, embedding, is_live) in rows {
-        conn.execute(
-            "INSERT INTO facts_vec(fact_id, embedding, is_live) VALUES (?1, ?2, ?3)",
-            (fact_id, embedding, is_live),
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let migrate = || -> Result<()> {
+        if conn
+            .prepare("SELECT is_live FROM facts_vec LIMIT 0")
+            .is_ok()
+        {
+            return Ok(());
+        }
+        let mut stmt = conn.prepare(
+            "SELECT v.fact_id, v.embedding, (f.invalid_at IS NULL)
+               FROM facts_vec v
+               JOIN facts f ON f.id = v.fact_id",
         )?;
+        let rows: Vec<(String, Vec<u8>, i64)> = stmt
+            .query_map([], |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)))?
+            .collect::<Result<_>>()?;
+        drop(stmt);
+        conn.execute_batch("DROP TABLE facts_vec;")?;
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE facts_vec USING vec0(
+                fact_id TEXT PRIMARY KEY,
+                embedding FLOAT[768],
+                is_live BOOLEAN
+            );",
+        )?;
+        for (fact_id, embedding, is_live) in rows {
+            conn.execute(
+                "INSERT INTO facts_vec(fact_id, embedding, is_live) VALUES (?1, ?2, ?3)",
+                (fact_id, embedding, is_live),
+            )?;
+        }
+        Ok(())
+    };
+    match migrate() {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
     }
-    Ok(())
 }
 
 /// Migrate a Plan 2 (schema_version 4) database to Plan 3 (schema_version 5):
@@ -399,6 +430,106 @@ pub fn apply_plan1_baseline_for_test(conn: &Connection) -> Result<()> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// RED for the R1 review redo (`review-redo`, F1 major): without a
+    /// transaction, an error injected partway through the reinsert loop
+    /// (DROP + CREATE already committed, only some rows re-inserted) left
+    /// `facts_vec` in the NEW is_live shape with the remaining rows silently
+    /// dropped — and since the guard's probe now passes, every later
+    /// `apply_plan3` call would skip the rebuild forever, permanently losing
+    /// those embeddings. `rebuild_facts_vec_with_is_live` must wrap the whole
+    /// drop/create/reinsert in one transaction: on error, ROLLBACK must
+    /// restore the OLD 2-column table with every original row intact, so the
+    /// next `open_db` retries the rebuild from a consistent starting point.
+    #[test]
+    fn rebuild_facts_vec_rollback_preserves_old_table_on_reinsert_failure() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization};
+
+        crate::memory::vector::register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        apply_plan1_baseline_for_test(&conn).unwrap();
+        apply_plan2(&conn).unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT", [])
+            .unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN invalid_at TEXT", [])
+            .unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN superseded_by TEXT", [])
+            .unwrap();
+
+        let n = 5;
+        for i in 0..n {
+            let id = format!("f{i}");
+            conn.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from) VALUES (?1,'s','p','o',0.5,'2026-01-01','2026-01-01','2026-01-01')",
+                rusqlite::params![id],
+            ).unwrap();
+            let v: Vec<f32> = (0..crate::memory::vector::EMBED_DIM)
+                .map(|d| (i as f32 + d as f32) * 0.0001)
+                .collect();
+            conn.execute(
+                "INSERT INTO facts_vec(fact_id, embedding) VALUES (?1, ?2)",
+                rusqlite::params![id, crate::memory::vector::f32s_to_le_bytes(&v)],
+            )
+            .unwrap();
+        }
+
+        // Deny the 3rd INSERT into the rebuilt facts_vec — simulates a crash
+        // or error after DROP+CREATE already ran but before every row is
+        // reinserted.
+        let counter = std::sync::Arc::new(std::sync::atomic::AtomicI32::new(0));
+        let c2 = counter.clone();
+        conn.authorizer(Some(move |ctx: AuthContext<'_>| {
+            if let AuthAction::Insert { table_name } = ctx.action {
+                if table_name == "facts_vec" {
+                    let n = c2.fetch_add(1, std::sync::atomic::Ordering::SeqCst) + 1;
+                    if n == 3 {
+                        return Authorization::Deny;
+                    }
+                }
+            }
+            Authorization::Allow
+        }));
+
+        let result = rebuild_facts_vec_with_is_live(&conn);
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+
+        assert!(
+            result.is_err(),
+            "an authorizer-denied reinsert must surface as an Err, not silently succeed"
+        );
+
+        let probe = conn.prepare("SELECT is_live FROM facts_vec LIMIT 0");
+        assert!(
+            probe.is_err(),
+            "rollback must restore the OLD 2-column facts_vec (is_live probe must still fail), not leave the new shape half-built"
+        );
+        let count: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts_vec", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, n as i64,
+            "rollback must preserve every pre-existing facts_vec row, not leave a dropped/partial table"
+        );
+    }
+
+    #[test]
+    fn probe_wrong_length_blob_insert() {
+        crate::memory::vector::register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        apply_plan1_baseline_for_test(&conn).unwrap();
+        apply_plan2(&conn).unwrap();
+        let bad_blob: Vec<u8> = vec![0u8; 8]; // way too short for FLOAT[768]
+        let result = conn.execute(
+            "INSERT INTO facts_vec(fact_id, embedding) VALUES (?1, ?2)",
+            rusqlite::params!["bad-id", bad_blob],
+        );
+        eprintln!("PROBE RESULT: {:?}", result);
+        assert!(
+            result.is_err(),
+            "expected wrong-length blob insert to error, got {:?}",
+            result
+        );
+    }
 
     #[test]
     fn migration_creates_all_plan2_tables() {
@@ -637,8 +768,9 @@ mod tests {
     /// `hex-knn-is-live-metadata-filter-2026-09-10.md` item 1: `facts_vec`
     /// must gain an `is_live BOOLEAN` metadata column as part of reaching
     /// schema version 5 — vec0 tables cannot `ALTER TABLE ADD COLUMN`, so
-    /// this requires the create-`facts_vec_new`/copy/drop/rename sequence
-    /// the decision spells out. Probed exactly as the task names it:
+    /// this requires the buffer/drop/recreate/reinsert sequence
+    /// `rebuild_facts_vec_with_is_live` implements (RENAME is unavailable —
+    /// see that function's doc comment). Probed exactly as the task names it:
     /// `SELECT is_live FROM facts_vec LIMIT 0`. Fails now because
     /// `apply_plan3` never touches `facts_vec` — it is still the plain
     /// `vec0(fact_id, embedding)` shape from `PLAN2_VEC_DDL`.
