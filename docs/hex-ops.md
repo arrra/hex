@@ -439,3 +439,143 @@ The Rust harness call sites build the arg vector via
 `claude-runs.toml` will still work — the built-in profiles apply and runs
 become lean. That IS the intended default; only opt in to re-enabling
 specific functionality, per profile.
+
+---
+
+## `hex upgrade` — instance-repo consistency
+
+### The deployed-but-orphaned blind spot
+
+`hex upgrade` syncs foundation files into the instance's `.hex/` and rebuilds the
+harness binary. Historically it stopped there: the synced source was left
+**uncommitted** in the instance repo. Because `hex upgrade`'s own change detection
+diffs the checked-out `.hex/` tree against the source, an already-synced but
+uncommitted deploy reads as "nothing changed" — so a live, running deploy can sit
+orphaned in git for days while every subsequent upgrade reports success and does
+nothing. One instance ran a deployed-but-uncommitted sync for nine days this way.
+
+### The fix: an automatic post-upgrade commit
+
+After a **successful** sync AND rebuild, `hex upgrade` now commits the synced
+tracked files so the repo reflects the deployed version (`commit_synced_files` in
+`system/harness/src/upgrade.rs`). Properties:
+
+- **Scoped to `.hex/`.** Only tracked changes under `.hex/` are staged
+  (`git add -u -- .hex`). The operator's unrelated tracked work — `todo.md`,
+  `me/`, `projects/`, `landings/` — is never swept into the upgrade commit.
+- **Tracked-only.** New, untracked files are deliberately NOT added, so runtime
+  state under `.hex/` (the per-run `.upgrade-backup-*` snapshot, `.hex/iii/data`,
+  worker `node_modules`, `memory.db`) never lands in a bookkeeping commit.
+- **Named by version.** The commit subject is
+  `chore(hex): sync harness files to v<version>`, reading the version from
+  `.hex/version.txt`.
+- **Clean tree is a no-op.** If nothing under `.hex/` changed, the step prints
+  "already consistent" and makes no commit — never an error.
+- **Own repo only.** The commit is gated on the workspace being the top level of
+  its OWN git work tree (`git rev-parse --show-toplevel` must equal `$HEX_DIR`), so
+  a workspace nested inside some parent repo is never polluted. A workspace that is
+  not a git repo at all is skipped with a visible note.
+- **Fails loudly.** If the commit cannot be made in a repo where it should have
+  succeeded, `hex upgrade` prints a `[FAIL]` to stderr stating the deploy is live
+  but unrecorded in git, prints the exact manual `git` fix, and exits nonzero
+  (Standing Order S6: no quiet failures). It is never a silent skip.
+- **Cannot hang.** The commit runs with `commit.gpgsign=false` and `--no-verify`
+  so an unattended upgrade can never block on a GPG passphrase or a pre-commit
+  hook prompt.
+- **Mid-merge/rebase caveat.** The commit is pathspec-scoped (`--only -- .hex`),
+  which git refuses during an in-progress merge or rebase ("cannot do a partial
+  commit during a merge"). If you run `hex upgrade` while the instance repo is
+  mid-merge/rebase, the post-upgrade commit fails loudly and exits nonzero — the
+  deploy is live, the tree is fine. Finish or abort the merge/rebase and run the
+  printed manual `git` fix (or re-run `hex upgrade`) to record the synced files.
+
+### Known limitation: instance-side gitignore shadowing of new harness source
+
+An instance `.gitignore` commonly carries a blanket ignore rule for
+`.hex/harness/src/` (and, in some instances, all of `.hex/`). When a foundation
+upgrade introduces **new** harness source files under a shadowed path, `git add`
+will not stage them — they are invisible to the tracked-only commit above and stay
+orphaned even though the deploy is live. This is a genuine gap the automatic commit
+cannot close on its own, because un-ignoring runtime state indiscriminately would
+sweep backups and databases into history.
+
+**Recommended policy:**
+
+- Keep the blanket ignore narrow. Ignore runtime state precisely
+  (`.hex/iii/data/`, `.hex/*.db`, `.hex/.upgrade-backup-*`, worker `node_modules`),
+  not an entire subtree that also contains synced source.
+- If `.hex/harness/src/` (or a broader `.hex/` subtree) must stay ignored, add a
+  negation for the synced source you want tracked, e.g. an allow rule that
+  re-includes `.hex/harness/src/` while the surrounding ignore stands, so new
+  source files become trackable and the post-upgrade commit can pick them up.
+- After an upgrade that adds new files, verify with
+  `git -C "$HEX_DIR" status --porcelain --ignored -- .hex` that no synced source
+  is sitting in the ignored set; if it is, adjust the ignore rule and commit the
+  files by hand.
+- Treat a first upgrade to a new version as the moment to reconcile the ignore
+  rules — new source files ship with minor/major bumps, not patch syncs.
+
+## Repo leak guards (`.githooks/pre-commit` + sanitize)
+
+Two leak classes must never reach a public branch: absolute **private home
+paths** (`/Users/<letter>...`, excluding the `/Users/test` fixture) and **build
+artifacts** (a worker tree-preservation commit once swept ~1230 cargo artifact
+files carrying ~6000 private path strings toward a public branch; caught by
+review pre-push, 2026-09-04). There are now two mechanical lines of defense.
+
+### The committed pre-commit hook
+
+`.githooks/pre-commit` is a committed hook (not a per-clone `.git/hooks/` file)
+with three independent guards; it runs all three and reports every failure at
+once, ending in an explicit `exit 0` so a no-match `grep` never rejects a clean
+commit under `pipefail`:
+
+1. **Legacy-rename guard** (pre-existing) — blocks renaming a script to
+   `.legacy.{sh,py}` while Rust callers under `system/harness/src/` still
+   reference it.
+2. **Private-path guard** — rejects staged **added** lines containing an
+   absolute `/Users/<letter>` path. The single allowance is `/Users/test`
+   (followed by `/` or end-of-token), mirroring the sanitize gate's boundary.
+3. **Artifact-deny-set guard** — rejects any staged path matching the deny set:
+   any `target*/` directory, `node_modules/`, `*.rlib`, `*.rmeta`, `*.o`,
+   `.DS_Store`.
+
+Operational note: the guard inspects staged **added** lines only, and the sole
+allowance is `/Users/test`. This repo's own test fixtures use other fake
+`/Users/<name>` paths tagged `personalization-audit`; re-staging those exact
+lines would trip guard 2. That is a deliberate, spec-faithful tradeoff —
+a second unspecified allowance would be a silent-skip channel (Standing Order
+S6). In practice you rarely re-stage those fixture lines; when you do, the
+sanitize gate already tolerates them and this guard's message names the path.
+
+### Wiring: `core.hooksPath`
+
+A committed hook only fires when git is told to look in `.githooks/`:
+
+- **`hex upgrade`** wires it automatically. `configure_hooks_path()` sets
+  `git config core.hooksPath .githooks` in any workspace that is its own git
+  top-level and carries `.githooks/`. It is idempotent (no-op when already set)
+  and loud-but-non-fatal on failure — a missing hooks wiring never blocks a
+  version sync.
+- **`hex doctor`** carries the standing backstop `git-hookspath` check: it
+  **skips** when the repo has no `.githooks/`, **passes** when `core.hooksPath`
+  points at `.githooks`, and **warns** when `.githooks/` is present but
+  `core.hooksPath` is unset or points elsewhere (the committed hook would be
+  dead code).
+- **Fresh clones** of the foundation repo have no `hex upgrade` step; run
+  `git config core.hooksPath .githooks` once (or `hex doctor` will warn until
+  you do). Note: the initial install path (`install.sh`) lives at the repo root,
+  outside this change's allowed scope, so clone-time wiring is via `hex doctor`
+  + the manual one-liner rather than the installer.
+
+### Release-time backstop: `sanitize`
+
+`system/harness/src/sanitize.rs`'s `scan()` is the last line at release time. It
+already flagged the `/Users/` leak class; it now also carries an
+**artifact-detection** category. That category keys on the **git index**
+(`git ls-files`), not a filesystem walk — the tree gitignores `target/` and uses
+out-of-repo `CARGO_TARGET_DIR` plus per-worktree `target-cq` dirs, so a raw walk
+would false-positive on gitignored build dirs. A non-git tree has no tracked
+paths (zero artifacts, correct); a genuine `git` failure is surfaced loudly. So
+`sanitize` catches a deny-set artifact that slips past the hook (e.g. committed
+before the hook was wired) before it can ship in a release.
