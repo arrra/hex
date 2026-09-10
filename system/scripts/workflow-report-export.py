@@ -269,6 +269,26 @@ def _extract_repo_path(text: str) -> str | None:
     return None
 
 
+# review_b G1 — a `result` dict can carry a path-shaped string in an
+# unrelated field (e.g. "summary") that sits earlier in the JSON dump than
+# the field that actually identifies the repo. These are checked, in order,
+# before falling back to a free-text scan of the whole blob.
+_STRUCTURED_PATH_KEYS = ("repo", "repoPath", "repository", "repoDir", "path", "cwd", "workdir", "directory")
+
+
+def _structured_repo_path(result: object) -> str | None:
+    """An explicit repo/path field from a structured `result` dict, if any."""
+    if not isinstance(result, dict):
+        return None
+    for key in _STRUCTURED_PATH_KEYS:
+        value = result.get(key)
+        if isinstance(value, str) and value.strip():
+            found = _extract_repo_path(value)
+            if found:
+                return found
+    return None
+
+
 def infer_project(rec: dict, project_map: list[tuple[str, str]]) -> str | None:
     blob = " ".join(
         [
@@ -284,8 +304,10 @@ def infer_project(rec: dict, project_map: list[tuple[str, str]]) -> str | None:
         if counts:
             counts.sort(key=lambda c: (-c[0], c[1]))
             return counts[0][2]
-    result_blob = json.dumps(rec.get("result"), ensure_ascii=False)
-    found = _extract_repo_path(result_blob)
+    result = rec.get("result")
+    found = _structured_repo_path(result)
+    if not found:
+        found = _extract_repo_path(json.dumps(result, ensure_ascii=False))
     if found:
         return repo_dir_basename(found)
     return None

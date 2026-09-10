@@ -505,6 +505,22 @@ class PathExtractionEdgeCases(unittest.TestCase):
         rec = {"result": "/Users/Jane Doe Smith/acme-repo/src/main.py"}
         self.assertNotEqual(m.infer_project(rec, []), "Jane")
 
+    def test_structured_repo_field_wins_over_unrelated_path_in_free_text(self):
+        # review_b G1 (round 2): a `result` dict can carry a path-shaped
+        # string in an unrelated field (e.g. "summary") that happens to sit
+        # earlier in the JSON dump than the actual structured "repo" field.
+        # Scanning the whole blob as free text picks whichever path comes
+        # first in the dump, not the one the record actually identifies as
+        # the repo. The structured field must be inspected first.
+        m = load_script()
+        rec = {
+            "result": {
+                "summary": "see /tmp/wrong-repo/src/main.py for context",
+                "repo": "/tmp/right-repo/src/main.py",
+            }
+        }
+        self.assertEqual(m.infer_project(rec, []), "right-repo")
+
 
 class RepoRootInference(unittest.TestCase):
     """F8 / F15 — only strip a confirmed trailing file component (parent
