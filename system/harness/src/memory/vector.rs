@@ -145,23 +145,38 @@ pub fn knn(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(
 /// query: limiting to `k` inside the subquery FIRST would truncate the
 /// candidate window before stale vectors are filtered out, letting them
 /// consume slots a live fact should have won.
+///
+/// A fixed overfetch window can still be exhausted by a wall of superseded
+/// neighbors nearer than every eligible one (PR#9 r1 F2): if the join-filtered
+/// result has fewer than `k` hits and the window hasn't already covered every
+/// candidate in `facts_vec`, the window is widened and the query re-run —
+/// repeating until either `k` eligible hits are found or the candidate set is
+/// exhausted.
 pub fn knn_facts(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(i64, f64)>> {
-    let overfetch = k.saturating_mul(4).max(k + 16);
-    let mut stmt = conn.prepare(
-        "SELECT f.rowid, v.distance
-           FROM (SELECT fact_id, distance FROM facts_vec
-                  WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2) v
-           JOIN facts f ON f.id = v.fact_id
-          WHERE f.tombstone = 0 AND f.invalid_at IS NULL
-          ORDER BY v.distance
-          LIMIT ?3",
-    )?;
-    let rows = stmt.query_map(
-        params![f32s_to_le_bytes(query), overfetch as i64, k as i64],
-        |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)),
-    )?;
-    let hits: Vec<(i64, f64)> = rows.collect::<rusqlite::Result<_>>()?;
-    Ok(filter_by_distance(hits, max_distance()))
+    let total: i64 = conn.query_row("SELECT COUNT(*) FROM facts_vec", [], |r| r.get(0))?;
+    let total = total.max(0) as usize;
+    let mut overfetch = k.saturating_mul(4).max(k + 16);
+    loop {
+        let window = overfetch.min(total);
+        let mut stmt = conn.prepare(
+            "SELECT f.rowid, v.distance
+               FROM (SELECT fact_id, distance FROM facts_vec
+                      WHERE embedding MATCH ?1 ORDER BY distance LIMIT ?2) v
+               JOIN facts f ON f.id = v.fact_id
+              WHERE f.tombstone = 0 AND f.invalid_at IS NULL
+              ORDER BY v.distance
+              LIMIT ?3",
+        )?;
+        let rows = stmt.query_map(
+            params![f32s_to_le_bytes(query), window as i64, k as i64],
+            |r| Ok((r.get::<_, i64>(0)?, r.get::<_, f64>(1)?)),
+        )?;
+        let hits: Vec<(i64, f64)> = rows.collect::<rusqlite::Result<_>>()?;
+        if hits.len() >= k || window >= total {
+            return Ok(filter_by_distance(hits, max_distance()));
+        }
+        overfetch = overfetch.saturating_mul(4).max(overfetch + 16);
+    }
 }
 
 #[cfg(test)]
@@ -326,6 +341,66 @@ mod tests {
         assert!(
             hits.is_empty(),
             "superseded fact must be excluded from the KNN join, got {:?}",
+            hits
+        );
+    }
+
+    /// RED for PR#9 r1 F2 (major): the live-row filter in `knn_facts` runs
+    /// AFTER the inner vec0 KNN subquery's overfetch `LIMIT`. For `k = 1`
+    /// the overfetch window is 17 (`k.saturating_mul(4).max(k + 16)`); if 20
+    /// superseded facts all rank nearer to the query than the single
+    /// eligible live fact, that live fact never enters the subquery's
+    /// candidate window and is silently dropped, even though it is the
+    /// only real answer.
+    #[test]
+    fn knn_facts_returns_live_neighbor_behind_a_wall_of_superseded_ones() {
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
+
+        // 20 superseded facts, each strictly nearer to the query than the
+        // live fact below — more than the k=1 overfetch window of 17.
+        for i in 0..20 {
+            let id = format!("01HFACT-STALE-{i:02}");
+            conn.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+                 VALUES (?1,'project:hex','uses','stale object',0.5,'2026-06-11','2026-06-11','2026-06-11','2026-09-05','01HFACT-NEW')",
+                params![id],
+            )
+            .unwrap();
+            let v: Vec<f32> = (0..EMBED_DIM)
+                .map(|d| (i as f32 + d as f32) * 0.0001)
+                .collect();
+            insert_fact_vec(&conn, &id, &v).unwrap();
+        }
+
+        // The one live, eligible fact — farther from the query than all 20
+        // stale facts above, so it ranks 21st by distance.
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('01HFACT-LIVE','project:hex','uses','live object',0.5,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+        let live_v: Vec<f32> = (0..EMBED_DIM).map(|d| (20.0 + d as f32) * 0.0001).collect();
+        insert_fact_vec(&conn, "01HFACT-LIVE", &live_v).unwrap();
+
+        let query: Vec<f32> = (0..EMBED_DIM).map(|d| d as f32 * 0.0001).collect();
+        let hits = knn_facts(&conn, &query, 1).unwrap();
+
+        let found_live = hits.iter().any(|(rowid, _)| {
+            let id: String = conn
+                .query_row("SELECT id FROM facts WHERE rowid = ?1", [*rowid], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            id == "01HFACT-LIVE"
+        });
+        assert!(
+            found_live,
+            "the live fact must be returned even though 20 superseded facts (more than the k=1 overfetch window of 17) rank nearer — got {:?}",
             hits
         );
     }
