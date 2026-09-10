@@ -114,7 +114,7 @@ impl Drop for WorktreeGuard {
 /// `--offline`, a blocking checkout filter — can never hang an ordinary
 /// health check. stdout/stderr are drained on background threads so a
 /// chatty child can't deadlock on a full pipe buffer while we poll.
-fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<Output, String> {
+pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<Output, String> {
     let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
