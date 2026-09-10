@@ -31,8 +31,11 @@ as an ordered list of substring-to-project rules:
 Rules are checked in order against the run's result JSON, script source, and
 workflow name (case-insensitive substring search). The rule with the most
 hits wins; ties go to the earliest rule in the file. If the mapping file is
-absent, or present but nothing matches, the project is inferred as the
-basename of the first absolute path found in the run's result. If that also
+absent, or present but nothing matches, the project is inferred from the
+first absolute path found in the run's result, resolved to its containing
+repository (on-disk `.git`, a `<host>/<owner>/<repo>` clone layout, or the
+path with trailing file / src-style directories stripped) and then its
+basename. If that also
 finds nothing, the run lands in projects/_unmapped/.
 
 Usage: workflow-report-export.py [--dry-run] [--hex-dir DIR] [--claude-projects DIR]
@@ -67,14 +70,55 @@ ABS_PATH_RE = re.compile(r"/[\w][\w.\-]*(?:/[\w][\w.\-]*)+")
 FILE_EXT_RE = re.compile(r"\.[A-Za-z0-9]{1,5}$")
 
 
-def repo_dir_basename(path: str) -> str | None:
-    """Drop trailing file-looking segments so a file path resolves to its repo dir."""
-    parts = path.rstrip("/").split("/")
+# Directories that are never a repository root themselves — stripped from the
+# tail of a path when no on-disk `.git` can be found (spec-review finding G2:
+# `/tmp/acme-repo/src/main.py` must resolve to `acme-repo`, not `src`).
+NON_REPO_DIRS = frozenset(
+    {
+        "src", "lib", "libs", "tests", "test", "app", "apps", "packages", "pkg",
+        "scripts", "docs", "bin", "dist", "build", "target", "node_modules",
+        "system", "cmd", "internal", "modules", "components", "public",
+    }
+)
+CLONE_HOSTS = ("github.com", "gitlab.com", "bitbucket.org")
+
+
+def repo_root_of(path: str) -> str | None:
+    """Resolve an absolute path to its containing repository root.
+
+    1. On disk: the nearest ancestor that contains `.git` (dir or worktree file).
+    2. Clone layout `<host>/<owner>/<repo>/...` (e.g. ~/github.com/acme/widgets/src).
+    3. Otherwise strip a trailing file segment, then well-known non-repo
+       directories, and take what is left — never the immediate parent of a
+       file blindly.
+    """
+    p = path.rstrip("/")
+    cur = p
+    while cur and cur != "/":
+        marker = os.path.join(cur, ".git")
+        if os.path.isdir(marker) or os.path.isfile(marker):
+            return cur
+        cur = os.path.dirname(cur)
+    parts = p.split("/")
+    for i, seg in enumerate(parts):
+        if seg in CLONE_HOSTS and len(parts) > i + 2:
+            return "/".join(parts[: i + 3])
     while len(parts) > 2 and FILE_EXT_RE.search(parts[-1]):
+        parts.pop()
+    while len(parts) > 2 and parts[-1] in NON_REPO_DIRS:
         parts.pop()
     if len(parts) < 2:
         return None
-    return parts[-1] or None
+    return "/".join(parts)
+
+
+def repo_dir_basename(path: str) -> str | None:
+    """Basename of the repository that contains `path` (see repo_root_of)."""
+    root = repo_root_of(path)
+    if not root:
+        return None
+    return os.path.basename(root) or None
+
 
 MAPPING_FILE_HELP = """
 Project mapping (optional):
