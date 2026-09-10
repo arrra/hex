@@ -519,7 +519,9 @@ def main() -> int:
     warnings: list[str] = []
 
     if source_root_missing:
-        warnings.append(f"--claude-projects root does not exist: {claude_projects}")
+        # G1 (review_b) — an explicitly-supplied --claude-projects value is
+        # attacker/user-controlled text; redact it like any other diagnostic.
+        warnings.append(f"--claude-projects root does not exist: {redact(claude_projects)}")
 
     for path in records:
         # F2 — the on-disk record path can itself embed a credential-shaped
@@ -540,7 +542,10 @@ def main() -> int:
         invalid_reason = validate_record(rec)
         if invalid_reason:
             invalid += 1
-            fallback_id = os.path.basename(path).removesuffix(".json")
+            # G1 (review_b) — the harness names wf_*.json after runId, so an
+            # unvalidated record's filename can itself be credential-shaped;
+            # redact the fallback id before it goes into a diagnostic.
+            fallback_id = redact(os.path.basename(path).removesuffix(".json"))
             warnings.append(f"{fallback_id}: invalid record ({invalid_reason}) -> skipped")
             continue
 

@@ -315,6 +315,36 @@ class DestinationAndDiagnosticRedaction(unittest.TestCase):
             all_names = "\n".join(str(p) for p in Path(hex_dir).rglob("*"))
             self.assertNotIn(secret, all_names, "secret leaked into a destination path")
 
+    def test_invalid_record_fallback_id_redacts_credential_shaped_filename(self):
+        # review_b G1: the invalid-record warning path builds `fallback_id`
+        # straight from the on-disk filename (which the harness names after
+        # runId) without ever passing it through redact().
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            secret = "sk-ant-" + "B" * 30
+            wf_dir = os.path.join(projects, "-Users-x-hex", "sess1", "workflows")
+            os.makedirs(wf_dir)
+            Path(wf_dir, f"wf_{secret}.json").write_text("null")
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 1, err)
+            self.assertIn("invalid record", err)
+            self.assertNotIn(secret, err, "credential-shaped filename leaked into the invalid-record warning")
+
+    def test_missing_explicit_root_warning_redacts_credential_shaped_path(self):
+        # review_b G1: the missing-root warning interpolates the raw
+        # --claude-projects value without redact().
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            os.makedirs(hex_dir)
+            secret = "sk-ant-" + "C" * 30
+            missing_root = os.path.join(td, f"{secret}-claude-projects")
+            rc, out, err = _run_export(hex_dir, missing_root)
+            self.assertEqual(rc, 1, err)
+            self.assertIn("does not exist", err)
+            self.assertNotIn(secret, err, "credential-shaped root path leaked into the missing-root warning")
+
 
 class ResultTruncationOrdering(unittest.TestCase):
     """F3 — the full rendered result must be redacted before RESULT_CAP truncation."""
