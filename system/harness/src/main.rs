@@ -2871,6 +2871,49 @@ fn hitl_send_digest(
     }
 }
 
+/// The `HitlCommands::Nudge` arm's actual body, factored out so tests can
+/// drive it directly with an injected clock instead of hand-reenacting the
+/// gate logic (G1, arrra/hex PR #11 review round 1B). `local_hour`/`local_day`
+/// must come from the same localized moment (see `hitl_local_hour_and_day`)
+/// so the digest dedup lookup and record agree, as `run_hitl` already
+/// arranges for its real callers.
+fn hitl_run_nudge(
+    hex_dir: &std::path::Path,
+    now: chrono::DateTime<chrono::Utc>,
+    local_hour: u32,
+    local_day: &str,
+) -> i32 {
+    use hex::hitl::store;
+
+    if let Err(e) = hitl_process_pings(hex_dir, now, local_hour, local_day, None) {
+        eprintln!("hex hitl nudge: {e}");
+        return 1;
+    }
+    let cfg = match store::load_config(hex_dir) {
+        Ok(c) => c,
+        Err(e) => {
+            eprintln!("hex hitl nudge: {e}");
+            return 1;
+        }
+    };
+    if hitl_digest_due(
+        local_hour,
+        cfg.digest_hour,
+        hitl_digest_sent(hex_dir, local_day),
+    ) {
+        match hitl_send_digest(hex_dir, now, local_day) {
+            Ok(Some(n)) => println!("hitl nudge: digest sent ({n} open)"),
+            Ok(None) => {}
+            Err(e) => {
+                eprintln!("hex hitl nudge: digest failed: {e}");
+                return 1;
+            }
+        }
+    }
+    println!("hitl nudge: done");
+    0
+}
+
 fn hitl_close(
     hex_dir: &std::path::Path,
     id: u64,
@@ -3064,35 +3107,7 @@ fn run_hitl(command: HitlCommands) -> i32 {
                 }
             }
         }
-        HitlCommands::Nudge => {
-            if let Err(e) = hitl_process_pings(&hex_dir, now, local_hour, &local_day, None) {
-                eprintln!("hex hitl nudge: {e}");
-                return 1;
-            }
-            let cfg = match store::load_config(&hex_dir) {
-                Ok(c) => c,
-                Err(e) => {
-                    eprintln!("hex hitl nudge: {e}");
-                    return 1;
-                }
-            };
-            if hitl_digest_due(
-                local_hour,
-                cfg.digest_hour,
-                hitl_digest_sent(&hex_dir, &local_day),
-            ) {
-                match hitl_send_digest(&hex_dir, now, &local_day) {
-                    Ok(Some(n)) => println!("hitl nudge: digest sent ({n} open)"),
-                    Ok(None) => {}
-                    Err(e) => {
-                        eprintln!("hex hitl nudge: digest failed: {e}");
-                        return 1;
-                    }
-                }
-            }
-            println!("hitl nudge: done");
-            0
-        }
+        HitlCommands::Nudge => hitl_run_nudge(&hex_dir, now, local_hour, &local_day),
         HitlCommands::Digest => match hitl_send_digest(&hex_dir, now, &local_day) {
             Ok(Some(n)) => {
                 println!("hitl digest: sent ({n} open)");
@@ -3792,6 +3807,68 @@ mod tests {
                 !hitl_digest_sent(tmp.path(), &utc_day),
                 "no digest-sent marker should exist under the UTC day -- \
                  only the local day key was ever written"
+            );
+        }
+
+        // G1 (round-1B review, operator guidance 2026-09-10): the prior
+        // regression tests call `hitl_digest_due`/`hitl_send_digest`
+        // directly, hand-reenacting the `Nudge` arm's gate logic inside the
+        // test itself. That leaves the actual production wiring in
+        // `run_hitl`'s `HitlCommands::Nudge` arm unverified -- if a future
+        // edit reverted the arm to a UTC-derived day, dropped the
+        // `hitl_digest_due` gate, or called `hitl_send_digest`
+        // unconditionally, every existing test would still pass. This test
+        // drives the digest THROUGH `hitl_run_nudge` -- the function
+        // `run_hitl`'s `Nudge` arm calls, taking `now`/`local_hour`/
+        // `local_day` as its injected-time seam -- at local 09:00 and local
+        // 09:30 in a UTC+09:30 zone with digest_hour=9 (spanning UTC
+        // midnight), and counts the ACTUAL digest sends recorded in
+        // log.jsonl (every `transport::send` attempt is logged, sent or
+        // fallback -- see hitl/transport.rs) rather than re-deriving the
+        // gate decision by hand.
+        #[test]
+        fn nudge_command_sends_exactly_one_digest_across_two_calls_spanning_utc_midnight() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _env = HexDirEnvGuard::set(tmp.path());
+            let offset = chrono::FixedOffset::east_opt(9 * 3600 + 30 * 60).unwrap();
+            let digest_hour = 9;
+            let cfg = store::Config {
+                digest_hour,
+                ..store::Config::default()
+            };
+            store::save_config(tmp.path(), &cfg).expect("save config");
+            // One open item so `compose_digest` has something to send --
+            // otherwise no send is attempted either way and the test proves
+            // nothing.
+            seed_due_p1(tmp.path(), ts("2026-07-01T00:00:00Z"));
+
+            // First call: local 2026-07-10T09:00:00+09:30 (UTC
+            // 2026-07-09T23:30:00Z).
+            let now_0900 = ts("2026-07-09T23:30:00Z");
+            let (hour1, day1) = hitl_local_hour_and_day(now_0900.with_timezone(&offset));
+            let rc1 = hitl_run_nudge(tmp.path(), now_0900, hour1, &day1);
+            assert_eq!(rc1, 0, "first nudge must succeed");
+
+            // Second call: local 2026-07-10T09:30:00+09:30 (UTC
+            // 2026-07-10T00:00:00Z) -- 30 minutes later locally, same local
+            // calendar day, but the UTC date has already advanced.
+            let now_0930 = ts("2026-07-10T00:00:00Z");
+            let (hour2, day2) = hitl_local_hour_and_day(now_0930.with_timezone(&offset));
+            assert_eq!(day1, day2, "both calls land on the same local calendar day");
+            let rc2 = hitl_run_nudge(tmp.path(), now_0930, hour2, &day2);
+            assert_eq!(rc2, 0, "second nudge must succeed");
+
+            let log = store::read_log(tmp.path()).expect("read log");
+            let digest_sends = log
+                .iter()
+                .filter(|e| e.event == "digest-sent" || e.event == "digest-fallback")
+                .count();
+            assert_eq!(
+                digest_sends, 1,
+                "exactly one digest must be sent across both calls to the \
+                 production nudge path even though the second call's UTC \
+                 date has advanced -- got events: {:?}",
+                log.iter().map(|e| e.event.clone()).collect::<Vec<_>>()
             );
         }
     }
