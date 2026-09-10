@@ -1053,5 +1053,92 @@ class TestPipeTailScopedToTestCommandPipeline(RouterTestCase):
                 self.assertEqual(read_ledger(ledger_dir), [])
 
 
+class TestCommandSubstitutionParenMatchingIsQuoteAware(RouterTestCase):
+    """Review G1 (review_b round 1): `_find_matching_paren`'s flat depth
+    counter treated ANY `)` character as closing a `$(...)` span, including
+    one that only appears inside a quoted literal INSIDE the substitution.
+    A real shell tracks nested quoting when it looks for the substitution's
+    true closing paren, so a `)` inside `'...'`/`"..."` never ends it early."""
+
+    def test_quoted_paren_inside_substitution_does_not_end_it_early(self):
+        """The quoted `)` at the start of `$(echo ")")` is NOT the real
+        closing paren; a real shell keeps the substitution open through the
+        actual final `)`. Everything after that real close is still
+        literal text inside the OUTER double quotes, so `git stash` here
+        never executes and the command must abstain. The buggy flat
+        counter mistook the quoted `)` for the real close, which spilled
+        `git stash` out into unquoted (executable) territory -> false deny."""
+        cmd = 'echo "$(echo ")") ; git stash"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"git stash here is literal text inside the still-open outer quotes (G1): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_quoted_paren_inside_substitution_does_not_hide_a_real_stash(self):
+        """`$(echo ')' ; git stash)` is ONE substitution (a real shell
+        tracks the quoted `)` as part of the single-quoted literal, not a
+        closer) that genuinely runs `git stash` as its second command. The
+        buggy flat counter closed the substitution early at the quoted `)`,
+        which caused the real `git stash` text to be masked as ordinary
+        double-quoted literal content -> stash bypass (abstain instead of
+        deny)."""
+        cmd = "echo \"$(echo ')' ; git stash)\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must still deny (G1): a real substitution runs git stash")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestPipefailExemptionRespectsOrdering(RouterTestCase):
+    """Review G2 (review_b round 1): the shell-wide pipefail exemption for
+    `pipe-tail-masks-exit` checked `unless_match` anywhere in the whole
+    text, ignoring order. `set -o pipefail` only protects pipelines that
+    run AFTER it -- a pipefail enabled AFTER an already-unsafe pipeline
+    must never retroactively suppress that pipeline's prior. (Reading
+    PIPESTATUS is a different, position-agnostic idiom and must keep
+    working regardless of order -- TestPipeTailAbstainsWhenStatusCaptured.)
+    """
+
+    def test_pipefail_set_after_the_risky_pipeline_does_not_suppress_it(self):
+        cmd = "pytest -q | tail -5; set -o pipefail"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"pipefail enabled AFTER the pipe must not suppress its prior (G2): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "pipe-tail-masks-exit")
+
+    def test_pipefail_set_before_still_abstains(self):
+        """Regression guard: the existing forward case (F10) must not break."""
+        cmd = "set -o pipefail; cargo test --locked | tail -20"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", cmd)
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestInvocationExemptionAnchoredNotSearched(RouterTestCase):
+    """Review G3 (review_b round 1): the invocation-local stash exemption
+    searched the WHOLE "same command" window for `unless_match`, so an
+    arbitrary UNQUOTED argument elsewhere in the invocation (e.g. an
+    unquoted `-m` message) could contain safe-looking text and wrongly
+    exempt a genuinely dangerous `git stash push`. The exemption must be
+    checked CONTIGUOUSLY from the match's own subcommand position, never
+    searched across unrelated trailing arguments."""
+
+    def test_unquoted_trailing_argument_does_not_shield_a_dangerous_push(self):
+        cmd = "git stash push -m stash pop"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

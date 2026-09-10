@@ -21,20 +21,29 @@ is documented here instead):
   unless_match (optional)  -- a regex on the same canonical text; when it
     matches, the rule does not fire.
   unless_scope (optional)  -- governs WHERE `unless_match` is checked:
-    "invocation" - judged from the actual command window of EACH occurrence
-      of `match` only, never from arbitrary safe-looking text elsewhere in
-      the canonical text (e.g. `git-stash-shared-checkout`: an echoed
-      string or a commit message mentioning "stash pop" must never
-      suppress a real stash invocation elsewhere in the command).
+    "invocation" - checked CONTIGUOUSLY (re.match, not re.search) starting
+      at the tail word of EACH occurrence of `match` (e.g. right where
+      "stash" begins in "git-cmd ... stash") — never searched across the rest
+      of that "same command" window, so an unrelated unquoted argument
+      elsewhere in the SAME invocation (an echoed string, an unquoted `-m`
+      message) can never suppress a real stash invocation by accident
+      (e.g. `git-stash-shared-checkout`; G3, review_b round 1).
     "shell" - judged from the WHOLE canonical text, for every occurrence,
       because the exemption reflects shell state that protects every later
       pipeline in the same shell (e.g. `pipe-tail-masks-exit`: `set -o
       pipefail` exempts every subsequent piped test command, not just the
-      first one).
+      first one) -- but ORDER-sensitive per `unless_match` alternative
+      (G2, review_b round 1): an occurrence of `unless_match` tagged with
+      the named group `(?P<before>...)` only counts if it appears AT OR
+      BEFORE the candidate (persistent state like `pipefail` can never
+      retroactively protect a pipeline that already ran unsafely); an
+      occurrence NOT tagged `before` (e.g. reading `PIPESTATUS` right
+      after the pipe it inspects) still counts anywhere in the text,
+      since that idiom is read AFTER the pipe by design.
     unset - default, today's behavior: a single occurrence of `match` uses
       the whole-text check; more than one occurrence uses a per-occurrence
-      window (same mechanics as "invocation", but only when there are
-      multiple occurrences).
+      window (search, not anchored — distinct from "invocation" above,
+      only when there are multiple occurrences).
   unless_cwd (optional)  -- a regex on the payload's `cwd`; when it
     matches, the rule does not fire.
   Bash rules write `@PREFIX@`/`@GITOPTS@` placeholders in `match`/
@@ -128,18 +137,66 @@ _HEREDOC_START_RE = re.compile(r"<<(-)?\s*(?:'([^'\n]*)'|\"([^\"\n]*)\"|([A-Za-z
 
 def _find_matching_paren(text, open_idx):
     """`text[open_idx]` is '('; return the index just past its matching ')'
-    (or len(text) if unterminated). A flat depth counter — sufficient for
-    real `$(...)` substitutions, not a full shell/paren grammar."""
+    (or len(text) if unterminated). Quote-aware (G1, review_b round 1): a
+    `)` inside a single- or double-quoted span does not count toward the
+    depth — a real shell parses nested quoting when it looks for a `$(...)`
+    substitution's true closing paren, so a quoted `)` earlier in the
+    substitution (e.g. `$(echo ")")`) must never be mistaken for the real
+    close. Mutually recursive with `_skip_double_quoted` so a NESTED
+    `$(...)` inside that quoted span is itself parsed the same way. Still a
+    flat scanner, not a full shell/paren grammar — sufficient for every
+    rule and fixture in this router (spec STOP condition already covers
+    that boundary)."""
     depth = 0
     n = len(text)
     i = open_idx
     while i < n:
-        if text[i] == "(":
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == "'":
+            j = text.find("'", i + 1)
+            i = (j + 1) if j != -1 else n
+            continue
+        if ch == '"':
+            i = _skip_double_quoted(text, i)
+            continue
+        if ch == "`":
+            j = text.find("`", i + 1)
+            i = (j + 1) if j != -1 else n
+            continue
+        if ch == "(":
             depth += 1
-        elif text[i] == ")":
+        elif ch == ")":
             depth -= 1
             if depth == 0:
                 return i + 1
+        i += 1
+    return n
+
+
+def _skip_double_quoted(text, start):
+    """`text[start]` is '"'; return the index just past the matching
+    closing quote. Recurses into `$(...)` (via `_find_matching_paren`) so a
+    `)` inside a NESTED substitution can never be mistaken for the end of
+    an ENCLOSING one either (G1)."""
+    n = len(text)
+    i = start + 1
+    while i < n:
+        ch = text[i]
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
+        if ch == '"':
+            return i + 1
+        if ch == "$" and i + 1 < n and text[i + 1] == "(":
+            i = _find_matching_paren(text, i + 1)
+            continue
+        if ch == "`":
+            j = text.find("`", i + 1)
+            i = (j + 1) if j != -1 else n
+            continue
         i += 1
     return n
 
@@ -429,25 +486,47 @@ def evaluate(payload):
         if unless_re is None:
             m = all_matches[0]
         elif scope == "shell":
-            # Shell-wide: the exemption is checked against the WHOLE text,
-            # for every occurrence, because it reflects shell state (e.g.
-            # `set -o pipefail`) that protects every later pipeline in the
-            # same shell, not just the first one a window happens to cover.
-            if unless_re.search(scan_text):
-                continue
-            m = all_matches[0]
-        elif scope == "invocation":
-            # Invocation-local: the exemption is judged from THIS
-            # occurrence's own "same command" window only, never from
-            # arbitrary safe-looking text elsewhere (an echoed string, a
-            # commit message argument) — always, even with a single
-            # occurrence, unlike the default heuristic below.
+            # Shell-wide, ORDER-sensitive (G2, review_b round 1): the
+            # exemption is checked against the WHOLE text, for every
+            # occurrence, because it reflects shell state (e.g. `set -o
+            # pipefail`) that protects every later pipeline in the same
+            # shell, not just the first one a window happens to cover — BUT
+            # a `unless_match` occurrence tagged with the named group
+            # `before` only counts if it appears AT OR BEFORE this
+            # candidate: persistent state like `pipefail` must already be
+            # in effect, it can never retroactively protect a pipeline that
+            # already ran unsafely. An `unless_match` occurrence that is
+            # NOT tagged `before` (e.g. reading `PIPESTATUS` right after
+            # the pipe it's inspecting) keeps the original anywhere-in-text
+            # check, since that idiom is read AFTER the pipe by design.
             m = None
             for candidate in all_matches:
-                start, end = _window_bounds(
-                    sep_positions, len(scan_text), candidate.start(), candidate.end()
-                )
-                if not unless_re.search(scan_text[start:end]):
+                exempted = False
+                for um in unless_re.finditer(scan_text):
+                    if um.lastgroup == "before" and um.end() > candidate.start():
+                        continue  # set too late to protect this occurrence
+                    exempted = True
+                    break
+                if not exempted:
+                    m = candidate
+                    break
+            if m is None:
+                continue
+        elif scope == "invocation":
+            # Invocation-local, ANCHORED not searched (G3, review_b round
+            # 1): the exemption must be checked CONTIGUOUSLY from the tail
+            # word of THIS occurrence's own match (e.g. "stash"), never
+            # searched across the rest of the "same command" window —
+            # otherwise an unrelated, unquoted argument elsewhere in the
+            # SAME invocation (e.g. an unquoted `-m` message) could contain
+            # safe-looking text and wrongly exempt a genuinely dangerous
+            # subcommand (a `stash push -m stash pop` invocation).
+            m = None
+            for candidate in all_matches:
+                matched_text = candidate.group(0)
+                tail = re.search(r"\w+\Z", matched_text)
+                anchor = candidate.start() + (tail.start() if tail else len(matched_text))
+                if unless_re.match(scan_text, anchor) is None:
                     m = candidate
                     break
             if m is None:

@@ -71,7 +71,7 @@
     "id": "pipe-tail-masks-exit",
     "tool": "^Bash$",
     "match": "@PREFIX@(cargo\\s+test|vitest|pnpm\\s+test|npm\\s+test|pytest|python3?\\s+-m\\s+unittest)\\b(?:[^|\\n;&]|[<>]&|&>)*\\|\\s*(tail|grep|head)\\b",
-    "unless_match": "pipefail|PIPESTATUS",
+    "unless_match": "(?P<before>pipefail)|PIPESTATUS",
     "unless_scope": "shell",
     "decision": "prior",
     "message": "Piping a test run into tail/grep/head makes the pipeline's exit status the filter's, not the tests'. Gate on the test command's own exit code (run it once to a log, then read the log); if you must match output, strip ANSI first - unittest/cargo print colored OK/FAILED.",
