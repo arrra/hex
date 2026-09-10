@@ -57,7 +57,7 @@ class RepoRootFallback(unittest.TestCase):
 
     def test_clone_layout_host_owner_repo(self):
         self.assertEqual(
-            self.m.repo_dir_basename("/Users/x/github.com/acme/widgets/src/index.ts"), "widgets"
+            self.m.repo_dir_basename("/tmp/hex-home/github.com/acme/widgets/src/index.ts"), "widgets"
         )
 
     def test_infer_project_falls_back_to_result_path(self):
