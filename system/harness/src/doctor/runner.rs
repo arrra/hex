@@ -985,6 +985,24 @@ mod tests {
         format!("hex-doctor-g1-selflock-{}-{}", std::process::id(), n)
     }
 
+    /// F6 follow-up: serializes the two self-locking-cleanup-trap tests
+    /// (`test_cleanup_failure_surfaces_on_an_intermediate_failure_path` and
+    /// `test_cleanup_failure_downgrades_an_otherwise_passing_result_to_fail`)
+    /// against each other. Both blindly scan the OS temp dir for ANY
+    /// `hex-doctor-harness-buildable-*` directory and briefly restore
+    /// permissions on ANY candidate's locked marker to identify it (see
+    /// `sweep_leaked_harness_buildable_tempdirs`) — under `cargo test`'s
+    /// default parallelism that peek can momentarily unlock a SIBLING
+    /// test's still-in-flight, deliberately-locked worktree at exactly the
+    /// wrong instant, letting that sibling's own `git worktree remove
+    /// --force` sneak through and defeat its forced cleanup failure. These
+    /// two tests are the only callers of `add_self_locking_cleanup_trap`;
+    /// holding this lock for a whole test body keeps at most one of them
+    /// "in flight" (trap armed, worktree not yet cleaned up) at a time, so
+    /// the blind scan can never land on a sibling mid-flight.
+    #[cfg(unix)]
+    static FAULT_INJECTION_SERIAL: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     /// Sweeps the OS temp dir for leaked `hex-doctor-harness-buildable-*`
     /// directories that carry THIS invocation's own fault-injection
     /// signature (`.hex/harness/aaa_locked` containing exactly `token`,
@@ -1010,24 +1028,60 @@ mod tests {
     /// invocation's live worktree. Requiring the marker's CONTENT to match
     /// this invocation's own unique `token` scopes the sweep to exactly
     /// the directory THIS invocation created.
+    ///
+    /// F6: the fault injection itself (`add_self_locking_cleanup_trap`)
+    /// chmod 000s `.hex/harness/aaa_locked` to simulate the cleanup
+    /// failure under test, which makes that directory unreadable —
+    /// including by this sweep. Restore read/execute permission on any
+    /// candidate's `aaa_locked` directory just long enough to read its
+    /// marker, so a leaked directory can still be recognized as ours (by
+    /// token match) and removed even though it was deliberately locked.
+    ///
+    /// F6 follow-up: under `cargo test`'s default parallelism, several of
+    /// these fault-injection tests run concurrently, each locking its OWN
+    /// in-flight worktree and relying on that lock surviving until ITS OWN
+    /// cleanup runs. A candidate directory that doesn't match `token`
+    /// belongs to one of those still-running siblings (or a real `hex
+    /// doctor` invocation elsewhere on the host) — leaving it unlocked
+    /// after peeking inside would let that other run's cleanup succeed
+    /// early and silently defeat its deliberately-forced failure. Restore
+    /// the directory's original permission bits immediately when the
+    /// marker doesn't match, so the peek is a momentary, best-effort probe
+    /// rather than a lasting unlock.
     #[cfg(unix)]
     fn sweep_leaked_harness_buildable_tempdirs(token: &str) {
+        use std::os::unix::fs::PermissionsExt;
+
         let base = std::env::temp_dir();
         let Ok(entries) = std::fs::read_dir(&base) else {
             return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
-            let marker = path.join(".hex/harness/aaa_locked/file.txt");
-            let is_our_own_fault_injection = entry
+            if !entry
                 .file_name()
                 .to_string_lossy()
                 .starts_with("hex-doctor-harness-buildable-")
-                && std::fs::read_to_string(&marker)
-                    .map(|content| content == token)
-                    .unwrap_or(false);
+            {
+                continue;
+            }
+            let locked_dir = path.join(".hex/harness/aaa_locked");
+            let original_mode = std::fs::metadata(&locked_dir)
+                .ok()
+                .map(|meta| meta.permissions().mode());
+            if locked_dir.is_dir() {
+                let _ =
+                    std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755));
+            }
+            let marker = locked_dir.join("file.txt");
+            let is_our_own_fault_injection = std::fs::read_to_string(&marker)
+                .map(|content| content == token)
+                .unwrap_or(false);
             if is_our_own_fault_injection {
                 force_remove_dir_all(&path);
+            } else if let Some(mode) = original_mode {
+                let _ =
+                    std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(mode));
             }
         }
     }
@@ -1170,6 +1224,14 @@ mod tests {
         // that itself deterministically fails: the returned message must
         // name BOTH problems, proving cleanup now runs — and its failure is
         // surfaced — on this early path too, not just the final one.
+        //
+        // F6 follow-up: held for the whole test body so this test's
+        // in-flight, deliberately-locked worktree can never be caught
+        // mid-peek by the sibling fault-injection test's blind temp-dir
+        // scan (see `FAULT_INJECTION_SERIAL`).
+        let _serial_guard = FAULT_INJECTION_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let token = unique_fault_injection_token();
         sweep_leaked_harness_buildable_tempdirs(&token);
         let tmp = init_repo_missing_lockfile();
@@ -1212,6 +1274,12 @@ mod tests {
         // leaked a worktree it could not clean up is a silent failure (SO
         // S6: no quiet failures). A fully buildable fixture plus a
         // deterministic cleanup trap must now report FAIL, not PASS.
+        //
+        // F6 follow-up: held for the whole test body — see
+        // `FAULT_INJECTION_SERIAL`.
+        let _serial_guard = FAULT_INJECTION_SERIAL
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
         let token = unique_fault_injection_token();
         sweep_leaked_harness_buildable_tempdirs(&token);
         let tmp = init_repo_committed_include();
