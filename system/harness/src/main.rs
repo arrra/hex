@@ -2738,11 +2738,15 @@ fn hitl_mark_digest_sent(hex_dir: &std::path::Path, day: &str) {
     }
 }
 
-/// Send the pings due right now. When `only_id` is set (the `add` path), restrict
-/// to that freshly-filed item so filing one item never fires unrelated pings.
+/// Send the pings due right now. `local_hour` is the operator's actual local
+/// hour (never `now`'s UTC hour — see `hitl::policy::in_quiet_hours`), so
+/// quiet-hours gating matches the wall clock the operator actually lives on.
+/// When `only_id` is set (the `add` path), restrict to that freshly-filed
+/// item so filing one item never fires unrelated pings.
 fn hitl_process_pings(
     hex_dir: &std::path::Path,
     now: chrono::DateTime<chrono::Utc>,
+    local_hour: u32,
     only_id: Option<u64>,
 ) -> Result<(), String> {
     use hex::hitl::{policy, store, transport};
@@ -2766,9 +2770,30 @@ fn hitl_process_pings(
     let sent_today = hitl_ping_count(hex_dir, &day);
     let digest_done = hitl_digest_sent(hex_dir, &day);
 
-    let mut actions = policy::pings_due(&items, &cfg, now, sent_today, digest_done);
+    let mut actions = policy::pings_due(&items, &cfg, now, local_hour, sent_today, digest_done);
     if let Some(id) = only_id {
         actions.retain(|a| a.item_id == id);
+    }
+
+    // S6 — no silent suppression: quiet hours defer pings rather than drop
+    // them, but the operator must be told loudly, not left to notice their
+    // absence.
+    let mut suppressed = policy::quiet_suppressed(&items, &cfg, now, local_hour, sent_today);
+    if let Some(id) = only_id {
+        suppressed.retain(|a| a.item_id == id);
+    }
+    if !suppressed.is_empty() {
+        let count = suppressed.len();
+        eprintln!("hex hitl: quiet hours suppressed {count} due ping(s)");
+        store::append_log(
+            hex_dir,
+            now,
+            None,
+            "quiet-suppressed",
+            Some(format!(
+                "{count} ping(s) held back by quiet hours (local_hour={local_hour})"
+            )),
+        )?;
     }
 
     let sender = transport::OsascriptSender;
@@ -2789,6 +2814,13 @@ fn hitl_process_pings(
         hitl_incr_ping_count(hex_dir, &day);
     }
     Ok(())
+}
+
+/// Is the digest due right now? Pure: the digest fires once, at the
+/// operator's local `digest_hour`, never at `now`'s UTC hour (same bug class
+/// as quiet hours — see `hitl::policy::in_quiet_hours`).
+fn hitl_digest_due(local_hour: u32, digest_hour: u32, already_sent_today: bool) -> bool {
+    local_hour == digest_hour && !already_sent_today
 }
 
 /// Compose + send the digest now. Returns the open count if a digest was sent.
@@ -2836,6 +2868,9 @@ fn run_hitl(command: HitlCommands) -> i32 {
 
     let hex_dir = hitl_hex_dir();
     let now = chrono::Utc::now();
+    // The operator's actual local hour, not `now`'s UTC hour — quiet hours
+    // and the digest gate on this (see `hitl::policy::in_quiet_hours`).
+    let local_hour = now.with_timezone(&chrono::Local).hour();
 
     match command {
         HitlCommands::Add {
@@ -2895,7 +2930,7 @@ fn run_hitl(command: HitlCommands) -> i32 {
                 }
             };
             println!("{}", item.id);
-            if let Err(e) = hitl_process_pings(&hex_dir, now, Some(item.id)) {
+            if let Err(e) = hitl_process_pings(&hex_dir, now, local_hour, Some(item.id)) {
                 eprintln!("hex hitl add: ping failed: {e}");
             }
             0
@@ -2999,7 +3034,7 @@ fn run_hitl(command: HitlCommands) -> i32 {
             }
         }
         HitlCommands::Nudge => {
-            if let Err(e) = hitl_process_pings(&hex_dir, now, None) {
+            if let Err(e) = hitl_process_pings(&hex_dir, now, local_hour, None) {
                 eprintln!("hex hitl nudge: {e}");
                 return 1;
             }
@@ -3011,7 +3046,11 @@ fn run_hitl(command: HitlCommands) -> i32 {
                 }
             };
             let day = now.format("%Y-%m-%d").to_string();
-            if now.hour() == cfg.digest_hour && !hitl_digest_sent(&hex_dir, &day) {
+            if hitl_digest_due(
+                local_hour,
+                cfg.digest_hour,
+                hitl_digest_sent(&hex_dir, &day),
+            ) {
                 match hitl_send_digest(&hex_dir, now) {
                     Ok(Some(n)) => println!("hitl nudge: digest sent ({n} open)"),
                     Ok(None) => {}
@@ -3419,5 +3458,132 @@ mod tests {
             "zsh completions must contain '_hex', got: {}",
             output.get(..200.min(output.len())).unwrap_or(&output)
         );
+    }
+
+    // B1 (task T63d7sngx): hitl quiet hours used to be evaluated in UTC, so
+    // every ping filed 15:00-01:00 America/Los_Angeles was silently
+    // suppressed. These tests pin the CLI-level contract via
+    // `hitl_process_pings`'s explicit `local_hour` param: the quiet-hours
+    // gate is evaluated against it, never against `now`'s UTC hour.
+    mod hitl {
+        use super::*;
+        use hex::hitl::store;
+        use std::sync::Mutex;
+
+        // `telemetry::record`/`alert::notify` (invoked by `transport::send`,
+        // which `hitl_process_pings` drives) read `$HEX_DIR` from the process
+        // env, not from the `hex_dir` argument -- so a test that doesn't also
+        // redirect the env var writes an alert/telemetry row into whatever
+        // live workspace HEX_DIR happens to point at. Serialize on this lock
+        // and restore the prior value so the two env-mutating tests below
+        // never touch production state.
+        static HEX_DIR_ENV_LOCK: Mutex<()> = Mutex::new(());
+
+        struct HexDirEnvGuard {
+            _lock: std::sync::MutexGuard<'static, ()>,
+            prev: Option<std::ffi::OsString>,
+        }
+
+        impl HexDirEnvGuard {
+            fn set(path: &std::path::Path) -> Self {
+                let lock = HEX_DIR_ENV_LOCK.lock().unwrap_or_else(|p| p.into_inner());
+                let prev = std::env::var_os("HEX_DIR");
+                std::env::set_var("HEX_DIR", path);
+                HexDirEnvGuard { _lock: lock, prev }
+            }
+        }
+
+        impl Drop for HexDirEnvGuard {
+            fn drop(&mut self) {
+                match self.prev.take() {
+                    Some(v) => std::env::set_var("HEX_DIR", v),
+                    None => std::env::remove_var("HEX_DIR"),
+                }
+            }
+        }
+
+        fn ts(s: &str) -> chrono::DateTime<chrono::Utc> {
+            chrono::DateTime::parse_from_rfc3339(s)
+                .unwrap()
+                .with_timezone(&chrono::Utc)
+        }
+
+        /// Seed one due P1 item (never pinged) under a quiet-22..8 config.
+        fn seed_due_p1(hex_dir: &std::path::Path, created: chrono::DateTime<chrono::Utc>) -> u64 {
+            let cfg = store::Config {
+                quiet_start: 22,
+                quiet_end: 8,
+                ..store::Config::default()
+            };
+            store::save_config(hex_dir, &cfg).expect("save config");
+            let item = store::create(
+                hex_dir,
+                store::NewItem {
+                    title: "test ping".into(),
+                    project: "studio".into(),
+                    body: String::new(),
+                    priority: Some(store::Priority::P1),
+                    deadline: None,
+                    est_minutes: None,
+                    depends_on: vec![],
+                },
+                created,
+            )
+            .expect("create item");
+            item.id
+        }
+
+        #[test]
+        fn nudge_sends_at_local_hour_18_even_when_utc_hour_is_quiet() {
+            // UTC 01:00 is 18:00 local for a UTC-7 operator: outside quiet
+            // 22..8, so the due P1 must be SENT even though the UTC hour (1)
+            // falls inside the quiet window.
+            let tmp = tempfile::tempdir().unwrap();
+            let _env = HexDirEnvGuard::set(tmp.path());
+            let now = ts("2026-07-10T01:00:00Z");
+            let id = seed_due_p1(tmp.path(), now);
+            hitl_process_pings(tmp.path(), now, 18, None).expect("process pings");
+            let it = store::load_item(tmp.path(), id).expect("load item");
+            assert!(
+                it.last_pinged.is_some(),
+                "local hour 18 is outside quiet 22..8 -- the on-file ping must be sent"
+            );
+        }
+
+        #[test]
+        fn nudge_suppresses_and_logs_at_local_hour_23_even_when_utc_hour_is_awake() {
+            // UTC noon would be awake under a UTC-only check, but local hour
+            // 23 is inside quiet 22..8: the ping must be suppressed, and the
+            // suppression must be logged loudly (S6) as a `quiet-suppressed`
+            // log.jsonl event.
+            let tmp = tempfile::tempdir().unwrap();
+            let _env = HexDirEnvGuard::set(tmp.path());
+            let now = ts("2026-07-10T12:00:00Z");
+            let id = seed_due_p1(tmp.path(), now);
+            hitl_process_pings(tmp.path(), now, 23, None).expect("process pings");
+            let it = store::load_item(tmp.path(), id).expect("load item");
+            assert!(
+                it.last_pinged.is_none(),
+                "local hour 23 is inside quiet 22..8 -- the on-file ping must be suppressed"
+            );
+            let log = store::read_log(tmp.path()).expect("read log");
+            assert!(
+                log.iter().any(|e| e.event == "quiet-suppressed"),
+                "quiet-hours suppression must be logged loudly (S6 — no silent \
+                 suppression); got events: {:?}",
+                log.iter().map(|e| e.event.clone()).collect::<Vec<_>>()
+            );
+        }
+
+        // The Nudge arm's digest gate must run on the operator's LOCAL hour,
+        // pinned via the pure `hitl_digest_due` helper so it's testable
+        // without a clock.
+        #[test]
+        fn digest_due_when_local_hour_matches_and_not_yet_sent() {
+            assert!(
+                hitl_digest_due(9, 9, false),
+                "local hour == digest_hour and not sent today -- digest must fire"
+            );
+        }
     }
 }

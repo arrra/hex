@@ -23,7 +23,7 @@
 //! thresholds have been crossed since the last ping we emit the single most
 //! urgent one (T-24h over T-48h over the initial on-file ping), never a burst.
 
-use chrono::{DateTime, Duration, NaiveDate, Timelike, Utc};
+use chrono::{DateTime, Duration, NaiveDate, Utc};
 
 use super::store::{Config, Item, Mode, Priority, Status};
 
@@ -75,10 +75,15 @@ fn deadline_instant(d: NaiveDate) -> DateTime<Utc> {
     DateTime::<Utc>::from_naive_utc_and_offset(d.and_hms_opt(0, 0, 0).unwrap(), Utc)
 }
 
-/// Is `now`'s hour inside the half-open quiet window `[start, end)`, wrapping
+/// Is `local_hour` inside the half-open quiet window `[start, end)`, wrapping
 /// past midnight when `start > end`? `start == end` ⇒ never quiet.
-fn in_quiet_hours(now: DateTime<Utc>, cfg: &Config) -> bool {
-    let h = now.hour();
+///
+/// Takes the caller's **local** hour, never `now`'s UTC hour — a fixed UTC
+/// quiet window silently gates on the wrong clock for any operator not in
+/// UTC (e.g. default 22..8 suppressed every ping filed 15:00-01:00
+/// America/Los_Angeles). The caller is responsible for resolving local time.
+fn in_quiet_hours(local_hour: u32, cfg: &Config) -> bool {
+    let h = local_hour;
     let (start, end) = (cfg.quiet_start, cfg.quiet_end);
     if start == end {
         false
@@ -179,32 +184,15 @@ fn ping_for_item(
 // The decision function
 // ---------------------------------------------------------------------------
 
-/// Compute the individual pings to send right now.
-///
-/// Inputs are exactly what the scope specifies: the full item set, config, the
-/// injected clock, how many individual pings have already gone out today, and
-/// whether the digest was already sent today. No I/O, no wall clock.
-///
-/// Ordering & cap: candidates are sorted highest-priority-first then
-/// oldest-first, and truncated to the remaining daily allowance
-/// (`max_pings_per_day - pings_sent_today`). During quiet hours nothing fires.
-pub fn pings_due(
+/// Candidates due right now (priority-sorted, daily cap applied), ignoring
+/// quiet hours entirely. Factored out so [`pings_due`] and
+/// [`quiet_suppressed`] never drift apart on what "due" means.
+fn candidates_due(
     items: &[Item],
     cfg: &Config,
     now: DateTime<Utc>,
     pings_sent_today: u32,
-    digest_sent_today: bool,
 ) -> Vec<PingAction> {
-    // The digest-sent flag is part of the specified signature but does not
-    // gate individual pings; accepted for contract stability.
-    let _ = digest_sent_today;
-
-    // Quiet hours: emit no individual pings; they defer to the next run that
-    // clears quiet hours (re-derived from `last_pinged`, so nothing is lost).
-    if in_quiet_hours(now, cfg) {
-        return Vec::new();
-    }
-
     let mut candidates: Vec<PingAction> = items
         .iter()
         .filter_map(|it| {
@@ -229,6 +217,56 @@ pub fn pings_due(
     let remaining = cfg.max_pings_per_day.saturating_sub(pings_sent_today) as usize;
     candidates.truncate(remaining);
     candidates
+}
+
+/// Compute the individual pings to send right now.
+///
+/// Inputs are exactly what the scope specifies: the full item set, config, the
+/// injected clock, the caller's **local** hour (never `now`'s UTC hour — see
+/// [`in_quiet_hours`]), how many individual pings have already gone out
+/// today, and whether the digest was already sent today. No I/O, no wall
+/// clock.
+///
+/// Ordering & cap: candidates are sorted highest-priority-first then
+/// oldest-first, and truncated to the remaining daily allowance
+/// (`max_pings_per_day - pings_sent_today`). During quiet hours nothing fires
+/// (see [`quiet_suppressed`] for what was held back, so the caller can log it
+/// loudly instead of swallowing it).
+pub fn pings_due(
+    items: &[Item],
+    cfg: &Config,
+    now: DateTime<Utc>,
+    local_hour: u32,
+    pings_sent_today: u32,
+    digest_sent_today: bool,
+) -> Vec<PingAction> {
+    // The digest-sent flag is part of the specified signature but does not
+    // gate individual pings; accepted for contract stability.
+    let _ = digest_sent_today;
+
+    // Quiet hours: emit no individual pings; they defer to the next run that
+    // clears quiet hours (re-derived from `last_pinged`, so nothing is lost).
+    if in_quiet_hours(local_hour, cfg) {
+        return Vec::new();
+    }
+
+    candidates_due(items, cfg, now, pings_sent_today)
+}
+
+/// What quiet hours held back this run — empty when it's not quiet, or when
+/// nothing was due anyway. Lets the caller log a loud `quiet-suppressed`
+/// event (S6: no quiet failures) instead of pings silently vanishing.
+pub fn quiet_suppressed(
+    items: &[Item],
+    cfg: &Config,
+    now: DateTime<Utc>,
+    local_hour: u32,
+    pings_sent_today: u32,
+) -> Vec<PingAction> {
+    if !in_quiet_hours(local_hour, cfg) {
+        return Vec::new();
+    }
+    candidates_due(items, cfg, now, pings_sent_today)
 }
 
 // ---------------------------------------------------------------------------
@@ -352,7 +390,7 @@ impl Digest {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use chrono::TimeZone;
+    use chrono::{TimeZone, Timelike};
 
     fn ts(s: &str) -> DateTime<Utc> {
         DateTime::parse_from_rfc3339(s).unwrap().with_timezone(&Utc)
@@ -410,7 +448,7 @@ mod tests {
         ];
         for (pri, expect) in cases {
             let it = item(1, pri);
-            let got = pings_due(&[it], &cfg(), ts("2026-07-10T12:00:00Z"), 0, false);
+            let got = pings_due(&[it], &cfg(), ts("2026-07-10T12:00:00Z"), 12, 0, false);
             assert_eq!(
                 !got.is_empty(),
                 expect,
@@ -439,7 +477,7 @@ mod tests {
             let mut it = item(1, Priority::P1);
             it.last_pinged = Some(base);
             let now = base + Duration::hours(hrs);
-            let got = pings_due(&[it], &cfg(), now, 0, false);
+            let got = pings_due(&[it], &cfg(), now, now.hour(), 0, false);
             assert_eq!(!got.is_empty(), expect, "P1 at +{hrs}h expect={expect}");
             if expect {
                 assert_eq!(got[0].reason, PingReason::Recurring);
@@ -452,7 +490,7 @@ mod tests {
         let mut it = item(1, Priority::P2);
         it.last_pinged = Some(ts("2026-07-10T12:00:00Z"));
         // Days later, still no re-ping (digest covers it).
-        let got = pings_due(&[it], &cfg(), ts("2026-07-20T12:00:00Z"), 0, false);
+        let got = pings_due(&[it], &cfg(), ts("2026-07-20T12:00:00Z"), 12, 0, false);
         assert!(got.is_empty(), "P2 without deadline must not re-ping");
     }
 
@@ -474,7 +512,7 @@ mod tests {
             let mut it = item(1, Priority::P2);
             it.deadline = Some(day(2026, 7, 10));
             it.last_pinged = Some(last);
-            let got = pings_due(&[it], &cfg(), ts(now_s), 0, false);
+            let got = pings_due(&[it], &cfg(), ts(now_s), ts(now_s).hour(), 0, false);
             match expect {
                 None => assert!(got.is_empty(), "at {now_s} expected no ping"),
                 Some(r) => {
@@ -493,10 +531,17 @@ mod tests {
         it.deadline = Some(day(2026, 7, 10));
         it.last_pinged = Some(ts("2026-07-08T06:00:00Z")); // after T-48h
                                                            // now between T-48h and T-24h → nothing new
-        let got = pings_due(&[it.clone()], &cfg(), ts("2026-07-08T12:00:00Z"), 0, false);
+        let got = pings_due(
+            &[it.clone()],
+            &cfg(),
+            ts("2026-07-08T12:00:00Z"),
+            12,
+            0,
+            false,
+        );
         assert!(got.is_empty(), "T-48h already covered, T-24h not reached");
         // now past T-24h → T-24h fires
-        let got = pings_due(&[it], &cfg(), ts("2026-07-09T06:00:00Z"), 0, false);
+        let got = pings_due(&[it], &cfg(), ts("2026-07-09T06:00:00Z"), 6, 0, false);
         assert_eq!(reasons(&got), vec![(1, PingReason::Deadline24h)]);
     }
 
@@ -513,7 +558,7 @@ mod tests {
             "2026-07-09T12:00:00Z",
             "2026-07-20T12:00:00Z",
         ] {
-            let got = pings_due(&[it.clone()], &cfg(), ts(now_s), 0, false);
+            let got = pings_due(&[it.clone()], &cfg(), ts(now_s), ts(now_s).hour(), 0, false);
             assert!(got.is_empty(), "P3 must never ping ({now_s})");
         }
         // …but it does appear in the digest.
@@ -542,7 +587,7 @@ mod tests {
             blocked.depends_on = vec![1];
             let items = vec![dep, blocked];
 
-            let got = pings_due(&items, &cfg(), ts("2026-07-10T12:00:00Z"), 0, false);
+            let got = pings_due(&items, &cfg(), ts("2026-07-10T12:00:00Z"), 12, 0, false);
             let pinged_2 = got.iter().any(|a| a.item_id == 2);
             assert_eq!(
                 pinged_2, !blocks,
@@ -581,7 +626,7 @@ mod tests {
             it.status = Status::Snoozed;
             it.snooze_until = Some(day(2026, 7, 15));
             let items = vec![it];
-            let got = pings_due(&items, &cfg(), ts(now_s), 0, false);
+            let got = pings_due(&items, &cfg(), ts(now_s), ts(now_s).hour(), 0, false);
             assert_eq!(!got.is_empty(), expect_ping, "ping at {now_s}");
             let digest = compose_digest(&items, ts(now_s));
             assert_eq!(digest.is_some(), expect_digest, "digest at {now_s}");
@@ -608,7 +653,7 @@ mod tests {
         for (hour, expect) in cases {
             let it = item(1, Priority::P1); // on-file ping otherwise guaranteed
             let now = Utc.with_ymd_and_hms(2026, 7, 10, hour, 0, 0).unwrap();
-            let got = pings_due(&[it], &c, now, 0, false);
+            let got = pings_due(&[it], &c, now, hour, 0, false);
             assert_eq!(!got.is_empty(), expect, "hour {hour} expect ping={expect}");
         }
     }
@@ -628,12 +673,49 @@ mod tests {
             std::slice::from_ref(&it),
             &c,
             ts("2026-07-10T23:30:00Z"),
+            23,
             0,
             false,
         );
         assert!(night.is_empty(), "no ping at night");
-        let morning = pings_due(&[it], &c, ts("2026-07-11T08:30:00Z"), 0, false);
+        let morning = pings_due(&[it], &c, ts("2026-07-11T08:30:00Z"), 8, 0, false);
         assert_eq!(reasons(&morning), vec![(1, PingReason::OnFile)]);
+    }
+
+    // --- Local-hour quiet gating (B1, task T63d7sngx) -----------------------
+    //
+    // Quiet hours and the digest used to be evaluated in UTC. With the
+    // default quiet window 22..8, every ping filed 15:00-01:00
+    // America/Los_Angeles was silently suppressed. `pings_due` must accept
+    // the operator's actual local hour and gate on it instead of `now`'s UTC
+    // hour.
+
+    #[test]
+    fn quiet_hours_will_be_gated_by_local_hour_not_utc_hour() {
+        let mut c = cfg();
+        c.quiet_start = 22;
+        c.quiet_end = 8;
+        let it = item(1, Priority::P1); // on-file ping otherwise guaranteed
+        let now = ts("2026-07-10T01:00:00Z"); // UTC hour 1 -> quiet under the UTC-only check
+        let got = pings_due(&[it], &c, now, 18, 0, false); // local hour 18 -> awake
+        assert!(
+            !got.is_empty(),
+            "local hour 18 is outside quiet 22..8; the ping must be SENT regardless of the UTC hour"
+        );
+    }
+
+    #[test]
+    fn quiet_hours_will_suppress_by_local_hour_23_even_when_utc_hour_is_awake() {
+        let mut c = cfg();
+        c.quiet_start = 22;
+        c.quiet_end = 8;
+        let it = item(1, Priority::P1);
+        let now = ts("2026-07-10T12:00:00Z"); // UTC noon -> awake under the UTC-only check
+        let got = pings_due(&[it], &c, now, 23, 0, false); // local hour 23 -> quiet
+        assert!(
+            got.is_empty(),
+            "local hour 23 is inside quiet 22..8; the ping must be suppressed regardless of the UTC hour"
+        );
     }
 
     // --- Daily cap with priority ordering ----------------------------------
@@ -652,7 +734,7 @@ mod tests {
 
         let mut c = cfg();
         c.max_pings_per_day = 2;
-        let got = pings_due(&items, &c, ts("2026-07-10T12:00:00Z"), 0, false);
+        let got = pings_due(&items, &c, ts("2026-07-10T12:00:00Z"), 12, 0, false);
         let ids: Vec<u64> = got.iter().map(|a| a.item_id).collect();
         assert_eq!(ids, vec![2, 1], "P1 first, then older P2; newer P2 dropped");
     }
@@ -668,12 +750,13 @@ mod tests {
             &[a.clone(), b.clone()],
             &c,
             ts("2026-07-10T12:00:00Z"),
+            12,
             2,
             false,
         );
         assert_eq!(got.len(), 1, "only one ping left in today's allowance");
         // Cap already reached → nothing.
-        let got = pings_due(&[a, b], &c, ts("2026-07-10T12:00:00Z"), 3, false);
+        let got = pings_due(&[a, b], &c, ts("2026-07-10T12:00:00Z"), 12, 3, false);
         assert!(got.is_empty(), "cap exhausted");
     }
 
@@ -686,20 +769,20 @@ mod tests {
 
         // P2 on-file: suppressed.
         let p2 = item(1, Priority::P2);
-        assert!(pings_due(&[p2], &c, ts("2026-07-10T12:00:00Z"), 0, false).is_empty());
+        assert!(pings_due(&[p2], &c, ts("2026-07-10T12:00:00Z"), 12, 0, false).is_empty());
 
         // P2 with deadline escalation: also suppressed.
         let mut p2d = item(2, Priority::P2);
         p2d.deadline = Some(day(2026, 7, 10));
         p2d.last_pinged = Some(ts("2026-07-05T09:00:00Z"));
         assert!(
-            pings_due(&[p2d], &c, ts("2026-07-09T01:00:00Z"), 0, false).is_empty(),
+            pings_due(&[p2d], &c, ts("2026-07-09T01:00:00Z"), 1, 0, false).is_empty(),
             "batched suppresses P2 deadline escalation"
         );
 
         // P1 still pings normally.
         let p1 = item(3, Priority::P1);
-        let got = pings_due(&[p1], &c, ts("2026-07-10T12:00:00Z"), 0, false);
+        let got = pings_due(&[p1], &c, ts("2026-07-10T12:00:00Z"), 12, 0, false);
         assert_eq!(reasons(&got), vec![(3, PingReason::OnFile)]);
     }
 
