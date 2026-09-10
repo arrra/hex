@@ -342,12 +342,13 @@ fn diagnose(worktree_path: &Path, empty_hooks_dir: &Path, timeout: Duration) -> 
             // not present in the LOCAL CARGO CACHE (nothing to do with git
             // tracking; classify as inconclusive), or a repository input
             // (path dependency, Cargo.lock itself) is genuinely missing from
-            // the checkout (a real FAIL). Cargo's own offline-mode diagnostic
-            // text is the only reliable signal here — both the registry case
-            // ("...you're using offline mode (--offline)...") and the git
-            // dependency case ("...you are in the offline mode (--offline)")
-            // include this phrase; a missing local path dependency or a
-            // missing/unusable Cargo.lock never does.
+            // the checkout (a real FAIL). `classify_metadata_failure` matches
+            // cargo's own offline-mode diagnostic wording ("...offline mode
+            // (--offline)..." or "...but --offline was specified...") rather
+            // than a bare `--offline` substring, because cargo's missing-
+            // Cargo.lock diagnostic ALSO names the flag in its help text
+            // ("...use --offline instead") without that being a cache
+            // problem at all.
             return classify_metadata_failure(&String::from_utf8_lossy(&o.stderr));
         }
         Err(e) => {
@@ -427,7 +428,14 @@ fn diagnose(worktree_path: &Path, empty_hooks_dir: &Path, timeout: Duration) -> 
 /// or a genuine repository-input FAIL. See the call site for why the
 /// substring check is reliable.
 fn classify_metadata_failure(stderr: &str) -> CheckResult {
-    if stderr.to_lowercase().contains("offline mode (--offline)") {
+    // Match on cargo's own offline-mode wording rather than a bare
+    // "--offline" substring: a missing/out-of-date `Cargo.lock` under
+    // `--locked` also *mentions* the flag (cargo's help text suggests
+    // "remove the --locked flag and use --offline instead"), which would
+    // otherwise misclassify that genuine repository-input FAIL as a
+    // cache-unavailable WARN.
+    let lower = stderr.to_lowercase();
+    if lower.contains("offline mode (--offline)") || lower.contains("--offline was specified") {
         return CheckResult::warn(format!(
             ".hex/harness -> a dependency the lockfile resolves to is not present \
              in the local Cargo registry/git cache (dependency cache unavailable — \
@@ -443,6 +451,15 @@ fn classify_metadata_failure(stderr: &str) -> CheckResult {
          fix: git add it or install it from .hex/.upgrade-cache: {}",
         stderr.trim()
     ))
+}
+
+/// Test-only entry point into `classify_metadata_failure`, mirroring the
+/// `host_triple`/`host_triple_impl` split above — lets `doctor::runner`'s
+/// test module feed exact cargo diagnostic strings straight to the
+/// classifier without spinning up a real `cargo metadata --offline` run.
+#[cfg(test)]
+pub(crate) fn classify_metadata_failure_for_tests(stderr: &str) -> CheckResult {
+    classify_metadata_failure(stderr)
 }
 
 /// Always runs `guard.cleanup()` regardless of `result`'s status (G1), and

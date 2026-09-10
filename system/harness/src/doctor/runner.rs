@@ -1567,6 +1567,79 @@ mod tests {
         );
     }
 
+    /// F1 (review R1): with the crates.io INDEX cached but a specific
+    /// `.crate` not yet downloaded, real `cargo metadata --locked --offline`
+    /// fails with "attempting to make an HTTP request, but --offline was
+    /// specified" — no "offline mode (--offline)" substring at all. The
+    /// classifier must still recognize this as a cache-unavailable WARN
+    /// instead of falling through to the repository-input FAIL path.
+    #[test]
+    fn test_classify_metadata_failure_recognizes_http_request_offline_phrasing() {
+        let stderr = "error: failed to download `once_cell v1.19.0`\n\n\
+                       Caused by:\n  attempting to make an HTTP request, but \
+                       --offline was specified\n";
+        let result =
+            crate::doctor::checks::harness_buildable::classify_metadata_failure_for_tests(stderr);
+        assert_eq!(
+            result.status,
+            Status::Warn,
+            "an --offline-flag diagnostic without the 'offline mode' phrase \
+             must still classify as dependency-cache-unavailable (WARN), got \
+             {:?}",
+            result
+        );
+        let msg = result.message.to_lowercase();
+        assert!(
+            !msg.contains("git add"),
+            "must not recommend `git add` for a dependency-cache problem, got: {}",
+            result.message
+        );
+    }
+
+    /// F1 (review R1): the two diagnostics `classify_metadata_failure` must
+    /// still FAIL on — a missing `Cargo.lock` and a missing local path
+    /// dependency — must not be swallowed into WARN by a plain `--offline`
+    /// substring match. Critically, cargo's real missing-lockfile diagnostic
+    /// itself NAMES `--offline` in its help text ("...remove the --locked
+    /// flag and use --offline instead"), which is exactly what broke a
+    /// naive `stderr.contains("--offline")` fix here — pin the real message,
+    /// not a paraphrase.
+    #[test]
+    fn test_classify_metadata_failure_still_fails_on_non_offline_diagnostics() {
+        let locked_stderr = "error: cannot create the lock file \
+                              /repo/.hex/harness/Cargo.lock because --locked \
+                              was passed to prevent this\nhelp: to generate \
+                              the lock file without accessing the network, \
+                              remove the --locked flag and use --offline \
+                              instead.\n";
+        let locked_result =
+            crate::doctor::checks::harness_buildable::classify_metadata_failure_for_tests(
+                locked_stderr,
+            );
+        assert_eq!(
+            locked_result.status,
+            Status::Fail,
+            "a missing-Cargo.lock diagnostic must still FAIL even though its \
+             help text names --offline, got {:?}",
+            locked_result
+        );
+
+        let path_dep_stderr = "error: failed to load manifest for dependency \
+                                `scipd`\n\nCaused by:\n  failed to read \
+                                `/repo/.hex/code-intel/scipd/Cargo.toml`\n";
+        let path_dep_result =
+            crate::doctor::checks::harness_buildable::classify_metadata_failure_for_tests(
+                path_dep_stderr,
+            );
+        assert_eq!(
+            path_dep_result.status,
+            Status::Fail,
+            "a missing local path dependency diagnostic (no --offline \
+             mention) must still FAIL, got {:?}",
+            path_dep_result
+        );
+    }
+
     // -- F2/F6: follow the complete local source graph --
 
     #[test]
