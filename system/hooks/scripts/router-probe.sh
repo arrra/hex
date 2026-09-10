@@ -259,6 +259,23 @@ EXTRA_FIXTURES = [
         positive={"command": "git checkout HEAD -- tracked-file"},
         near_miss={"command": "git checkout -b newbranch"},
     ),
+    # F11: a normal multiline while/until loop must ask the same as its
+    # one-line equivalent (rules compile MULTILINE, not DOTALL); an
+    # out-of-loop gh call before an unrelated loop must stay abstain.
+    dict(
+        id="gh-fast-polling",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "while true; do\n  gh pr checks 123\n  sleep 5\ndone"},
+        near_miss={"command": "gh pr checks 123\nwhile true; do\n  sleep 5\ndone"},
+    ),
+    dict(
+        id="gh-fast-polling",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "until false; do\n  gh pr checks 123\n  sleep 5\ndone"},
+        near_miss={"command": "for n in 293 294 295; do gh pr checks $n; sleep 2; done"},
+    ),
 ]
 
 

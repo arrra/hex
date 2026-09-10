@@ -1288,5 +1288,43 @@ class TestDestructiveArgumentFormsAskFirst(RouterTestCase):
                 self.assertEqual(read_ledger(ledger_dir), [])
 
 
+class TestMultilinePollingLoopScope(RouterTestCase):
+    """F11: rules compile with MULTILINE, not DOTALL, so the polling rule's
+    `.*` never crossed a newline -- a normal multiline `while`/`until` loop
+    abstained while its one-line equivalent asked. Match must span the loop
+    body's actual extent (bounded at its own `done`), keeping an out-of-loop
+    `gh` call from being pulled into an unrelated loop's sleep."""
+
+    def test_multiline_while_loop_asks(self):
+        cmd = "while true; do\n  gh pr checks 123\n  sleep 5\ndone"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F11)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_multiline_until_loop_asks(self):
+        cmd = "until false; do\n  gh pr checks 123\n  sleep 5\ndone"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F11)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_bounded_for_loop_over_pr_list_still_abstains(self):
+        cmd = "for n in 293 294 295; do gh pr checks $n; sleep 2; done"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F11 near miss)")
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_out_of_loop_gh_call_before_an_unrelated_loop_abstains(self):
+        cmd = "gh pr checks 123\nwhile true; do\n  sleep 5\ndone"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F11 near miss)")
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
 if __name__ == "__main__":
     unittest.main()
