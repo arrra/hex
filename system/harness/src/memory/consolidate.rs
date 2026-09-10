@@ -129,7 +129,6 @@ fn op_catchup_distill(conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 // ---------------------------------------------------------------------------
 // Conservative fact canonicalization (recall-fix task Tsfwg7d2v; diagnosis root
 // cause 2: fact-store duplication and subject fragmentation).
@@ -450,7 +449,6 @@ fn tombstone_duplicate_fact(
     Ok(())
 }
 
-
 // PAUSED — see the op registration above. Kept compiled (not deleted) so the
 // re-enable diff is one line once the access counter ships.
 #[allow(dead_code)]
@@ -465,7 +463,6 @@ fn op_prune(conn: &mut Connection) -> anyhow::Result<()> {
     )?;
     Ok(())
 }
-
 
 /// One quick tick may not hold the consolidate lock indefinitely — the
 /// nightly full run needs it (lock_wait_budget = 45m). 10 minutes processes
@@ -611,23 +608,34 @@ mod tests {
 
         let report = run(&mut conn).unwrap();
 
+        // On this line dedup / contradiction-sweep / topic-rollup are not yet
+        // implemented and are reported once as `skipped` instead of running as
+        // stub ops (692a95d) — so they get no timing entry, by design.
         let expected_ops = [
             "orientation-snapshot",
             "catchup-distill",
             "fact-canonicalize",
-            "dedup",
-            "contradiction-sweep",
-            "topic-rollup",
         ];
+        let skipped_ops = ["dedup", "contradiction-sweep", "topic-rollup"];
         assert_eq!(
             report.op_timings.len(),
             expected_ops.len(),
-            "every executed op must report exactly one timing entry (paused ops excluded)"
+            "every executed op must report exactly one timing entry (paused and skipped ops excluded)"
         );
         for name in expected_ops {
             assert!(
                 report.op_timings.iter().any(|t| t.name == name),
                 "missing timing entry for op '{name}'"
+            );
+        }
+        for name in skipped_ops {
+            assert!(
+                report.skipped.iter().any(|s| s == name),
+                "skipped op '{name}' must be reported in `skipped`"
+            );
+            assert!(
+                !report.op_timings.iter().any(|t| t.name == name),
+                "skipped op '{name}' must not carry a timing entry"
             );
         }
         // rss_delta_mb is best-effort (None on platforms without /proc, e.g.
