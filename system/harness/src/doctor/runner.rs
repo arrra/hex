@@ -966,14 +966,33 @@ mod tests {
         let _ = std::fs::remove_dir_all(path);
     }
 
+    /// Monotonic source for `unique_fault_injection_token` — see there.
+    #[cfg(unix)]
+    static FAULT_INJECTION_TOKEN_COUNTER: std::sync::atomic::AtomicU64 =
+        std::sync::atomic::AtomicU64::new(0);
+
+    /// A token unique to ONE invocation of the self-locking cleanup fault
+    /// injection (`add_self_locking_cleanup_trap` /
+    /// `sweep_leaked_harness_buildable_tempdirs` below). Combines the
+    /// process id with a monotonic counter so that two invocations —
+    /// whether two tests in this binary running concurrently under
+    /// `cargo test`'s default parallelism, or two separate `cargo test`
+    /// processes on a shared host — never mint the same token (G3
+    /// follow-up).
+    #[cfg(unix)]
+    fn unique_fault_injection_token() -> String {
+        let n = FAULT_INJECTION_TOKEN_COUNTER.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+        format!("hex-doctor-g1-selflock-{}-{}", std::process::id(), n)
+    }
+
     /// Sweeps the OS temp dir for leaked `hex-doctor-harness-buildable-*`
-    /// directories that carry THIS test module's own fault-injection
-    /// signature (`.hex/harness/aaa_locked`, written only by
-    /// `add_self_locking_cleanup_trap` below) and force-removes them. Used
-    /// before/after the G1 fault-injection tests below so a cleanup failure
-    /// they deliberately cause doesn't leak a permission-locked directory
-    /// into `/tmp` for the rest of the suite (or the next CI run) to trip
-    /// over.
+    /// directories that carry THIS invocation's own fault-injection
+    /// signature (`.hex/harness/aaa_locked` containing exactly `token`,
+    /// written only by `add_self_locking_cleanup_trap` below) and
+    /// force-removes them. Used before/after the G1 fault-injection tests
+    /// below so a cleanup failure they deliberately cause doesn't leak a
+    /// permission-locked directory into `/tmp` for the rest of the suite
+    /// (or the next CI run) to trip over.
     ///
     /// G3: an earlier version matched on the check's own tempdir PREFIX
     /// alone and force-removed every match. Under `cargo test`'s default
@@ -981,22 +1000,32 @@ mod tests {
     /// the same host), that prefix is shared with every OTHER in-flight
     /// `harness-buildable-from-git` diagnostic worktree — the sweep could
     /// delete a live worktree belonging to an unrelated, still-running
-    /// check. Only this fault injection ever creates
-    /// `.hex/harness/aaa_locked`, so gating removal on that path's
-    /// presence scopes the sweep to directories THIS test created.
+    /// check.
+    ///
+    /// G3 follow-up: gating on the mere PRESENCE of
+    /// `.hex/harness/aaa_locked` was still not enough — every invocation of
+    /// the fault injection wrote the exact same fixed marker content, so
+    /// two invocations of it produced indistinguishable directories and
+    /// one invocation's sweep could delete another, still-running
+    /// invocation's live worktree. Requiring the marker's CONTENT to match
+    /// this invocation's own unique `token` scopes the sweep to exactly
+    /// the directory THIS invocation created.
     #[cfg(unix)]
-    fn sweep_leaked_harness_buildable_tempdirs() {
+    fn sweep_leaked_harness_buildable_tempdirs(token: &str) {
         let base = std::env::temp_dir();
         let Ok(entries) = std::fs::read_dir(&base) else {
             return;
         };
         for entry in entries.flatten() {
             let path = entry.path();
+            let marker = path.join(".hex/harness/aaa_locked/file.txt");
             let is_our_own_fault_injection = entry
                 .file_name()
                 .to_string_lossy()
                 .starts_with("hex-doctor-harness-buildable-")
-                && path.join(".hex/harness/aaa_locked").exists();
+                && std::fs::read_to_string(&marker)
+                    .map(|content| content == token)
+                    .unwrap_or(false);
             if is_our_own_fault_injection {
                 force_remove_dir_all(&path);
             }
@@ -1025,7 +1054,7 @@ mod tests {
         std::fs::create_dir_all(decoy.path().join("some-other-checks-live-worktree"))
             .expect("failed to populate decoy");
 
-        sweep_leaked_harness_buildable_tempdirs();
+        sweep_leaked_harness_buildable_tempdirs(&unique_fault_injection_token());
 
         assert!(
             decoy.path().exists(),
@@ -1033,6 +1062,46 @@ mod tests {
              tempdir that lacks this test module's own fault-injection \
              signature — doing so would delete another concurrently \
              running check's live worktree"
+        );
+    }
+
+    /// G3 follow-up (review_b, iteration 2): gating the sweep on the mere
+    /// PRESENCE of `.hex/harness/aaa_locked` is not enough — every
+    /// invocation of `add_self_locking_cleanup_trap` wrote the exact same
+    /// fixed marker content, so two invocations of the fault injection
+    /// (e.g. two of the tests below running concurrently under `cargo
+    /// test`'s default parallelism, or two separate `cargo test` processes
+    /// on a shared CI host) produced INDISTINGUISHABLE directories: one
+    /// invocation's sweep could delete another, still-running invocation's
+    /// live worktree. Plant a decoy that carries the signature PATH but a
+    /// DIFFERENT invocation's token as its content (simulating a
+    /// concurrently running invocation of the same fault injection) and
+    /// assert this invocation's sweep — scoped to its own unique token —
+    /// leaves it alone.
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_sweep_never_touches_a_concurrent_invocations_matching_signature_tempdir() {
+        let decoy = tempfile::Builder::new()
+            .prefix("hex-doctor-harness-buildable-")
+            .tempdir()
+            .expect("failed to create decoy tempdir");
+        std::fs::create_dir_all(decoy.path().join(".hex/harness/aaa_locked"))
+            .expect("failed to populate decoy");
+        std::fs::write(
+            decoy.path().join(".hex/harness/aaa_locked/file.txt"),
+            "some-other-concurrent-invocations-token",
+        )
+        .expect("failed to write decoy's marker content");
+
+        let my_token = unique_fault_injection_token();
+        sweep_leaked_harness_buildable_tempdirs(&my_token);
+
+        assert!(
+            decoy.path().exists(),
+            "G3: the sweep must not delete a directory carrying a \
+             DIFFERENT invocation's fault-injection signature — doing so \
+             could delete another concurrently running invocation's live \
+             worktree"
         );
     }
 
@@ -1047,7 +1116,7 @@ mod tests {
     /// worktree (e.g. from a permissions/ACL quirk), rather than simulating
     /// one.
     #[cfg(unix)]
-    fn add_self_locking_cleanup_trap(tmp: &std::path::Path) {
+    fn add_self_locking_cleanup_trap(tmp: &std::path::Path, token: &str) {
         run_git(
             tmp,
             &[
@@ -1066,7 +1135,7 @@ mod tests {
         );
         let harness = tmp.join(".hex/harness");
         std::fs::create_dir_all(harness.join("aaa_locked")).unwrap();
-        std::fs::write(harness.join("aaa_locked/file.txt"), "x").unwrap();
+        std::fs::write(harness.join("aaa_locked/file.txt"), token).unwrap();
         std::fs::write(harness.join("zzz_trigger.txt"), "trigger").unwrap();
         std::fs::write(
             harness.join(".gitattributes"),
@@ -1101,9 +1170,10 @@ mod tests {
         // that itself deterministically fails: the returned message must
         // name BOTH problems, proving cleanup now runs — and its failure is
         // surfaced — on this early path too, not just the final one.
-        sweep_leaked_harness_buildable_tempdirs();
+        let token = unique_fault_injection_token();
+        sweep_leaked_harness_buildable_tempdirs(&token);
         let tmp = init_repo_missing_lockfile();
-        add_self_locking_cleanup_trap(tmp.path());
+        add_self_locking_cleanup_trap(tmp.path(), &token);
 
         let result = crate::doctor::checks::harness_buildable::run_check_with_timeout(
             tmp.path(),
@@ -1129,7 +1199,7 @@ mod tests {
             result.message
         );
 
-        sweep_leaked_harness_buildable_tempdirs();
+        sweep_leaked_harness_buildable_tempdirs(&token);
     }
 
     #[cfg(unix)]
@@ -1142,9 +1212,10 @@ mod tests {
         // leaked a worktree it could not clean up is a silent failure (SO
         // S6: no quiet failures). A fully buildable fixture plus a
         // deterministic cleanup trap must now report FAIL, not PASS.
-        sweep_leaked_harness_buildable_tempdirs();
+        let token = unique_fault_injection_token();
+        sweep_leaked_harness_buildable_tempdirs(&token);
         let tmp = init_repo_committed_include();
-        add_self_locking_cleanup_trap(tmp.path());
+        add_self_locking_cleanup_trap(tmp.path(), &token);
 
         let result = crate::doctor::checks::harness_buildable::run_check_with_timeout(
             tmp.path(),
@@ -1165,7 +1236,7 @@ mod tests {
             result.message
         );
 
-        sweep_leaked_harness_buildable_tempdirs();
+        sweep_leaked_harness_buildable_tempdirs(&token);
     }
 
     #[test]
