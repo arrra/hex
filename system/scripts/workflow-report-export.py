@@ -63,17 +63,33 @@ LOG_CAP = 150
 # a mixed alphabet), github_pat_*, the gh[pousr]_ classic token family,
 # xox[abps]- Slack tokens, AKIA AWS keys, Bearer headers, pit- tokens,
 # key=/token=/password=/secret= value pairs, and PEM private-key blocks.
+#
+# R1 redo (F2 regression): github_pat_/gh[pousr]_/xox[abps]-/AKIA/pit- and
+# the key|token|password|secret= pairs are anchored with a negative
+# lookbehind so they only match at a genuine token boundary. "sk-" is left
+# unanchored on purpose — legitimate ids in this codebase embed it directly
+# after "_"/"-" with no boundary (e.g. a runId "wf_sk-ant-...", a filename
+# "deploy-sk-ant-..."), so a lookbehind on "-"/"_" would also block those.
+# Instead _redact_one() (see redact()) requires a digit somewhere in the
+# matched "sk-" text before treating it as a credential: every real sk-* key
+# carries a digit (a provider infix like "api03", or random chars), while the
+# ordinary hyphenated prose that used to false-positive here — "task-review-
+# changes-and-summarize" contains "sk-review-..." right after "ta"; "risk-
+# assessment-and-mitigation-plan" contains "sk-assessment-..." right after
+# "ri" — is plain lowercase letters and hyphens with no digit at all.
 SECRET_RE = re.compile(
     r"sk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}"
-    r"|github_pat_[A-Za-z0-9_]{20,}"
-    r"|gh[pousr]_[A-Za-z0-9]{20,}"
-    r"|xox[abps]-[A-Za-z0-9-]{10,}"
-    r"|AKIA[A-Z0-9]{12,}"
+    r"|(?<![A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}"
+    r"|(?<![A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|(?<![A-Za-z0-9_-])xox[abps]-[A-Za-z0-9-]{10,}"
+    r"|(?<![A-Za-z0-9_-])AKIA[A-Z0-9]{12,}"
     r"|Bearer [A-Za-z0-9._-]{20,}"
-    r"|pit-[a-f0-9-]{20,}"
-    r"|(?:key|token|password|secret)=\S+"
+    r"|(?<![A-Za-z0-9_-])pit-[a-f0-9-]{20,}"
+    r"|(?<![A-Za-z0-9_])(?:key|token|password|secret)=\S+"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
 )
+
+_HAS_DIGIT_RE = re.compile(r"[0-9]")
 
 # Absolute paths with at least two segments, e.g. /home/x/repo or /home/x/proj/src.
 ABS_PATH_RE = re.compile(r"/[\w][\w.\-]*(?:/[\w][\w.\-]*)+")
@@ -122,12 +138,16 @@ def repo_root_of(path: str) -> str | None:
             return "/".join(parts[: i + 3])
 
     work = list(parts)
-    # F8 — only trust a trailing segment as a stray file (and strip it) when
-    # there is enough structure left afterward that the remainder isn't just
-    # a generic top-level directory. Without this, a dotted directory like
-    # "service.api" sitting right under "/tmp" gets mistaken for a filename
-    # and stripped down to "tmp".
-    if len(work) > 3 and FILE_EXT_RE.search(work[-1]):
+    # F8 — only strip a trailing segment as a confirmed stray file when it
+    # has an extension AND its own parent segment is a recognized
+    # source/non-repo directory (NON_REPO_DIRS) — the on-disk `.git` case is
+    # already handled above. R1 redo: a bare "len(work) > 3" depth check let
+    # a dotted directory like "service.api" get popped down to whatever
+    # ancestor happened to be there (e.g. /home/x/service.api -> "x",
+    # /Users/sagar/work/service.api -> "work") — neither is a repo root, so
+    # leave the trailing segment alone unless the parent is a known
+    # boundary, e.g. ".../src/service.api" popping "service.api" under "src".
+    if len(work) >= 2 and FILE_EXT_RE.search(work[-1]) and work[-2] in NON_REPO_DIRS:
         work.pop()
 
     # F15 — truncate at the shallowest recognized non-repo/source-directory
@@ -138,6 +158,13 @@ def repo_root_of(path: str) -> str | None:
         if seg in NON_REPO_DIRS:
             work = work[:i]
             break
+    else:
+        # R1 redo: no recognized boundary was found anywhere in the path. If
+        # the tail still looks like a stray file, the path is too ambiguous
+        # to resolve — report unmapped rather than guessing an unrelated
+        # leaf directory (e.g. never .../acme-repo/auth/main.py -> "auth").
+        if work and FILE_EXT_RE.search(work[-1]):
+            return None
 
     if len(work) < 2:
         return None
@@ -253,6 +280,17 @@ def infer_project(rec: dict, project_map: list[tuple[str, str]]) -> str | None:
     return None
 
 
+def _redact_one(m: re.Match) -> str:
+    text = m.group(0)
+    # R1 redo (F2 regression) — the unanchored "sk-" alternative also
+    # matches ordinary hyphenated prose ("task-review-...", "risk-
+    # assessment-..."). Every real sk-* key carries a digit; plain-English
+    # hyphenated phrases don't, so leave those untouched.
+    if text.startswith("sk-") and not _HAS_DIGIT_RE.search(text):
+        return text
+    return "[REDACTED]"
+
+
 def redact(text: str, warnings: list[str] | None = None, label: str = "record") -> str:
     """Strip credential-shaped substrings from `text` (F1).
 
@@ -263,9 +301,18 @@ def redact(text: str, warnings: list[str] | None = None, label: str = "record") 
     """
     if not text:
         return text
-    out, n = SECRET_RE.subn("[REDACTED]", text)
-    if n and warnings is not None:
-        warnings.append(f"{label}: redacted {n} credential-shaped string(s)")
+    redacted_count = 0
+
+    def _sub(m: re.Match) -> str:
+        nonlocal redacted_count
+        replacement = _redact_one(m)
+        if replacement != m.group(0):
+            redacted_count += 1
+        return replacement
+
+    out = SECRET_RE.sub(_sub, text)
+    if redacted_count and warnings is not None:
+        warnings.append(f"{label}: redacted {redacted_count} credential-shaped string(s)")
     return out
 
 

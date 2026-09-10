@@ -224,6 +224,48 @@ class RedactionCoverage(unittest.TestCase):
         out = self.m.redact(pem, warnings, "wf_1")
         self.assertNotIn("MIIEpAIBAAKCAQEA", out)
 
+    def test_hyphenated_prose_containing_a_credential_prefix_substring_survives(self):
+        # R1 redo regression: the F1 fix's unanchored "sk-[A-Za-z0-9_-]{20,}"
+        # alternative also matched mid-word inside ordinary hyphenated prose
+        # — "task-review-changes-and-summarize" contains "sk-review..." right
+        # after "ta", and "risk-assessment-and-mitigation-plan" contains
+        # "sk-assessment..." right after "ri". Neither is a credential.
+        warnings: list[str] = []
+        for text in [
+            "task-review-changes-and-summarize",
+            "risk-assessment-and-mitigation-plan",
+        ]:
+            out = self.m.redact(text, warnings, "wf_1")
+            self.assertEqual(out, text, f"{text!r} was mangled by redaction")
+
+
+class HyphenatedWorkflowNamesSurviveRedaction(unittest.TestCase):
+    """F2 regression, end-to-end: an ordinary hyphenated workflow name that
+    happens to contain a credential-prefix substring must reach the report
+    filename and body intact, not get mangled by the anchored SECRET_RE."""
+
+    def test_ordinary_hyphenated_workflow_name_not_redacted_in_report(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            name = "task-review-changes-and-summarize"
+            rec = {
+                "runId": "wf_plain1",
+                "workflowName": name,
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"summary": "ok"},
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(len(reports), 1, reports)
+            self.assertIn(name, reports[0].name, "ordinary hyphenated name mangled in filename")
+            content = reports[0].read_text()
+            self.assertNotIn("[REDACTED]", content, "ordinary hyphenated workflow name got redacted")
+
 
 class DestinationAndDiagnosticRedaction(unittest.TestCase):
     """F2 — credential-shaped runId/workflow name must not leak into
@@ -240,7 +282,7 @@ class DestinationAndDiagnosticRedaction(unittest.TestCase):
                 "workflowName": f"deploy-{secret}",
                 "status": "completed",
                 "timestamp": "2026-09-09T12:00:00Z",
-                "result": {"repo": "/tmp/acme-repo/main.py"},
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
             }
             _write_record(projects, rec)
             rc, out, err = _run_export(hex_dir, projects, dry_run=True)
@@ -344,7 +386,7 @@ class DestinationContainment(unittest.TestCase):
                 "workflowName": "wf",
                 "status": "completed",
                 "timestamp": "2026-09-09T12:00:00Z",
-                "result": "/tmp/acme-repo/main.py",
+                "result": "/tmp/acme-repo/src/main.py",
             }
             _write_record(projects, rec)
             _run_export(hex_dir, projects)
@@ -393,7 +435,7 @@ class ConcurrencySafety(unittest.TestCase):
                 "workflowName": "review-changes",
                 "status": "completed",
                 "timestamp": "2026-09-09T12:00:00Z",
-                "result": {"repo": "/tmp/acme-repo/main.py"},
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
             }
             _write_record(projects, rec)
             out_dir = os.path.join(hex_dir, "projects", "acme-repo", "workflow-reports")
@@ -426,17 +468,42 @@ class PathExtractionEdgeCases(unittest.TestCase):
 
 
 class RepoRootInference(unittest.TestCase):
-    """F8 / F15 — only strip a confirmed trailing file component; nested
-    unknown directories must resolve through recognized source-dir
-    boundaries, never to the leaf directory."""
+    """F8 / F15 — only strip a confirmed trailing file component (parent
+    segment is a recognized source/non-repo directory); nested unknown
+    directories must resolve through recognized source-dir boundaries, never
+    to the leaf directory or an unrelated ancestor."""
 
     def test_dotted_directory_is_not_stripped_as_a_filename(self):
         m = load_script()
-        self.assertEqual(m.repo_dir_basename("/tmp/service.api"), "service.api")
+        # A bare dotted directory right under a generic ancestor ("tmp" is
+        # not a recognized boundary) is ambiguous — it must never be treated
+        # as a stray file and popped down to its parent, e.g. never "tmp".
+        self.assertIsNone(m.repo_dir_basename("/tmp/service.api"))
 
     def test_nested_non_whitelisted_directory_resolves_to_repo_not_leaf(self):
         m = load_script()
         self.assertEqual(m.repo_dir_basename("/tmp/acme-repo/src/auth/main.py"), "acme-repo")
+
+    def test_dotted_leaf_under_arbitrary_directory_never_becomes_that_directory(self):
+        # R1 redo counter-example: repo_dir_basename("/home/x/service.api")
+        # returned "x" and ("/Users/sagar/work/service.api") returned "work"
+        # — the old depth heuristic (len(work) > 3) let a dotted leaf pop
+        # down to whatever ancestor happened to be there. Neither "x" nor
+        # "work" is a recognized source/non-repo directory, so the trailing
+        # segment must be left alone; with no boundary found and the tail
+        # still file-shaped, this must resolve to None (_unmapped).
+        m = load_script()
+        self.assertIsNone(m.repo_dir_basename("/home/x/service.api"))
+        self.assertIsNone(m.repo_dir_basename("/Users/sagar/work/service.api"))
+
+    def test_unbounded_nested_directory_is_unmapped_never_the_leaf(self):
+        # R1 redo counter-example: repo_dir_basename("/tmp/acme-repo/auth/main.py")
+        # returned "auth" because no NON_REPO_DIRS boundary exists in the
+        # path. Per the contract ("never auth"), an unresolved nested path
+        # without a recognized boundary must go _unmapped (None), not guess
+        # the immediate leaf directory.
+        m = load_script()
+        self.assertIsNone(m.repo_dir_basename("/tmp/acme-repo/auth/main.py"))
 
 
 class MappingSearchesFullScript(unittest.TestCase):
