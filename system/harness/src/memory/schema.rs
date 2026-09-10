@@ -277,7 +277,24 @@ CREATE INDEX IF NOT EXISTS facts_live_idx ON facts(subject, predicate) WHERE inv
 /// `invalid_at` is left NULL), and adds the live-rows partial index. Uses the
 /// same guarded-ALTER idiom as `apply_plan2`'s `transcript_files` backfill so
 /// re-running against an already-migrated database is a no-op, not an error.
+///
+/// Skips the ALTER/backfill/index work entirely once `schema_version` already
+/// records version 5 (PR#9 r1 F4): those steps are safe to repeat, but every
+/// `open_db` call would otherwise re-run three guarded `ALTER TABLE` attempts
+/// and a table scan on every process start for no effect. A DB whose migration
+/// only partially landed (columns present but no version-5 row, or vice versa)
+/// still has no version-5 marker, so it still retries the full sequence.
 pub fn apply_plan3(conn: &Connection) -> Result<()> {
+    let already_applied: i64 = conn
+        .query_row(
+            "SELECT COUNT(*) FROM schema_version WHERE version = 5",
+            [],
+            |r| r.get(0),
+        )
+        .unwrap_or(0);
+    if already_applied > 0 {
+        return Ok(());
+    }
     for (col, ddl) in [
         ("valid_from", "ALTER TABLE facts ADD COLUMN valid_from TEXT"),
         ("invalid_at", "ALTER TABLE facts ADD COLUMN invalid_at TEXT"),
@@ -514,6 +531,48 @@ mod tests {
         assert_eq!(
             version2, 5,
             "re-applying apply_plan3 must stay at version 5"
+        );
+    }
+
+    /// RED for PR#9 r1 F4 (minor): once `schema_version` already records
+    /// version 5, `apply_plan3` must skip the ALTER/backfill/index work
+    /// entirely rather than re-running it on every `open_db` call. Pinned by
+    /// making the file read-only AFTER a completed migration: the guarded
+    /// `ALTER TABLE`s are tolerated no-ops either way, but the backfill
+    /// `UPDATE` needs a write transaction even when it matches zero rows —
+    /// so a re-run that doesn't skip hits `SQLITE_READONLY` here, while a
+    /// re-run that skips returns `Ok` untouched.
+    #[test]
+    fn apply_plan3_skips_backfill_when_version_5_marker_present() {
+        crate::memory::vector::register_sqlite_vec();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("memory.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            apply_plan1_baseline_for_test(&conn).unwrap();
+            apply_plan2(&conn).unwrap();
+            apply_plan3(&conn).unwrap();
+        }
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+        }
+
+        let conn = Connection::open(&db_path).unwrap();
+        let result = apply_plan3(&conn);
+
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).unwrap();
+        }
+
+        assert!(
+            result.is_ok(),
+            "apply_plan3 must skip its write work (not error) once version 5 is already recorded: {result:?}"
         );
     }
 }
