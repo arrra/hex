@@ -1231,5 +1231,30 @@ class TestStashExemptionEffectiveCheckout(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestForceRefspecAsksFirst(RouterTestCase):
+    """F5: a leading `+` on any push refspec forces the update, the same as
+    `--force`/`-f`, but neither force-push rule matched it. Inspect refspec
+    arguments for a leading `+` and ask, alongside non-forcing near misses."""
+
+    def test_leading_plus_refspec_asks(self):
+        cmd = "git push origin +HEAD:main"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F5)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_non_forcing_refspec_near_misses_abstain(self):
+        cases = (
+            "git push origin HEAD:main",
+            "git push origin main",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F5 near miss)")
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+
 if __name__ == "__main__":
     unittest.main()

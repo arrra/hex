@@ -29,10 +29,10 @@
   {
     "id": "git-push-force",
     "tool": "^Bash$",
-    "match": "@PREFIX@git\\s+@GITOPTS@push\\b[^\\n;&|]*\\s--force\\b|@PREFIX@git\\s+@GITOPTS@push\\b[^\\n;&|]*\\s-f\\b",
+    "match": "@PREFIX@git\\s+@GITOPTS@push\\b[^\\n;&|]*\\s--force\\b|@PREFIX@git\\s+@GITOPTS@push\\b[^\\n;&|]*\\s-f\\b|@PREFIX@git\\s+@GITOPTS@push\\b[^\\n;&|]*\\s\\+[^\\s;&|]",
     "unless_match": "--force-with-lease",
     "decision": "ask",
-    "message": "Force-push is ASK-FIRST (operator policy). NEVER on a stacked-PR branch (false-MERGED class) - use gh stack sync / gh stack push. Personal single branch after a rebase: confirm.",
+    "message": "Force-push is ASK-FIRST (operator policy). NEVER on a stacked-PR branch (false-MERGED class) - use gh stack sync / gh stack push. Personal single branch after a rebase: confirm. (F5: a leading `+` on a refspec forces the update the same as --force.)",
     "source": "feedback_stacked_pr_forcepush_false_merge"
   },
   {

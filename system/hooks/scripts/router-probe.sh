@@ -227,6 +227,15 @@ EXTRA_FIXTURES = [
         near_miss={"command": f"cd {WORKTREE_CWD} && git stash"},
         near_miss_cwd=DEFAULT_CWD,
     ),
+    # F5: a leading `+` on a push refspec forces the update, same as
+    # --force/-f, but neither original rule alternative matched it.
+    dict(
+        id="git-push-force",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git push origin +HEAD:main"},
+        near_miss={"command": "git push origin HEAD:main"},
+    ),
 ]
 
 
