@@ -496,6 +496,15 @@ class PathExtractionEdgeCases(unittest.TestCase):
         rec = {"result": "/Users/Jane Doe/acme-repo/src/main.py"}
         self.assertNotEqual(m.infer_project(rec, []), "Jane")
 
+    def test_multi_space_name_is_not_truncated_to_first_segment(self):
+        # review_b G1: a name with more than one space ("Jane Doe Smith")
+        # still slipped past the old one-space-ahead check in
+        # _looks_truncated_by_space, so the truncated "/Users/Jane" prefix
+        # was accepted as a complete path.
+        m = load_script()
+        rec = {"result": "/Users/Jane Doe Smith/acme-repo/src/main.py"}
+        self.assertNotEqual(m.infer_project(rec, []), "Jane")
+
 
 class RepoRootInference(unittest.TestCase):
     """F8 / F15 — only strip a confirmed trailing file component (parent
@@ -535,6 +544,16 @@ class RepoRootInference(unittest.TestCase):
         m = load_script()
         self.assertIsNone(m.repo_dir_basename("/tmp/acme-repo/auth/main.py"))
 
+    def test_container_boundary_before_repo_name_does_not_win_over_the_real_boundary(self):
+        # review_b G3: the old leftmost-boundary scan stopped at the FIRST
+        # NON_REPO_DIRS segment it saw. In a container layout like
+        # "/workspace/src/acme-repo/src/main.py" that first hit is the outer
+        # "src" (a container prefix before the repo name), so it resolved to
+        # "workspace" instead of the real repo root "acme-repo" anchored by
+        # the second "src", the one immediately before the file.
+        m = load_script()
+        self.assertEqual(m.repo_dir_basename("/workspace/src/acme-repo/src/main.py"), "acme-repo")
+
 
 class MappingSearchesFullScript(unittest.TestCase):
     """F17 — the mapping search must read the full script text, not an
@@ -552,6 +571,42 @@ class MappingSearchesFullScript(unittest.TestCase):
         rec = {"result": "", "workflowName": "", "script": script}
         rules = [("acme", "acme-project"), ("widgets", "widgets-project")]
         self.assertEqual(m.infer_project(rec, rules), "widgets-project")
+
+
+class RunIdCollisionSafety(unittest.TestCase):
+    """review_b G2 — redact() turns any credential-shaped runId into the same
+    literal "[REDACTED]" string, so two distinct credential-shaped runIds
+    collided on one filename and the second run was silently skipped as
+    "already exported". Each run must still land its own report."""
+
+    def test_distinct_credential_shaped_run_ids_do_not_collide(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            secret_a = "sk-ant-" + "A" * 25
+            secret_b = "sk-ant-" + "B" * 25
+            for i, secret in enumerate([secret_a, secret_b]):
+                rec = {
+                    "runId": f"wf_{secret}",
+                    "workflowName": "wf",
+                    "status": "completed",
+                    "timestamp": "2026-09-09T12:00:00Z",
+                    "result": {"repo": "/tmp/acme-repo/src/main.py"},
+                }
+                _write_record(projects, rec, session=f"sess{i}")
+
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("wrote=2", out, out)
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(len(reports), 2, reports)
+            self.assertEqual(
+                len({p.name for p in reports}), 2, "two distinct runIds collided on one filename"
+            )
+            for name in (p.name for p in reports):
+                self.assertNotIn(secret_a, name)
+                self.assertNotIn(secret_b, name)
 
 
 if __name__ == "__main__":

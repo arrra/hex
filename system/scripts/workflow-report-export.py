@@ -47,6 +47,7 @@ from __future__ import annotations
 
 import argparse
 import glob
+import hashlib
 import json
 import os
 import re
@@ -133,25 +134,31 @@ def repo_root_of(path: str) -> str | None:
             return "/".join(parts[: i + 3])
 
     work = list(parts)
-    # F8 — only strip a trailing segment as a confirmed stray file when it
-    # has an extension AND its own parent segment is a recognized
-    # source/non-repo directory (NON_REPO_DIRS) — the on-disk `.git` case is
-    # already handled above. R1 redo: a bare "len(work) > 3" depth check let
-    # a dotted directory like "service.api" get popped down to whatever
-    # ancestor happened to be there (e.g. /home/x/service.api -> "x",
-    # /Users/sagar/work/service.api -> "work") — neither is a repo root, so
-    # leave the trailing segment alone unless the parent is a known
-    # boundary, e.g. ".../src/service.api" popping "service.api" under "src".
-    if len(work) >= 2 and FILE_EXT_RE.search(work[-1]) and work[-2] in NON_REPO_DIRS:
-        work.pop()
+    # F8 — a trailing segment with an extension is ambiguous on its own (it
+    # could be a real file, or a dotted directory like "service.api"), so it
+    # never anchors the boundary search itself; it is only consulted
+    # afterwards to decide the no-boundary-found / ambiguous case below.
+    dir_parts = work[:-1] if work and FILE_EXT_RE.search(work[-1]) else work
 
-    # F15 — truncate at the shallowest recognized non-repo/source-directory
-    # boundary, if any. This also absorbs unrecognized nested directories
-    # below it: ".../acme-repo/src/auth/main.py" must resolve via the "src"
-    # boundary to "acme-repo", never stop early at "auth".
-    for i, seg in enumerate(work):
-        if seg in NON_REPO_DIRS:
-            work = work[:i]
+    # F15 / review_b G3 — find the recognized non-repo/source-directory
+    # boundary CLOSEST to the file: the rightmost NON_REPO_DIRS segment whose
+    # immediate predecessor is itself NOT a NON_REPO_DIRS segment (i.e. a
+    # real name — the repo). Walking from the left and stopping at the FIRST
+    # boundary breaks container layouts like
+    # ".../workspace/src/acme-repo/src/main.py", where the first "src" is an
+    # outer container prefix, not the repo boundary — that resolved to
+    # "workspace" instead of "acme-repo". Walking from the right absolutely
+    # (picking the last NON_REPO_DIRS segment full stop) breaks nested
+    # source dirs like ".../acme-repo/src/lib/util.py", where "lib" is
+    # itself a NON_REPO_DIRS segment with another one ("src") right before
+    # it — there the boundary must be "src", not "lib". Requiring a
+    # non-boundary predecessor picks the right one in both shapes; this also
+    # absorbs unrecognized nested directories below it: e.g.
+    # ".../acme-repo/src/auth/main.py" must resolve via the "src" boundary
+    # to "acme-repo", never stop early at "auth".
+    for i in range(len(dir_parts) - 1, 0, -1):
+        if dir_parts[i] in NON_REPO_DIRS and dir_parts[i - 1] not in NON_REPO_DIRS:
+            work = dir_parts[:i]
             break
     else:
         # R1 redo: no recognized boundary was found anywhere in the path. If
@@ -223,14 +230,23 @@ def load_project_map(hex_dir: str) -> list[tuple[str, str]]:
     return out
 
 
+# review_b G1: a name with MORE than one space ("Jane Doe Smith") was not
+# caught by looking just one space-separated word ahead — "Doe Smith/..."
+# has a second space before the next "/", so the old single-hop regex never
+# found it. Match any run of space-separated word-tokens that eventually
+# reaches a "/", however many spaces it takes.
+_SPACE_CONTINUATION_RE = re.compile(r"(?: [\w.\-]+)+/")
+
+
 def _looks_truncated_by_space(text: str, end: int) -> bool:
     """True if a path match ends right at a space that is followed by more
-    path-like text — a strong signal the real path continued past the space
-    and the match is only a truncated prefix (e.g. ".../Jane Doe/repo/...":
-    the match stops at "Jane" but "Doe/..." keeps going)."""
+    (possibly multi-word, multi-space) path-like text — a strong signal the
+    real path continued past the space(s) and the match is only a truncated
+    prefix (e.g. ".../Jane Doe Smith/repo/...": the match stops at "Jane"
+    but " Doe Smith/..." keeps going)."""
     if end >= len(text) or text[end] != " ":
         return False
-    return bool(re.match(r"[\w.\-]+/", text[end + 1 :]))
+    return bool(_SPACE_CONTINUATION_RE.match(text, end))
 
 
 def _extract_repo_path(text: str) -> str | None:
@@ -444,6 +460,16 @@ def main() -> int:
         # part of a path or a diagnostic message.
         run_id_raw = rec.get("runId") or os.path.basename(path).removesuffix(".json")
         run_id = redact(run_id_raw, warnings, path_label)
+        if run_id != run_id_raw:
+            # review_b G2 — redact() collapses every credential-shaped runId
+            # to the same literal "...[REDACTED]" string, so two distinct
+            # credential-shaped runIds collided on one filename and the
+            # second run was silently dropped as "already exported". Append
+            # a short, non-reversible fingerprint of the RAW id (never the
+            # raw id itself, which is exactly the secret being redacted) so
+            # distinct runIds still land on distinct files.
+            fingerprint = hashlib.sha256(run_id_raw.encode("utf-8", "surrogateescape")).hexdigest()[:8]
+            run_id = f"{run_id}-{fingerprint}"
         workflow_name = redact(rec.get("workflowName") or "workflow", warnings, path_label)
 
         ts = rec.get("timestamp")
