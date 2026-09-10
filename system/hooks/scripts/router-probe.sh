@@ -382,6 +382,76 @@ EXTRA_FIXTURES = [
             )
         },
     ),
+    # G1 (review_b round 1): `_effective_checkout` used to pick up the LAST
+    # `cd` anywhere earlier in the text even when its effect never actually
+    # reaches the later invocation -- a subshell-local `cd` (closed by its
+    # own `)` before the stash runs) or a `cd` guarded by `||` (only the
+    # stash runs, which means the `cd` FAILED) must not leak into the
+    # effective checkout. The near miss: `cd` and the stash both inside the
+    # SAME subshell -- that subshell-local checkout genuinely governs.
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": "(cd /worktrees/x); git stash"},
+        near_miss={"command": "(cd /worktrees/x; git stash)"},
+    ),
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": "cd /worktrees/x || git stash"},
+        near_miss={"command": "(cd /worktrees/x; git stash)"},
+    ),
+    # G2 (review_b round 1): `executable_mask` used to blank an entire
+    # quoted span to spaces, erasing the literal argument content along
+    # with it -- a quoted leading `+` refspec or a quoted destructive flag
+    # abstained even though the shell passes that exact text through
+    # unquoted. Near miss: a quoted but non-forcing refspec / a
+    # destructive-looking flag spelled out as literal TEXT to an unrelated
+    # subcommand must keep abstaining.
+    dict(
+        id="git-push-force",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git push origin '+HEAD:main'"},
+        near_miss={"command": "git push origin 'main'"},
+    ),
+    dict(
+        id="git-destructive-ask",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git reset HEAD~1 '--hard'"},
+        near_miss={"command": "git commit -m 'reset --hard would be bad here'"},
+    ),
+    dict(
+        id="git-destructive-ask",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git clean '--force' -d"},
+        near_miss={"command": "git commit -m 'reset --hard would be bad here'"},
+    ),
+    # G3 (review_b round 1): `_polling_loop_bounded` rejected any candidate
+    # with more than one `done` token, which also rejected a genuine OUTER
+    # polling loop merely CONTAINING a fully-closed nested loop (two
+    # `done`s, both legitimate). The near miss (two UNRELATED sibling
+    # loops, F3/F7's actual concern) stays abstain.
+    dict(
+        id="gh-fast-polling",
+        decision="ask",
+        tool_name="Bash",
+        positive={
+            "command": "while true; do\n  for i in 1 2; do\n    echo $i\n  done\n  gh pr checks 123\n  sleep 5\ndone"
+        },
+        near_miss={
+            "command": (
+                "while read x; do echo $x; done < f\n"
+                "gh pr checks 123\n"
+                "sleep 5\n"
+                "for p in 1 2; do echo; done"
+            )
+        },
+    ),
 ]
 
 
