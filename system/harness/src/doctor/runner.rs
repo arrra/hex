@@ -943,4 +943,209 @@ mod tests {
             result
         );
     }
+
+    // ---- tests for review round 1's follow-up findings (G1, G2 — from the
+    // `review_b` pass on task Thcdrea2q) ----
+
+    /// Recursively reinstates `0o755` and removes `path` — best-effort, used
+    /// only to undo the fault injection this test module performs on itself
+    /// (a deliberately unremovable directory, to force the check's own
+    /// cleanup to fail) so it doesn't leak a permission-locked directory in
+    /// the OS temp dir across test runs.
+    #[cfg(unix)]
+    fn force_remove_dir_all(path: &std::path::Path) {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o755));
+        if path.is_dir() {
+            if let Ok(entries) = std::fs::read_dir(path) {
+                for entry in entries.flatten() {
+                    force_remove_dir_all(&entry.path());
+                }
+            }
+        }
+        let _ = std::fs::remove_dir_all(path);
+    }
+
+    /// Sweeps the OS temp dir for any `hex-doctor-harness-buildable-*`
+    /// prefixed directory (the check's own `tempfile::Builder` prefix) and
+    /// force-removes it. Used before/after the G1 fault-injection tests
+    /// below so a cleanup failure this test deliberately causes doesn't
+    /// leak a permission-locked directory into `/tmp` for the rest of the
+    /// suite (or the next CI run) to trip over.
+    #[cfg(unix)]
+    fn sweep_leaked_harness_buildable_tempdirs() {
+        let base = std::env::temp_dir();
+        let Ok(entries) = std::fs::read_dir(&base) else {
+            return;
+        };
+        for entry in entries.flatten() {
+            if entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("hex-doctor-harness-buildable-")
+            {
+                force_remove_dir_all(&entry.path());
+            }
+        }
+    }
+
+    /// Deterministically forces the check's OWN diagnostic worktree cleanup
+    /// to fail, without timing/race dependence or process-global side
+    /// effects: a `smudge` filter on a small trigger file `chmod 000`s a
+    /// SIBLING directory that sorts earlier in git's checkout order (so its
+    /// own content is already fully written by the time the filter runs).
+    /// After checkout, that directory can no longer be deleted by `git
+    /// worktree remove --force` or by a plain recursive filesystem removal,
+    /// so cleanup deterministically fails — reproducing a real leaked
+    /// worktree (e.g. from a permissions/ACL quirk), rather than simulating
+    /// one.
+    #[cfg(unix)]
+    fn add_self_locking_cleanup_trap(tmp: &std::path::Path) {
+        run_git(
+            tmp,
+            &[
+                "config",
+                "filter.hex-doctor-g1-selflock.smudge",
+                "chmod 000 .hex/harness/aaa_locked; cat",
+            ],
+        );
+        run_git(tmp, &["config", "filter.hex-doctor-g1-selflock.clean", "cat"]);
+        run_git(
+            tmp,
+            &["config", "filter.hex-doctor-g1-selflock.required", "true"],
+        );
+        let harness = tmp.join(".hex/harness");
+        std::fs::create_dir_all(harness.join("aaa_locked")).unwrap();
+        std::fs::write(harness.join("aaa_locked/file.txt"), "x").unwrap();
+        std::fs::write(harness.join("zzz_trigger.txt"), "trigger").unwrap();
+        std::fs::write(
+            harness.join(".gitattributes"),
+            "zzz_trigger.txt filter=hex-doctor-g1-selflock\n",
+        )
+        .unwrap();
+        run_git(
+            tmp,
+            &[
+                "add",
+                ".hex/harness/aaa_locked/file.txt",
+                ".hex/harness/zzz_trigger.txt",
+                ".hex/harness/.gitattributes",
+            ],
+        );
+        run_git(tmp, &["commit", "-q", "-m", "add self-locking cleanup trap"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_failure_surfaces_on_an_intermediate_failure_path() {
+        // G1: earlier code only called `WorktreeGuard::cleanup()` from the
+        // single FINAL return (the `missing.is_empty()` branch at the end
+        // of the old monolithic function) — every earlier `return
+        // CheckResult::fail(...)` (e.g. the `cargo metadata` failure below)
+        // skipped cleanup entirely and left it to `Drop`, which discards
+        // any cleanup error silently. Combine a diagnostic that fails
+        // BEFORE the old final-return site (no Cargo.lock) with a cleanup
+        // that itself deterministically fails: the returned message must
+        // name BOTH problems, proving cleanup now runs — and its failure is
+        // surfaced — on this early path too, not just the final one.
+        sweep_leaked_harness_buildable_tempdirs();
+        let tmp = init_repo_missing_lockfile();
+        add_self_locking_cleanup_trap(tmp.path());
+
+        let result = crate::doctor::checks::harness_buildable::run_check_with_timeout(
+            tmp.path(),
+            std::time::Duration::from_secs(30),
+        );
+
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "sanity: no Cargo.lock must still fail cargo metadata, got {:?}",
+            result
+        );
+        let msg = result.message.to_lowercase();
+        assert!(
+            msg.contains("cargo metadata") || msg.contains("lockfile") || msg.contains("lock"),
+            "must still name the original cargo-metadata failure, got: {}",
+            result.message
+        );
+        assert!(
+            msg.contains("cleanup"),
+            "G1: an early `return` before the old final cleanup call must still \
+             surface a cleanup failure (not silently rely on Drop), got: {}",
+            result.message
+        );
+
+        sweep_leaked_harness_buildable_tempdirs();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_cleanup_failure_downgrades_an_otherwise_passing_result_to_fail() {
+        // G1: on the one path that DID call `cleanup()` explicitly (the
+        // final, success return), a cleanup error was appended to the
+        // message as a "(cleanup warning: ...)" suffix but `Status::Pass`
+        // was preserved — a doctor check reporting PASS while it just
+        // leaked a worktree it could not clean up is a silent failure (SO
+        // S6: no quiet failures). A fully buildable fixture plus a
+        // deterministic cleanup trap must now report FAIL, not PASS.
+        sweep_leaked_harness_buildable_tempdirs();
+        let tmp = init_repo_committed_include();
+        add_self_locking_cleanup_trap(tmp.path());
+
+        let result = crate::doctor::checks::harness_buildable::run_check_with_timeout(
+            tmp.path(),
+            std::time::Duration::from_secs(30),
+        );
+
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "G1: a cleanup failure must never leave the result as Status::Pass, \
+             got {:?}",
+            result
+        );
+        let msg = result.message.to_lowercase();
+        assert!(
+            msg.contains("cleanup"),
+            "failure must name the cleanup problem, got: {}",
+            result.message
+        );
+
+        sweep_leaked_harness_buildable_tempdirs();
+    }
+
+    #[test]
+    fn test_run_with_timeout_bounds_pipe_drain_when_descendant_holds_stdout_open() {
+        // G2: `try_wait` observing the direct child's exit does not mean its
+        // stdout/stderr pipes are closed. Backgrounding a longer-lived
+        // descendant that inherits the child's stdout fd and then letting
+        // the direct child (`sh`) exit immediately reproduces exactly that:
+        // an unbounded `.join()` on the drain thread would block for as
+        // long as the descendant lives (verified by hand: this exact shell
+        // snippet piped to `cat` takes as long as the backgrounded sleep,
+        // not as long as `sh` itself). `run_with_timeout` must bound the
+        // drain instead of hanging past its own configured deadline.
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c")
+            .arg("(sleep 30 >&1 &) ; exit 0");
+        let start = std::time::Instant::now();
+        let result = crate::doctor::checks::harness_buildable::run_with_timeout(
+            &mut cmd,
+            std::time::Duration::from_millis(500),
+        );
+        let elapsed = start.elapsed();
+        assert!(
+            elapsed < std::time::Duration::from_secs(10),
+            "G2: a descendant holding the pipe open after the direct child \
+             exits must not block the drain for its full lifetime — took {:?}",
+            elapsed
+        );
+        assert!(
+            result.is_err(),
+            "a drain that times out waiting for the descendant's pipe to \
+             close must be reported as an error, got: {:?}",
+            result
+        );
+    }
 }
