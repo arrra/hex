@@ -3020,11 +3020,26 @@ mod tests {
         assert_eq!(meta_count, n as i64);
     }
 
+    // F5 (minor, arrra/hex PR #8 round 1): the reuse-pool lookup at
+    // `index_file_with_reuse` (~line 866) filters the FTS5 `chunks` virtual
+    // table on a plain column equality (`WHERE c.file_id = ?`). FTS5 has no
+    // secondary index on non-MATCH column filters, so this degrades to a
+    // linear scan of every chunk row in the whole index for every changed
+    // file — the "whole-index work even when almost every vector is reused"
+    // the finding calls out. `EXPLAIN QUERY PLAN` on the deployed schema
+    // (below) confirms it: SQLite reports `SCAN c VIRTUAL TABLE INDEX 0:` —
+    // an unfiltered scan of the `c` (chunks) side — not a `SEARCH`. This
+    // pins the contract (no full scan of the chunks table for a per-file
+    // lookup), not any particular fix shape: it currently FAILS, and should
+    // start passing once the lookup is switched to an indexed file->chunk
+    // mapping per the finding's remediation.
     #[test]
-    fn f5_scratch_explain_plan() {
+    fn index_file_with_reuse_lookup_avoids_full_chunk_table_scan() {
         let tmp = TempDir::new().unwrap();
         let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
         init_db(&conn).unwrap();
+        // Multiple files with many chunks each, so a full scan of `chunks`
+        // is distinguishable from a lookup scoped to one file's rows.
         for f in 0..5 {
             conn.execute(
                 "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) VALUES (?, ?, ?, ?, ?)",
@@ -3042,6 +3057,9 @@ mod tests {
                 .unwrap();
             }
         }
+        // Identical to the reuse-pool query in `index_file_with_reuse`
+        // (~line 866-868): `SELECT c.heading, c.content, v.embedding FROM
+        // chunks c JOIN vec_chunks v ON v.rowid = c.rowid WHERE c.file_id = ?`.
         let mut stmt = conn
             .prepare(
                 "EXPLAIN QUERY PLAN SELECT c.heading, c.content, v.embedding \
@@ -3054,6 +3072,10 @@ mod tests {
             .unwrap()
             .map(|r| r.unwrap())
             .collect();
-        eprintln!("F5 PLAN (before): {plan:?}");
+        assert!(
+            !plan.iter().any(|step| step.starts_with("SCAN c ")),
+            "F5: reuse lookup does a full unindexed scan of the chunks \
+             table instead of a per-file indexed lookup: {plan:?}"
+        );
     }
 }
