@@ -1140,5 +1140,42 @@ class TestInvocationExemptionAnchoredNotSearched(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestSubstitutionMaskingIsRecursive(RouterTestCase):
+    """Review G1 (review_b round 2): `_mask_double_quoted` skips over a
+    `$(...)`/backtick substitution's ENTIRE body via `_find_matching_paren`
+    without recursively masking quoted literals NESTED inside it. A
+    single-quoted STRING ARGUMENT inside the substitution that merely
+    CONTAINS `; git stash` text -- never executed as a command -- was
+    therefore left fully visible to the stash rule, firing a false deny.
+    The fix must recursively scan executable regions inside `$(...)`/
+    backtick spans (nested quoting stays masked, nested `$(...)`/backticks
+    stay executable) instead of leaving the whole span untouched."""
+
+    def test_quoted_literal_inside_substitution_does_not_false_deny(self):
+        """`printf '%s' '; git stash'` never runs `git stash` -- the text is
+        a single-quoted string argument to printf. The buggy flat skip over
+        the substitution left that quoted literal fully visible to the
+        stash rule, firing a false deny."""
+        cmd = "echo \"$(printf '%s' '; git stash')\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"quoted literal text inside the substitution is never executed (G1): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_stash_inside_substitution_still_denies(self):
+        """Regression guard: an ACTUAL `git stash` invocation inside a
+        `$(...)` substitution (not inside a nested quoted literal) must
+        keep denying once the masking is made recursive."""
+        cmd = 'echo "$(git stash)"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must still deny (G1 regression guard)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()

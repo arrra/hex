@@ -136,17 +136,21 @@ _HEREDOC_START_RE = re.compile(r"<<(-)?\s*(?:'([^'\n]*)'|\"([^\"\n]*)\"|([A-Za-z
 
 
 def _find_matching_paren(text, open_idx):
-    """`text[open_idx]` is '('; return the index just past its matching ')'
-    (or len(text) if unterminated). Quote-aware (G1, review_b round 1): a
-    `)` inside a single- or double-quoted span does not count toward the
-    depth — a real shell parses nested quoting when it looks for a `$(...)`
-    substitution's true closing paren, so a quoted `)` earlier in the
-    substitution (e.g. `$(echo ")")`) must never be mistaken for the real
-    close. Mutually recursive with `_skip_double_quoted` so a NESTED
-    `$(...)` inside that quoted span is itself parsed the same way. Still a
-    flat scanner, not a full shell/paren grammar — sufficient for every
-    rule and fixture in this router (spec STOP condition already covers
-    that boundary)."""
+    """`text[open_idx]` is '('; return `(index_just_past_close, terminated)`
+    -- `terminated` is False when the substitution never closes (matching
+    real shell EOF behavior), mirroring `_consume_heredoc_body`'s
+    `(index, terminated)` convention so callers can tell a genuine close
+    from a truncated one (G1, review_b round 2: `_mask_double_quoted` needs
+    this to know whether to exclude a trailing ')' from the body it
+    recurses into). Quote-aware (G1, review_b round 1): a `)` inside a
+    single- or double-quoted span does not count toward the depth — a real
+    shell parses nested quoting when it looks for a `$(...)` substitution's
+    true closing paren, so a quoted `)` earlier in the substitution (e.g.
+    `$(echo ")")`) must never be mistaken for the real close. Mutually
+    recursive with `_skip_double_quoted` so a NESTED `$(...)` inside that
+    quoted span is itself parsed the same way. Still a flat scanner, not a
+    full shell/paren grammar — sufficient for every rule and fixture in
+    this router (spec STOP condition already covers that boundary)."""
     depth = 0
     n = len(text)
     i = open_idx
@@ -171,9 +175,9 @@ def _find_matching_paren(text, open_idx):
         elif ch == ")":
             depth -= 1
             if depth == 0:
-                return i + 1
+                return i + 1, True
         i += 1
-    return n
+    return n, False
 
 
 def _skip_double_quoted(text, start):
@@ -191,7 +195,7 @@ def _skip_double_quoted(text, start):
         if ch == '"':
             return i + 1
         if ch == "$" and i + 1 < n and text[i + 1] == "(":
-            i = _find_matching_paren(text, i + 1)
+            i, _ = _find_matching_paren(text, i + 1)
             continue
         if ch == "`":
             j = text.find("`", i + 1)
@@ -209,7 +213,8 @@ def _mask_span_preserving_substitutions(text, start, end, result):
     while i < end:
         ch = text[i]
         if ch == "$" and i + 1 < end and text[i + 1] == "(":
-            i = min(_find_matching_paren(text, i + 1), end)
+            close, _ = _find_matching_paren(text, i + 1)
+            i = min(close, end)
             continue
         if ch == "`":
             j = text.find("`", i + 1)
@@ -220,10 +225,63 @@ def _mask_span_preserving_substitutions(text, start, end, result):
         i += 1
 
 
+def _mask_quotes_recursive(text, start, end, result):
+    """Mask single-/double-quoted literal spans within text[start:end),
+    leaving executable text visible, and recurse into any `$(...)`/backtick
+    substitution found in that range — so a quoted literal several
+    substitutions deep is masked too, while the substitution's own
+    executable structure (and anything nested inside IT) stays visible.
+    Used by `_mask_double_quoted` for the body of a `$(...)`/backtick
+    substitution it finds inside a double-quoted span (G1, review_b round
+    2): that body was previously left untouched by `_find_matching_paren`
+    alone (only its true end was located, quote-aware), so a quoted
+    literal nested inside it (e.g. a `printf '%s' '...'` argument quoting a
+    fake stash-invocation string) stayed fully visible to Bash rules and
+    fired a false deny."""
+    i = start
+    while i < end:
+        ch = text[i]
+        if ch == "\\" and i + 1 < end:
+            i += 2
+            continue
+        if ch == "'":
+            j = text.find("'", i + 1)
+            close = (j + 1) if (j != -1 and j < end) else end
+            for k in range(i, close):
+                if text[k] != "\n":
+                    result[k] = " "
+            i = close
+            continue
+        if ch == '"':
+            i = min(_mask_double_quoted(text, i, result), end)
+            continue
+        if ch == "$" and i + 1 < end and text[i + 1] == "(":
+            raw_close, terminated = _find_matching_paren(text, i + 1)
+            if terminated and raw_close <= end:
+                close, body_end = raw_close, raw_close - 1
+            else:
+                close = body_end = min(raw_close, end)
+            _mask_quotes_recursive(text, i + 2, body_end, result)
+            i = close
+            continue
+        if ch == "`":
+            j = text.find("`", i + 1)
+            if j != -1 and j + 1 <= end:
+                close, body_end = j + 1, j
+            else:
+                close = body_end = min((j + 1) if j != -1 else len(text), end)
+            _mask_quotes_recursive(text, i + 1, body_end, result)
+            i = close
+            continue
+        i += 1
+
+
 def _mask_double_quoted(text, start, result):
     """`text[start]` is the opening '"'; mask the double-quoted span,
-    preserving `$(...)`/backtick substitutions. Returns the index just past
-    the closing quote (or len(text) if unterminated)."""
+    preserving `$(...)`/backtick substitutions' executable structure while
+    recursively masking any quoted literal NESTED inside one of them (G1,
+    review_b round 2 — see `_mask_quotes_recursive`). Returns the index
+    just past the closing quote (or len(text) if unterminated)."""
     n = len(text)
     result[start] = " "
     i = start + 1
@@ -239,11 +297,22 @@ def _mask_double_quoted(text, start, result):
             result[i] = " "
             return i + 1
         if ch == "$" and i + 1 < n and text[i + 1] == "(":
-            i = _find_matching_paren(text, i + 1)
+            raw_close, terminated = _find_matching_paren(text, i + 1)
+            if terminated:
+                close, body_end = raw_close, raw_close - 1
+            else:
+                close = body_end = raw_close
+            _mask_quotes_recursive(text, i + 2, body_end, result)
+            i = close
             continue
         if ch == "`":
             j = text.find("`", i + 1)
-            i = (j + 1) if j != -1 else n
+            if j != -1:
+                close, body_end = j + 1, j
+            else:
+                close = body_end = n
+            _mask_quotes_recursive(text, i + 1, body_end, result)
+            i = close
             continue
         if ch != "\n":
             result[i] = " "
