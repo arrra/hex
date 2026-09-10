@@ -1237,6 +1237,57 @@ mod tests {
         );
 
         sweep_leaked_harness_buildable_tempdirs(&token);
+
+        // F6 (review R4, reopened): `sweep_leaked_harness_buildable_tempdirs`
+        // recognizes its own leaked directory by reading
+        // `.hex/harness/aaa_locked/file.txt` and comparing its content to
+        // `token` — but `add_self_locking_cleanup_trap` chmod 000s that very
+        // `aaa_locked` directory during checkout to force the deterministic
+        // cleanup failure this test exercises. `read_to_string` on the
+        // marker then fails with EACCES, and `.unwrap_or(false)` treats that
+        // as "not mine", so the sweep call directly above silently leaves
+        // this test's own permission-locked worktree behind in the OS temp
+        // dir instead of removing it. Walk the temp dir directly, restoring
+        // read/execute permission on any matching `aaa_locked` directory so
+        // its marker can actually be inspected (a fixed sweep must do the
+        // same internally to have any chance of finding its own directory),
+        // and fail loudly if anything carrying this invocation's token
+        // survived the sweep above. This must fail today and pass once the
+        // sweep can see past its own chmod-000 marker.
+        use std::os::unix::fs::PermissionsExt;
+        for entry in std::fs::read_dir(std::env::temp_dir())
+            .expect("failed to read OS temp dir")
+            .flatten()
+        {
+            let leaked = entry.path();
+            if !entry
+                .file_name()
+                .to_string_lossy()
+                .starts_with("hex-doctor-harness-buildable-")
+            {
+                continue;
+            }
+            let locked_dir = leaked.join(".hex/harness/aaa_locked");
+            if locked_dir.is_dir() {
+                let _ =
+                    std::fs::set_permissions(&locked_dir, std::fs::Permissions::from_mode(0o755));
+            }
+            let marker = locked_dir.join("file.txt");
+            let is_ours = std::fs::read_to_string(&marker)
+                .map(|content| content == token)
+                .unwrap_or(false);
+            if is_ours {
+                force_remove_dir_all(&leaked);
+                panic!(
+                    "F6: sweep_leaked_harness_buildable_tempdirs left behind \
+                     this invocation's own chmod-000 leaked worktree at {} — \
+                     its marker was unreadable (EACCES) so the sweep's \
+                     `.unwrap_or(false)` treated it as not-ours and skipped \
+                     removing it",
+                    leaked.display()
+                );
+            }
+        }
     }
 
     #[test]
