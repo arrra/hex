@@ -1230,6 +1230,36 @@ class TestStashExemptionEffectiveCheckout(RouterTestCase):
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
+    def test_semicolon_separated_cd_chain_to_shared_checkout_denies(self):
+        """F1 (review round 1 redo): _CD_RE captured `(\\S+)` which swallows a
+        trailing `;`, so `cd /worktrees/x; cd /shared/checkout && git stash`
+        had its second `cd` invisible (no leading separator left to match)
+        and the stale first `cd` exempted the stash. The capture must stop
+        at `;`/`&`/`|`/`)` so every `cd` in the chain is seen."""
+        cmd = "cd /worktrees/x; cd /shared/checkout && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_semicolon_separated_cd_chain_to_worktree_still_abstains(self):
+        """Same capture fix as above, but the near miss: the chain's last
+        `cd` genuinely resolves to a /worktrees/ checkout, so it must keep
+        abstaining even though the fix changes what the regex captures."""
+        cmd = f"cd /worktrees/x; cd {self.WORKTREE_CWD} && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=DEFAULT_CWD), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"genuine worktree-local chained cd must abstain: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
 
 class TestForceRefspecAsksFirst(RouterTestCase):
     """F5: a leading `+` on any push refspec forces the update, the same as

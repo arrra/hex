@@ -227,6 +227,20 @@ EXTRA_FIXTURES = [
         near_miss={"command": f"cd {WORKTREE_CWD} && git stash"},
         near_miss_cwd=DEFAULT_CWD,
     ),
+    # F1 (review round 1 redo): `_CD_RE`/`_DASH_C_RE` captured `(\S+)`,
+    # which swallowed a trailing `;` so a chained `cd x; cd y && ...` lost
+    # its second `cd` (no leading separator left to anchor on) and the
+    # stale first `cd` wrongly exempted the stash. Capture must stop at
+    # `;`/`&`/`|`/`)` so every `cd` in the chain is seen.
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": "cd /worktrees/x; cd /shared/checkout && git stash"},
+        cwd=WORKTREE_CWD,
+        near_miss={"command": f"cd /worktrees/x; cd {WORKTREE_CWD} && git stash"},
+        near_miss_cwd=DEFAULT_CWD,
+    ),
     # F5: a leading `+` on a push refspec forces the update, same as
     # --force/-f, but neither original rule alternative matched it.
     dict(

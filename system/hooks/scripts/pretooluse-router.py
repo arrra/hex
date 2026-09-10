@@ -484,9 +484,9 @@ def _window_bounds(sep_positions, text_len, start, end):
 # alone no longer describes the checkout); callers must treat None as "never
 # exempt" so an unresolvable target conservatively keeps protection rather
 # than guessing (a cwd substring alone must never exempt another target).
-_DASH_C_RE = re.compile(r"-C\s+(\S+)")
+_DASH_C_RE = re.compile(r"-C\s+([^\s;&|)]+)")
 _GIT_DIR_RE = re.compile(r"--git-dir=(\S+)")
-_CD_RE = re.compile(r"(?:^|[;&|(){}\n])\s*cd\s+(\S+)")
+_CD_RE = re.compile(r"(?:^|[;&|(){}\n])\s*cd\s+([^\s;&|)]+)")
 
 
 def _looks_like_resolvable_path(token):
