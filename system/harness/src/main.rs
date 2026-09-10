@@ -3616,10 +3616,10 @@ mod tests {
         // digest hour but straddle UTC midnight -- deriving the day from
         // UTC gives the two nudges different dedup keys and lets a second
         // digest go out for the same local day. `hitl_local_hour_and_day`
-        // (not yet implemented) is the pure helper the fix must introduce:
-        // it derives (local_hour, local_day) from ONE localized moment so
-        // they can never disagree the way `now.format(...)` vs
-        // `now.with_timezone(&Local).hour()` can today.
+        // is the pure helper the fix introduces: it derives (local_hour,
+        // local_day) from ONE localized moment so they can never disagree
+        // the way `now.format(...)` vs `now.with_timezone(&Local).hour()`
+        // could before this fix.
         #[test]
         fn digest_day_key_matches_across_utc_midnight_within_one_local_hour() {
             let offset = chrono::FixedOffset::east_opt(9 * 3600 + 30 * 60).unwrap();
@@ -3642,6 +3642,74 @@ mod tests {
                  one digest goes out"
             );
             assert_eq!(day_0900, "2026-07-10");
+        }
+
+        // G1 (round-1B review of the F1 fix): a helper-only test can pass
+        // even if the lookup and the record end up wired to different keys
+        // (e.g. a call site that still reads `hitl_digest_sent` with a
+        // freshly UTC-derived day while only the write got fixed, or vice
+        // versa). This test drives the REAL dedup state through
+        // `hitl_send_digest` (which calls `hitl_mark_digest_sent`) and
+        // `hitl_digest_sent` -- the exact two calls `run_hitl`'s nudge path
+        // makes -- across two nudge decisions spanning UTC midnight within
+        // one local digest hour, on a real temp store.
+        #[test]
+        fn digest_dedup_state_survives_two_nudges_across_utc_midnight_local_hour() {
+            let tmp = tempfile::tempdir().unwrap();
+            let _env = HexDirEnvGuard::set(tmp.path());
+            let offset = chrono::FixedOffset::east_opt(9 * 3600 + 30 * 60).unwrap();
+            let digest_hour = 9;
+            let cfg = store::Config {
+                digest_hour,
+                ..store::Config::default()
+            };
+            store::save_config(tmp.path(), &cfg).expect("save config");
+            // One open item so `compose_digest` has something to send --
+            // otherwise `hitl_send_digest` returns `Ok(None)` without ever
+            // touching the dedup record, and the test would prove nothing.
+            seed_due_p1(tmp.path(), ts("2026-07-01T00:00:00Z"));
+
+            // First nudge: local 2026-07-10T09:00:00+09:30 (UTC
+            // 2026-07-09T23:30:00Z).
+            let now_0900 = ts("2026-07-09T23:30:00Z");
+            let (hour1, day1) = hitl_local_hour_and_day(now_0900.with_timezone(&offset));
+            assert!(
+                !hitl_digest_sent(tmp.path(), &day1),
+                "no digest recorded yet for the first nudge's day"
+            );
+            assert!(
+                hitl_digest_due(hour1, digest_hour, hitl_digest_sent(tmp.path(), &day1)),
+                "first nudge at local 09:00 must be due"
+            );
+            let sent1 =
+                hitl_send_digest(tmp.path(), now_0900, &day1).expect("send digest (first nudge)");
+            assert!(
+                sent1.is_some(),
+                "first nudge must actually send the digest and record day {day1}"
+            );
+
+            // Second nudge: local 2026-07-10T09:30:00+09:30 (UTC
+            // 2026-07-10T00:00:00Z) -- 30 minutes later locally, same local
+            // calendar day, but the UTC date has already advanced.
+            let now_0930 = ts("2026-07-10T00:00:00Z");
+            let (hour2, day2) = hitl_local_hour_and_day(now_0930.with_timezone(&offset));
+            assert_eq!(
+                day1, day2,
+                "both nudges land on the same local calendar day"
+            );
+            let sent_flag_seen_by_second_nudge = hitl_digest_sent(tmp.path(), &day2);
+            assert!(
+                sent_flag_seen_by_second_nudge,
+                "the record the first nudge wrote must be visible under the \
+                 SAME key the second nudge looks up -- this is the \
+                 lookup/record round trip the fix wires together"
+            );
+            assert!(
+                !hitl_digest_due(hour2, digest_hour, sent_flag_seen_by_second_nudge),
+                "second nudge at local 09:30 (same local day) must NOT be \
+                 due -- one digest per LOCAL day even though the UTC date \
+                 advanced"
+            );
         }
     }
 }
