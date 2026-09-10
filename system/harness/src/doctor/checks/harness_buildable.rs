@@ -124,15 +124,25 @@ pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<O
 
     let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
-    let stdout_thread = std::thread::spawn(move || {
+    let (stdout_tx, stdout_rx) = std::sync::mpsc::channel();
+    let (stderr_tx, stderr_rx) = std::sync::mpsc::channel();
+    // G2: these reader threads are intentionally never joined below. The
+    // direct child exiting (observed via `try_wait`) does not mean its
+    // stdout/stderr pipes are closed — a descendant it spawned can inherit
+    // the fd and keep the write end open indefinitely. An unconditional
+    // `.join()` here would then block for as long as that descendant lives,
+    // past this function's own `timeout`. Sending the buffer over a channel
+    // and bounding the receive below lets us stop waiting on a straggler
+    // thread instead of hanging on it.
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stdout_pipe.read_to_end(&mut buf);
-        buf
+        let _ = stdout_tx.send(buf);
     });
-    let stderr_thread = std::thread::spawn(move || {
+    std::thread::spawn(move || {
         let mut buf = Vec::new();
         let _ = stderr_pipe.read_to_end(&mut buf);
-        buf
+        let _ = stderr_tx.send(buf);
     });
 
     let start = Instant::now();
@@ -151,8 +161,26 @@ pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<O
         }
     }?;
 
-    let stdout = stdout_thread.join().unwrap_or_default();
-    let stderr = stderr_thread.join().unwrap_or_default();
+    // Bound how long we wait for each reader thread to observe EOF, rather
+    // than joining unconditionally (G2). A small floor keeps this from
+    // collapsing to a zero-length window when the main loop above already
+    // consumed the whole `timeout` (e.g. the child itself was killed for
+    // running over).
+    let drain_budget = timeout
+        .saturating_sub(start.elapsed())
+        .max(Duration::from_millis(200));
+    let stdout = stdout_rx.recv_timeout(drain_budget).map_err(|_| {
+        format!(
+            "command exited but its stdout was not closed within {drain_budget:?} \
+             (a descendant process may still be holding the pipe open)"
+        )
+    })?;
+    let stderr = stderr_rx.recv_timeout(drain_budget).map_err(|_| {
+        format!(
+            "command exited but its stderr was not closed within {drain_budget:?} \
+             (a descendant process may still be holding the pipe open)"
+        )
+    })?;
     Ok(Output {
         status,
         stdout,
@@ -223,13 +251,34 @@ pub(crate) fn run_check_with_timeout(hex_dir: &Path, timeout: Duration) -> Check
         ));
     }
 
+    // G1: from here on a worktree registration actually exists on disk, so
+    // every return path below — including the ones inside `diagnose` —
+    // MUST run through `finalize_with_cleanup` so `cleanup()` always runs
+    // and its failure is never silently swallowed. Earlier code called
+    // `cleanup()` only from the single final branch at the bottom of this
+    // function; every earlier `return` relied on `Drop`, which discards
+    // cleanup errors and, on the success path, merely appended a "(cleanup
+    // warning: ...)" suffix while still reporting `Status::Pass` — a doctor
+    // check reporting PASS after leaking a worktree it could not remove is
+    // exactly the "quiet failure" SO S6 forbids.
+    let result = diagnose(&worktree_path, empty_hooks_dir.path(), timeout);
+    finalize_with_cleanup(result, &worktree_guard)
+}
+
+/// Runs every check step that requires the diagnostic worktree to already
+/// exist: materializing a full checkout (F20), verifying `.hex/harness` is
+/// present, running `cargo metadata`, and scanning for missing
+/// `include_str!`/`include_bytes!` targets. Deliberately does not touch
+/// `WorktreeGuard` — the caller always runs cleanup afterward via
+/// `finalize_with_cleanup`, regardless of which branch here returns (G1).
+fn diagnose(worktree_path: &Path, empty_hooks_dir: &Path, timeout: Duration) -> CheckResult {
     // F20: `git worktree add` copies the CALLER's sparse-checkout patterns
     // and `core.sparseCheckout` setting into the new worktree — a tracked
     // file excluded only by the caller's own sparse patterns would then
     // read as "missing from git" below. Materialize a full checkout scoped
     // to this worktree's own (worktree-private) index, without touching the
     // caller's config or sparse-checkout patterns at all.
-    if let Err(e) = materialize_full_checkout(&worktree_path, empty_hooks_dir.path(), timeout) {
+    if let Err(e) = materialize_full_checkout(worktree_path, empty_hooks_dir, timeout) {
         return CheckResult::fail(format!(
             "failed to materialize a full checkout in the diagnostic worktree: {e}"
         ));
@@ -249,9 +298,8 @@ pub(crate) fn run_check_with_timeout(hex_dir: &Path, timeout: Duration) -> Check
     // `.git/info/exclude`) and a Cargo.lock that isn't tracked at all —
     // `--locked` refuses to generate/update one, so a fresh checkout with no
     // lockfile fails immediately (no network needed to detect that), rather
-    // than being silently skipped. (Review finding G1: skipping this step
-    // when Cargo.lock is absent let a genuinely unbuildable checkout falsely
-    // PASS.) This never generates a lockfile and never compiles anything.
+    // than being silently skipped. This never generates a lockfile and
+    // never compiles anything.
     //
     // `--filter-platform <host>` is required: without it, `cargo metadata
     // --offline` resolves ALL platforms in the lockfile, including
@@ -297,15 +345,15 @@ pub(crate) fn run_check_with_timeout(hex_dir: &Path, timeout: Duration) -> Check
     for dir_name in ["src", "tests"] {
         let dir = harness_dir.join(dir_name);
         if dir.is_dir() {
-            scan_dir(&dir, &worktree_path, &mut checked, &mut missing);
+            scan_dir(&dir, worktree_path, &mut checked, &mut missing);
         }
     }
     let build_rs = harness_dir.join("build.rs");
     if build_rs.is_file() {
-        scan_file(&build_rs, &worktree_path, &mut checked, &mut missing);
+        scan_file(&build_rs, worktree_path, &mut checked, &mut missing);
     }
 
-    let result = if missing.is_empty() {
+    if missing.is_empty() {
         CheckResult::pass(format!(
             "harness builds from git ({checked} include target(s) present)"
         ))
@@ -321,18 +369,23 @@ pub(crate) fn run_check_with_timeout(hex_dir: &Path, timeout: Duration) -> Check
             missing.len()
         ))
         .with_details(details)
-    };
+    }
+}
 
-    // F15/F16: clean up only this invocation's own worktree explicitly
-    // (never a repo-wide `git worktree prune`), verify it is gone, and
-    // report — rather than swallow — a cleanup failure. `Drop` remains a
-    // best-effort fallback for early returns/panics above.
-    match worktree_guard.cleanup() {
+/// Always runs `guard.cleanup()` regardless of `result`'s status (G1), and
+/// never lets a cleanup failure surface as `Status::Pass` — a doctor check
+/// reporting PASS after leaking a worktree it could not remove is exactly
+/// the "quiet failure" SO S6 forbids. A successful cleanup passes `result`
+/// through unchanged; F15/F16 already scope `cleanup()` to exactly this
+/// invocation's own worktree (never a repo-wide `git worktree prune`) and
+/// verify it is actually gone.
+fn finalize_with_cleanup(result: CheckResult, guard: &WorktreeGuard) -> CheckResult {
+    match guard.cleanup() {
         Ok(()) => result,
-        Err(e) => CheckResult {
-            message: format!("{} (cleanup warning: {e})", result.message),
-            ..result
-        },
+        Err(cleanup_err) => CheckResult::fail(format!(
+            "{} (cleanup failed: {cleanup_err})",
+            result.message
+        )),
     }
 }
 

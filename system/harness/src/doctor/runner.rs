@@ -1009,7 +1009,10 @@ mod tests {
                 "chmod 000 .hex/harness/aaa_locked; cat",
             ],
         );
-        run_git(tmp, &["config", "filter.hex-doctor-g1-selflock.clean", "cat"]);
+        run_git(
+            tmp,
+            &["config", "filter.hex-doctor-g1-selflock.clean", "cat"],
+        );
         run_git(
             tmp,
             &["config", "filter.hex-doctor-g1-selflock.required", "true"],
@@ -1032,7 +1035,10 @@ mod tests {
                 ".hex/harness/.gitattributes",
             ],
         );
-        run_git(tmp, &["commit", "-q", "-m", "add self-locking cleanup trap"]);
+        run_git(
+            tmp,
+            &["commit", "-q", "-m", "add self-locking cleanup trap"],
+        );
     }
 
     #[cfg(unix)]
@@ -1127,8 +1133,7 @@ mod tests {
         // not as long as `sh` itself). `run_with_timeout` must bound the
         // drain instead of hanging past its own configured deadline.
         let mut cmd = std::process::Command::new("sh");
-        cmd.arg("-c")
-            .arg("(sleep 30 >&1 &) ; exit 0");
+        cmd.arg("-c").arg("(sleep 30 >&1 &) ; exit 0");
         let start = std::time::Instant::now();
         let result = crate::doctor::checks::harness_buildable::run_with_timeout(
             &mut cmd,
