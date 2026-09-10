@@ -484,15 +484,54 @@ def _window_bounds(sep_positions, text_len, start, end):
 # alone no longer describes the checkout); callers must treat None as "never
 # exempt" so an unresolvable target conservatively keeps protection rather
 # than guessing (a cwd substring alone must never exempt another target).
-_DASH_C_RE = re.compile(r"-C\s+([^\s;&|)]+)")
-_GIT_DIR_RE = re.compile(r"--git-dir=(\S+)")
-_CD_RE = re.compile(r"(?:^|[;&|(){}\n])\s*cd\s+([^\s;&|)]+)")
+# F8 (review round 2 redo): these locate the `-C`/`cd`/`--git-dir=` KEYWORD
+# only -- no argument capture -- so they still match correctly against the
+# MASKED scan_text (quoted argument content is blanked to spaces there, but
+# the keyword itself, never being inside quotes for a real invocation, is
+# untouched; a quoted mention of "cd" INSIDE a string literal is masked away
+# too, so it can't be mistaken for a real `cd`). Only a SINGLE trailing
+# whitespace char is consumed here (not `\s+`) -- a masked quoted argument
+# is indistinguishable from real whitespace in scan_text, so a greedy `\s+`
+# would swallow the whole masked span and land past the argument instead of
+# at its start. `_read_token` (reading from the UNMASKED text at this same
+# offset -- masking preserves length/offsets 1:1) skips any further real
+# whitespace itself before parsing the argument.
+_DASH_C_LOCATE_RE = re.compile(r"-C\s")
+_GIT_DIR_LOCATE_RE = re.compile(r"--git-dir=")
+_CD_LOCATE_RE = re.compile(r"(?:^|[;&|(){}\n])\s*cd\s")
 
 
 def _looks_like_resolvable_path(token):
     if not token or token.startswith("-"):
         return False
     return not any(c in token for c in ("$", "`", "*", "~"))
+
+
+def _read_token(text, pos):
+    """Read one shell argument token starting at `pos` in the UNMASKED
+    canonical text. Returns None when the token can't be resolved to a
+    literal path: an unterminated quote, a double-quoted value that still
+    contains `$`/backtick (may expand to anything at runtime), or an
+    unquoted token with `$`/backtick/`*`/`~`/a leading `-` (a flag, not a
+    path). A single-quoted value is always literal -- single quotes
+    suppress all shell expansion, so its content is exactly the path."""
+    n = len(text)
+    while pos < n and text[pos] in " \t":
+        pos += 1
+    if pos < n and text[pos] == "'":
+        end = text.find("'", pos + 1)
+        return None if end == -1 else text[pos + 1 : end]
+    if pos < n and text[pos] == '"':
+        end = text.find('"', pos + 1)
+        if end == -1:
+            return None
+        value = text[pos + 1 : end]
+        return None if any(c in value for c in ("$", "`")) else value
+    start = pos
+    while pos < n and text[pos] not in " \t\n;&|)":
+        pos += 1
+    token = text[start:pos]
+    return token if _looks_like_resolvable_path(token) else None
 
 
 def _resolve_against_cwd(path, payload_cwd):
@@ -505,17 +544,18 @@ def _resolve_against_cwd(path, payload_cwd):
     return os.path.normpath(os.path.join(payload_cwd, path))
 
 
-def _effective_checkout(scan_text, match_start, matched_text, payload_cwd):
-    if _GIT_DIR_RE.search(matched_text):
+def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd):
+    invocation = scan_text[match_start:match_end]
+    if _GIT_DIR_LOCATE_RE.search(invocation):
         return None
-    c_matches = list(_DASH_C_RE.finditer(matched_text))
-    if c_matches:
-        path = c_matches[-1].group(1)
-        return _resolve_against_cwd(path, payload_cwd) if _looks_like_resolvable_path(path) else None
-    cd_matches = list(_CD_RE.finditer(scan_text[:match_start]))
-    if cd_matches:
-        path = cd_matches[-1].group(1)
-        return _resolve_against_cwd(path, payload_cwd) if _looks_like_resolvable_path(path) else None
+    c_locates = list(_DASH_C_LOCATE_RE.finditer(invocation))
+    if c_locates:
+        value = _read_token(text, match_start + c_locates[-1].end())
+        return _resolve_against_cwd(value, payload_cwd) if value is not None else None
+    cd_locates = list(_CD_LOCATE_RE.finditer(scan_text[:match_start]))
+    if cd_locates:
+        value = _read_token(text, cd_locates[-1].end())
+        return _resolve_against_cwd(value, payload_cwd) if value is not None else None
     return payload_cwd
 
 
@@ -635,7 +675,7 @@ def evaluate(payload):
             # an unresolved target never exempts (keeps protection).
             if _unless_cwd_re is None:
                 return False
-            eff_cwd = _effective_checkout(scan_text, candidate.start(), candidate.group(0), cwd)
+            eff_cwd = _effective_checkout(text, scan_text, candidate.start(), candidate.end(), cwd)
             if eff_cwd is None:
                 return False
             return bool(_unless_cwd_re.search(eff_cwd))
@@ -644,16 +684,34 @@ def evaluate(payload):
         scope = rule["unless_scope"]
         if unless_re is None:
             m = None
-            for candidate in all_matches:
-                if _cwd_exempts(candidate):
-                    continue
-                # F3: gh-fast-polling's own bound check (see
-                # `_polling_loop_bounded`) -- keeps the JSON `match` field
-                # lookaround-free for the Rust port.
-                if rule["id"] == "gh-fast-polling" and not _polling_loop_bounded(candidate.group(0)):
-                    continue
-                m = candidate
-                break
+            if rule["id"] == "gh-fast-polling":
+                # F7 (review round 2 redo): `finditer`'s candidates never
+                # overlap, so once the FIRST candidate -- a greedy span
+                # crossing an earlier, unrelated loop's own `done` -- got
+                # rejected by `_polling_loop_bounded`, finditer resumed
+                # searching from that rejected span's END, skipping straight
+                # past a real loop that started inside it. Re-search from
+                # one past the REJECTED candidate's own START (not its end)
+                # so every possible start position is still tried.
+                search_pos = 0
+                while True:
+                    candidate = rule["match_re"].search(scan_text, search_pos)
+                    if candidate is None:
+                        break
+                    if _cwd_exempts(candidate):
+                        search_pos = max(candidate.start() + 1, candidate.end())
+                        continue
+                    if not _polling_loop_bounded(candidate.group(0)):
+                        search_pos = candidate.start() + 1
+                        continue
+                    m = candidate
+                    break
+            else:
+                for candidate in all_matches:
+                    if _cwd_exempts(candidate):
+                        continue
+                    m = candidate
+                    break
             if m is None:
                 continue
         elif scope == "shell":

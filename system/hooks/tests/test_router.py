@@ -1260,6 +1260,63 @@ class TestStashExemptionEffectiveCheckout(RouterTestCase):
             )
             self.assertEqual(read_ledger(ledger_dir), [])
 
+    def test_quoted_cd_to_shared_checkout_denies_even_from_worktree_cwd(self):
+        """F8 (review round 2 redo): `executable_mask` blanks quoted
+        argument content to spaces BEFORE `_effective_checkout` ever sees
+        it, so a quoted `cd` target found no resolvable path, fell back to
+        the hook's own /worktrees/ payload cwd, and wrongly exempted. A
+        single- or double-quoted literal must resolve to its real
+        (masked-away) content and still deny.
+
+        NOTE: `git -C "<quoted>" stash` is a SEPARATE, pre-existing gap, not
+        part of this regression -- verified by running this exact command
+        against commit ac89538 (the commit the review cites as "denied
+        before"): it abstains there too, because `_GIT_GLOBAL_OPTS`'s
+        `-C\\s+\\S+` can never match through a masked (spaced-out) quoted
+        argument in the rule's own top-level `match` regex, independent of
+        `_effective_checkout`. Fixing that needs a new mechanism (a
+        quote-preserving splice for @GITOPTS@ matching) beyond this
+        finding's scope -- see the adjudication."""
+        cases = (
+            "cd '/shared/checkout' && git stash",
+            'cd "/shared/checkout" && git stash',
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F8)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_quoted_variable_cd_keeps_protection(self):
+        """F8: a double-quoted variable still expands at runtime, so it
+        can't be resolved to a literal path -- uncertain must keep
+        protection (deny), the same as the unquoted `$VAR` case."""
+        cases = ('cd "$DIR" && git stash',)
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F8, unresolved target)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_quoted_worktree_local_near_miss_still_abstains(self):
+        """F8 near miss: a quoted `cd` target that genuinely resolves to a
+        /worktrees/ checkout must keep abstaining -- the fix must recover
+        the real literal, not just always deny once quotes are involved."""
+        cmd = "cd '/worktrees/x/sub' && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd=DEFAULT_CWD), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"genuine quoted worktree-local stash must abstain (F8): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
     def test_relative_cd_within_worktree_cwd_still_abstains(self):
         """F4 (review round 1 redo): a relative `cd sub` from a /worktrees/
         payload cwd is resolvable against that cwd (not uncertain) and stays
@@ -1388,6 +1445,22 @@ class TestMultilinePollingLoopScope(RouterTestCase):
             proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
             self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F11 near miss)")
             self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_polling_loop_after_an_earlier_unrelated_loop_still_asks(self):
+        """F7 (review round 2 redo): `finditer` never revisits text inside
+        an already-yielded span, even a REJECTED one. The first candidate
+        greedily spanned from the earlier `while read` loop all the way
+        through the later polling loop's own `done`, got rejected by
+        `_polling_loop_bounded` (two `done`s), and finditer then resumed
+        searching from that rejected span's END -- past the real polling
+        loop entirely. A genuine polling loop placed after an unrelated
+        loop must still ask."""
+        cmd = "while read x; do echo $x; done < f\nwhile true; do gh pr checks 1; sleep 5; done"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F7)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
 
     def test_gh_call_between_an_earlier_loops_done_and_a_later_loop_abstains(self):
         """F3 (review round 1 redo): the loop-body gap used a lazy

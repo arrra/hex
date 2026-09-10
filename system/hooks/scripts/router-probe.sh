@@ -333,6 +333,55 @@ EXTRA_FIXTURES = [
             )
         },
     ),
+    # F8 (review round 2 redo): `executable_mask` blanks quoted argument
+    # content to spaces before `_effective_checkout` ever sees it, so a
+    # quoted `cd` target found no resolvable path, fell back to the hook's
+    # own /worktrees/ payload cwd, and wrongly exempted. A single-quoted
+    # literal must resolve to its real (masked-away) content and still
+    # deny; the genuine quoted worktree-local case must still abstain.
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": "cd '/shared/checkout' && git stash"},
+        cwd=WORKTREE_CWD,
+        near_miss={"command": "cd '/worktrees/x/sub' && git stash"},
+        near_miss_cwd=DEFAULT_CWD,
+    ),
+    # F8: a double-quoted variable still expands at runtime, so it can't be
+    # resolved to a literal path -- uncertain must keep protection (deny),
+    # same as the unquoted $VAR case.
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": 'cd "$DIR" && git stash'},
+        cwd=WORKTREE_CWD,
+        near_miss={"command": 'cd "/worktrees/x/sub" && git stash'},
+        near_miss_cwd=DEFAULT_CWD,
+    ),
+    # F7 (review round 2 redo): `finditer` never revisits text inside an
+    # already-yielded span, even a REJECTED one -- a real polling loop
+    # placed after an earlier, unrelated loop's own `done` was never tried
+    # as a match start once the first (unbounded, two-`done`) candidate got
+    # rejected. Must still ask; the out-of-loop gh call near miss stays
+    # abstain.
+    dict(
+        id="gh-fast-polling",
+        decision="ask",
+        tool_name="Bash",
+        positive={
+            "command": "while read x; do echo $x; done < f\nwhile true; do gh pr checks 1; sleep 5; done"
+        },
+        near_miss={
+            "command": (
+                "while read x; do echo $x; done < f\n"
+                "gh pr checks 123\n"
+                "sleep 5\n"
+                "for p in 1 2; do echo; done"
+            )
+        },
+    ),
 ]
 
 
