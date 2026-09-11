@@ -488,6 +488,27 @@ def _is_contained(child_dir: str, parent_dir: str) -> bool:
     return child == parent or child.startswith(parent + os.sep)
 
 
+def _redact_deep(obj, warnings: list[str] | None = None, label: str = "record"):
+    """Recursively redact every string leaf of a JSON-like structure — dict
+    values, list items, arbitrarily nested (F1, round 2).
+
+    `render_result()`/log rendering used to serialize (`json.dumps`) or
+    stringify (`str()`) a structure FIRST and redact the result afterward.
+    Serialization escapes control characters ("\\n" becomes the two
+    characters backslash-n), which changes what character sits immediately
+    before a credential and can defeat the negative-lookbehind boundary
+    check in `redact()`. Redacting each string leaf before it is ever
+    serialized means `redact()` always sees the real characters.
+    """
+    if isinstance(obj, str):
+        return redact(obj, warnings, label)
+    if isinstance(obj, dict):
+        return {k: _redact_deep(v, warnings, label) for k, v in obj.items()}
+    if isinstance(obj, list):
+        return [_redact_deep(v, warnings, label) for v in obj]
+    return obj
+
+
 def render_result(result) -> str:
     if result is None:
         return "_(no result recorded)_"
@@ -520,16 +541,21 @@ def build_report(rec: dict, path: str, warnings: list[str]) -> str:
     dur_s = f"{round(dur / 60000, 1)} min" if isinstance(dur, (int, float)) else "unknown"
     session = os.path.basename(os.path.dirname(os.path.dirname(path)))
 
-    body = render_result(rec.get("result"))
+    # F1 (round 2) — redact string leaves BEFORE render_result() serializes
+    # nested values with json.dumps()/str(); the post-serialization redact()
+    # below stays as a belt-and-braces pass over the fully rendered text.
+    result = _redact_deep(rec.get("result"), warnings, path_label)
+    body = render_result(result)
     body = redact(body, warnings, path_label)  # F3 — redact before truncating, not after
     if len(body) > RESULT_CAP:
         cut = len(body) - RESULT_CAP
         body = body[:RESULT_CAP] + f"\n\n**[truncated {cut} chars — full record at {path}]**"
 
-    logs = rec.get("logs") or []
-    log_lines = [f"- {str(l).strip()}" for l in logs[:LOG_CAP]]
-    if len(logs) > LOG_CAP:
-        log_lines.append(f"- [{len(logs) - LOG_CAP} more lines in the record]")
+    logs_raw = rec.get("logs") or []
+    logs = [_redact_deep(l, warnings, path_label) for l in logs_raw[:LOG_CAP]]
+    log_lines = [f"- {str(l).strip()}" for l in logs]
+    if len(logs_raw) > LOG_CAP:
+        log_lines.append(f"- [{len(logs_raw) - LOG_CAP} more lines in the record]")
 
     phases = rec.get("phases") or []
     phase_line = ", ".join(p.get("title", "?") for p in phases if isinstance(p, dict)) or "(none declared)"

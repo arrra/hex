@@ -1679,5 +1679,186 @@ class NoClobberLinkPublish(unittest.TestCase):
             self.assertEqual(report.read_text(), "winner", "the race winner's write must not be clobbered")
 
 
+class NestedAndEscapedCredentialsRedactedBeforeSerialization(unittest.TestCase):
+    """F1 (round 2) — nested result values are JSON-serialized BEFORE
+    redaction runs, so an escaped leading newline (the two literal
+    characters backslash-n in the dump) sits immediately before "sk-"/"ghp_"
+    instead of an actual newline character. The alphanumeric negative
+    lookbehind sees the letter "n" (from the escape), not a newline, and
+    lets the credential through. Structured log entries converted with
+    str() have the same problem. String leaves must be redacted before
+    serialization, not only on the fully serialized blob afterward."""
+
+    def test_nested_result_value_with_escaped_leading_newline_is_redacted(self):
+        m = load_script()
+        token = "sk-proj-" + "A" * 40
+        rec = {
+            "runId": "wf_f1nested1",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": {"details": {"message": "\n" + token}},
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(token, report, "credential inside a nested result value survived into the report")
+
+    def test_structured_log_entry_with_escaped_newline_is_redacted(self):
+        m = load_script()
+        token = "ghp_" + "B" * 36
+        rec = {
+            "runId": "wf_f1log1",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": "ok",
+            "logs": [{"note": "\n" + token}],
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(token, report, "credential inside a structured log entry survived into the report")
+
+    def test_prose_near_misses_are_still_untouched(self):
+        # Guard against the natural failure mode of a str-leaf-walking fix:
+        # widening the lookbehind or adding an escape-aware pass must not
+        # start flagging ordinary hyphenated prose that merely resembles a
+        # credential boundary.
+        m = load_script()
+        for text in [
+            "let's prioritize the risky-migration tasks before Friday",
+            "he asks-for clarification on the risky-approach before shipping",
+        ]:
+            self.assertEqual(m.redact(text), text, f"{text!r} was mangled by redaction")
+
+
+class StructuredPathConsumedAsCompleteValue(unittest.TestCase):
+    """F7/F16 (round 2) — an explicit structured path field (repo, path,
+    cwd, ...) was still pushed through the free-text extractor, which
+    tokenizes at whitespace and can accept a truncated prefix as if it were
+    the whole path. A structured field's value must be trusted as a
+    complete filesystem path, never tokenized. The free-text extractor
+    separately only recognized a single space between multi-word directory
+    names as a truncation signal — a run of 2+ spaces was not."""
+
+    def test_structured_repo_field_with_a_space_is_consumed_whole_not_truncated(self):
+        m = load_script()
+        rec = {"result": {"repo": "/tmp/acme repo"}}
+        # The old free-text tokenizer stopped at the space and resolved this
+        # to "/tmp/acme" -> project "acme". Consumed whole, the real
+        # directory name is "acme repo".
+        self.assertEqual(m.infer_project(rec, []), "acme repo")
+
+    def test_two_consecutive_spaces_in_free_text_are_recognized_as_truncation(self):
+        m = load_script()
+        rec = {"result": "/Users/Jane  Doe/acme-repo/src/main.py"}
+        # The single-space continuation regex missed a run of 2+ spaces, so
+        # the truncated "/Users/Jane" prefix was accepted as a complete path
+        # and resolved to project "Jane". Once the truncation is recognized
+        # (same as the already-fixed single-space case), the scan continues
+        # past it and finds the real repository boundary.
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+
+class UnsafeRunIdFingerprintPreservesDistinctRecords(unittest.TestCase):
+    """F19 (round 2, NEW) — the unsafe-runId branch normalizes via
+    slug(run_id) with no fingerprint, so two raw ids that collapse to the
+    same slug (e.g. "wf/a" and "wf//a", sharing a workflow name and
+    timestamp) silently collide on one destination file: the second record
+    is counted skipped_existing with exit 0 and is never written."""
+
+    def test_distinct_unsafe_run_ids_do_not_collide_and_reexport_is_idempotent(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            for i, rid in enumerate(["wf/a", "wf//a"]):
+                rec = {
+                    "runId": rid,
+                    "workflowName": "wf",
+                    "status": "completed",
+                    "timestamp": "2026-09-09T12:00:00Z",
+                    "result": "no paths here",
+                }
+                _write_record(projects, rec, session=f"sess{i}")
+
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("wrote=2", out, "the two colliding-once-normalized runIds must both be written")
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(len(reports), 2, reports)
+            self.assertEqual(
+                len({p.name for p in reports}), 2, "two distinct raw runIds collided on one filename"
+            )
+
+            rc2, out2, err2 = _run_export(hex_dir, projects)
+            self.assertEqual(rc2, 0, err2)
+            self.assertIn("wrote=0", out2, out2)
+            self.assertIn("skipped_existing=2", out2, "re-export of both records must be idempotent")
+            self.assertEqual(
+                len(list(Path(hex_dir, "projects").rglob("*.md"))), 2, "re-export must not add or lose files"
+            )
+
+
+class RemappingRemovesStaleReportCopy(unittest.TestCase):
+    """F10 (round 2) — when a run's inferred destination changes between
+    exports (e.g. _unmapped -> a newly-mapped named project), the previous
+    report was left behind under the old destination instead of being
+    cleaned up by the exporter."""
+
+    def test_remapped_run_removes_the_stale_unmapped_copy(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            rec = {
+                "runId": "wf_remap1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": "nothing path-shaped here",
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            old_reports = list(Path(hex_dir, "projects", "_unmapped", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(old_reports), 1, old_reports)
+            old_report = old_reports[0]
+
+            cfg = Path(hex_dir, ".hex", "config")
+            cfg.mkdir(parents=True)
+            (cfg / "workflow-projects.toml").write_text(
+                '[[map]]\nmatch = "nothing path-shaped"\nproject = "named-project"\n'
+            )
+            rc2, out2, err2 = _run_export(hex_dir, projects)
+            self.assertEqual(rc2, 0, err2)
+            new_reports = list(Path(hex_dir, "projects", "named-project", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(new_reports), 1, "the remapped run must land under the new project")
+            self.assertFalse(
+                old_report.exists(),
+                "the stale report under the old (_unmapped) destination must be removed on remap",
+            )
+
+
+class MapValueMustBeAList(unittest.TestCase):
+    """F11 (round 2) — `data.get("map", [])` is enumerated without checking
+    it is actually a list. `map = ""` or `map = {}` are both zero-length
+    iterables, so they silently produced an empty rule set instead of being
+    diagnosed as invalid config."""
+
+    def test_empty_string_map_value_is_rejected_not_silently_empty(self):
+        with tempfile.TemporaryDirectory() as hex_dir:
+            cfg = Path(hex_dir) / ".hex" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "workflow-projects.toml").write_text('map = ""\n')
+            m = load_script()
+            with self.assertRaises(Exception):
+                m.load_project_map(hex_dir)
+
+    def test_table_map_value_is_rejected_not_silently_empty(self):
+        with tempfile.TemporaryDirectory() as hex_dir:
+            cfg = Path(hex_dir) / ".hex" / "config"
+            cfg.mkdir(parents=True)
+            (cfg / "workflow-projects.toml").write_text("map = {}\n")
+            m = load_script()
+            with self.assertRaises(Exception):
+                m.load_project_map(hex_dir)
+
+
 if __name__ == "__main__":
     unittest.main()
