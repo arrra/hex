@@ -1206,5 +1206,24 @@ class MultiBoundarySourcePathRouting(unittest.TestCase):
             )
 
 
+class UnderscoreCompoundAndUppercaseKeyValuePairs(unittest.TestCase):
+    """F1 (reviewer A) — the key=/token=/password=/secret= lookbehind
+    excluded a preceding "_", and the alternation was case-sensitive, so
+    underscore-compound names (api_key=, client_secret=, access_token=) and
+    uppercase names (API_KEY=) all survived redaction."""
+
+    def test_underscore_compound_and_uppercase_key_names_are_redacted(self):
+        m = load_script()
+        warnings: list[str] = []
+        for token in [
+            "api_key=" + "a" * 24,
+            "client_secret=" + "b" * 24,
+            "access_token=" + "c" * 24,
+            "API_KEY=" + "d" * 24,
+        ]:
+            out = m.redact(token, warnings, "wf_1")
+            self.assertNotIn(token, out, f"{token!r} survived redaction")
+
+
 if __name__ == "__main__":
     unittest.main()

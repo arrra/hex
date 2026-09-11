@@ -98,7 +98,13 @@ SECRET_RE = re.compile(
     r"|(?<![A-Za-z0-9])AKIA[A-Z0-9]{12,}"
     r"|Bearer [A-Za-z0-9._-]{20,}"
     r"|(?<![A-Za-z0-9])pit-[a-f0-9-]{20,}"
-    r"|(?<![A-Za-z0-9_])(?:key|token|password|secret)=\S+"
+    # F1 (reviewer A) — the lookbehind excluded a preceding "_", and the
+    # alternation was case-sensitive, so underscore-compound names
+    # (api_key=, client_secret=, access_token=) and uppercase names
+    # (API_KEY=) all survived. Allow "_" immediately before the key name
+    # (block only a preceding alnum, same boundary as every other
+    # alternative above) and match the key name case-insensitively.
+    r"|(?<![A-Za-z0-9])(?i:key|token|password|secret)=\S+"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
 )
 
