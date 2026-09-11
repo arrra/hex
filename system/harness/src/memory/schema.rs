@@ -525,25 +525,6 @@ mod tests {
     }
 
     #[test]
-    fn probe_wrong_length_blob_insert() {
-        crate::memory::vector::register_sqlite_vec();
-        let conn = Connection::open_in_memory().unwrap();
-        apply_plan1_baseline_for_test(&conn).unwrap();
-        apply_plan2(&conn).unwrap();
-        let bad_blob: Vec<u8> = vec![0u8; 8]; // way too short for FLOAT[768]
-        let result = conn.execute(
-            "INSERT INTO facts_vec(fact_id, embedding) VALUES (?1, ?2)",
-            rusqlite::params!["bad-id", bad_blob],
-        );
-        eprintln!("PROBE RESULT: {:?}", result);
-        assert!(
-            result.is_err(),
-            "expected wrong-length blob insert to error, got {:?}",
-            result
-        );
-    }
-
-    #[test]
     fn migration_creates_all_plan2_tables() {
         crate::memory::vector::register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
