@@ -1251,6 +1251,28 @@ class MultiBoundarySourcePathRouting(unittest.TestCase):
             m.repo_dir_basename("/workspace/src/acme-repo/src/main.py"), "acme-repo"
         )
 
+    def test_same_keyword_container_prefix_pair_still_warns(self):
+        # review_b redo G1 (round 2): the container-prefix-pair exception
+        # above resolves silently -- real CLI probes on the IDENTICAL shape
+        # applied to a genuine ambiguity ("/acme-repo/src/auth/src/main.py",
+        # "/acme-repo/lib/auth/lib/main.py" -- a real repo name directly
+        # under the root with a nested module re-using the same boundary
+        # keyword) were routed to "auth" with zero warnings. The
+        # container/tests resolution-choice dispute is accepted (the
+        # rightmost boundary still wins here, unchanged from the test
+        # above), but per review_b "does not justify suppressing ambiguity
+        # warnings" -- a WARN naming both candidates must fire whenever this
+        # exception's shape is hit, not just in the general-disagreement
+        # branch.
+        m = load_script()
+        for path in (
+            "/acme-repo/src/auth/src/main.py",
+            "/acme-repo/lib/auth/lib/main.py",
+        ):
+            warnings: list[str] = []
+            m.repo_dir_basename(path, warnings, "record")
+            self.assertTrue(warnings, f"expected a WARN for the repeated-boundary shape in {path!r}")
+
 
 class UnderscoreCompoundAndUppercaseKeyValuePairs(unittest.TestCase):
     """F1 (reviewer A) — the key=/token=/password=/secret= lookbehind

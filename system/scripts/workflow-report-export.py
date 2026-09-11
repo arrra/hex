@@ -232,6 +232,22 @@ def repo_root_of(path: str, warnings: list[str] | None = None, label: str = "rec
             )
             if is_container_prefix_pair:
                 non_test_boundary = rightmost
+                # review_b redo G1 (round 2): this shape is syntactically
+                # identical to a genuine disagreement (a real repo name
+                # directly under the root, with a nested module re-using the
+                # same boundary keyword, e.g. ".../acme-repo/src/auth/src/
+                # main.py") -- there is nothing in the path text to tell the
+                # F15 container idiom apart from that case. The resolution
+                # choice (rightmost wins) stays as documented/disputed
+                # elsewhere, but it must never be SILENT: warn naming both
+                # candidates every time this branch fires, exactly like the
+                # general disagreement branch below does.
+                if warnings is not None:
+                    warnings.append(
+                        f"{label}: multiple source boundaries in path -> using "
+                        f"'{dir_parts[rightmost - 1]}' (boundary '{dir_parts[rightmost]}'), "
+                        f"not the outer '{dir_parts[leftmost - 1]}' boundary ('{dir_parts[leftmost]}')"
+                    )
             else:
                 non_test_boundary = leftmost
                 if warnings is not None:
