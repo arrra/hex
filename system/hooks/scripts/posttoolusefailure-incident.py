@@ -56,10 +56,17 @@ _REDACT_PATTERNS = [
     # to the first space and leaked the rest of the phrase. Prefer a
     # quoted value (single or double) when present, else fall back to the
     # original single-token match.
+    # G2 (review round 3 redo): args_preview is built from
+    # `redact(json.dumps(tool_input))`, so a quoted value is JSON-escaped
+    # (`password=\"hunter two secret\"`) -- the bare-double-quote
+    # alternation never matched that shape and dropped to the `\S+`
+    # fallback, which stopped at the first space. Try the JSON-escaped
+    # double-quoted form first, then the bare quoted forms, then the
+    # single-token fallback.
     (
         re.compile(
             r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""("[^"]*"|'[^']*'|\S+)"""
+            r"""(\\"(?:[^"\\]|\\.)*\\"|"[^"]*"|'[^']*'|\S+)"""
         ),
         r"\1=***REDACTED***",
     ),

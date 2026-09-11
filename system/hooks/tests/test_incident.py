@@ -299,6 +299,22 @@ class TestF7RedactionAndLedgerPrivacy(IncidentHookTestCase):
         self.assertNotIn("hunter two secret", record["error"])
         self.assertNotIn("two secret", record["error"])
 
+    def test_quoted_password_in_args_preview_is_fully_redacted(self):
+        """G2 (review round 3 redo): args_preview = redact(json.dumps(tool_input))
+        JSON-escapes the quoted value (password=\\"hunter two secret\\"), so the
+        bare-double-quote alternation never matches and `\\S+` eats only up to
+        the first space, leaking the rest of the phrase into the ledger."""
+        proc = self._run(
+            _fixture(
+                tool_input={
+                    "command": 'curl -u admin password="hunter two secret" https://x'
+                }
+            )
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn("two secret", record["args_preview"])
+
     def test_pem_block_survives_a_preceding_secret_assignment(self):
         """G2b: `secret=...` is matched (and truncated at the first token)
         BEFORE the PEM-block pattern runs, so a `secret=` prefix right
