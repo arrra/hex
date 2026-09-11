@@ -709,6 +709,19 @@ def _read_token(text, pos):
         return (None if any(c in value for c in ("$", "`")) else value), end + 1
     start = pos
     while pos < n and text[pos] not in " \t\n;&|)":
+        if text[pos] == "$" and pos + 1 < n and text[pos + 1] == "(":
+            # G7 (review_b round 5): treat `$(...)` as one atomic unit via
+            # the quote-aware `_find_matching_paren` instead of stopping at
+            # the first unescaped `)`, which used to land INSIDE the
+            # substitution (one char short of its real close) and threw off
+            # every caller relying on `end_pos` as a genuine token boundary
+            # (see docstring above).
+            pos, _terminated = _find_matching_paren(text, pos + 1)
+            continue
+        if text[pos] == "`":
+            close = text.find("`", pos + 1)
+            pos = (close + 1) if close != -1 else n
+            continue
         pos += 1
     token = text[start:pos]
     return (token if _looks_like_resolvable_path(token) else None), pos

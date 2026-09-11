@@ -1251,6 +1251,40 @@ class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertEqual(proc.stdout.strip(), "")
 
+    def test_thousands_of_cds_with_command_substitution_argument_stays_under_hang_ceiling(self):
+        """Review_b G7 (round 5): `_read_token`'s unquoted-word scanner stops
+        at the FIRST unescaped `)` it sees, so a `cd $(pwd)` argument's own
+        token boundary lands one character INSIDE the substitution (at its
+        closing paren) instead of past it. `_precompute_cd_reach_info` then
+        sees `paren_depths[token_end] != enclosing` for every such `cd`
+        (the ')' hasn't been processed yet at that index) and falls back to
+        the linear `break_pos` walk for EVERY one of them -- and since the
+        net depth after a balanced `$(...)` never actually drops below
+        `enclosing` anywhere later in the text, that walk runs all the way
+        to the end of `paren_depths` each time, making thousands of `cd
+        $(...)` invocations quadratic again despite the F14 redo-2 fix.
+        Empirically: 12000 repeats already exceeds a 5s timeout at HEAD (a
+        single leading `cd $(pwd)` is not even required -- every repeat
+        re-triggers the bug on its own). No tighter wall-clock number is
+        asserted here (that would reintroduce F18)."""
+        cmd = "cd $(pwd); " * 12000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on thousands of `cd "
+                    "$(...)` invocations -- _read_token's unquoted-word scan "
+                    "stops mid-substitution at the first ')', forcing the "
+                    "_precompute_cd_reach_info linear fallback walk (G7)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
 
 class TestPipeTailScopedToTestCommandPipeline(RouterTestCase):
     """F20: the masked-test-exit prior must only fire when the
