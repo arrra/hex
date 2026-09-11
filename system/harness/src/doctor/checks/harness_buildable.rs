@@ -368,7 +368,7 @@ fn diagnose(worktree_path: &Path, empty_hooks_dir: &Path, timeout: Duration) -> 
         }
     };
 
-    let mut state = ScanState::new(worktree_path.to_path_buf());
+    let mut state = ScanState::new(worktree_path.to_path_buf(), timeout);
     for pkg in &local_packages {
         // G1: `cargo metadata` resolves a LOCAL package's root wherever it
         // lives on disk — including an absolute-path dependency that
@@ -1158,6 +1158,58 @@ fn scan_balanced_generic(
 // F4/F10, G1: containment + readability validation
 // ---------------------------------------------------------------------
 
+/// Reads the raw git blob for `canonical_path` (already known to resolve
+/// inside `checkout_root`) via `git show HEAD:<path>` (G1, review_b
+/// iteration 1): a `.gitattributes`-configured smudge filter runs during
+/// `git worktree add` just like it would during any other checkout of this
+/// repository, and the checked-out worktree shares the SAME `.git/config`
+/// (and therefore the same filter drivers) as the caller — so a filter can
+/// freely substitute on-disk bytes for content that is NOT what git
+/// actually committed. That substitution only reproduces on a machine that
+/// happens to have the identical local filter driver configured, which is
+/// exactly the kind of machine-local dependency this check exists to catch
+/// (the same class of problem F1 already treats a warm Cargo cache as).
+/// `git show` reads straight from the object database, bypassing the
+/// working-tree filter pipeline entirely, so its output is the one thing
+/// actually guaranteed reproducible from `git worktree add` on any machine.
+fn read_git_tracked_bytes(
+    checkout_root: &Path,
+    canonical_path: &Path,
+    timeout: Duration,
+) -> Result<Vec<u8>, String> {
+    // `canonical_path` is fully canonicalized (symlinks resolved); on
+    // platforms where the checkout root itself sits behind a symlink
+    // (e.g. macOS's `/tmp` -> `/private/tmp`), stripping against the
+    // RAW `checkout_root` would spuriously fail here even though
+    // `canonicalize_within_checkout` already proved containment.
+    // Canonicalize `checkout_root` the same way before stripping.
+    let canonical_root = std::fs::canonicalize(checkout_root)
+        .map_err(|e| format!("failed to canonicalize checkout root: {e}"))?;
+    let rel = canonical_path
+        .strip_prefix(&canonical_root)
+        .map_err(|_| "resolves outside the checkout root".to_string())?;
+    // `git show rev:path` always wants forward-slash-separated paths,
+    // regardless of host platform.
+    let rel_git = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    let mut cmd = Command::new("git");
+    cmd.args(["show", &format!("HEAD:{rel_git}")])
+        .current_dir(checkout_root);
+    let output = run_with_timeout(&mut cmd, timeout)
+        .map_err(|e| format!("could not read git-tracked content of {rel_git}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "not tracked by git at HEAD ({}): {}",
+            rel_git,
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(output.stdout)
+}
+
 /// Canonicalizes `path` and confirms it resolves inside `checkout_root`
 /// (G1): a local package root, target entry point, or `mod` resolution
 /// reached only through an escaping absolute path or symlink must never
@@ -1187,6 +1239,7 @@ fn validate_include_target(
     literal: &str,
     checkout_root: &Path,
     kind: IncludeKind,
+    timeout: Duration,
 ) -> Result<PathBuf, String> {
     if Path::new(literal).is_absolute() {
         return Err("absolute path; not something git tracks".to_string());
@@ -1203,20 +1256,29 @@ fn validate_include_target(
     }
     // G2: a regular file that exists but cannot actually be READ
     // (permission denied) must never be counted as "present" — `stat`
-    // alone cannot see that. `include_str!` already reads the whole file
-    // to validate UTF-8, which would incidentally catch this; `include!`
-    // and `include_bytes!` did not, so open (and for `include!`, fully
-    // read — it's re-read as source text right after this returns) every
-    // kind here rather than only the `Str` branch.
-    if kind == IncludeKind::Str || kind == IncludeKind::Include {
-        let bytes = std::fs::read(&canonical_target)
-            .map_err(|e| format!("could not read resolved target: {e}"))?;
-        if kind == IncludeKind::Str && std::str::from_utf8(&bytes).is_err() {
-            return Err("is not valid UTF-8, required by include_str!".to_string());
-        }
-    } else {
-        std::fs::File::open(&canonical_target)
-            .map_err(|e| format!("could not read resolved target: {e}"))?;
+    // alone cannot see that. Read the full bytes for every kind (not just
+    // `Str`), so a permission error surfaces uniformly and the G1 check
+    // below has disk bytes to compare against git's own copy.
+    let disk_bytes = std::fs::read(&canonical_target)
+        .map_err(|e| format!("could not read resolved target: {e}"))?;
+    if kind == IncludeKind::Str && std::str::from_utf8(&disk_bytes).is_err() {
+        return Err("is not valid UTF-8, required by include_str!".to_string());
+    }
+    // G1 (review_b, iteration 1): `disk_bytes` came off disk AFTER the
+    // diagnostic checkout ran — a configured smudge filter could have
+    // substituted them for content that is not what git actually
+    // committed. Compare against the raw git blob; a mismatch means this
+    // check cannot certify the bytes cargo would embed as something a
+    // fresh checkout on ANY machine (with or without that filter driver
+    // configured) is guaranteed to reproduce.
+    let git_bytes = read_git_tracked_bytes(checkout_root, &canonical_target, timeout)?;
+    if git_bytes != disk_bytes {
+        return Err(
+            "checked-out content differs from the committed git blob — a \
+             checkout filter (see .gitattributes) substituted content \
+             this check cannot verify came from git"
+                .to_string(),
+        );
     }
     Ok(canonical_target)
 }
@@ -1251,10 +1313,14 @@ struct ScanState {
     inconclusive: Vec<String>,
     errors: Vec<String>,
     visited: HashSet<PathBuf>,
+    /// Deadline for every `git show` this scan issues to verify content
+    /// against the raw git blob (G1, review_b iteration 1) — same F14
+    /// discipline as every other external command this check spawns.
+    timeout: Duration,
 }
 
 impl ScanState {
-    fn new(worktree_path: PathBuf) -> Self {
+    fn new(worktree_path: PathBuf, timeout: Duration) -> Self {
         Self {
             worktree_path,
             checked: 0,
@@ -1262,6 +1328,7 @@ impl ScanState {
             inconclusive: Vec::new(),
             errors: Vec::new(),
             visited: HashSet::new(),
+            timeout,
         }
     }
 
@@ -1340,7 +1407,7 @@ impl ScanState {
                 return;
             }
         };
-        if !self.visited.insert(canonical) {
+        if !self.visited.insert(canonical.clone()) {
             return;
         }
         let content = match std::fs::read_to_string(path) {
@@ -1350,6 +1417,42 @@ impl ScanState {
                 return;
             }
         };
+        // G1 (review_b, iteration 1): `content` came off disk AFTER the
+        // diagnostic checkout ran, so a configured smudge filter could
+        // have silently rewritten it — hiding a real `mod`/`include!`
+        // reference (or fabricating one) that only the raw git blob
+        // actually contains. Parsing filtered content would examine
+        // source no fresh checkout on another machine is guaranteed to
+        // reproduce; treat any mismatch (or an unreadable/non-UTF-8 git
+        // blob) as a scan failure rather than trusting disk content.
+        let git_bytes = match read_git_tracked_bytes(&self.worktree_path, &canonical, self.timeout)
+        {
+            Ok(b) => b,
+            Err(e) => {
+                self.errors.push(format!("{}: {e}", self.rel(path)));
+                return;
+            }
+        };
+        match String::from_utf8(git_bytes) {
+            Ok(git_content) if git_content == content => {}
+            Ok(_) => {
+                self.errors.push(format!(
+                    "{}: checked-out content differs from the committed git \
+                     blob — a checkout filter (see .gitattributes) \
+                     substituted content this check cannot verify came \
+                     from git",
+                    self.rel(path)
+                ));
+                return;
+            }
+            Err(e) => {
+                self.errors.push(format!(
+                    "{}: committed git blob is not valid UTF-8: {e}",
+                    self.rel(path)
+                ));
+                return;
+            }
+        }
         let parsed = scan_source(&content);
         let dir_for_submodules = module_dir_for(path, is_root);
 
@@ -1420,7 +1523,8 @@ impl ScanState {
                     continue;
                 }
             };
-            match validate_include_target(path, literal, &self.worktree_path, mc.kind) {
+            match validate_include_target(path, literal, &self.worktree_path, mc.kind, self.timeout)
+            {
                 Ok(resolved) => {
                     self.checked += 1;
                     if mc.kind == IncludeKind::Include {

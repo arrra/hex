@@ -2439,4 +2439,129 @@ mod tests {
             result
         );
     }
+
+    // -- G1 (review_b, iteration 1): containment does not verify committed
+    // bytes — a configured smudge filter can replace reachable source or
+    // include content during the diagnostic checkout, and the existing
+    // `add_self_locking_cleanup_trap` fixture already proves such filters
+    // DO execute against this check's own worktree. Reading disk content
+    // straight after that checkout can therefore certify content this
+    // check can never actually prove came from git.
+
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_fails_when_smudge_filter_replaces_include_target_content() {
+        // The committed git blob for `data.txt` is NOT valid UTF-8 — a
+        // fresh checkout with no smudge filter configured would fail
+        // `include_str!` outright. A locally configured smudge filter
+        // substitutes readable-looking content on disk during the
+        // diagnostic checkout; the check must judge the content git
+        // actually tracks, not whatever a local filter driver produced.
+        let tmp = init_repo_with_lib_rs("pub const D: &str = include_str!(\"data.txt\");\n");
+        let harness = tmp.path().join(".hex/harness");
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-content.smudge",
+                "printf 'REPLACED-BY-FILTER'",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &["config", "filter.hex-doctor-g1-content.clean", "cat"],
+        );
+        run_git(
+            tmp.path(),
+            &["config", "filter.hex-doctor-g1-content.required", "true"],
+        );
+        std::fs::write(
+            harness.join(".gitattributes"),
+            "data.txt filter=hex-doctor-g1-content\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("src/data.txt"), [0xFFu8, 0xFE, 0xFD]).unwrap();
+        run_git(
+            tmp.path(),
+            &[
+                "add",
+                ".hex/harness/.gitattributes",
+                ".hex/harness/src/data.txt",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &["commit", "-q", "-m", "add filtered include target"],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+
+        assert_ne!(
+            result.status,
+            Status::Pass,
+            "an include_str! target whose committed git blob is not \
+             valid UTF-8 must never PASS just because a locally \
+             configured smudge filter produced readable content on disk \
+             during the diagnostic checkout, got {:?}",
+            result
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_fails_when_smudge_filter_hides_a_reachable_mod_reference() {
+        // The committed `src/lib.rs` declares `mod missing_dep;`, whose
+        // file is genuinely untracked — but a locally configured smudge
+        // filter strips that line from the on-disk copy the diagnostic
+        // worktree checks out, so scanning disk content (instead of
+        // git's raw blob) never discovers the missing module and wrongly
+        // PASSes. A machine without this exact filter driver configured
+        // would see the real committed source and fail to compile.
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(
+            harness.join("Cargo.toml"),
+            "[package]\nname = \"fixture-harness\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("Cargo.lock"), FIXTURE_LOCKFILE).unwrap();
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-source.smudge",
+                "sed '/mod missing_dep;/d'",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &["config", "filter.hex-doctor-g1-source.clean", "cat"],
+        );
+        run_git(
+            tmp.path(),
+            &["config", "filter.hex-doctor-g1-source.required", "true"],
+        );
+        std::fs::write(
+            harness.join(".gitattributes"),
+            "src/lib.rs filter=hex-doctor-g1-source\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("src/lib.rs"), "mod missing_dep;\n").unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(tmp.path(), &["commit", "-q", "-m", "add filtered source"]);
+
+        let result = run_harness_buildable(tmp.path());
+
+        assert_ne!(
+            result.status,
+            Status::Pass,
+            "a `mod` reference to a genuinely untracked file must not be \
+             hidden by a locally configured smudge filter that strips it \
+             from the on-disk copy the diagnostic checkout materializes, \
+             got {:?}",
+            result
+        );
+    }
 }
