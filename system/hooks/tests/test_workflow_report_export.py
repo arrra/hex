@@ -71,7 +71,15 @@ class RepoRootFallback(unittest.TestCase):
         # A monorepo package path without an on-disk .git is NOT resolvable by
         # heuristics alone (packages/<name> looks like a repo) — that case is
         # covered by the on-disk marker test below, which is the real signal.
-        self.assertEqual(self.m.repo_dir_basename("/tmp/acme-repo/src/lib/util.py"), "acme-repo")
+        #
+        # G1 (round 3, review_b's second redo): "src/lib" nested directly
+        # under the repo carries TWO recognized boundaries with no repo name
+        # between them ("src" then "lib") -- per the unconditional ambiguity
+        # contract (see repo_root_of / AmbiguousBoundaryNeverRoutesToNamedProject)
+        # this is ambiguous and must resolve to None, not "acme-repo". This
+        # pin used to assert the old single-boundary resolution; it now pins
+        # the superseding contract on the same input shape.
+        self.assertIsNone(self.m.repo_dir_basename("/tmp/acme-repo/src/lib/util.py"))
         self.assertEqual(self.m.repo_dir_basename("/tmp/acme-repo"), "acme-repo")
 
     def test_on_disk_git_marker_wins(self):
@@ -1354,6 +1362,74 @@ class AmbiguousBoundaryNeverRoutesToNamedProject(unittest.TestCase):
             m.repo_dir_basename("/acme-repo/src/auth/main.py", warnings, "record"), "acme-repo"
         )
         self.assertEqual(warnings, [])
+
+    def test_adjacent_test_then_src_boundary_is_unmapped_not_acme_repo(self):
+        # review_b G1 (round 3, second redo): the candidate-collection loop
+        # required a boundary's immediate left neighbor to NOT itself be a
+        # NON_REPO_DIRS segment (the "predecessor filter"), so two boundaries
+        # sitting directly next to each other -- no repo name between them --
+        # silently dropped the inner one. Only one candidate survived, so the
+        # unconditional "more than one boundary is ambiguous" check at
+        # repo_root_of never fired: this resolved straight to "acme-repo"
+        # with zero warnings.
+        warnings: list[str] = []
+        m = load_script()
+        self.assertIsNone(
+            m.repo_dir_basename("/acme-repo/tests/src/main.py", warnings, "record"),
+            "adjacent tests/ and src/ boundaries must never resolve to a named project",
+        )
+        self.assertTrue(warnings, "expected a WARN naming the ambiguous boundary candidates")
+
+    def test_adjacent_src_then_lib_boundary_is_unmapped_not_acme_repo(self):
+        # Same predecessor-filter bug, non-test/non-test shape.
+        warnings: list[str] = []
+        m = load_script()
+        self.assertIsNone(
+            m.repo_dir_basename("/acme-repo/src/lib/main.py", warnings, "record"),
+            "adjacent src/ and lib/ boundaries must never resolve to a named project",
+        )
+        self.assertTrue(warnings, "expected a WARN naming the ambiguous boundary candidates")
+
+    def test_adjacent_repeated_tests_boundary_is_unmapped_not_acme_repo(self):
+        # Same predecessor-filter bug, same-keyword adjacent shape.
+        warnings: list[str] = []
+        m = load_script()
+        self.assertIsNone(
+            m.repo_dir_basename("/acme-repo/tests/tests/main.py", warnings, "record"),
+            "two directly adjacent tests/ boundaries must never resolve to a named project",
+        )
+        self.assertTrue(warnings, "expected a WARN naming the ambiguous boundary candidates")
+
+    def test_cli_probe_adjacent_boundary_lands_under_unmapped_with_warn(self):
+        # Reproduces one of review_b's real CLI probes end-to-end: the run
+        # must complete (exit 0, unmapped records don't fail the run) and
+        # the report must land under projects/_unmapped/, never
+        # projects/acme-repo/.
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            rec = {
+                "runId": "wf_g1r3b1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-11T12:00:00Z",
+                "result": {"repo": "/acme-repo/src/lib/main.py"},
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(len(reports), 1, reports)
+            self.assertEqual(
+                reports[0].parent.parent.name,
+                "_unmapped",
+                "an adjacent multi-boundary path must never route to a named project",
+            )
+            self.assertTrue(
+                any("WARN" in line for line in err.splitlines()),
+                f"expected a WARN for the ambiguous adjacent boundaries, got stderr: {err!r}",
+            )
 
     def test_cli_probe_ambiguous_path_lands_under_unmapped_with_warn(self):
         # Reproduces the reviewer's real CLI probe end-to-end: the run must

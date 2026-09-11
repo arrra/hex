@@ -172,36 +172,26 @@ def repo_root_of(path: str, warnings: list[str] | None = None, label: str = "rec
     # afterwards to decide the no-boundary-found / ambiguous case below.
     dir_parts = work[:-1] if work and FILE_EXT_RE.search(work[-1]) else work
 
-    # F15 / review_b G3 — find the recognized non-repo/source-directory
-    # boundary CLOSEST to the file: the rightmost NON_REPO_DIRS segment whose
-    # immediate predecessor is itself NOT a NON_REPO_DIRS segment (i.e. a
-    # real name — the repo). Walking from the left and stopping at the FIRST
-    # boundary breaks container layouts like
-    # ".../workspace/src/acme-repo/src/main.py", where the first "src" is an
-    # outer container prefix, not the repo boundary — that resolved to
-    # "workspace" instead of "acme-repo". Walking from the right absolutely
-    # (picking the last NON_REPO_DIRS segment full stop) breaks nested
-    # source dirs like ".../acme-repo/src/lib/util.py", where "lib" is
-    # itself a NON_REPO_DIRS segment with another one ("src") right before
-    # it — there the boundary must be "src", not "lib". Requiring a
-    # non-boundary predecessor picks the right one in both shapes; this also
-    # absorbs unrecognized nested directories below it: e.g.
-    # ".../acme-repo/src/auth/main.py" must resolve via the "src" boundary
-    # to "acme-repo", never stop early at "auth".
-    #
-    # G3 (spec review round 2) redo, generalized again per review_b's second
-    # redo (G1): the previous fix only kept walking past a REJECTED
-    # candidate for the tests/test bucket, so it caught the one literal
-    # example the spec quoted but not the same failure shape with any other
-    # boundary keyword. Collect EVERY recognized candidate on each side
-    # (non-test, test-like), not just the first one the right-to-left walk
-    # meets, so a second non-test boundary (e.g. "lib" nested under "auth",
-    # itself nested under an earlier "src") or a second tests-like boundary
-    # (a "tests" nested inside another "tests") is never silently dropped.
+    # F15 / review_b G3, generalized by G1 (round 3, third pass) — collect
+    # EVERY recognized NON_REPO_DIRS segment anywhere in the path, full stop.
+    # Earlier passes only counted a boundary whose immediate left neighbor
+    # was itself NOT a NON_REPO_DIRS segment (a "predecessor filter"), meant
+    # to skip an outer container prefix like ".../workspace/src/acme-repo/
+    # src/main.py" (the first "src" sits right after "workspace", a real
+    # name, so both occurrences still passed the filter and correctly stayed
+    # ambiguous there). But that same filter silently DROPPED any boundary
+    # that happened to sit directly next to another boundary with no repo
+    # name in between — ".../acme-repo/tests/src/main.py",
+    # ".../acme-repo/src/lib/main.py", ".../acme-repo/tests/tests/main.py" —
+    # because the inner segment's predecessor was itself a boundary keyword.
+    # That left only one surviving candidate, so the ambiguity check below
+    # never fired and the path resolved straight to a named project. There
+    # is no reliable text-only rule for telling "adjacent boundaries" apart
+    # from a genuine single boundary, so every occurrence counts, unfiltered.
     non_test_candidates: list[int] = []
     test_candidates: list[int] = []
     for i in range(len(dir_parts) - 1, 0, -1):
-        if dir_parts[i] in NON_REPO_DIRS and dir_parts[i - 1] not in NON_REPO_DIRS:
+        if dir_parts[i] in NON_REPO_DIRS:
             if dir_parts[i] in _TEST_LIKE_DIRS:
                 test_candidates.append(i)
             else:
