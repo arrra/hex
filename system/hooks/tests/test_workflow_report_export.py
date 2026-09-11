@@ -1726,6 +1726,43 @@ class NestedAndEscapedCredentialsRedactedBeforeSerialization(unittest.TestCase):
         ]:
             self.assertEqual(m.redact(text), text, f"{text!r} was mangled by redaction")
 
+    def test_dict_key_with_escaped_leading_newline_is_redacted(self):
+        # review_b G3 (round 3, blocker) — _redact_deep() walked dict
+        # VALUES and list items but never dict KEYS, so a credential used
+        # as a nested dict key was left completely raw right up to
+        # json.dumps() time. json.dumps() then escapes its leading newline
+        # to the two literal characters backslash-n, defeating the
+        # post-serialization belt-and-braces redact() pass the exact same
+        # way the original F1 value case did.
+        m = load_script()
+        token = "sk-proj-" + "C" * 40
+        rec = {
+            "runId": "wf_g3key1",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": {"details": {"\n" + token: "some value"}},
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(token, report, "credential used as a nested dict KEY survived into the report")
+
+    def test_structured_log_entry_key_with_escaped_newline_is_redacted(self):
+        # review_b G3 (round 3, blocker) — same dict-key gap, but through
+        # the logs path: str() on a dict escapes control characters in its
+        # keys just like json.dumps() does.
+        m = load_script()
+        token = "ghp_" + "D" * 36
+        rec = {
+            "runId": "wf_g3log1",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": "ok",
+            "logs": [{"\n" + token: "note"}],
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(
+            token, report, "credential used as a structured log entry KEY survived into the report"
+        )
+
 
 class StructuredPathConsumedAsCompleteValue(unittest.TestCase):
     """F7/F16 (round 2) — an explicit structured path field (repo, path,

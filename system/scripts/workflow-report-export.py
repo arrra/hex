@@ -560,7 +560,8 @@ def _is_contained(child_dir: str, parent_dir: str) -> bool:
 
 def _redact_deep(obj, warnings: list[str] | None = None, label: str = "record"):
     """Recursively redact every string leaf of a JSON-like structure — dict
-    values, list items, arbitrarily nested (F1, round 2).
+    keys, dict values, list items, arbitrarily nested (F1, round 2; dict
+    keys added in review_b G3, round 3).
 
     `render_result()`/log rendering used to serialize (`json.dumps`) or
     stringify (`str()`) a structure FIRST and redact the result afterward.
@@ -569,11 +570,19 @@ def _redact_deep(obj, warnings: list[str] | None = None, label: str = "record"):
     before a credential and can defeat the negative-lookbehind boundary
     check in `redact()`. Redacting each string leaf before it is ever
     serialized means `redact()` always sees the real characters.
+
+    A dict KEY is a string leaf too: a credential used as a key was left
+    untouched by the dict-comprehension below, reached json.dumps()/str()
+    completely raw, and its escaped form defeated the post-serialization
+    belt-and-braces pass exactly like an unredacted value would.
     """
     if isinstance(obj, str):
         return redact(obj, warnings, label)
     if isinstance(obj, dict):
-        return {k: _redact_deep(v, warnings, label) for k, v in obj.items()}
+        return {
+            (redact(k, warnings, label) if isinstance(k, str) else k): _redact_deep(v, warnings, label)
+            for k, v in obj.items()
+        }
     if isinstance(obj, list):
         return [_redact_deep(v, warnings, label) for v in obj]
     return obj
