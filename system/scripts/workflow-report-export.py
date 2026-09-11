@@ -307,8 +307,15 @@ def load_project_map(hex_dir: str) -> list[tuple[str, str]]:
         return []
     with open(path, "rb") as fh:
         data = tomllib.load(fh)
+    map_value = data.get("map", [])
+    # F11 (round 2) — a present `map` value that is not a list (e.g. `map = ""`
+    # or `map = {}`) is zero-length when enumerated either way, so it was
+    # silently treated as "no rules" instead of the configuration error it
+    # actually is. Validate the container's type before validating entries.
+    if not isinstance(map_value, list):
+        raise ValueError(f"workflow-projects.toml: 'map' must be a list (got {type(map_value).__name__})")
     out = []
-    for i, entry in enumerate(data.get("map", []), start=1):
+    for i, entry in enumerate(map_value, start=1):
         if not isinstance(entry, dict):
             raise ValueError(f"workflow-projects.toml: rule {i}: must be a table (got {type(entry).__name__})")
         match = entry.get("match")
