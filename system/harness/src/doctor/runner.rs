@@ -2936,4 +2936,93 @@ mod tests {
             result
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_fails_when_smudge_filter_clobbers_a_tracked_files_own_checkout_into_a_symlink_alias(
+    ) {
+        // `src/lib.rs` declares `mod implementation;`. `src/implementation.rs`
+        // is ITSELF genuinely tracked by git — with real content containing
+        // `include!("hidden_missing.rs");`, and `hidden_missing.rs` is never
+        // tracked anywhere, a real build-breaking bug. `src/real.rs` is also
+        // genuinely tracked, with harmless content and no includes at all.
+        // A smudge filter on an unrelated trigger file that checks out AFTER
+        // `implementation.rs` (alphabetically last) clobbers the ALREADY
+        // checked-out `src/implementation.rs` into a symlink to `real.rs`.
+        // The diagnostic worktree therefore has `implementation.rs`'s disk
+        // bytes equal to `real.rs`'s content, which has no missing include
+        // at all. A byte comparison keyed on wherever the symlink RESOLVES
+        // TO — rather than `implementation.rs`'s own git blob, which does
+        // have the missing include — would trivially agree with the disk
+        // read and never notice the substitution. A machine without this
+        // exact filter driver configured gets the real, broken
+        // `implementation.rs` and fails to compile — this check must reach
+        // the same verdict.
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(
+            harness.join("Cargo.toml"),
+            "[package]\nname = \"fixture-harness\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("Cargo.lock"), FIXTURE_LOCKFILE).unwrap();
+        std::fs::write(harness.join("src/lib.rs"), "mod implementation;\n").unwrap();
+        std::fs::write(
+            harness.join("src/implementation.rs"),
+            "include!(\"hidden_missing.rs\");\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("src/real.rs"), "pub const REAL: i32 = 1;\n").unwrap();
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-own-file-clobber.smudge",
+                "ln -sfn real.rs .hex/harness/src/implementation.rs; cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-own-file-clobber.clean",
+                "cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-own-file-clobber.required",
+                "true",
+            ],
+        );
+        std::fs::write(harness.join("zzz_trigger.txt"), "trigger").unwrap();
+        std::fs::write(
+            harness.join(".gitattributes"),
+            "zzz_trigger.txt filter=hex-doctor-g1-own-file-clobber\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &["commit", "-q", "-m", "add own-file-clobber smudge trap"],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "`src/implementation.rs` is genuinely tracked by git with an \
+             `include!(\"hidden_missing.rs\")` that is never satisfied — a \
+             smudge filter clobbering its CHECKED-OUT bytes into a symlink \
+             alias to a different, clean tracked file must not let this \
+             check compare disk content against the alias target's blob \
+             instead of `implementation.rs`'s own, got {:?}",
+            result
+        );
+    }
 }

@@ -1187,43 +1187,39 @@ fn scan_balanced_generic(
 // F4/F10, G1: containment + readability validation
 // ---------------------------------------------------------------------
 
-/// Reads the raw git blob for `canonical_path` (already known to resolve
-/// inside `checkout_root`) via `git show HEAD:<path>` (G1, review_b
-/// iteration 1): a `.gitattributes`-configured smudge filter runs during
-/// `git worktree add` just like it would during any other checkout of this
-/// repository, and the checked-out worktree shares the SAME `.git/config`
-/// (and therefore the same filter drivers) as the caller — so a filter can
-/// freely substitute on-disk bytes for content that is NOT what git
-/// actually committed. That substitution only reproduces on a machine that
-/// happens to have the identical local filter driver configured, which is
-/// exactly the kind of machine-local dependency this check exists to catch
-/// (the same class of problem F1 already treats a warm Cargo cache as).
-/// `git show` reads straight from the object database, bypassing the
-/// working-tree filter pipeline entirely, so its output is the one thing
-/// actually guaranteed reproducible from `git worktree add` on any machine.
+/// Reads the raw git blob at `rel_git` — an already-verified, `/`-joined
+/// path relative to `checkout_root`, returned by
+/// `verify_raw_path_tracked_by_git` — via `git show HEAD:<path>` (G1,
+/// review_b iteration 1): a `.gitattributes`-configured smudge filter runs
+/// during `git worktree add` just like it would during any other checkout
+/// of this repository, and the checked-out worktree shares the SAME
+/// `.git/config` (and therefore the same filter drivers) as the caller —
+/// so a filter can freely substitute on-disk bytes for content that is NOT
+/// what git actually committed. That substitution only reproduces on a
+/// machine that happens to have the identical local filter driver
+/// configured, which is exactly the kind of machine-local dependency this
+/// check exists to catch (the same class of problem F1 already treats a
+/// warm Cargo cache as). `git show` reads straight from the object
+/// database, bypassing the working-tree filter pipeline entirely, so its
+/// output is the one thing actually guaranteed reproducible from
+/// `git worktree add` on any machine.
+///
+/// Takes the LITERAL git-relative path, never a canonicalized
+/// (symlink-followed) one (G1, review_b iteration 6): comparing disk
+/// content against the blob at wherever a path's symlinks happen to
+/// RESOLVE to — rather than the blob at the path's own name — lets a
+/// checkout filter replace a tracked regular file with a symlink alias to
+/// a DIFFERENT, also-tracked file; the disk read and the git-blob lookup
+/// would then both transparently follow the same alias and trivially
+/// agree, hiding whatever the aliased file's own git blob actually
+/// contains (e.g. a `mod`/`include!` reference the real committed content
+/// is missing). `verify_raw_path_tracked_by_git` is the only thing that
+/// gets to decide what path this reads.
 fn read_git_tracked_bytes(
     checkout_root: &Path,
-    canonical_path: &Path,
+    rel_git: &str,
     timeout: Duration,
 ) -> Result<Vec<u8>, String> {
-    // `canonical_path` is fully canonicalized (symlinks resolved); on
-    // platforms where the checkout root itself sits behind a symlink
-    // (e.g. macOS's `/tmp` -> `/private/tmp`), stripping against the
-    // RAW `checkout_root` would spuriously fail here even though
-    // `canonicalize_within_checkout` already proved containment.
-    // Canonicalize `checkout_root` the same way before stripping.
-    let canonical_root = std::fs::canonicalize(checkout_root)
-        .map_err(|e| format!("failed to canonicalize checkout root: {e}"))?;
-    let rel = canonical_path
-        .strip_prefix(&canonical_root)
-        .map_err(|_| "resolves outside the checkout root".to_string())?;
-    // `git show rev:path` always wants forward-slash-separated paths,
-    // regardless of host platform.
-    let rel_git = rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/");
     let mut cmd = Command::new("git");
     cmd.args(["show", &format!("HEAD:{rel_git}")])
         .current_dir(checkout_root);
@@ -1288,7 +1284,7 @@ fn verify_raw_path_tracked_by_git(
     checkout_root: &Path,
     raw_path: &Path,
     timeout: Duration,
-) -> Result<(), String> {
+) -> Result<String, String> {
     let canonical_root = std::fs::canonicalize(checkout_root)
         .map_err(|e| format!("failed to canonicalize checkout root: {e}"))?;
     let rel = raw_path
@@ -1368,7 +1364,17 @@ fn verify_raw_path_tracked_by_git(
             ));
         }
     }
-    Ok(())
+    // Every checked segment above passed, so `accumulated` now holds the
+    // complete literal path — build the same `/`-joined form once more and
+    // hand it back so callers can read the git blob at this EXACT path
+    // (never a canonicalized one) via `read_git_tracked_bytes` (G1,
+    // review_b iteration 6).
+    let final_rel_git = accumulated
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    Ok(final_rel_git)
 }
 
 /// Canonicalizes `path` and confirms it resolves inside `checkout_root`
@@ -1412,8 +1418,11 @@ fn validate_include_target(
     let canonical_target = canonicalize_within_checkout(&candidate, checkout_root)?;
     // G1 (review_b iteration 3): confirm the LITERAL path this macro names
     // is itself tracked by git, not just whatever it resolves to after
-    // following symlinks — see `verify_raw_path_tracked_by_git`.
-    verify_raw_path_tracked_by_git(checkout_root, &candidate, timeout)?;
+    // following symlinks — see `verify_raw_path_tracked_by_git`. Keep the
+    // exact git-relative path it returns; the byte comparison below must
+    // read THAT blob, not whatever `canonical_target` happens to resolve
+    // to (review_b iteration 6).
+    let rel_git = verify_raw_path_tracked_by_git(checkout_root, &candidate, timeout)?;
     let meta = std::fs::metadata(&canonical_target)
         .map_err(|e| format!("could not stat resolved target: {e}"))?;
     if !meta.is_file() {
@@ -1432,11 +1441,14 @@ fn validate_include_target(
     // G1 (review_b, iteration 1): `disk_bytes` came off disk AFTER the
     // diagnostic checkout ran — a configured smudge filter could have
     // substituted them for content that is not what git actually
-    // committed. Compare against the raw git blob; a mismatch means this
-    // check cannot certify the bytes cargo would embed as something a
-    // fresh checkout on ANY machine (with or without that filter driver
-    // configured) is guaranteed to reproduce.
-    let git_bytes = read_git_tracked_bytes(checkout_root, &canonical_target, timeout)?;
+    // committed. Compare against the raw git blob at the LITERAL path
+    // (review_b iteration 6) — using `canonical_target` here would follow
+    // any symlink `candidate` itself turned out to be and silently compare
+    // against a different (but also tracked) file's blob instead. A
+    // mismatch means this check cannot certify the bytes cargo would embed
+    // as something a fresh checkout on ANY machine (with or without that
+    // filter driver configured) is guaranteed to reproduce.
+    let git_bytes = read_git_tracked_bytes(checkout_root, &rel_git, timeout)?;
     if git_bytes != disk_bytes {
         return Err(
             "checked-out content differs from the committed git blob — a \
@@ -1445,7 +1457,12 @@ fn validate_include_target(
                 .to_string(),
         );
     }
-    Ok(canonical_target)
+    // Return the RAW (unresolved) candidate, not `canonical_target`: a
+    // caller that recurses into this target (an `include!`) must keep
+    // treating it as an unverified literal path so its own top-level
+    // git-content check (see `scan_file_and_follow`) asks git about the
+    // exact same name, not whatever it resolves to on disk.
+    Ok(candidate)
 }
 
 /// The module-resolution base directory `mod x;` (without `#[path]`)
@@ -1590,8 +1607,24 @@ impl ScanState {
         // source no fresh checkout on another machine is guaranteed to
         // reproduce; treat any mismatch (or an unreadable/non-UTF-8 git
         // blob) as a scan failure rather than trusting disk content.
-        let git_bytes = match read_git_tracked_bytes(&self.worktree_path, &canonical, self.timeout)
+        //
+        // Ask git about `path` itself — never `canonical` (review_b
+        // iteration 6): a checkout filter can clobber a tracked regular
+        // file's checked-out bytes with a symlink alias to a DIFFERENT,
+        // also-tracked file. `canonical` follows that alias, so both the
+        // disk read above and a git-blob lookup keyed on `canonical` would
+        // transparently agree on the alias TARGET's content — hiding
+        // whatever `path`'s own git blob (the file this scan actually
+        // thinks it is reading) really contains.
+        let rel_git = match verify_raw_path_tracked_by_git(&self.worktree_path, path, self.timeout)
         {
+            Ok(s) => s,
+            Err(e) => {
+                self.errors.push(format!("{}: {e}", self.rel(path)));
+                return;
+            }
+        };
+        let git_bytes = match read_git_tracked_bytes(&self.worktree_path, &rel_git, self.timeout) {
             Ok(b) => b,
             Err(e) => {
                 self.errors.push(format!("{}: {e}", self.rel(path)));
