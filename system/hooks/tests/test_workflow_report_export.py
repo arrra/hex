@@ -1860,6 +1860,50 @@ class RemappingRemovesStaleReportCopy(unittest.TestCase):
             )
 
 
+class StaleReportCleanupNeverDeletesThroughAnInternalSymlink(unittest.TestCase):
+    """review_b G2 (round 3) — the F10 stale-copy cleanup compared
+    candidate paths with os.path.abspath(), which does not resolve
+    symlinks. A project directory reached through an internal alias
+    symlink produces a glob match that is textually different from the
+    just-written `out` path but physically the SAME file. abspath()
+    reported them as different files, so the cleanup deleted the report
+    the run had just written a moment earlier through its own alias."""
+
+    def test_cleanup_never_deletes_the_report_it_just_wrote_via_an_internal_symlink(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            rec = {
+                "runId": "wf_symlink1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            _write_record(projects, rec)
+
+            # Pre-create the real project directory this run resolves to,
+            # plus an alias directory that is a symlink to it -- so the
+            # stale-report glob (projects_root/*/workflow-reports/<basename>)
+            # finds the just-written report twice: once at its real path,
+            # once through the alias.
+            projects_root = os.path.join(hex_dir, "projects")
+            real_dir = os.path.join(projects_root, "acme-repo")
+            os.makedirs(real_dir, exist_ok=True)
+            os.symlink(real_dir, os.path.join(projects_root, "acme-repo-alias"))
+
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("wrote=1", out, out)
+            reports = list(Path(real_dir, "workflow-reports").glob("*.md"))
+            self.assertEqual(
+                len(reports),
+                1,
+                "the report the run just wrote must survive its own stale-copy cleanup pass",
+            )
+
+
 class MapValueMustBeAList(unittest.TestCase):
     """F11 (round 2) — `data.get("map", [])` is enumerated without checking
     it is actually a list. `map = ""` or `map = {}` are both zero-length

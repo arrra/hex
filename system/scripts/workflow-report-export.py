@@ -879,7 +879,15 @@ def main() -> int:
                     marker = _source_marker(path)
                     basename = os.path.basename(out)
                     for stale in glob.glob(os.path.join(projects_root, "*", "workflow-reports", basename)):
-                        same = os.path.abspath(stale) == os.path.abspath(out)
+                        # review_b G2 (round 3) — abspath() does not resolve
+                        # symlinks: a project directory reached through an
+                        # internal alias symlink is a different STRING but
+                        # the SAME file as `out`, so abspath() said "not the
+                        # same file" and the just-written report was deleted
+                        # as if it were a stale copy. realpath() resolves
+                        # the symlink so the identity check is physical, not
+                        # textual.
+                        same = os.path.realpath(stale) == os.path.realpath(out)
                         if same or not _is_contained(stale, projects_root) or _report_source_marker(stale) != marker:
                             continue
                         try:
