@@ -1205,6 +1205,52 @@ class MultiBoundarySourcePathRouting(unittest.TestCase):
                 "expected a WARN naming the rejected nested boundary candidate",
             )
 
+    def test_two_different_non_test_boundaries_prefer_leftmost_and_warn(self):
+        # review_b redo G1: the original G3 fix only made the tests/test
+        # bucket keep scanning past its first (rightmost) hit -- a second
+        # NON-test boundary (e.g. "lib" nested under "auth", itself nested
+        # under an earlier "src") still broke at the FIRST (rightmost) match
+        # and silently returned "auth" with zero warnings. Two DIFFERENT
+        # non-test boundary keywords must resolve via the leftmost one, with
+        # a WARN naming the rejected nested candidate -- same contract as
+        # the tests/test case, generalized to any boundary keyword.
+        warnings: list[str] = []
+        m = load_script()
+        self.assertEqual(
+            m.repo_dir_basename("/acme-repo/src/auth/lib/x.py", warnings, "record"),
+            "acme-repo",
+        )
+        self.assertTrue(
+            any("lib" in w and "src" in w for w in warnings),
+            f"expected a WARN naming both boundary candidates, got {warnings!r}",
+        )
+
+    def test_repeated_nested_test_boundaries_prefer_leftmost_and_warn(self):
+        # review_b redo G1: two tests-like boundaries ("tests" nested inside
+        # another "tests") kept only the FIRST (rightmost) one found -- the
+        # nested one under "auth" -- and silently returned "auth" with zero
+        # warnings, contradicting "nested tests/ under a source dir never
+        # wins" for the repeated-boundary case too.
+        warnings: list[str] = []
+        m = load_script()
+        self.assertEqual(
+            m.repo_dir_basename("/acme-repo/tests/auth/tests/test_login.py", warnings, "record"),
+            "acme-repo",
+        )
+        self.assertTrue(warnings, "expected a WARN naming the rejected nested tests/ candidate")
+
+    def test_same_keyword_container_prefix_pair_still_prefers_rightmost(self):
+        # The F15 container idiom (".../workspace/src/acme-repo/src/main.py")
+        # must keep resolving via the boundary closest to the file -- a
+        # single repo name sandwiched between two occurrences of the SAME
+        # boundary keyword is a container prefix, not a genuine multi-
+        # boundary disagreement, and must not be swept into the new
+        # leftmost-wins generalization above.
+        m = load_script()
+        self.assertEqual(
+            m.repo_dir_basename("/workspace/src/acme-repo/src/main.py"), "acme-repo"
+        )
+
 
 class UnderscoreCompoundAndUppercaseKeyValuePairs(unittest.TestCase):
     """F1 (reviewer A) — the key=/token=/password=/secret= lookbehind

@@ -189,26 +189,89 @@ def repo_root_of(path: str, warnings: list[str] | None = None, label: str = "rec
     # ".../acme-repo/src/auth/main.py" must resolve via the "src" boundary
     # to "acme-repo", never stop early at "auth".
     #
-    # G3 (spec review round 2) redo: that same rightmost-with-real-predecessor
-    # scan also silently matched a "tests" boundary nested under an unrelated
-    # subdirectory of an outer source boundary (".../acme-repo/src/auth/tests/
-    # x.py" resolved to "auth", not "acme-repo") because "tests" is the first
-    # candidate the right-to-left walk finds and it never looked any further
-    # left. Keep walking past a tests/test candidate to see whether an
-    # earlier, non-test boundary also exists; if so, that earlier one wins
-    # and a WARN names both. A tests/test boundary is only used when it is
-    # the ONLY recognized boundary in the path.
-    non_test_boundary = None
-    test_boundary = None
+    # G3 (spec review round 2) redo, generalized again per review_b's second
+    # redo (G1): the previous fix only kept walking past a REJECTED
+    # candidate for the tests/test bucket, so it caught the one literal
+    # example the spec quoted but not the same failure shape with any other
+    # boundary keyword. Collect EVERY recognized candidate on each side
+    # (non-test, test-like), not just the first one the right-to-left walk
+    # meets, so a second non-test boundary (e.g. "lib" nested under "auth",
+    # itself nested under an earlier "src") or a second tests-like boundary
+    # (a "tests" nested inside another "tests") is never silently dropped.
+    non_test_candidates: list[int] = []
+    test_candidates: list[int] = []
     for i in range(len(dir_parts) - 1, 0, -1):
         if dir_parts[i] in NON_REPO_DIRS and dir_parts[i - 1] not in NON_REPO_DIRS:
             if dir_parts[i] in _TEST_LIKE_DIRS:
-                if test_boundary is None:
-                    test_boundary = i
-                continue
-            non_test_boundary = i
-            break
+                test_candidates.append(i)
+            else:
+                non_test_candidates.append(i)
+    # Both lists are populated right-to-left, so index 0 is the rightmost
+    # (closest-to-file) candidate and index -1 is the leftmost.
 
+    non_test_boundary: int | None = None
+    if non_test_candidates:
+        if len(non_test_candidates) == 1:
+            non_test_boundary = non_test_candidates[0]
+        else:
+            rightmost, leftmost = non_test_candidates[0], non_test_candidates[-1]
+            # F15's container idiom (".../workspace/src/acme-repo/src/
+            # main.py") is a single repo name SANDWICHED between two
+            # occurrences of the SAME boundary keyword with nothing else
+            # between them -- there the boundary closest to the file is the
+            # real one and the leftmost is an outer container prefix. Any
+            # other multi-candidate shape (different keywords, e.g. "src"
+            # then "lib", or more than two candidates) is a genuine
+            # disagreement: prefer the LEFTMOST boundary under the repo
+            # root and warn, per spec ("do not infer a project from the
+            # rightmost one").
+            is_container_prefix_pair = (
+                len(non_test_candidates) == 2
+                and dir_parts[rightmost] == dir_parts[leftmost]
+                and rightmost - leftmost == 2
+            )
+            if is_container_prefix_pair:
+                non_test_boundary = rightmost
+            else:
+                non_test_boundary = leftmost
+                if warnings is not None:
+                    warnings.append(
+                        f"{label}: multiple source boundaries in path -> using "
+                        f"'{dir_parts[leftmost - 1]}' (boundary '{dir_parts[leftmost]}'), "
+                        f"not the nested '{dir_parts[rightmost - 1]}' boundary ('{dir_parts[rightmost]}')"
+                    )
+
+    test_boundary: int | None = None
+    if test_candidates:
+        # Leftmost wins here too -- "nested tests/ under a source dir never
+        # wins" applies whether the nested candidate is competing against an
+        # earlier non-test boundary (below) or an earlier tests/test one.
+        test_boundary = test_candidates[-1]
+        if len(test_candidates) > 1 and warnings is not None:
+            rightmost_test = test_candidates[0]
+            warnings.append(
+                f"{label}: multiple source boundaries in path -> using "
+                f"'{dir_parts[test_boundary - 1]}' (boundary '{dir_parts[test_boundary]}'), "
+                f"not the nested '{dir_parts[rightmost_test - 1]}' boundary ('{dir_parts[rightmost_test]}')"
+            )
+
+    # KNOWN LIMITATION (documented dispute, review_b redo G1): a non-test
+    # boundary still unconditionally wins over a test-like one whenever both
+    # exist, e.g. ".../workspace/src/acme-repo/tests/x.py" resolves via the
+    # outer "src" (-> "workspace") rather than the repo's own top-level
+    # "tests" (-> "acme-repo"). That shape is byte-for-byte structurally
+    # identical -- non-test boundary immediately after the first path
+    # segment, test-like boundary immediately before the file -- to the
+    # spec's own pinned canonical example
+    # ("/acme-repo/src/auth/tests/test_login.py" MUST resolve to
+    # "acme-repo" via the EARLIER non-test boundary beating the LATER
+    # test-like one; see test_leftmost_boundary_wins_over_nested_rightmost_
+    # boundary). A syntax-only rule cannot prefer "earlier boundary wins"
+    # for one and "later boundary wins" for the other -- there is nothing
+    # in either path's shape to key off besides the literal segment names.
+    # The call site already gets a loud WARN either way (below), so the
+    # ambiguity is never silent even though the winning candidate can't be
+    # made to match every possible caller's expectation.
     if non_test_boundary is not None:
         if test_boundary is not None and warnings is not None:
             warnings.append(
