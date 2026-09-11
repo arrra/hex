@@ -1495,6 +1495,19 @@ struct ScanState {
     inconclusive: Vec<String>,
     errors: Vec<String>,
     visited: HashSet<PathBuf>,
+    /// Git-verified literal paths (the `rel_git` a file's own content was
+    /// already checked against) whose `mod`/`include!` children have
+    /// already been followed. Keyed on the LITERAL tracked path, never on
+    /// `visited`'s canonicalized one (G1, review_b iteration 7): a checkout
+    /// filter can clobber one tracked file's checked-out bytes into a
+    /// symlink alias pointing at a DIFFERENT, already-scanned tracked
+    /// file, so `canonical` for the clobbered file collides with a path
+    /// already in `visited` even though the clobbered file's own git blob
+    /// was never compared against its (now substituted) disk content. This
+    /// set is only consulted AFTER that per-file content comparison
+    /// succeeds, so it dedupes recursion (cycle protection) without ever
+    /// skipping the check that catches the substitution.
+    verified: HashSet<String>,
     /// Deadline for every `git show` this scan issues to verify content
     /// against the raw git blob (G1, review_b iteration 1) — same F14
     /// discipline as every other external command this check spawns.
@@ -1510,6 +1523,7 @@ impl ScanState {
             inconclusive: Vec::new(),
             errors: Vec::new(),
             visited: HashSet::new(),
+            verified: HashSet::new(),
             timeout,
         }
     }
@@ -1579,8 +1593,12 @@ impl ScanState {
     /// Scans one Rust source file for `mod`/include references and follows
     /// them (F2/F6). `is_root` marks a metadata target entry point (or
     /// `build.rs`) — the module-resolution basis for any bare `mod x;` it
-    /// declares. Dedupes on canonicalized path, which also makes this safe
-    /// against `include!`/`mod` cycles.
+    /// declares. Every call verifies `path`'s own content against its own
+    /// git blob before consulting any dedup set (G1, review_b iteration 7)
+    /// — cycle protection (`self.verified`, keyed on the literal git path)
+    /// is applied only AFTER that verification succeeds, so it can never
+    /// skip the check that catches a clobbered file impersonating an
+    /// already-scanned one.
     fn scan_file_and_follow(&mut self, path: &Path, is_root: bool) {
         let canonical = match std::fs::canonicalize(path) {
             Ok(p) => p,
@@ -1589,9 +1607,9 @@ impl ScanState {
                 return;
             }
         };
-        if !self.visited.insert(canonical.clone()) {
-            return;
-        }
+        // Perf-only bookkeeping for `check_dir_readable`'s "already read via
+        // the graph walk" skip — never used to gate the content check below.
+        self.visited.insert(canonical);
         let content = match std::fs::read_to_string(path) {
             Ok(c) => c,
             Err(e) => {
@@ -1650,6 +1668,14 @@ impl ScanState {
                 ));
                 return;
             }
+        }
+        // Cycle protection only now, after `path`'s own git blob has been
+        // proven to match what's on disk — dedupes on the literal tracked
+        // path (finite: it names one git blob), never on `canonical`, which
+        // a clobbering symlink could make collide with an unrelated,
+        // already-verified file.
+        if !self.verified.insert(rel_git.clone()) {
+            return;
         }
         let parsed = scan_source(&content);
         let dir_for_submodules = module_dir_for(path, is_root);

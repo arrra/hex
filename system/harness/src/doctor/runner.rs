@@ -3025,4 +3025,102 @@ mod tests {
             result
         );
     }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_fails_when_a_visited_alias_target_hides_a_later_own_file_clobber() {
+        // Same attack as the test above (a smudge filter clobbers a
+        // genuinely-tracked `src/implementation.rs` into a symlink to
+        // `src/real.rs`), but with the module declaration ORDER reversed:
+        // `src/lib.rs` declares `mod real;` BEFORE `mod implementation;`.
+        // `scan_file_and_follow`'s canonical-path `visited` check (line
+        // ~1592) runs and returns BEFORE the literal-path git-blob
+        // comparison. Because `real.rs` is scanned first, its canonical
+        // path is recorded as visited; when `implementation.rs` is scanned
+        // next, it has been clobbered into a symlink to `real.rs`, so its
+        // canonical path resolves to the SAME already-visited path — the
+        // `visited.insert` returns `false` and the function returns
+        // immediately, never reading `implementation.rs`'s own content or
+        // comparing it against its own git blob (which contains
+        // `include!("hidden_missing.rs");`, a real build-breaking bug). A
+        // machine without this exact filter driver configured checks out
+        // the real, broken `implementation.rs` and fails to compile — this
+        // check must reach the same verdict regardless of scan order.
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(
+            harness.join("Cargo.toml"),
+            "[package]\nname = \"fixture-harness\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("Cargo.lock"), FIXTURE_LOCKFILE).unwrap();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "mod real;\nmod implementation;\n",
+        )
+        .unwrap();
+        std::fs::write(
+            harness.join("src/implementation.rs"),
+            "include!(\"hidden_missing.rs\");\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("src/real.rs"), "pub const REAL: i32 = 1;\n").unwrap();
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-ordering-clobber.smudge",
+                "ln -sfn real.rs .hex/harness/src/implementation.rs; cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-ordering-clobber.clean",
+                "cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-ordering-clobber.required",
+                "true",
+            ],
+        );
+        std::fs::write(harness.join("zzz_trigger.txt"), "trigger").unwrap();
+        std::fs::write(
+            harness.join(".gitattributes"),
+            "zzz_trigger.txt filter=hex-doctor-g1-ordering-clobber\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add ordering-variant own-file-clobber smudge trap",
+            ],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "`src/implementation.rs` is genuinely tracked by git with an \
+             `include!(\"hidden_missing.rs\")` that is never satisfied — \
+             scanning `src/real.rs` FIRST (per `mod real; mod \
+             implementation;` declaration order) must not let the \
+             canonical-path visited check short-circuit the literal-path \
+             git-blob comparison for `implementation.rs` once it has been \
+             clobbered into a symlink alias to `real.rs`, got {:?}",
+            result
+        );
+    }
 }
