@@ -354,6 +354,13 @@ fn op_fact_canonicalize(conn: &mut Connection) -> anyhow::Result<()> {
 /// CHECK-constrained to ADD/UPDATE/DELETE/FLAG; an UPDATE row with a descriptive
 /// `new_value` records the collapse and names its survivor). Idempotent: guarded
 /// on `tombstone = 0` so a re-run never double-logs an already-collapsed fact.
+///
+/// The tombstone UPDATE, the `facts_vec` sync, and the audit row run inside one
+/// `BEGIN IMMEDIATE` transaction — same idiom as `schema.rs`'s
+/// `rebuild_facts_vec_with_is_live` (PR#9 r2 review_b G1: the two writes were
+/// previously separate autocommits, so a crash/error between them could leave
+/// `facts.tombstone = 1` with a still-live `facts_vec` row). On any error the
+/// transaction rolls back and none of the writes land.
 fn tombstone_duplicate_fact(
     conn: &Connection,
     loser: &CanonFact,
@@ -366,14 +373,50 @@ fn tombstone_duplicate_fact(
         loser.id, loser.object, survivor.id, survivor.object, survivor.subject, survivor.predicate
     );
 
-    // Tombstone — NEVER delete. Guard on tombstone=0 keeps re-runs idempotent.
-    let changed = conn.execute(
-        "UPDATE facts SET tombstone = 1 WHERE id = ?1 AND tombstone = 0",
-        rusqlite::params![loser.id],
-    )?;
-    if changed == 0 {
-        // Row was already tombstoned or vanished between load and write — do not
-        // silently pretend we collapsed it (S6).
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let write = || -> anyhow::Result<bool> {
+        // Tombstone — NEVER delete. Guard on tombstone=0 keeps re-runs idempotent.
+        let changed = conn.execute(
+            "UPDATE facts SET tombstone = 1 WHERE id = ?1 AND tombstone = 0",
+            rusqlite::params![loser.id],
+        )?;
+        if changed == 0 {
+            // Row was already tombstoned or vanished between load and write — do
+            // not silently pretend we collapsed it (S6).
+            return Ok(false);
+        }
+
+        // Keep facts_vec.is_live in sync with the tombstone (decision
+        // hex-knn-is-live-metadata-filter-2026-09-10.md §3, PR#9 r2 review_b G1)
+        // — without this, knn_facts can still surface the just-tombstoned loser
+        // until the next maintain_facts::backfill sweep.
+        crate::memory::vector::mark_fact_vec_dead(conn, &loser.id)?;
+
+        // Durable audit row. Names the survivor so the collapse is
+        // reconstructable from the ledger.
+        conn.execute(
+            "INSERT INTO fact_history (fact_id, op, prev_value, new_value, ts)
+             VALUES (?1, 'UPDATE', ?2, ?3, datetime('now'))",
+            rusqlite::params![
+                loser.id,
+                loser.object,
+                format!(
+                    "tombstoned as canonical near-duplicate of fact {} (object: {})",
+                    survivor.id, survivor.object
+                ),
+            ],
+        )?;
+        Ok(true)
+    };
+
+    let result = write();
+    match &result {
+        Ok(_) => conn.execute_batch("COMMIT")?,
+        Err(_) => {
+            let _ = conn.execute_batch("ROLLBACK");
+        }
+    }
+    if !result? {
         eprintln!(
             "consolidate fact-canonicalize: WARN fact id={} was not live at write time; no \
              tombstone applied",
@@ -381,28 +424,6 @@ fn tombstone_duplicate_fact(
         );
         return Ok(());
     }
-
-    // Keep facts_vec.is_live in sync with the tombstone, in the same
-    // transaction as the UPDATE above (decision
-    // hex-knn-is-live-metadata-filter-2026-09-10.md §3, PR#9 r2 review_b G1) —
-    // without this, knn_facts can still surface the just-tombstoned loser
-    // until the next maintain_facts::backfill sweep.
-    crate::memory::vector::mark_fact_vec_dead(conn, &loser.id)?;
-
-    // Durable audit row. Names the survivor so the collapse is reconstructable
-    // from the ledger.
-    conn.execute(
-        "INSERT INTO fact_history (fact_id, op, prev_value, new_value, ts)
-         VALUES (?1, 'UPDATE', ?2, ?3, datetime('now'))",
-        rusqlite::params![
-            loser.id,
-            loser.object,
-            format!(
-                "tombstoned as canonical near-duplicate of fact {} (object: {})",
-                survivor.id, survivor.object
-            ),
-        ],
-    )?;
 
     crate::telemetry::record_loud(&crate::telemetry::TelemetryEvent {
         source: "memory::consolidate".into(),
@@ -422,25 +443,44 @@ fn tombstone_duplicate_fact(
 
 // PAUSED — see the op registration above. Kept compiled (not deleted) so the
 // re-enable diff is one line once the access counter ships.
+//
+// Both UPDATEs run inside one `BEGIN IMMEDIATE` transaction — same idiom as
+// `tombstone_duplicate_fact` above (PR#9 r2 review_b G1: previously separate
+// autocommits, so a crash between them could leave a tombstoned fact with a
+// still-live `facts_vec` row).
 #[allow(dead_code)]
 fn op_prune(conn: &mut Connection) -> anyhow::Result<()> {
-    // Tombstone-eligible: access_count=0 AND age>60 AND subject!='user' AND predicate!='decided'
-    conn.execute(
-        "UPDATE facts SET tombstone = 1
-         WHERE tombstone = 0 AND access_count = 0
-           AND subject != 'user' AND predicate != 'decided'
-           AND julianday('now') - julianday(updated_at) > 60",
-        [],
-    )?;
-    // Keep facts_vec.is_live in sync with the tombstone this op just set —
-    // same requirement as tombstone_duplicate_fact above (decision
-    // hex-knn-is-live-metadata-filter-2026-09-10.md §3, PR#9 r2 review_b G1).
-    conn.execute(
-        "UPDATE facts_vec SET is_live = 0
-         WHERE fact_id IN (SELECT id FROM facts WHERE tombstone = 1)",
-        [],
-    )?;
-    Ok(())
+    let conn: &Connection = conn;
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let write = || -> anyhow::Result<()> {
+        // Tombstone-eligible: access_count=0 AND age>60 AND subject!='user' AND predicate!='decided'
+        conn.execute(
+            "UPDATE facts SET tombstone = 1
+             WHERE tombstone = 0 AND access_count = 0
+               AND subject != 'user' AND predicate != 'decided'
+               AND julianday('now') - julianday(updated_at) > 60",
+            [],
+        )?;
+        // Keep facts_vec.is_live in sync with the tombstone this op just set —
+        // same requirement as tombstone_duplicate_fact above (decision
+        // hex-knn-is-live-metadata-filter-2026-09-10.md §3, PR#9 r2 review_b G1).
+        conn.execute(
+            "UPDATE facts_vec SET is_live = 0
+             WHERE fact_id IN (SELECT id FROM facts WHERE tombstone = 1)",
+            [],
+        )?;
+        Ok(())
+    };
+    match write() {
+        Ok(()) => {
+            conn.execute_batch("COMMIT")?;
+            Ok(())
+        }
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 
