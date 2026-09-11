@@ -321,7 +321,16 @@ def _mask_double_quoted(text, start, result):
     preserving `$(...)`/backtick substitutions' executable structure while
     recursively masking any quoted literal NESTED inside one of them (G1,
     review_b round 2 — see `_mask_quotes_recursive`). Returns the index
-    just past the closing quote (or len(text) if unterminated)."""
+    just past the closing quote (or len(text) if unterminated).
+
+    A REAL newline inside the span is blanked too (G4, review_b round 2):
+    `_mask_literal_span` (single quotes) already blanks it for the same
+    reason the R4 fix documents there — leaving it visible put a fresh
+    line-start inside quoted text, and `_CMD_PREFIX`'s `\\n\\s*` alternative
+    anchored the next line as if it were a brand new command (e.g. a
+    double-quoted, multi-line `cd /worktrees/x` mention got picked up by
+    `_effective_checkout` as a REAL `cd`). This function had its own
+    inline masking loop and was missed by that fix."""
     n = len(text)
     result[start] = " "
     i = start + 1
@@ -354,10 +363,13 @@ def _mask_double_quoted(text, start, result):
             _mask_quotes_recursive(text, i + 1, body_end, result)
             i = close
             continue
-        if ch != "\n" and ch in _SEPARATOR_CHARS:
+        if ch in _SEPARATOR_CHARS:
             # G2: only a shell-metacharacter gets blanked here -- ordinary
             # argument content inside the double-quoted span stays visible
             # (see `_mask_literal_span`/executable-region-scanner comment).
+            # G4: a real newline is one of those metacharacters too and
+            # must be blanked like any other (see this function's
+            # docstring) -- it is never excluded.
             result[i] = " "
         i += 1
     return n
@@ -687,13 +699,34 @@ def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd, pa
 # while B; do...done`) touch depth 0 again in the MIDDLE, after the first
 # closes, before the second even opens -- that mid-span return to 0 is
 # exactly the "crossed into an unrelated loop" case F3/F7 rejects.
+#
+# G5 (review_b round 2): when the nested bounded loop sits AFTER the
+# CLI+sleep pair instead of before it (G3's case), the lazy regex's
+# candidate span stops at the NESTED loop's own `done` -- the first `done`
+# that satisfies the CLI+sleep requirement -- never reaching the outer
+# loop's real terminator further out in scan_text. That candidate's depth
+# is still positive at its own end (UNCLOSED, not the mid-span-return-to-0
+# CROSSED case), so it is a genuinely too-short match at an otherwise
+# correct start position, not a wrong start position at all. The caller
+# (`evaluate`) tells these apart via `_polling_loop_extent` and extends an
+# UNCLOSED candidate to the next `done` in scan_text instead of discarding
+# it; a CROSSED candidate is still rejected outright.
 _LOOP_TOKEN_RE = re.compile(r"\b(?:do|done)\b")
 
 
-def _polling_loop_bounded(matched_text):
+def _polling_loop_extent(matched_text):
+    """Classify `matched_text`'s `do`/`done` nesting relative to its own
+    span. Returns "closed" (a genuine, fully-bounded loop -- possibly
+    containing fully-nested loops of its own), "unclosed" (every token
+    consumed but depth is still positive -- a nested loop's `done` closed
+    before the true outer terminator, which lies further out in scan_text
+    than this candidate reached; the caller should extend and re-check),
+    or "crossed" (depth returns to 0 somewhere in the MIDDLE of the span --
+    an earlier, unrelated loop already closed; the caller must reject this
+    span outright, never extend it)."""
     tokens = list(_LOOP_TOKEN_RE.finditer(matched_text))
     if not tokens:
-        return False
+        return "crossed"
     depth = 0
     last = len(tokens) - 1
     for i, tok in enumerate(tokens):
@@ -702,10 +735,10 @@ def _polling_loop_bounded(matched_text):
         else:
             depth -= 1
             if depth < 0:
-                return False
+                return "crossed"
             if depth == 0 and i != last:
-                return False
-    return depth == 0
+                return "crossed"
+    return "closed" if depth == 0 else "unclosed"
 
 
 def canonical_text(tool_name, tool_input):
@@ -808,13 +841,14 @@ def evaluate(payload):
 
         unless_re = rule["unless_match_re"]
         scope = rule["unless_scope"]
+        match_override = None
         if unless_re is None:
             m = None
             if rule["id"] == "gh-fast-polling":
                 # F7 (review round 2 redo): `finditer`'s candidates never
                 # overlap, so once the FIRST candidate -- a greedy span
                 # crossing an earlier, unrelated loop's own `done` -- got
-                # rejected by `_polling_loop_bounded`, finditer resumed
+                # rejected by `_polling_loop_extent`, finditer resumed
                 # searching from that rejected span's END, skipping straight
                 # past a real loop that started inside it. Re-search from
                 # one past the REJECTED candidate's own START (not its end)
@@ -827,10 +861,27 @@ def evaluate(payload):
                     if _cwd_exempts(candidate):
                         search_pos = max(candidate.start() + 1, candidate.end())
                         continue
-                    if not _polling_loop_bounded(candidate.group(0)):
+                    end = candidate.end()
+                    extent = _polling_loop_extent(scan_text[candidate.start():end])
+                    # G5 (review_b round 2): a nested bounded loop AFTER the
+                    # CLI+sleep pair leaves this lazy candidate UNCLOSED
+                    # (its own span never reaches the outer loop's real
+                    # terminator) -- extend to the next `done` in scan_text
+                    # and re-check, rather than discarding this start
+                    # position outright (see `_polling_loop_extent`). A
+                    # "crossed" extent (an unrelated earlier loop) is never
+                    # extended -- it is genuinely the wrong start.
+                    while extent == "unclosed":
+                        next_done = _LOOP_TOKEN_RE.search(scan_text, end)
+                        if next_done is None:
+                            break
+                        end = next_done.end()
+                        extent = _polling_loop_extent(scan_text[candidate.start():end])
+                    if extent != "closed":
                         search_pos = candidate.start() + 1
                         continue
                     m = candidate
+                    match_override = scan_text[candidate.start():end]
                     break
             else:
                 for candidate in all_matches:
@@ -915,7 +966,10 @@ def evaluate(payload):
                     break
             if m is None:
                 continue
-        matched = m.group(0)[:MATCH_TRUNCATE]
+        # G5: gh-fast-polling's candidate may have been extended past its
+        # own (too-short) regex match to reach the loop's real `done`;
+        # `match_override` carries that extended span when set.
+        matched = (match_override if match_override is not None else m.group(0))[:MATCH_TRUNCATE]
         fires.append(
             {
                 "id": rule["id"],

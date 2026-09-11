@@ -473,6 +473,53 @@ EXTRA_FIXTURES = [
         positive={"command": "git push origin +HEAD:main"},
         near_miss={"command": "echo 'x\ngit push --force'"},
     ),
+    # G4 (review_b round 2): `_mask_double_quoted` had its own inline
+    # masking loop and was missed by the R4 fix above -- a REAL newline
+    # inside a DOUBLE-quoted span stayed visible, so a fake `cd
+    # /worktrees/x` mentioned in a quoted `echo` argument got picked up by
+    # `_effective_checkout` as a genuine `cd` and wrongly exempted a real
+    # `git stash` that runs from an actual shared (non-worktree) checkout.
+    # Near miss: the double-quoted equivalent of the R4 multi-line mention
+    # above must stay inert too.
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        cwd="/shared/checkout",
+        positive={"command": 'echo "x\ncd /worktrees/x"; git stash'},
+        near_miss={"command": 'git commit -m "fix\n\ngit stash was wrong"'},
+        near_miss_cwd="/shared/checkout",
+    ),
+    dict(
+        id="git-push-force",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git push origin +HEAD:main"},
+        near_miss={"command": 'echo "x\ngit push --force"'},
+    ),
+    # G5 (review_b round 2): a nested bounded loop placed AFTER the
+    # `gh`+sleep pair (rather than before, G3's case) left the lazy
+    # gh-fast-polling candidate UNCLOSED at the nested loop's own `done`
+    # instead of reaching the outer loop's real terminator further out --
+    # `_polling_loop_extent` must be extended to the next `done`, not
+    # discarded. Near miss: the same unrelated-sibling-loops case G3 uses,
+    # which must keep abstaining regardless of nesting placement.
+    dict(
+        id="gh-fast-polling",
+        decision="ask",
+        tool_name="Bash",
+        positive={
+            "command": "while true; do\n  gh pr checks 123\n  sleep 5\n  for i in 1 2; do\n    echo $i\n  done\ndone"
+        },
+        near_miss={
+            "command": (
+                "while read x; do echo $x; done < f\n"
+                "gh pr checks 123\n"
+                "sleep 5\n"
+                "for p in 1 2; do echo; done"
+            )
+        },
+    ),
 ]
 
 

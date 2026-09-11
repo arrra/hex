@@ -923,6 +923,8 @@ class TestExecutableRegionScanner(RouterTestCase):
         cases = (
             ("git commit -m 'fix\n\ngit stash was wrong'", DEFAULT_CWD),
             ("echo 'x\ngit push --force'", DEFAULT_CWD),
+            ('git commit -m "fix\n\ngit stash was wrong"', DEFAULT_CWD),
+            ('echo "x\ngit push --force"', DEFAULT_CWD),
         )
         for cmd, cwd in cases:
             with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
@@ -1397,6 +1399,25 @@ class TestStashExemptionEffectiveCheckout(RouterTestCase):
             )
             self.assertEqual(read_ledger(ledger_dir), [])
 
+    def test_double_quoted_newline_does_not_fake_a_cd(self):
+        """G4 (review_b round 2): `_mask_double_quoted` excluded the REAL
+        newline inside a double-quoted span from blanking (only
+        `_mask_literal_span`, used for single quotes, was fixed for R4), so
+        a double-quoted string's second line stayed at a fresh line-start
+        and `_CMD_PREFIX`'s `\\n\\s*` alternative anchored `cd
+        /worktrees/x` inside the quotes as a brand new command --
+        `_effective_checkout` then picked up that FAKE `cd` and wrongly
+        exempted a real `git stash` that runs from an actual shared
+        checkout with no real `cd` at all."""
+        cmd = 'echo "x\ncd /worktrees/x"; git stash'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
 
 class TestForceRefspecAsksFirst(RouterTestCase):
     """F5: a leading `+` on any push refspec forces the update, the same as
@@ -1604,6 +1625,24 @@ class TestMultilinePollingLoopScope(RouterTestCase):
         with tempfile.TemporaryDirectory() as ledger_dir:
             proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
             self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_nested_bounded_loop_after_gh_and_sleep_still_asks(self):
+        """G5 (review_b round 2): a nested bounded loop placed AFTER the
+        `gh`+sleep pair (rather than before, G3's case) makes the lazy
+        gh-fast-polling regex's candidate span stop at the NESTED loop's own
+        `done` -- the first `done` that satisfies the CLI+sleep requirement
+        -- instead of the outer loop's real terminator further out.
+        `_polling_loop_bounded` correctly rejects that short span (depth
+        never returns to 0), but the caller then discarded the match
+        entirely instead of extending the candidate to the next `done` and
+        re-checking. Must still ask -- nesting is legitimate regardless of
+        whether it comes before or after the CLI+sleep pair."""
+        cmd = "while true; do\n  gh pr checks 123\n  sleep 5\n  for i in 1 2; do\n    echo $i\n  done\ndone"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G5)")
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
 
