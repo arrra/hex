@@ -262,6 +262,10 @@ class TestSeedRulePositiveFixtures(RouterTestCase):
                         proc.returncode, 0,
                         f"{fx['id']}: router must exit 0; stderr={proc.stderr!r}",
                     )
+                    self.assertEqual(
+                        proc.stderr.strip(), "",
+                        f"{fx['id']}: abstain/fire must produce no stderr, got {proc.stderr!r}",
+                    )
                     stdout = proc.stdout.strip()
                     self.assertTrue(
                         stdout,
@@ -318,6 +322,10 @@ class TestSeedRuleNearMisses(RouterTestCase):
                         f"{fx['id']}: near-miss fixture must abstain (empty stdout), "
                         f"got {proc.stdout!r}",
                     )
+                    self.assertEqual(
+                        proc.stderr.strip(), "",
+                        f"{fx['id']}: abstain/fire must produce no stderr, got {proc.stderr!r}",
+                    )
                     lines = read_ledger(ledger_dir)
                     self.assertEqual(
                         lines, [],
@@ -337,6 +345,10 @@ class TestSeedRuleNearMisses(RouterTestCase):
             proc = run_router_payload(payload, ledger_dir)
             self.assertEqual(proc.returncode, 0)
             self.assertEqual(proc.stdout.strip(), "")
+            self.assertEqual(
+                proc.stderr.strip(), "",
+                f"abstain/fire must produce no stderr, got {proc.stderr!r}",
+            )
             self.assertEqual(read_ledger(ledger_dir), [])
 
 
@@ -646,6 +658,39 @@ class TestCombinedOutcomeSemantics(RouterTestCase):
             self.assertEqual(
                 {l["rule_id"]: l["decision"] for l in lines},
                 {"gh-pr-merge-ci-green": "prior", "git-push-force": "ask"},
+            )
+
+    def test_deny_beats_ask_exact_message_and_complete_ledger(self):
+        """F17: the missing deny-vs-ask precedence pair. git-push-force (ask)
+        and git-stash-shared-checkout (deny) both match; deny must win with
+        its exact message, and both rules must still each get a ledger
+        line."""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            payload = make_payload(
+                "Bash",
+                {"command": "git push --force origin main; git stash"},
+            )
+            proc = run_router_payload(payload, ledger_dir)
+
+            self.assertEqual(proc.returncode, 0)
+            stdout = proc.stdout.strip()
+            self.assertTrue(stdout)
+            out = json.loads(stdout)
+            hso = out["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny")
+            self.assertEqual(
+                hso.get("permissionDecisionReason"),
+                "Standing Order 7: no stash save/push in a shared checkout - it "
+                "sweeps sibling agents' uncommitted work (2026-08-19/20, 23 files "
+                "lost). Work in a git worktree. Recovery ops (pop/apply/drop/list/"
+                "show) are allowed.",
+            )
+            self.assertNotIn("additionalContext", hso)
+
+            lines = read_ledger(ledger_dir)
+            self.assertEqual(
+                {l["rule_id"]: l["decision"] for l in lines},
+                {"git-push-force": "ask", "git-stash-shared-checkout": "deny"},
             )
 
 
@@ -1882,6 +1927,10 @@ class TestF12PathRuleAnchoring(RouterTestCase):
                 "a .test.ts/spawnSync pair inside file CONTENT (not the "
                 "canonical file_path) must not fire vitest-spawnsync",
             )
+            self.assertEqual(
+                proc.stderr.strip(), "",
+                f"abstain/fire must produce no stderr, got {proc.stderr!r}",
+            )
             self.assertEqual(read_ledger(ledger_dir), [])
 
     def test_hex_events_policy_pathname_in_content_only_abstains(self):
@@ -1898,6 +1947,10 @@ class TestF12PathRuleAnchoring(RouterTestCase):
                 proc.stdout.strip(), "",
                 "a policy pathname mentioned inside file CONTENT (not the "
                 "canonical file_path) must not fire hex-events-flat-policy",
+            )
+            self.assertEqual(
+                proc.stderr.strip(), "",
+                f"abstain/fire must produce no stderr, got {proc.stderr!r}",
             )
             self.assertEqual(read_ledger(ledger_dir), [])
 
