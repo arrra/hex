@@ -63,10 +63,19 @@ _REDACT_PATTERNS = [
     # fallback, which stopped at the first space. Try the JSON-escaped
     # double-quoted form first, then the bare quoted forms, then the
     # single-token fallback.
+    # G2 (review_b round 4): the bare-double-quoted alternative was
+    # `"[^"]*"` -- no escape awareness, so a RAW (non-JSON) value with a
+    # backslash-escaped inner quote (`password="alpha \"bravo\" charlie"`,
+    # valid bash: `\"` inside double quotes is a literal quote) made
+    # `[^"]*` stop at that embedded quote instead of the real closing one.
+    # Only the leading fragment got redacted and the rest of the value
+    # leaked in the clear. `(?:[^"\\]|\\.)*` walks past any
+    # backslash-escaped character (including an escaped quote) and only
+    # stops at a real, unescaped closing quote.
     (
         re.compile(
             r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""(\\"(?:[^"\\]|\\.)*\\"|"[^"]*"|'[^']*'|\S+)"""
+            r"""(\\"(?:[^"\\]|\\.)*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|\S+)"""
         ),
         r"\1=***REDACTED***",
     ),
@@ -122,7 +131,11 @@ def build_record(payload: dict) -> dict:
     args_preview = redact(canonical)[:PREVIEW_MAX]
     return {
         "ts": datetime.now(timezone.utc).isoformat(),
-        "session_id": payload.get("session_id"),
+        # G3 (review_b round 4): `session_id` and `tool_use_id` are the
+        # same attacker-controlled payload metadata as `cwd` below --
+        # `redact()` is a no-op on an ordinary id/None, so this is safe
+        # on the common case too.
+        "session_id": redact(payload.get("session_id")),
         "tool": payload.get("tool_name"),
         "args_hash": args_hash,
         "args_preview": args_preview,
@@ -131,7 +144,7 @@ def build_record(payload: dict) -> dict:
         # metadata like every other persisted field -- redact() is a no-op
         # on a plain path/None, so this is safe on the common case too.
         "cwd": redact(payload.get("cwd")),
-        "tool_use_id": payload.get("tool_use_id"),
+        "tool_use_id": redact(payload.get("tool_use_id")),
         "duration_ms": payload.get("duration_ms"),
         "is_interrupt": payload.get("is_interrupt"),
     }

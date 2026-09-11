@@ -1950,6 +1950,45 @@ class TestF7RedactionAndLedgerPrivacy(RouterTestCase):
             for entry in lines:
                 self.assertNotIn(secret, entry.get("cwd", ""))
 
+    def test_session_id_field_in_ledger_entry_is_redacted(self):
+        """G3 (review_b round 4): the router persists the raw hook-payload
+        `session_id` straight into every ledger line without passing it
+        through `redact()` -- `cwd` was fixed but `session_id` is the same
+        attacker-controlled payload metadata and was missed."""
+        secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        payload = make_payload(
+            "Bash", {"command": "git stash"}, session_id=f"sess-{secret}"
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn(secret, entry.get("session_id", ""))
+
+    def test_escaped_quote_inside_password_does_not_leak_the_tail(self):
+        """G2 (review_b round 4): the bare-double-quote alternative
+        (`"[^"]*"`) has no escape awareness, so a raw shell value with a
+        backslash-escaped inner quote (`password="alpha \\"bravo\\"
+        charlie"`, valid bash -- `\\"` inside double quotes is a literal
+        quote) makes `[^"]*` stop at that embedded quote instead of the
+        real closing one. Only the leading fragment gets redacted and the
+        rest of the value (starting with "bravo") survives in the clear."""
+        payload = make_payload(
+            "Bash",
+            {"command": r'echo password="alpha \"bravo\" charlie" && git stash'},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("bravo", entry.get("match", ""))
+                self.assertNotIn("bravo", entry.get("preview", ""))
+                self.assertNotIn("charlie", entry.get("preview", ""))
+
 
 class TestF8ManifestQuoting(RouterTestCase):
     """F8: required-hooks.json's two Python hook commands interpolate

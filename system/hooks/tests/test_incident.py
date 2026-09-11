@@ -344,6 +344,41 @@ class TestF7RedactionAndLedgerPrivacy(IncidentHookTestCase):
         record = json.loads(self._read_lines()[0])
         self.assertNotIn(secret, record["cwd"])
 
+    def test_session_id_and_tool_use_id_are_redacted(self):
+        """G3 (review_b round 4): this hook copies the raw hook-payload
+        `session_id` and `tool_use_id` straight into the ledger record
+        without passing them through `redact()` -- `cwd` was fixed but
+        these are the same attacker-controlled payload metadata and were
+        missed."""
+        secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        proc = self._run(
+            _fixture(
+                session_id=f"sess-{secret}",
+                tool_use_id=f"toolu_{secret}",
+            )
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn(secret, record["session_id"])
+        self.assertNotIn(secret, record["tool_use_id"])
+
+    def test_escaped_quote_inside_password_does_not_leak_the_tail(self):
+        """G2 (review_b round 4): the bare-double-quote alternative
+        (`"[^"]*"`) has no escape awareness, so a raw text value with a
+        backslash-escaped inner quote (`password="alpha \\"bravo\\"
+        charlie"`) makes `[^"]*` stop at that embedded quote instead of
+        the real closing one. Only the leading fragment gets redacted and
+        the rest of the value (starting with "bravo") survives in the
+        clear. This hits the `error` field, which is plain text (not
+        JSON-escaped like `args_preview`)."""
+        proc = self._run(
+            _fixture(error='failed: password="alpha \\"bravo\\" charlie" and retry')
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn("bravo", record["error"])
+        self.assertNotIn("charlie", record["error"])
+
 
 class TestF15ProductionIsolationFlags(IncidentHookTestCase):
     """F15: this test suite's `_run` helper invokes the hook as plain

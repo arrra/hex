@@ -109,10 +109,19 @@ _REDACT_PATTERNS = [
     # fallback, which stopped at the first space. Try the JSON-escaped
     # double-quoted form first, then the bare quoted forms, then the
     # single-token fallback.
+    # G2 (review_b round 4): the bare-double-quoted alternative was
+    # `"[^"]*"` -- no escape awareness, so a RAW (non-JSON) value with a
+    # backslash-escaped inner quote (`password="alpha \"bravo\" charlie"`,
+    # valid bash: `\"` inside double quotes is a literal quote) made
+    # `[^"]*` stop at that embedded quote instead of the real closing one.
+    # Only the leading fragment got redacted and the rest of the value
+    # leaked in the clear. `(?:[^"\\]|\\.)*` walks past any
+    # backslash-escaped character (including an escaped quote) and only
+    # stops at a real, unescaped closing quote.
     (
         re.compile(
             r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""(\\"(?:[^"\\]|\\.)*\\"|"[^"]*"|'[^']*'|\S+)"""
+            r"""(\\"(?:[^"\\]|\\.)*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|\S+)"""
         ),
         r"\1=***REDACTED***",
     ),
@@ -1104,7 +1113,11 @@ def evaluate(payload):
         for fire in fires:
             entry = {
                 "ts": ts,
-                "session_id": session_id,
+                # G3 (review_b round 4): payload `session_id` is the same
+                # attacker-controlled metadata as `cwd` below -- redact it
+                # too (the RAW session_id is still used for the matching
+                # logic elsewhere; only the persisted copy is scrubbed).
+                "session_id": redact(session_id),
                 "rule_id": fire["id"],
                 "tool": tool_name,
                 "decision": fire["decision"],
