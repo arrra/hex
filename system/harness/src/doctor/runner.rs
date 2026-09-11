@@ -274,13 +274,28 @@ mod tests {
     /// run unrelated hooks just to create a test fixture. Command-local `-c`
     /// flags (not process-global env mutation) keep this safe under
     /// concurrent test execution.
+    ///
+    /// G1: `submodule add` gets the same `core.hooksPath=<empty dir>`
+    /// override — it stages the new gitlink/`.gitmodules` into this repo's
+    /// index and, like `commit`, honors a locally-configured
+    /// `post-index-change` hook while doing so. The subcommand is found by
+    /// skipping any caller-supplied leading `-c key=value` pairs (e.g. the
+    /// F11 submodule fixture's `-c protocol.file.allow=always`).
     fn run_git(dir: &std::path::Path, args: &[&str]) {
+        let mut i = 0;
+        while i + 1 < args.len() && args[i] == "-c" {
+            i += 2;
+        }
+        let subcommand = args.get(i).copied();
+
         let mut full_args: Vec<String> = Vec::new();
-        if args.first() == Some(&"commit") {
-            full_args.push("-c".to_string());
-            full_args.push("commit.gpgsign=false".to_string());
+        if matches!(subcommand, Some("commit") | Some("submodule")) {
             full_args.push("-c".to_string());
             full_args.push(format!("core.hooksPath={}", empty_hooks_dir().display()));
+        }
+        if subcommand == Some("commit") {
+            full_args.push("-c".to_string());
+            full_args.push("commit.gpgsign=false".to_string());
         }
         full_args.extend(args.iter().map(|s| s.to_string()));
 
@@ -629,6 +644,71 @@ mod tests {
             "F11: `git add` is the wrong remedy for a submodule that only \
              needs `git submodule update --init` — got: {:?}",
             result
+        );
+    }
+
+    #[test]
+    fn test_run_git_submodule_add_does_not_run_inherited_hooks() {
+        // G1 (review_b on the F11 fix): `git submodule add` stages the new
+        // gitlink and `.gitmodules` into the CURRENT (parent) repo's index,
+        // and — like `git worktree add`'s post-checkout hook (F13) — honors
+        // that repo's own local `core.hooksPath` for the `post-index-change`
+        // hook while doing so. `run_git` only stripped hooks for `commit`
+        // (F18), so a hostile hook configured on the fixture repo fires
+        // during test-fixture SETUP itself, before the check under test
+        // ever runs.
+        let vendor = tempfile::tempdir().unwrap();
+        run_git(vendor.path(), &["init", "-q"]);
+        std::fs::write(vendor.path().join("data.txt"), "hello\n").unwrap();
+        run_git(vendor.path(), &["add", "-A"]);
+        run_git(vendor.path(), &["commit", "-q", "-m", "vendor init"]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+
+        // A hostile `post-index-change` hook that leaves a sentinel if it
+        // ever runs, wired via this repo's own `core.hooksPath` — the same
+        // mechanism F13's hostile-hooks fixture uses for `post-checkout`.
+        let hooks_dir = tmp.path().join("hostile-hooks");
+        std::fs::create_dir_all(&hooks_dir).unwrap();
+        let sentinel = tmp.path().join("hook-ran.sentinel");
+        std::fs::write(
+            hooks_dir.join("post-index-change"),
+            format!("#!/bin/sh\ntouch '{}'\n", sentinel.display()),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                hooks_dir.join("post-index-change"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+        run_git(
+            tmp.path(),
+            &["config", "core.hooksPath", hooks_dir.to_str().unwrap()],
+        );
+
+        run_git(
+            tmp.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                vendor.path().to_str().unwrap(),
+                "vendor",
+            ],
+        );
+
+        assert!(
+            !sentinel.exists(),
+            "G1: `run_git` must disable inherited hooks for `submodule add`, \
+             not just `commit` — a hostile `post-index-change` hook fired \
+             during test-fixture setup itself"
         );
     }
 
