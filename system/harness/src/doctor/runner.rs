@@ -927,6 +927,123 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_warns_inconclusive_when_rustc_override_path_does_not_exist() {
+        // G3 (review_b, round 2): the original G3 fixture above only
+        // exercised cargo's OWN PATH lookup failing to find a bare `rustc`.
+        // cargo reports an EXPLICIT toolchain override (an `RUSTC` env var
+        // pointing at a path that does not exist, exactly like a broken
+        // rustup toolchain path) with the FULL PATH quoted after the
+        // backtick — `` could not execute process `/no/such/rustc -vV` ``
+        // — never the bare name `rustc` immediately following it. The old
+        // classifier required "rustc" to immediately follow the opening
+        // quote and so missed this, letting a toolchain problem fall
+        // through to the generic FAIL branch.
+        let tmp = init_hex_harness_repo(
+            &[(".hex/harness/src/lib.rs", "pub fn f() -> i32 { 1 }\n")],
+            &[],
+        );
+        let missing_rustc = tempfile::tempdir()
+            .unwrap()
+            .path()
+            .join("no-such-rustc-binary");
+
+        let result =
+            crate::doctor::checks::harness_buildable::run_check_with_timeout_and_env_override(
+                tmp.path(),
+                std::time::Duration::from_secs(60),
+                &[("RUSTC", missing_rustc.to_str().expect("utf8 path"))],
+            );
+        assert_eq!(
+            result.status,
+            Status::Warn,
+            "an explicit RUSTC override pointing at a path that does not \
+             exist must WARN (toolchain unreachable), never FAIL like a \
+             genuine compile error: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_refuses_a_symlink_that_escapes_only_via_a_chained_hop() {
+        // G2 (review_b, round 2), export-level: a purely LEXICAL `..`/`.`
+        // walk assumes every intermediate path component contributes
+        // exactly one real directory level — wrong when that component is
+        // itself a committed symlink targeting `.` (its own parent, zero
+        // real levels). `link_identity` -> `.` and `link_escape` ->
+        // `link_identity/../<sentinel file name>` each look, purely
+        // lexically, like they stay inside the export root (push then pop
+        // cancel out), but the REAL filesystem resolves `link_identity` to
+        // the repo root itself, so the single `..` actually walks one level
+        // ABOVE the export root. Verified by hand this exact two-symlink
+        // shape was accepted (not refused) before this fix.
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let outside_name = outside
+            .path()
+            .file_name()
+            .expect("named temp file has a name")
+            .to_owned();
+
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(harness.join("Cargo.toml"), HEX_HARNESS_MANIFEST).unwrap();
+        std::fs::write(harness.join("Cargo.lock"), HEX_HARNESS_LOCKFILE).unwrap();
+        std::os::unix::fs::symlink(".", tmp.path().join("link_identity")).unwrap();
+        let escape_target = PathBuf::from("link_identity/..").join(&outside_name);
+        std::os::unix::fs::symlink(&escape_target, tmp.path().join("link_escape")).unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &["commit", "-q", "-m", "fixture with chained escaping symlink"],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        assert!(
+            result.is_err(),
+            "a committed symlink that escapes the export root only once a \
+             chained committed symlink is REALLY resolved (never via a \
+             purely lexical `..`/`.` walk) must still be refused: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_harness_buildable_still_fails_when_a_failing_build_script_mentions_offline_wording() {
+        // G4 (review_b, round 2): the original G4 fixture above only
+        // exercised a genuine `rustc` compile error (which always carries
+        // `error[...]`/`-->` markers). A failing `build.rs` is JUST as much
+        // a real build failure, but cargo reports it as `error: failed to
+        // run custom build command for ...` — never `error[...]`/`-->` —
+        // so the old `looks_like_a_real_compiler_diagnostic` gate missed
+        // it, letting a build script's own panic message (crafted here to
+        // contain the offline-mode reminder wording) fall through to the
+        // offline-dependency-failure classifier and misreport an
+        // inconclusive WARN instead of the genuine FAIL it is.
+        let tmp = init_hex_harness_repo(
+            &[
+                (".hex/harness/src/lib.rs", "pub fn f() -> i32 { 1 }\n"),
+                (
+                    ".hex/harness/build.rs",
+                    "fn main() { panic!(\"pretend this mentions offline mode (--offline) in the diagnostic text\"); }\n",
+                ),
+            ],
+            &[],
+        );
+        let result = run_harness_buildable(tmp.path());
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "a build script that genuinely fails must FAIL even when its \
+             own panic message happens to contain the offline-mode \
+             reminder wording — the build-script-failure marker must gate \
+             the offline-dependency-failure classifier the same way a real \
+             compiler diagnostic does: {result:?}"
+        );
+    }
+
     #[test]
     fn test_harness_buildable_still_fails_when_a_real_compile_error_mentions_offline_wording() {
         // G4 (review_b): the offline-dependency-failure classifier must

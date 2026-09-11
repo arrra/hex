@@ -63,7 +63,7 @@ fn run_check(hex_dir: &Path) -> CheckResult {
 /// tiny cap (the wall-clock-cap contract test) or a generous one, without
 /// depending on process-wide environment mutation.
 pub(crate) fn run_check_with_timeout(hex_dir: &Path, timeout: Duration) -> CheckResult {
-    run_check_impl(hex_dir, timeout, None)
+    run_check_impl(hex_dir, timeout, &[])
 }
 
 /// Test-only entry point: same as `run_check_with_timeout`, but overrides
@@ -77,7 +77,16 @@ pub(crate) fn run_check_with_timeout_and_path_override(
     timeout: Duration,
     path_override: &str,
 ) -> CheckResult {
-    run_check_impl(hex_dir, timeout, Some(path_override))
+    run_check_impl(hex_dir, timeout, &[("PATH", path_override)])
+}
+
+#[cfg(test)]
+pub(crate) fn run_check_with_timeout_and_env_override(
+    hex_dir: &Path,
+    timeout: Duration,
+    env_overrides: &[(&str, &str)],
+) -> CheckResult {
+    run_check_impl(hex_dir, timeout, env_overrides)
 }
 
 #[cfg(test)]
@@ -94,7 +103,7 @@ pub(crate) fn last_export_path_for_tests() -> Option<std::path::PathBuf> {
     LAST_EXPORT_PATH.with(|p| p.borrow().clone())
 }
 
-fn run_check_impl(hex_dir: &Path, timeout: Duration, path_override: Option<&str>) -> CheckResult {
+fn run_check_impl(hex_dir: &Path, timeout: Duration, env_overrides: &[(&str, &str)]) -> CheckResult {
     let start = Instant::now();
 
     // Export cleanup (success, failure, or panic-unwind) is handled by
@@ -144,8 +153,8 @@ fn run_check_impl(hex_dir: &Path, timeout: Duration, path_override: Option<&str>
         .current_dir(&harness_dir)
         .env("CARGO_TARGET_DIR", &target_dir)
         .env("CARGO_NET_OFFLINE", "true");
-    if let Some(path) = path_override {
-        cmd.env("PATH", path);
+    for (key, value) in env_overrides {
+        cmd.env(key, value);
     }
 
     let output = match run_with_timeout(&mut cmd, timeout) {
