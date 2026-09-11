@@ -276,12 +276,37 @@ def _find_matching_paren(text, open_idx):
     recursive with `_skip_double_quoted` so a NESTED `$(...)` inside that
     quoted span is itself parsed the same way. Still a flat scanner, not a
     full shell/paren grammar — sufficient for every rule and fixture in
-    this router (spec STOP condition already covers that boundary)."""
+    this router (spec STOP condition already covers that boundary).
+
+    Comment-aware (G8, review_b round 6): a `#` at a word boundary (the
+    exact predicate `executable_mask` uses at top level) starts a real
+    shell comment that runs to the next newline, INCLUDING inside a
+    `$(...)` body — a real shell parses one there too. Without this, a
+    stray `(`/`)`/quote character that only ever appears in a comment
+    (e.g. `$(pwd # note: unbalanced ( here\n)`, entirely valid shell) was
+    counted as real syntax: an unmatched `(` in the comment meant this
+    scanner's local depth never returned to 0 within the current
+    substitution, forcing it to keep scanning character-by-character all
+    the way to the end of `text` looking for one more `)` -- and since
+    `_read_token` (G7) calls this once per `cd $(...)` occurrence, that
+    full-remaining-text scan repeated for every occurrence made thousands
+    of them quadratic overall. An unmatched quote in a comment caused a
+    correctness bug the same way: it was treated as opening a real quoted
+    span, silently pairing with an unrelated quote character much later in
+    the text and mis-locating the substitution's true close -- which threw
+    off `_precompute_cd_reach_info`'s reach data for that `cd` and could
+    turn a `cd` that closed inside its own subshell into one the router
+    thought still reached a later `<stash>` invocation, producing an
+    incorrect deny."""
     depth = 0
     n = len(text)
     i = open_idx
     while i < n:
         ch = text[i]
+        if ch == "#" and (i == 0 or text[i - 1] in " \t\n;&|(){}"):
+            j = text.find("\n", i)
+            i = j if j != -1 else n
+            continue
         if ch == "\\" and i + 1 < n:
             i += 2
             continue

@@ -1285,6 +1285,39 @@ class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertEqual(proc.stdout.strip(), "")
 
+    def test_thousands_of_comment_obscured_parens_in_substitution_stays_under_hang_ceiling(self):
+        """Review_b G8 (round 6): `_find_matching_paren` (the scanner G7
+        made `_read_token` rely on for every `cd $(...)` occurrence) has no
+        `#`-comment awareness of its own. A `(` that only ever appears
+        inside a real shell comment -- entirely valid, executable shell,
+        since a real shell comments to end-of-line the same way inside a
+        `$(...)` body as at top level -- was counted as a real unmatched
+        paren. That kept this scanner's LOCAL depth above zero for the rest
+        of the substitution's own real close, forcing it to keep scanning
+        character-by-character all the way to the end of the text looking
+        for one more `)`. `_precompute_cd_reach_info` calls this once per
+        `cd $(...)` occurrence, so that full-remaining-text scan repeated
+        for every occurrence made thousands of them quadratic again despite
+        the G7 fix. Empirically: 6000 repeats already exceeds a 5s timeout
+        at HEAD before the G8 fix. No tighter wall-clock number is asserted
+        here (that would reintroduce F18)."""
+        cmd = "cd $(pwd # comment (unbalanced\n); " * 6000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on thousands of "
+                    "comment-obscured-paren `cd $(...)` invocations -- "
+                    "_find_matching_paren has no #-comment awareness (G8)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
 
 class TestPipeTailScopedToTestCommandPipeline(RouterTestCase):
     """F20: the masked-test-exit prior must only fire when the
@@ -1426,6 +1459,49 @@ class TestSubstitutionMaskingIsRecursive(RouterTestCase):
         with tempfile.TemporaryDirectory() as ledger_dir:
             proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
             self.assertTrue(proc.stdout.strip(), f"{cmd!r} must still deny (G1 regression guard)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestFindMatchingParenIsCommentAware(RouterTestCase):
+    """Review_b G8 (round 6): `_find_matching_paren` had no `#`-comment
+    awareness, so a quote or paren character that only ever appears inside
+    a real shell comment inside a `$(...)` body was treated as real syntax
+    -- see `TestNoQuadraticRescanOnLargeAllExemptInput` for the quadratic
+    half of this finding; this class pins the correctness half."""
+
+    def test_quote_in_comment_inside_substitution_does_not_extend_cd_reach(self):
+        """`(cd $(pwd # it's fine\\n) ); git stash` is valid shell: the `cd`
+        runs inside a subshell that closes (the outer `)`) before `git
+        stash` runs, so it can never affect the outer shell's cwd, which
+        stays the payload's own `/worktrees/` cwd -- exempt, must abstain.
+        The buggy scanner treated the comment's apostrophe as opening a
+        real quoted span, silently pairing it with an unrelated apostrophe
+        it doesn't have here at all (so it consumed to end-of-text
+        instead), which threw off the reach data enough to make this `cd`
+        look like it still reached the later `git stash` -- an incorrect
+        deny on an exempt worktree cwd."""
+        cmd = "(cd $(pwd # it's fine\n) ); git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"the cd is subshell-scoped and the cwd is a worktree -- must abstain (G8): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_shared_checkout_cd_still_denies_alongside_a_commented_substitution(self):
+        """Regression guard: a genuine `cd` into a shared checkout earlier
+        in the same command must still deny, even with an unrelated
+        comment-bearing `$(...)` substitution elsewhere in the text."""
+        cmd = "cd $(pwd # it's fine\n); cd /shared/checkout; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must still deny (G8 regression guard)")
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
