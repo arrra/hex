@@ -209,95 +209,37 @@ def repo_root_of(path: str, warnings: list[str] | None = None, label: str = "rec
     # Both lists are populated right-to-left, so index 0 is the rightmost
     # (closest-to-file) candidate and index -1 is the leftmost.
 
-    non_test_boundary: int | None = None
+    # G1 (round 3, spec review_b's second redo): every earlier round tried to
+    # pick a WINNER among multiple candidates (leftmost non-test beats a
+    # nested test-like one, leftmost wins on a genuine disagreement,
+    # rightmost wins for a same-keyword container-prefix pair) -- but real
+    # CLI probes kept finding shapes where some tie-break rule still silently
+    # routed to a named project despite the ambiguity (an earlier tests/test/
+    # boundary losing unconditionally to a later src/lib/ boundary). There is
+    # nothing in the path text alone that reliably tells a genuine
+    # disagreement apart from a container-idiom false positive, so the
+    # contract is now unconditional: ANY path carrying more than one
+    # recognized boundary (test-like or not, same keyword or not) is
+    # ambiguous, full stop -- it is never routed to a named project. The
+    # caller still gets a loud WARN naming every candidate; the caller's
+    # existing "could not resolve a project" handling (routing to
+    # `_unmapped`) takes it from there.
+    all_candidates = non_test_candidates + test_candidates
+    if len(all_candidates) > 1:
+        if warnings is not None:
+            named = ", ".join(
+                f"'{dir_parts[i - 1]}' (boundary '{dir_parts[i]}')" for i in sorted(all_candidates)
+            )
+            warnings.append(
+                f"{label}: multiple source boundaries in path -> ambiguous, "
+                f"not routing to a named project ({named})"
+            )
+        return None
+
     if non_test_candidates:
-        if len(non_test_candidates) == 1:
-            non_test_boundary = non_test_candidates[0]
-        else:
-            rightmost, leftmost = non_test_candidates[0], non_test_candidates[-1]
-            # F15's container idiom (".../workspace/src/acme-repo/src/
-            # main.py") is a single repo name SANDWICHED between two
-            # occurrences of the SAME boundary keyword with nothing else
-            # between them -- there the boundary closest to the file is the
-            # real one and the leftmost is an outer container prefix. Any
-            # other multi-candidate shape (different keywords, e.g. "src"
-            # then "lib", or more than two candidates) is a genuine
-            # disagreement: prefer the LEFTMOST boundary under the repo
-            # root and warn, per spec ("do not infer a project from the
-            # rightmost one").
-            is_container_prefix_pair = (
-                len(non_test_candidates) == 2
-                and dir_parts[rightmost] == dir_parts[leftmost]
-                and rightmost - leftmost == 2
-            )
-            if is_container_prefix_pair:
-                non_test_boundary = rightmost
-                # review_b redo G1 (round 2): this shape is syntactically
-                # identical to a genuine disagreement (a real repo name
-                # directly under the root, with a nested module re-using the
-                # same boundary keyword, e.g. ".../acme-repo/src/auth/src/
-                # main.py") -- there is nothing in the path text to tell the
-                # F15 container idiom apart from that case. The resolution
-                # choice (rightmost wins) stays as documented/disputed
-                # elsewhere, but it must never be SILENT: warn naming both
-                # candidates every time this branch fires, exactly like the
-                # general disagreement branch below does.
-                if warnings is not None:
-                    warnings.append(
-                        f"{label}: multiple source boundaries in path -> using "
-                        f"'{dir_parts[rightmost - 1]}' (boundary '{dir_parts[rightmost]}'), "
-                        f"not the outer '{dir_parts[leftmost - 1]}' boundary ('{dir_parts[leftmost]}')"
-                    )
-            else:
-                non_test_boundary = leftmost
-                if warnings is not None:
-                    warnings.append(
-                        f"{label}: multiple source boundaries in path -> using "
-                        f"'{dir_parts[leftmost - 1]}' (boundary '{dir_parts[leftmost]}'), "
-                        f"not the nested '{dir_parts[rightmost - 1]}' boundary ('{dir_parts[rightmost]}')"
-                    )
-
-    test_boundary: int | None = None
-    if test_candidates:
-        # Leftmost wins here too -- "nested tests/ under a source dir never
-        # wins" applies whether the nested candidate is competing against an
-        # earlier non-test boundary (below) or an earlier tests/test one.
-        test_boundary = test_candidates[-1]
-        if len(test_candidates) > 1 and warnings is not None:
-            rightmost_test = test_candidates[0]
-            warnings.append(
-                f"{label}: multiple source boundaries in path -> using "
-                f"'{dir_parts[test_boundary - 1]}' (boundary '{dir_parts[test_boundary]}'), "
-                f"not the nested '{dir_parts[rightmost_test - 1]}' boundary ('{dir_parts[rightmost_test]}')"
-            )
-
-    # KNOWN LIMITATION (documented dispute, review_b redo G1): a non-test
-    # boundary still unconditionally wins over a test-like one whenever both
-    # exist, e.g. ".../workspace/src/acme-repo/tests/x.py" resolves via the
-    # outer "src" (-> "workspace") rather than the repo's own top-level
-    # "tests" (-> "acme-repo"). That shape is byte-for-byte structurally
-    # identical -- non-test boundary immediately after the first path
-    # segment, test-like boundary immediately before the file -- to the
-    # spec's own pinned canonical example
-    # ("/acme-repo/src/auth/tests/test_login.py" MUST resolve to
-    # "acme-repo" via the EARLIER non-test boundary beating the LATER
-    # test-like one; see test_leftmost_boundary_wins_over_nested_rightmost_
-    # boundary). A syntax-only rule cannot prefer "earlier boundary wins"
-    # for one and "later boundary wins" for the other -- there is nothing
-    # in either path's shape to key off besides the literal segment names.
-    # The call site already gets a loud WARN either way (below), so the
-    # ambiguity is never silent even though the winning candidate can't be
-    # made to match every possible caller's expectation.
-    if non_test_boundary is not None:
-        if test_boundary is not None and warnings is not None:
-            warnings.append(
-                f"{label}: multiple source boundaries in path -> using "
-                f"'{dir_parts[non_test_boundary - 1]}' (boundary '{dir_parts[non_test_boundary]}'), "
-                f"not the nested '{dir_parts[test_boundary - 1]}' boundary ('{dir_parts[test_boundary]}')"
-            )
-        work = dir_parts[:non_test_boundary]
-    elif test_boundary is not None:
-        work = dir_parts[:test_boundary]
+        work = dir_parts[: non_test_candidates[0]]
+    elif test_candidates:
+        work = dir_parts[: test_candidates[0]]
     else:
         # R1 redo: no recognized boundary was found anywhere in the path. If
         # the tail still looks like a stray file, the path is too ambiguous

@@ -591,14 +591,19 @@ class RepoRootInference(unittest.TestCase):
         self.assertIsNone(m.repo_dir_basename("/tmp/acme-repo/auth/main.py"))
 
     def test_container_boundary_before_repo_name_does_not_win_over_the_real_boundary(self):
-        # review_b G3: the old leftmost-boundary scan stopped at the FIRST
-        # NON_REPO_DIRS segment it saw. In a container layout like
-        # "/workspace/src/acme-repo/src/main.py" that first hit is the outer
-        # "src" (a container prefix before the repo name), so it resolved to
-        # "workspace" instead of the real repo root "acme-repo" anchored by
-        # the second "src", the one immediately before the file.
+        # review_b G3 (round 2): the old leftmost-boundary scan stopped at
+        # the FIRST NON_REPO_DIRS segment it saw, resolving this container
+        # layout to "workspace" instead of "acme-repo". Round 2 fixed that by
+        # preferring the boundary closest to the file for this same-keyword
+        # "container prefix pair" shape.
+        #
+        # G1 (round 3): that resolution choice is itself now superseded --
+        # there is nothing in the path text that reliably tells this
+        # container idiom apart from a genuine repo-name-reusing-the-same-
+        # keyword disagreement, so any path with more than one recognized
+        # boundary is ambiguous and must never resolve to a named project.
         m = load_script()
-        self.assertEqual(m.repo_dir_basename("/workspace/src/acme-repo/src/main.py"), "acme-repo")
+        self.assertIsNone(m.repo_dir_basename("/workspace/src/acme-repo/src/main.py"))
 
 
 class MappingSearchesFullScript(unittest.TestCase):
@@ -1164,15 +1169,25 @@ class DryRunDestinationRedaction(unittest.TestCase):
 
 
 class MultiBoundarySourcePathRouting(unittest.TestCase):
-    """G3 — a path with MORE THAN ONE recognized source boundary (src/,
-    tests/, ...) must resolve via the LEFTMOST boundary under the repo root,
-    never silently via a nested rightmost one (e.g. a stray tests/ under
-    src/auth/ must never win over the outer src/ boundary); a WARN must name
-    both candidates when they disagree."""
+    """G3 (round 2) — a path with MORE THAN ONE recognized source boundary
+    (src/, tests/, ...) resolved via a tie-break rule (leftmost under the
+    repo root, or rightmost for a same-keyword container-prefix pair), with
+    a WARN naming both candidates when they disagreed.
+
+    G1 (round 3, spec review_b's second redo) — every tie-break rule above
+    still let some real-world shape silently resolve to a named project
+    despite the ambiguity. The contract is now unconditional: ANY path
+    carrying more than one recognized boundary is ambiguous and never
+    resolves to a named project (see AmbiguousBoundaryNeverRoutesToNamedProject
+    below for the canonical round-3 pins); the tests here that used to pin a
+    specific winner now pin None instead, keeping the same input shapes as
+    regression coverage."""
 
     def test_leftmost_boundary_wins_over_nested_rightmost_boundary(self):
+        # Round 2 name kept for history; round 3 supersedes the "leftmost
+        # wins" resolution with unconditional ambiguity.
         m = load_script()
-        self.assertEqual(m.repo_dir_basename("/acme-repo/src/auth/tests/test_login.py"), "acme-repo")
+        self.assertIsNone(m.repo_dir_basename("/acme-repo/src/auth/tests/test_login.py"))
 
     def test_single_boundary_path_still_resolves_as_before(self):
         m = load_script()
@@ -1197,28 +1212,28 @@ class MultiBoundarySourcePathRouting(unittest.TestCase):
             self.assertEqual(len(reports), 1, reports)
             self.assertEqual(
                 reports[0].parent.parent.name,
-                "acme-repo",
-                "must route to the repo root via the leftmost boundary, not the nested 'auth' segment",
+                "_unmapped",
+                "round 3: an ambiguous multi-boundary path must never route to a named project",
             )
             self.assertTrue(
                 any("auth" in w for w in err.splitlines()),
-                "expected a WARN naming the rejected nested boundary candidate",
+                "expected a WARN naming the ambiguous boundary candidate",
             )
 
     def test_two_different_non_test_boundaries_prefer_leftmost_and_warn(self):
-        # review_b redo G1: the original G3 fix only made the tests/test
-        # bucket keep scanning past its first (rightmost) hit -- a second
-        # NON-test boundary (e.g. "lib" nested under "auth", itself nested
-        # under an earlier "src") still broke at the FIRST (rightmost) match
-        # and silently returned "auth" with zero warnings. Two DIFFERENT
-        # non-test boundary keywords must resolve via the leftmost one, with
-        # a WARN naming the rejected nested candidate -- same contract as
-        # the tests/test case, generalized to any boundary keyword.
+        # review_b redo G1 (round 2): the original G3 fix only made the
+        # tests/test bucket keep scanning past its first (rightmost) hit --
+        # a second NON-test boundary (e.g. "lib" nested under "auth", itself
+        # nested under an earlier "src") still broke at the FIRST (rightmost)
+        # match and silently returned "auth" with zero warnings.
+        #
+        # G1 (round 3): two different non-test boundary keywords are just
+        # another shape of "more than one recognized boundary" -- ambiguous,
+        # routes to None, WARN names both candidates.
         warnings: list[str] = []
         m = load_script()
-        self.assertEqual(
+        self.assertIsNone(
             m.repo_dir_basename("/acme-repo/src/auth/lib/x.py", warnings, "record"),
-            "acme-repo",
         )
         self.assertTrue(
             any("lib" in w and "src" in w for w in warnings),
@@ -1226,30 +1241,34 @@ class MultiBoundarySourcePathRouting(unittest.TestCase):
         )
 
     def test_repeated_nested_test_boundaries_prefer_leftmost_and_warn(self):
-        # review_b redo G1: two tests-like boundaries ("tests" nested inside
-        # another "tests") kept only the FIRST (rightmost) one found -- the
-        # nested one under "auth" -- and silently returned "auth" with zero
-        # warnings, contradicting "nested tests/ under a source dir never
-        # wins" for the repeated-boundary case too.
+        # review_b redo G1 (round 2): two tests-like boundaries ("tests"
+        # nested inside another "tests") kept only the FIRST (rightmost) one
+        # found -- the nested one under "auth" -- and silently returned
+        # "auth" with zero warnings.
+        #
+        # G1 (round 3): repeated tests-like boundaries are ambiguous too --
+        # routes to None, WARN fires.
         warnings: list[str] = []
         m = load_script()
-        self.assertEqual(
+        self.assertIsNone(
             m.repo_dir_basename("/acme-repo/tests/auth/tests/test_login.py", warnings, "record"),
-            "acme-repo",
         )
-        self.assertTrue(warnings, "expected a WARN naming the rejected nested tests/ candidate")
+        self.assertTrue(warnings, "expected a WARN naming the ambiguous nested tests/ candidates")
 
     def test_same_keyword_container_prefix_pair_still_prefers_rightmost(self):
-        # The F15 container idiom (".../workspace/src/acme-repo/src/main.py")
-        # must keep resolving via the boundary closest to the file -- a
+        # Round 2: the F15 container idiom (".../workspace/src/acme-repo/
+        # src/main.py") resolved via the boundary closest to the file -- a
         # single repo name sandwiched between two occurrences of the SAME
-        # boundary keyword is a container prefix, not a genuine multi-
-        # boundary disagreement, and must not be swept into the new
-        # leftmost-wins generalization above.
+        # boundary keyword was treated as a container prefix, not a genuine
+        # multi-boundary disagreement.
+        #
+        # G1 (round 3): there is nothing in the path text that reliably
+        # tells this container idiom apart from a genuine disagreement (see
+        # the code comment at repo_root_of), so it is no longer special-
+        # cased -- more than one boundary of any kind is ambiguous, full
+        # stop.
         m = load_script()
-        self.assertEqual(
-            m.repo_dir_basename("/workspace/src/acme-repo/src/main.py"), "acme-repo"
-        )
+        self.assertIsNone(m.repo_dir_basename("/workspace/src/acme-repo/src/main.py"))
 
     def test_same_keyword_container_prefix_pair_still_warns(self):
         # review_b redo G1 (round 2): the container-prefix-pair exception
@@ -1272,6 +1291,99 @@ class MultiBoundarySourcePathRouting(unittest.TestCase):
             warnings: list[str] = []
             m.repo_dir_basename(path, warnings, "record")
             self.assertTrue(warnings, f"expected a WARN for the repeated-boundary shape in {path!r}")
+
+
+class AmbiguousBoundaryNeverRoutesToNamedProject(unittest.TestCase):
+    """G1 (round 3, = the unfinished G3 from round 2) -- a path carrying more
+    than one recognized source boundary must NEVER resolve to a named
+    project, no matter which candidate a syntax-only tie-break rule would
+    have preferred. The round-2 fix still let an earlier tests/test/
+    boundary lose unconditionally to a later src/lib/ boundary (real CLI
+    probes wrote reports for "/acme-repo/tests/auth/src/main.py" and
+    "/acme-repo/test/auth/lib/main.py" into project "auth", despite an
+    ambiguity WARN). The contract now is: ANY multi-boundary path is
+    ambiguous, full stop -- it must resolve to None (routing the caller's
+    existing project-not-inferable path to _unmapped), carrying a WARN that
+    names the candidates. A single-boundary path is unaffected."""
+
+    def test_reviewer_probe_test_then_src_boundary_is_unmapped_not_auth(self):
+        warnings: list[str] = []
+        m = load_script()
+        self.assertIsNone(
+            m.repo_dir_basename("/acme-repo/tests/auth/src/main.py", warnings, "record"),
+            "an earlier tests/ boundary racing a later src/ boundary must never resolve to a named project",
+        )
+        self.assertTrue(
+            any("auth" in w for w in warnings),
+            f"expected a WARN naming the ambiguous candidate 'auth', got {warnings!r}",
+        )
+
+    def test_reviewer_probe_test_then_lib_boundary_is_unmapped_not_auth(self):
+        warnings: list[str] = []
+        m = load_script()
+        self.assertIsNone(
+            m.repo_dir_basename("/acme-repo/test/auth/lib/main.py", warnings, "record"),
+            "an earlier test/ boundary racing a later lib/ boundary must never resolve to a named project",
+        )
+        self.assertTrue(
+            any("auth" in w for w in warnings),
+            f"expected a WARN naming the ambiguous candidate 'auth', got {warnings!r}",
+        )
+
+    def test_round2_nested_tests_case_is_now_unmapped_not_acme_repo(self):
+        # Round 2 treated "leftmost src/ beats nested tests/" as the correct,
+        # documented resolution for this exact path (see
+        # test_leftmost_boundary_wins_over_nested_rightmost_boundary above).
+        # Round 3 tightens the contract further: ANY path carrying more than
+        # one recognized boundary is ambiguous, regardless of which
+        # candidate a syntax-only rule would have preferred -- it must never
+        # be silently routed to a named project.
+        warnings: list[str] = []
+        m = load_script()
+        self.assertIsNone(
+            m.repo_dir_basename("/acme-repo/src/auth/tests/test_login.py", warnings, "record")
+        )
+        self.assertTrue(warnings, "expected a WARN naming the ambiguous candidates")
+
+    def test_single_boundary_path_is_unaffected(self):
+        # Sanity pin: exactly one recognized boundary is not ambiguous, and
+        # must keep resolving exactly as before this fix -- no warning.
+        warnings: list[str] = []
+        m = load_script()
+        self.assertEqual(
+            m.repo_dir_basename("/acme-repo/src/auth/main.py", warnings, "record"), "acme-repo"
+        )
+        self.assertEqual(warnings, [])
+
+    def test_cli_probe_ambiguous_path_lands_under_unmapped_with_warn(self):
+        # Reproduces the reviewer's real CLI probe end-to-end: the run must
+        # complete (exit 0, unmapped records don't fail the run) and the
+        # report must land under projects/_unmapped/, never projects/auth/.
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            rec = {
+                "runId": "wf_g1r3warn1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-11T12:00:00Z",
+                "result": {"repo": "/acme-repo/tests/auth/src/main.py"},
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(len(reports), 1, reports)
+            self.assertEqual(
+                reports[0].parent.parent.name,
+                "_unmapped",
+                "an ambiguous multi-boundary path must never route to a named project",
+            )
+            self.assertTrue(
+                any("WARN" in line and "auth" in line for line in err.splitlines()),
+                f"expected a WARN naming the ambiguous candidate 'auth', got stderr: {err!r}",
+            )
 
 
 class UnderscoreCompoundAndUppercaseKeyValuePairs(unittest.TestCase):
