@@ -370,15 +370,27 @@ def validate_record(rec: object) -> str | None:
 # first hop of the continuation check and the truncated prefix was accepted
 # as a complete path. Match one-or-more spaces between tokens instead of
 # exactly one.
-_SPACE_CONTINUATION_RE = re.compile(r"(?: +[\w.\-]+)+/")
+#
+# review_b G1 (round 3) — requiring the continuation to eventually reach
+# another "/" missed the case where the space sits inside the FINAL path
+# component with nothing after it ("/tmp/acme repo" — no further "/" at
+# all): the match was accepted as the complete path "/tmp/acme", silently
+# dropping " repo". Free text gives no reliable way to tell a truncated
+# prefix apart from a complete path immediately followed by unrelated
+# prose, so per contract any space-then-word-characters continuation is
+# treated as an incomplete final component and rejected outright — a
+# further "/" is no longer required.
+_SPACE_CONTINUATION_RE = re.compile(r" +[\w.\-]+")
 
 
 def _looks_truncated_by_space(text: str, end: int) -> bool:
     """True if a path match ends right at a space that is followed by more
     (possibly multi-word, multi-space) path-like text — a strong signal the
-    real path continued past the space(s) and the match is only a truncated
-    prefix (e.g. ".../Jane Doe Smith/repo/...": the match stops at "Jane"
-    but " Doe Smith/..." keeps going)."""
+    match is either a truncated prefix of a longer, space-containing
+    directory name, or an incomplete final component. Either way it is not
+    safe to accept as-is (e.g. ".../Jane Doe Smith/repo/...": the match
+    stops at "Jane" but " Doe Smith/..." keeps going; "/tmp/acme repo" with
+    nothing further: the match stops at "acme" but " repo" keeps going)."""
     if end >= len(text) or text[end] != " ":
         return False
     return bool(_SPACE_CONTINUATION_RE.match(text, end))
@@ -408,7 +420,22 @@ def _extract_repo_path(text: str) -> str | None:
 # unrelated field (e.g. "summary") that sits earlier in the JSON dump than
 # the field that actually identifies the repo. These are checked, in order,
 # before falling back to a free-text scan of the whole blob.
-_STRUCTURED_PATH_KEYS = ("repo", "repoPath", "repository", "repoDir", "path", "cwd", "workdir", "directory")
+_STRUCTURED_PATH_KEYS = (
+    "repo",
+    "repoPath",
+    "repository",
+    "repoDir",
+    "path",
+    "cwd",
+    "workdir",
+    "directory",
+    # review_b G1 (round 3) — the F7/F16 fix promised repo/path/cwd/
+    # workspace fields are all consumed as a complete value, but
+    # "workspace" itself was missing: a workspace field's value fell
+    # through to the free-text tokenizer and was truncated at its first
+    # space, same bug the "repo" key was already fixed for.
+    "workspace",
+)
 
 
 def _structured_repo_path(result: object) -> str | None:

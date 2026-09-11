@@ -1754,6 +1754,31 @@ class StructuredPathConsumedAsCompleteValue(unittest.TestCase):
         # past it and finds the real repository boundary.
         self.assertEqual(m.infer_project(rec, []), "acme-repo")
 
+    def test_workspace_field_is_consumed_whole_like_repo_path_and_cwd(self):
+        # review_b G1 (round 3) — the structured-key list named "repo",
+        # "path", "cwd" and their synonyms but never "workspace", even
+        # though the F7/F16 fix explicitly promised repo/path/cwd/workspace
+        # fields are all consumed as a complete value. A "workspace" field's
+        # value fell through to the free-text tokenizer and got truncated at
+        # its first space, same bug as the original "repo" case.
+        m = load_script()
+        rec = {"result": {"workspace": "/tmp/acme repo"}}
+        self.assertEqual(m.infer_project(rec, []), "acme repo")
+
+    def test_incomplete_final_component_with_no_further_slash_is_rejected(self):
+        # review_b G1 (round 3) — the truncation check only fired when the
+        # continuation after the space eventually reached another "/". A
+        # candidate whose final (space-broken) component never reaches a
+        # further "/" — e.g. free text "/tmp/acme repo" with nothing after
+        # "repo" — was wrongly ACCEPTED as the complete path "/tmp/acme",
+        # silently dropping " repo" and resolving to the wrong project
+        # ("acme" instead of rejecting the ambiguous match). Per contract, an
+        # incomplete final component must be rejected outright (-> None /
+        # _unmapped), never accepted as a truncated prefix.
+        m = load_script()
+        rec = {"result": "/tmp/acme repo"}
+        self.assertIsNone(m.infer_project(rec, []))
+
 
 class UnsafeRunIdFingerprintPreservesDistinctRecords(unittest.TestCase):
     """F19 (round 2, NEW) — the unsafe-runId branch normalizes via
