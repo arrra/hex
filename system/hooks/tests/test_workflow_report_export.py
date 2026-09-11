@@ -1163,5 +1163,48 @@ class DryRunDestinationRedaction(unittest.TestCase):
             self.assertNotIn(secret, out, "credential-shaped --hex-dir component leaked into --dry-run preview")
 
 
+class MultiBoundarySourcePathRouting(unittest.TestCase):
+    """G3 — a path with MORE THAN ONE recognized source boundary (src/,
+    tests/, ...) must resolve via the LEFTMOST boundary under the repo root,
+    never silently via a nested rightmost one (e.g. a stray tests/ under
+    src/auth/ must never win over the outer src/ boundary); a WARN must name
+    both candidates when they disagree."""
+
+    def test_leftmost_boundary_wins_over_nested_rightmost_boundary(self):
+        m = load_script()
+        self.assertEqual(m.repo_dir_basename("/acme-repo/src/auth/tests/test_login.py"), "acme-repo")
+
+    def test_single_boundary_path_still_resolves_as_before(self):
+        m = load_script()
+        self.assertEqual(m.repo_dir_basename("/tmp/acme-repo/src/main.py"), "acme-repo")
+
+    def test_multi_boundary_disagreement_routes_to_repo_root_and_warns(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            rec = {
+                "runId": "wf_g3warn1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/acme-repo/src/auth/tests/test_login.py"},
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(len(reports), 1, reports)
+            self.assertEqual(
+                reports[0].parent.parent.name,
+                "acme-repo",
+                "must route to the repo root via the leftmost boundary, not the nested 'auth' segment",
+            )
+            self.assertTrue(
+                any("auth" in w for w in err.splitlines()),
+                "expected a WARN naming the rejected nested boundary candidate",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

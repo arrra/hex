@@ -127,7 +127,15 @@ NON_REPO_DIRS = frozenset(
 CLONE_HOSTS = ("github.com", "gitlab.com", "bitbucket.org")
 
 
-def repo_root_of(path: str) -> str | None:
+# G3 (spec review round 2) — a "tests"/"test" boundary is never allowed to
+# be the deciding one when an earlier (further left, i.e. closer to the
+# repo root) non-test boundary also exists: a stray tests/ nested inside a
+# source dir (".../src/auth/tests/x.py") is still part of that source tree,
+# not a second repo boundary.
+_TEST_LIKE_DIRS = frozenset({"tests", "test"})
+
+
+def repo_root_of(path: str, warnings: list[str] | None = None, label: str = "record") -> str | None:
     """Resolve an absolute path to its containing repository root.
 
     1. On disk: the nearest ancestor that contains `.git` (dir or worktree file).
@@ -135,6 +143,9 @@ def repo_root_of(path: str) -> str | None:
     3. Otherwise strip a trailing file segment, then well-known non-repo
        directories, and take what is left — never the immediate parent of a
        file blindly.
+
+    `warnings`/`label` (G3): when more than one recognized boundary is found,
+    a WARN is appended naming both the winning and the rejected candidate.
     """
     p = path.rstrip("/")
     cur = p
@@ -171,10 +182,37 @@ def repo_root_of(path: str) -> str | None:
     # absorbs unrecognized nested directories below it: e.g.
     # ".../acme-repo/src/auth/main.py" must resolve via the "src" boundary
     # to "acme-repo", never stop early at "auth".
+    #
+    # G3 (spec review round 2) redo: that same rightmost-with-real-predecessor
+    # scan also silently matched a "tests" boundary nested under an unrelated
+    # subdirectory of an outer source boundary (".../acme-repo/src/auth/tests/
+    # x.py" resolved to "auth", not "acme-repo") because "tests" is the first
+    # candidate the right-to-left walk finds and it never looked any further
+    # left. Keep walking past a tests/test candidate to see whether an
+    # earlier, non-test boundary also exists; if so, that earlier one wins
+    # and a WARN names both. A tests/test boundary is only used when it is
+    # the ONLY recognized boundary in the path.
+    non_test_boundary = None
+    test_boundary = None
     for i in range(len(dir_parts) - 1, 0, -1):
         if dir_parts[i] in NON_REPO_DIRS and dir_parts[i - 1] not in NON_REPO_DIRS:
-            work = dir_parts[:i]
+            if dir_parts[i] in _TEST_LIKE_DIRS:
+                if test_boundary is None:
+                    test_boundary = i
+                continue
+            non_test_boundary = i
             break
+
+    if non_test_boundary is not None:
+        if test_boundary is not None and warnings is not None:
+            warnings.append(
+                f"{label}: multiple source boundaries in path -> using "
+                f"'{dir_parts[non_test_boundary - 1]}' (boundary '{dir_parts[non_test_boundary]}'), "
+                f"not the nested '{dir_parts[test_boundary - 1]}' boundary ('{dir_parts[test_boundary]}')"
+            )
+        work = dir_parts[:non_test_boundary]
+    elif test_boundary is not None:
+        work = dir_parts[:test_boundary]
     else:
         # R1 redo: no recognized boundary was found anywhere in the path. If
         # the tail still looks like a stray file, the path is too ambiguous
@@ -188,9 +226,9 @@ def repo_root_of(path: str) -> str | None:
     return "/".join(work)
 
 
-def repo_dir_basename(path: str) -> str | None:
+def repo_dir_basename(path: str, warnings: list[str] | None = None, label: str = "record") -> str | None:
     """Basename of the repository that contains `path` (see repo_root_of)."""
-    root = repo_root_of(path)
+    root = repo_root_of(path, warnings, label)
     if not root:
         return None
     return os.path.basename(root) or None
@@ -345,7 +383,9 @@ def _structured_repo_path(result: object) -> str | None:
     return None
 
 
-def infer_project(rec: dict, project_map: list[tuple[str, str]]) -> str | None:
+def infer_project(
+    rec: dict, project_map: list[tuple[str, str]], warnings: list[str] | None = None, label: str = "record"
+) -> str | None:
     blob = " ".join(
         [
             json.dumps(rec.get("result"), ensure_ascii=False),
@@ -365,7 +405,7 @@ def infer_project(rec: dict, project_map: list[tuple[str, str]]) -> str | None:
     if not found:
         found = _extract_repo_path(json.dumps(result, ensure_ascii=False))
     if found:
-        return repo_dir_basename(found)
+        return repo_dir_basename(found, warnings, label)
     return None
 
 
@@ -599,7 +639,7 @@ def main() -> int:
                 date = "undated"
                 warnings.append(f"{run_id}: no usable timestamp")
 
-            project_raw = infer_project(rec, project_map)
+            project_raw = infer_project(rec, project_map, warnings, f"{run_id} ({workflow_name})")
             project = project_raw
             if project_raw is not None:
                 project = redact(project_raw, warnings, path_label)
