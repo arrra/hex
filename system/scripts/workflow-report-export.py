@@ -747,7 +747,15 @@ def main() -> int:
             rid_reason = unsafe_component_reason(run_id)
             if rid_reason:
                 warnings.append(f"{run_id!r}: runId rejected ({rid_reason}) -> using a sanitized id")
-                run_id_component = slug(run_id) or "run"
+                # F19 — slug() alone can collapse two distinct unsafe ids onto
+                # the same normalized string (e.g. "wf/a" and "wf//a" both
+                # slug to "wf-a"), silently merging distinct records: the
+                # second write hits the same destination and is counted
+                # skipped_existing. Append a short, non-reversible fingerprint
+                # of the raw (pre-slug) id — same helper the redaction path
+                # above uses — so distinct raw ids never collapse.
+                fingerprint = hashlib.sha256(run_id.encode("utf-8", "surrogateescape")).hexdigest()[:8]
+                run_id_component = f"{slug(run_id) or 'run'}-{fingerprint}"
                 if not routed_unmapped:
                     project = "_unmapped"
                     routed_unmapped = True
