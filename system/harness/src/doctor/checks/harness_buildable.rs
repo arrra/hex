@@ -383,10 +383,39 @@ fn diagnose(worktree_path: &Path, empty_hooks_dir: &Path, timeout: Duration) -> 
                 pkg.root.display()
             ));
         }
+        // G1 (review_b, iteration 5): containment alone proves the package
+        // root RESOLVES inside the checkout — it does not prove the root
+        // itself (as opposed to whatever it points to) is tracked by git.
+        // A checkout-filter side effect can fabricate an untracked symlink
+        // alias for the package root pointing at a different, genuinely
+        // tracked directory, exactly like the same gap already closed for
+        // `mod`/include! targets.
+        if let Err(reason) = verify_raw_path_tracked_by_git(worktree_path, &pkg.root, timeout) {
+            return CheckResult::fail(format!(
+                "local package root {} {reason}",
+                pkg.root.display()
+            ));
+        }
         for entry in &pkg.target_entry_points {
             if let Err(reason) = canonicalize_within_checkout(entry, worktree_path) {
                 return CheckResult::fail(format!(
                     "target entry point {} escapes the checkout — {reason}",
+                    entry.display()
+                ));
+            }
+            // G1 (review_b, iteration 5): same gap as the package root
+            // above — a Cargo target entry point (`[lib]`/`[[bin]]` etc.
+            // `path = "..."`) was only containment-checked, never proven
+            // to be itself a tracked entry at HEAD. The subsequent
+            // `scan_file_and_follow` byte-compares whatever the entry
+            // point CANONICALIZES to against git — which trivially
+            // matches if the entry point is an untracked symlink alias to
+            // a different, genuinely tracked file, since that comparison
+            // never looks at the literal (unresolved) entry-point path at
+            // all.
+            if let Err(reason) = verify_raw_path_tracked_by_git(worktree_path, entry, timeout) {
+                return CheckResult::fail(format!(
+                    "target entry point {} {reason}",
                     entry.display()
                 ));
             }
@@ -1236,9 +1265,25 @@ fn read_git_tracked_bytes(
 /// on disk — plus the final component, always — must itself be a
 /// git-tracked entry at HEAD (whether a tracked symlink object or,
 /// combined with the caller's separate containment/content checks, a
-/// tracked regular file/directory) for this to succeed. `..`/`.`
-/// components are resolved lexically first so they cannot be used to
-/// dodge the walk.
+/// tracked regular file/directory) for this to succeed.
+///
+/// `..`/`.` components (a `#[path]`/`mod` join can introduce them) are
+/// resolved as the walk proceeds, component by component, WITHOUT ever
+/// canonicalizing (that would defeat the whole point of the walk). A `..`
+/// that cancels an ORDINARY (non-symlink) directory is safe to fold away —
+/// that is exactly how the filesystem would resolve it too. But a `..`
+/// that cancels a component this walk already found to be a symlink is
+/// NOT safe to fold away lexically (review_b, iteration 5): the OS
+/// resolves `..` after a symlink relative to wherever the symlink's
+/// target actually is, which can be anywhere — not "back to where the
+/// symlink's name lexically sat". Silently popping it here would let a
+/// checkout-filter-fabricated untracked symlink component vanish from the
+/// walk entirely (never asked about) as long as whatever remains after
+/// the fold happens to name a tracked path, which is precisely how a
+/// prior version of this walk (that normalized `.`/`..` in a first pass,
+/// separate from the symlink check in a second pass) missed it. Refuse to
+/// guess in that case: fail rather than silently resolve past an
+/// unverified symlink.
 fn verify_raw_path_tracked_by_git(
     checkout_root: &Path,
     raw_path: &Path,
@@ -1251,37 +1296,55 @@ fn verify_raw_path_tracked_by_git(
         .or_else(|_| raw_path.strip_prefix(&canonical_root))
         .map_err(|_| "resolves outside the checkout root (escaping path or symlink)".to_string())?;
 
-    // Lexically normalize `.`/`..` components (a `#[path]`/`mod` join can
-    // introduce them) without touching the filesystem — resolving them by
-    // canonicalizing would defeat the whole point of this walk.
-    let mut normalized = PathBuf::new();
+    struct Segment {
+        name: std::ffi::OsString,
+        is_symlink: bool,
+    }
+    let mut stack: Vec<Segment> = Vec::new();
+    let mut on_disk = checkout_root.to_path_buf();
     for component in rel.components() {
         match component {
-            std::path::Component::ParentDir => {
-                if !normalized.pop() {
+            std::path::Component::ParentDir => match stack.pop() {
+                None => {
                     return Err(
                         "resolves outside the checkout root (escaping path or symlink)".to_string(),
                     );
                 }
-            }
+                Some(popped) => {
+                    on_disk.pop();
+                    if popped.is_symlink {
+                        return Err(format!(
+                            "path navigates `..` through symlink component `{}` — \
+                             refusing to resolve past it without following it, which \
+                             this check will not do (a checkout filter could fabricate \
+                             the alias)",
+                            popped.name.to_string_lossy(),
+                        ));
+                    }
+                }
+            },
             std::path::Component::CurDir => {}
-            other => normalized.push(other.as_os_str()),
+            other => {
+                on_disk.push(other.as_os_str());
+                let is_symlink = std::fs::symlink_metadata(&on_disk)
+                    .map(|m| m.file_type().is_symlink())
+                    .unwrap_or(false);
+                stack.push(Segment {
+                    name: other.as_os_str().to_owned(),
+                    is_symlink,
+                });
+            }
         }
     }
-    if normalized.as_os_str().is_empty() {
+    if stack.is_empty() {
         return Err("resolves to the checkout root itself, not a file".to_string());
     }
 
     let mut accumulated = PathBuf::new();
-    let mut on_disk = checkout_root.to_path_buf();
-    for component in normalized.components() {
-        accumulated.push(component.as_os_str());
-        on_disk.push(component.as_os_str());
-        let is_final = accumulated == normalized;
-        let is_symlink = std::fs::symlink_metadata(&on_disk)
-            .map(|m| m.file_type().is_symlink())
-            .unwrap_or(false);
-        if !is_final && !is_symlink {
+    let last_index = stack.len() - 1;
+    for (index, segment) in stack.iter().enumerate() {
+        accumulated.push(&segment.name);
+        if index != last_index && !segment.is_symlink {
             // An ordinary (non-symlink) intermediate directory is exactly
             // what `git worktree add` would have produced for any tracked
             // path through it — no alias risk, no need to ask git about

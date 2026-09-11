@@ -2741,4 +2741,199 @@ mod tests {
             result
         );
     }
+
+    // -- G1 (review_b, iteration 5): the iteration 3/4 fix
+    // (`verify_raw_path_tracked_by_git`) proves the FINAL component and
+    // every symlink ancestor of a resolved path are themselves tracked —
+    // but it found that by normalizing `.`/`..` components LEXICALLY in a
+    // first pass, separate from the symlink check in a second pass. A
+    // `..` that cancels a symlink component is popped away before the
+    // symlink check ever sees it, so the symlink component is never asked
+    // about at all — as long as whatever remains after the fold happens
+    // to name a tracked path (even a completely different file than the
+    // one actually reached on disk), this check wrongly certifies the
+    // reference as present.
+
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_fails_when_dotdot_lexically_cancels_an_untracked_symlink_component() {
+        // `src/lib.rs` declares `#[path = "alias/../sibling.rs"] mod
+        // aliased;`. `.hex/harness/sibling.rs` is genuinely committed and
+        // is what the path ACTUALLY resolves to on disk once the
+        // filter-fabricated `src/alias -> .` symlink is followed (`src`
+        // is a symlink to itself via `.`, so entering it and then `..`
+        // lands one level above `src`, i.e. at the harness root — exactly
+        // where `sibling.rs` lives). `.hex/harness/src/sibling.rs` is ALSO
+        // committed, as a decoy: it is the path the OLD lexical-first-pass
+        // normalization would check instead (`alias/..` folded away
+        // before the symlink was ever noticed, leaving plain
+        // `src/sibling.rs`), even though nothing on disk ever actually
+        // resolves there. No `src/alias` is ever tracked by git. A machine
+        // without this exact filter driver configured gets no
+        // `src/alias` at all and fails to compile — this check must
+        // reach the same verdict.
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(
+            harness.join("Cargo.toml"),
+            "[package]\nname = \"fixture-harness\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("Cargo.lock"), FIXTURE_LOCKFILE).unwrap();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "#[path = \"alias/../sibling.rs\"]\nmod aliased;\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("sibling.rs"), "pub const REAL: i32 = 1;\n").unwrap();
+        std::fs::write(
+            harness.join("src/sibling.rs"),
+            "pub const DECOY: i32 = 2;\n",
+        )
+        .unwrap();
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-dotdot-symlink.smudge",
+                "ln -sfn . .hex/harness/src/alias; cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &["config", "filter.hex-doctor-g1-dotdot-symlink.clean", "cat"],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-dotdot-symlink.required",
+                "true",
+            ],
+        );
+        std::fs::write(harness.join("zzz_trigger.txt"), "trigger").unwrap();
+        std::fs::write(
+            harness.join(".gitattributes"),
+            "zzz_trigger.txt filter=hex-doctor-g1-dotdot-symlink\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add dotdot-through-symlink smudge trap",
+            ],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "`#[path = \"alias/../sibling.rs\"]` names a path whose `alias` \
+             component is not itself a tracked entry at HEAD — folding \
+             `alias/..` away lexically before checking must not let this \
+             check certify the module as present just because the \
+             leftover `src/sibling.rs` string happens to be tracked, \
+             got {:?}",
+            result
+        );
+    }
+
+    // -- G1 (review_b, iteration 5): the containment check for a local
+    // package root / Cargo target entry point (`[lib]`/`[[bin]]` `path =
+    // "..."`) only ever proved the resolved (symlink-followed) location is
+    // inside the checkout and byte-matches git — it never proved the
+    // LITERAL entry-point path itself is tracked, the same gap already
+    // closed for `mod`/include! targets.
+
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_fails_when_custom_target_entry_point_is_an_untracked_symlink_alias() {
+        // `[lib] path = "custom/entry_alias.rs"`. `custom/entry_real.rs`
+        // is genuinely committed with real lib content. No
+        // `custom/entry_alias.rs` is ever tracked by git. A smudge filter
+        // on an unrelated trigger file symlinks
+        // `custom/entry_alias.rs -> entry_real.rs` as a side effect during
+        // the diagnostic checkout, so `cargo metadata` resolves the `[lib]`
+        // target and the resolved content byte-matches `entry_real.rs`'s
+        // own git blob — passing every check that only looks at the
+        // RESOLVED path. A machine without this exact filter driver
+        // configured gets no `custom/entry_alias.rs` at all and fails to
+        // compile — this check must reach the same verdict.
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("custom")).unwrap();
+        std::fs::write(
+            harness.join("Cargo.toml"),
+            "[package]\nname = \"fixture-harness\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [lib]\npath = \"custom/entry_alias.rs\"\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("Cargo.lock"), FIXTURE_LOCKFILE).unwrap();
+        std::fs::write(
+            harness.join("custom/entry_real.rs"),
+            "pub const REAL: i32 = 1;\n",
+        )
+        .unwrap();
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-entry-point-alias.smudge",
+                "ln -sfn entry_real.rs .hex/harness/custom/entry_alias.rs; cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-entry-point-alias.clean",
+                "cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-entry-point-alias.required",
+                "true",
+            ],
+        );
+        std::fs::write(harness.join("zzz_trigger.txt"), "trigger").unwrap();
+        std::fs::write(
+            harness.join(".gitattributes"),
+            "zzz_trigger.txt filter=hex-doctor-g1-entry-point-alias\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add entry-point symlink-alias smudge trap",
+            ],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "`[lib] path = \"custom/entry_alias.rs\"` names a target entry \
+             point that is not itself a tracked entry at HEAD — a smudge \
+             filter fabricating a symlink alias to a DIFFERENT tracked \
+             file must not let this check certify the target as present, \
+             got {:?}",
+            result
+        );
+    }
 }
