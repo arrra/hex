@@ -1211,25 +1211,34 @@ fn read_git_tracked_bytes(
 }
 
 /// Verifies that `raw_path` — the exact path this check is about to treat
-/// as present, with its FINAL component still unresolved (any symlink
-/// there left in place) — is itself a git-tracked entry at HEAD (G1,
-/// review_b iteration 3).
+/// as present, with EVERY component (not just the final one) still
+/// unresolved on disk (no symlink anywhere in it followed) — is itself
+/// reachable through git-tracked entries at HEAD (G1, review_b iterations
+/// 3-4).
 ///
 /// `read_git_tracked_bytes` / `canonicalize_within_checkout` only prove
 /// that whatever `raw_path` ultimately *resolves to* (after following
-/// symlinks) is tracked and matches git's blob. That is not the same
+/// every symlink) is tracked and matches git's blob. That is not the same
 /// claim: a checkout-filter side effect can fabricate an untracked
-/// symlink ALIAS at `raw_path` pointing at a different, genuinely tracked
-/// file — e.g. `mod missing_dep;` resolving through a filter-created
-/// `src/missing_dep.rs -> real.rs` symlink. The byte comparison then
-/// passes (real.rs's content matches its own git blob), even though
-/// nothing at the literal path `missing_dep.rs` names is committed, so a
-/// machine without that exact filter driver gets no file there at all.
-/// Only `raw_path`'s parent directories are canonicalized here — the
-/// final component is checked exactly as named, so a symlink there must
-/// itself be a tracked git entry (whether a tracked symlink object or,
-/// after the caller's separate containment/content checks, a tracked
-/// regular file) for this to succeed.
+/// symlink ALIAS anywhere along `raw_path` — a leaf file (iteration 3:
+/// `mod missing_dep;` resolving through a filter-created
+/// `src/missing_dep.rs -> real.rs` symlink) or a whole DIRECTORY
+/// (iteration 4: `mod missing_dir;` resolving through a filter-created
+/// `src/missing_dir -> real_dir` symlink to `src/missing_dir/mod.rs`) —
+/// pointing at different, genuinely tracked content. Canonicalizing any
+/// ancestor before asking git would silently follow that alias and ask
+/// about the wrong (but tracked) path, passing even though the literal
+/// path `raw_path` names is not itself committed, so a machine without
+/// that exact filter driver gets nothing there at all.
+///
+/// Walks `raw_path` component by component relative to `checkout_root`
+/// WITHOUT canonicalizing anything. Any ancestor prefix that is a symlink
+/// on disk — plus the final component, always — must itself be a
+/// git-tracked entry at HEAD (whether a tracked symlink object or,
+/// combined with the caller's separate containment/content checks, a
+/// tracked regular file/directory) for this to succeed. `..`/`.`
+/// components are resolved lexically first so they cannot be used to
+/// dodge the walk.
 fn verify_raw_path_tracked_by_git(
     checkout_root: &Path,
     raw_path: &Path,
@@ -1237,35 +1246,64 @@ fn verify_raw_path_tracked_by_git(
 ) -> Result<(), String> {
     let canonical_root = std::fs::canonicalize(checkout_root)
         .map_err(|e| format!("failed to canonicalize checkout root: {e}"))?;
-    let file_name = raw_path
-        .file_name()
-        .ok_or_else(|| "has no file name component".to_string())?;
-    let parent = raw_path.parent().unwrap_or_else(|| Path::new("."));
-    let canonical_parent = std::fs::canonicalize(parent).map_err(|_| {
-        "parent directory not tracked by git (missing from a fresh checkout)".to_string()
-    })?;
-    if !canonical_parent.starts_with(&canonical_root) {
-        return Err("resolves outside the checkout root (escaping path or symlink)".to_string());
+    let rel = raw_path
+        .strip_prefix(checkout_root)
+        .or_else(|_| raw_path.strip_prefix(&canonical_root))
+        .map_err(|_| "resolves outside the checkout root (escaping path or symlink)".to_string())?;
+
+    // Lexically normalize `.`/`..` components (a `#[path]`/`mod` join can
+    // introduce them) without touching the filesystem — resolving them by
+    // canonicalizing would defeat the whole point of this walk.
+    let mut normalized = PathBuf::new();
+    for component in rel.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                if !normalized.pop() {
+                    return Err(
+                        "resolves outside the checkout root (escaping path or symlink)".to_string(),
+                    );
+                }
+            }
+            std::path::Component::CurDir => {}
+            other => normalized.push(other.as_os_str()),
+        }
     }
-    let raw_check_path = canonical_parent.join(file_name);
-    let rel = raw_check_path
-        .strip_prefix(&canonical_root)
-        .map_err(|_| "resolves outside the checkout root".to_string())?;
-    let rel_git = rel
-        .components()
-        .map(|c| c.as_os_str().to_string_lossy().into_owned())
-        .collect::<Vec<_>>()
-        .join("/");
-    let mut cmd = Command::new("git");
-    cmd.args(["cat-file", "-e", &format!("HEAD:{rel_git}")])
-        .current_dir(checkout_root);
-    let output = run_with_timeout(&mut cmd, timeout)
-        .map_err(|e| format!("could not verify git tracking of {rel_git}: {e}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "{rel_git} is not itself a tracked entry at HEAD (only \
-             something it points to, e.g. via a symlink alias, is)"
-        ));
+    if normalized.as_os_str().is_empty() {
+        return Err("resolves to the checkout root itself, not a file".to_string());
+    }
+
+    let mut accumulated = PathBuf::new();
+    let mut on_disk = checkout_root.to_path_buf();
+    for component in normalized.components() {
+        accumulated.push(component.as_os_str());
+        on_disk.push(component.as_os_str());
+        let is_final = accumulated == normalized;
+        let is_symlink = std::fs::symlink_metadata(&on_disk)
+            .map(|m| m.file_type().is_symlink())
+            .unwrap_or(false);
+        if !is_final && !is_symlink {
+            // An ordinary (non-symlink) intermediate directory is exactly
+            // what `git worktree add` would have produced for any tracked
+            // path through it — no alias risk, no need to ask git about
+            // every ancestor.
+            continue;
+        }
+        let rel_git = accumulated
+            .components()
+            .map(|c| c.as_os_str().to_string_lossy().into_owned())
+            .collect::<Vec<_>>()
+            .join("/");
+        let mut cmd = Command::new("git");
+        cmd.args(["cat-file", "-e", &format!("HEAD:{rel_git}")])
+            .current_dir(checkout_root);
+        let output = run_with_timeout(&mut cmd, timeout)
+            .map_err(|e| format!("could not verify git tracking of {rel_git}: {e}"))?;
+        if !output.status.success() {
+            return Err(format!(
+                "{rel_git} is not itself a tracked entry at HEAD (only \
+                 something it points to, e.g. via a symlink alias, is)"
+            ));
+        }
     }
     Ok(())
 }
