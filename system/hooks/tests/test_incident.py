@@ -80,7 +80,11 @@ class IncidentHookTestCase(unittest.TestCase):
         env["HEX_LEDGER_DIR"] = ledger_dir or self.ledger_dir
         stdin_bytes = raw_stdin if raw_stdin is not None else json.dumps(payload).encode()
         return subprocess.run(
-            [sys.executable, str(SCRIPT)],
+            # F15: production (required-hooks.json) invokes this hook as
+            # `python3 -I -S ...` -- isolated mode, no site-packages/
+            # PYTHONPATH. Match that startup here so the suite exercises
+            # the same environment the real hook runs under.
+            [sys.executable, "-I", "-S", str(SCRIPT)],
             input=stdin_bytes,
             capture_output=True,
             env=env,

@@ -25,7 +25,7 @@ ROUTER="$SCRIPT_DIR/pretooluse-router.py"
 REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ROUTER_IMPL="${ROUTER_IMPL:-python}"
 HEX_ROUTER_BIN="${HEX_ROUTER_BIN:-${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/hex}"
-LEDGER_DIR="$(mktemp -d)"
+LEDGER_DIR="$(mktemp -d)" || exit 1
 trap 'rm -rf "$LEDGER_DIR"' EXIT
 
 python3 - "$ROUTER" "$LEDGER_DIR" "$ROUTER_IMPL" "$HEX_ROUTER_BIN" "$REPO_ROOT" <<'PYEOF'
@@ -573,6 +573,13 @@ EXTRA_FIXTURES = [
 ]
 
 
+# F15: production (required-hooks.json) invokes the router as
+# `python3 -I -S ...` -- isolated mode, no site-packages/PYTHONPATH. This
+# probe is the acceptance oracle for both the Python reference and the Rust
+# port, so it must drive the same startup, not a plainer `python3 script.py`.
+PYTHON_ISOLATED_FLAGS = ["-I", "-S"]
+
+
 def run(payload):
     env = dict(os.environ)
     env["HEX_LEDGER_DIR"] = str(ledger_dir)
@@ -580,7 +587,7 @@ def run(payload):
         env["HEX_DIR"] = repo_root
         cmd = [hex_router_bin, "hook", "router"]
     else:
-        cmd = [sys.executable, router]
+        cmd = [sys.executable, *PYTHON_ISOLATED_FLAGS, router]
     return subprocess.run(
         cmd,
         input=json.dumps(payload),
@@ -595,6 +602,13 @@ def classify(proc):
     """Return the winning decision string, or 'abstain'/'error:<detail>'."""
     if proc.returncode != 0:
         return f"error:exit={proc.returncode}"
+    # F16: empty-stdout-plus-exit-0 is also exactly the shape the router's
+    # own fail-open handler produces on an internal bug (see
+    # pretooluse-router.py's `except Exception` -> one stderr line, exit 0).
+    # A payload-specific internal error must never be reported as a clean
+    # abstain -- require empty stderr for a genuine abstain/decision.
+    if proc.stderr.strip():
+        return f"error:stderr:{proc.stderr.strip()[:200]!r}"
     out = proc.stdout.strip()
     if not out:
         return "abstain"
@@ -701,7 +715,7 @@ if router_impl == "python":
     _f15_env["HEX_LEDGER_DIR"] = str(ledger_dir)
     _f15_env["PYTHONPATH"] = str(_f15_sitedir)
     _f15_env["F15_MARKER"] = str(_f15_marker)
-    _f15_cmd = [sys.executable, router]  # mirrors run()'s python-impl cmd construction
+    _f15_cmd = [sys.executable, *PYTHON_ISOLATED_FLAGS, router]  # mirrors run()'s python-impl cmd construction
     subprocess.run(
         _f15_cmd,
         input=json.dumps(make_payload("Bash", {"command": "echo hi"})),
@@ -725,7 +739,7 @@ if router_impl == "python":
     _f16_env = dict(os.environ)
     _f16_env["HEX_LEDGER_DIR"] = str(ledger_dir)
     _f16_proc = subprocess.run(
-        [sys.executable, router],
+        [sys.executable, *PYTHON_ISOLATED_FLAGS, router],
         input="{not valid json",
         capture_output=True,
         text=True,

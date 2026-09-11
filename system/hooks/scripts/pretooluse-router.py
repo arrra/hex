@@ -64,6 +64,68 @@ MATCH_TRUNCATE = 200
 
 TEXT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 
+# --- Shared secret-redaction policy (F7) ------------------------------------
+#
+# DUPLICATED VERBATIM in posttoolusefailure-incident.py. The router runs as
+# `python3 -I -S <script>` (isolated mode -- confirmed ground truth), so
+# neither hook script can import a sibling module; keeping this one policy
+# byte-identical in both files is the only way to apply it consistently.
+# Covers current API-key/token shapes so persisted ledger text (match,
+# preview, incident error/args_preview) never carries a live credential.
+_REDACT_PATTERNS = [
+    (re.compile(r"sk-ant-[A-Za-z0-9\-_]{8,}"), "sk-ant-***REDACTED***"),
+    (re.compile(r"sk-[A-Za-z0-9]{8,}"), "sk-***REDACTED***"),
+    (re.compile(r"ghp_[A-Za-z0-9]{16,}"), "***REDACTED-GH-TOKEN***"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{16,}"), "***REDACTED-GH-TOKEN***"),
+    (re.compile(r"xox[abp]-[A-Za-z0-9\-]{8,}"), "***REDACTED-SLACK-TOKEN***"),
+    (re.compile(r"AKIA[A-Z0-9]{16}"), "***REDACTED-AWS-KEY***"),
+    (re.compile(r"(?i)\bpit-[A-Za-z0-9\-_]{8,}"), "pit-***REDACTED***"),
+    (re.compile(r"(?i)bearer\s+\S+"), "Bearer ***REDACTED***"),
+    (
+        re.compile(r"(?i)\b(password|token|secret|api[_-]?key)\s*=\s*\S+"),
+        r"\1=***REDACTED***",
+    ),
+    (
+        re.compile(
+            r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?"
+            r"-----END [A-Z0-9 ]*PRIVATE KEY-----"
+        ),
+        "***REDACTED-PEM-BLOCK***",
+    ),
+]
+
+
+def redact(text):
+    """Scrub every known secret shape out of `text`. A no-op (returns the
+    same string) when nothing matches -- ordinary command/path text is
+    returned unmodified."""
+    if not text:
+        return text
+    for pattern, repl in _REDACT_PATTERNS:
+        text = pattern.sub(repl, text)
+    return text
+
+
+def _ensure_private_dir(path):
+    """Create `path` (and parents) if missing, then force 0700 regardless
+    of the process umask or a pre-existing directory with looser
+    permissions (F7: 'existing paths handled explicitly' -- `os.makedirs`'s
+    own `mode=` argument is masked by umask AND is a no-op when the
+    directory already exists, so an explicit `chmod` after the fact is the
+    only way to guarantee this)."""
+    os.makedirs(path, mode=0o700, exist_ok=True)
+    os.chmod(path, 0o700)
+
+
+def _open_private_append(path):
+    """Open `path` for append, creating it 0600 if new; also force 0600 on
+    an already-existing file (same 'existing paths handled explicitly'
+    reasoning as `_ensure_private_dir` -- the mode passed to `os.open` only
+    applies when the file is newly created)."""
+    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    os.chmod(path, 0o600)
+    return os.fdopen(fd, "a")
+
 # Command-boundary characters used to scope `unless_match` when a rule's
 # `match` regex has more than one occurrence in one canonical text (e.g. a
 # chained shell invocation combining a safe subcommand with a dangerous
@@ -758,6 +820,20 @@ def canonical_text(tool_name, tool_input):
     """Canonical arg text a rule's `match` regex is applied to."""
     if tool_name == "Bash":
         return str(tool_input.get("command", ""))
+    if tool_name == "NotebookEdit":
+        # F21: NotebookEdit's actual schema is notebook_path + new_source,
+        # not file_path/new_string/content/edits -- the generic TEXT_TOOLS
+        # branch below never read either, so a real NotebookEdit payload
+        # canonicalized to an empty string and no rule could ever inspect
+        # it. Canonical first line is the path (so a \A-anchored path rule
+        # still works the same way it does for Edit/Write), then the
+        # source, mirroring the generic branch's file_path+body shape.
+        parts = []
+        if "notebook_path" in tool_input:
+            parts.append(str(tool_input.get("notebook_path", "")))
+        if "new_source" in tool_input:
+            parts.append(str(tool_input.get("new_source", "")))
+        return "\n".join(parts)
     if tool_name in TEXT_TOOLS:
         parts = [str(tool_input.get("file_path", ""))]
         if "new_string" in tool_input:
@@ -811,7 +887,7 @@ def ledger_path():
     ledger_dir = os.environ.get("HEX_LEDGER_DIR") or os.path.join(
         os.path.expanduser("~"), ".hex", "ledger"
     )
-    os.makedirs(ledger_dir, exist_ok=True)
+    _ensure_private_dir(ledger_dir)  # F7: 0700 regardless of umask
     return os.path.join(ledger_dir, LEDGER_FILENAME)
 
 
@@ -982,7 +1058,10 @@ def evaluate(payload):
         # G5: gh-fast-polling's candidate may have been extended past its
         # own (too-short) regex match to reach the loop's real `done`;
         # `match_override` carries that extended span when set.
-        matched = (match_override if match_override is not None else m.group(0))[:MATCH_TRUNCATE]
+        raw_matched = match_override if match_override is not None else m.group(0)
+        # F7: redact BEFORE truncating -- truncating first could slice a
+        # secret in half and leave the visible fragment unredacted.
+        matched = redact(raw_matched)[:MATCH_TRUNCATE]
         fires.append(
             {
                 "id": rule["id"],
@@ -994,6 +1073,9 @@ def evaluate(payload):
 
     if fires:
         ts = datetime.now(timezone.utc).isoformat()
+        # F7: redact the full canonical text BEFORE truncating to a preview
+        # (same reasoning as the `matched` redact-then-slice above).
+        preview = redact(text)[:300]
         lines = []
         for fire in fires:
             entry = {
@@ -1007,11 +1089,11 @@ def evaluate(payload):
                 # match (e.g. just the subcommand that tripped a rule) cannot explain a
                 # prompt after the fact, nor let step 3 cluster fires by context
                 # (2026-09-06 04:06Z operator question).
-                "preview": text[:300],
+                "preview": preview,
                 "cwd": cwd,
             }
             lines.append(json.dumps(entry, sort_keys=True))
-        with open(ledger_path(), "a") as lf:
+        with _open_private_append(ledger_path()) as lf:  # F7: 0600 regardless of umask
             lf.write("\n".join(lines) + "\n")
 
     winner = None

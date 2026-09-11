@@ -10,7 +10,7 @@
   {
     "id": "vitest-spawnsync",
     "tool": "^(Edit|Write|MultiEdit|NotebookEdit)$",
-    "match": "^[^\\n]*\\.(test|spec)\\.[cm]?[jt]sx?\\b[^\\n]*\\n[\\s\\S]*spawnSync",
+    "match": "\\A[^\\n]*\\.(test|spec)\\.[cm]?[jt]sx?\\b[^\\n]*\\n[\\s\\S]*spawnSync",
     "decision": "prior",
     "message": "spawnSync in a vitest test file risks the silent multi-hour CI hang class; use async spawn with a SIGKILL deadline instead.",
     "source": "feedback_no_spawnsync_in_vitest_ci_hang (learnings 2026-09-05)"
@@ -80,7 +80,7 @@
   {
     "id": "hex-events-flat-policy",
     "tool": "^Write$",
-    "match": "^[^\\n]*\\.hex-events/policies/[^\\n]*\\.ya?ml[^\\n]*",
+    "match": "\\A[^\\n]*\\.hex-events/policies/[^\\n]*\\.ya?ml[^\\n]*",
     "unless_match": "\\nrules:|^rules:",
     "decision": "prior",
     "message": "Flat hex-events policies (top-level trigger/action) are silently skipped by the daemon; use the rules: list format and validate with `cd ~/.hex-events && venv/bin/python hex_events_cli.py validate`.",
