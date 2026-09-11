@@ -302,7 +302,7 @@ pub(crate) fn facts_recall_with_config(
         conn.prepare(&format!(
             "SELECT facts_fts.rowid
              FROM facts_fts JOIN facts f ON f.rowid = facts_fts.rowid
-             WHERE facts_fts MATCH ?1 AND f.tombstone = 0{privacy}
+             WHERE facts_fts MATCH ?1 AND f.tombstone = 0 AND f.invalid_at IS NULL{privacy}
              ORDER BY bm25(facts_fts, {weights}), f.importance DESC LIMIT ?2",
         ))?
         .query_map(rusqlite::params![fts_query, (k * 3) as i64], |r| r.get(0))?
@@ -1439,7 +1439,9 @@ mod plan2_tests {
             hits.iter().map(|f| &f.object).collect::<Vec<_>>()
         );
         assert!(
-            !hits.iter().any(|f| f.subject.starts_with("noise-subject-fts-")),
+            !hits
+                .iter()
+                .any(|f| f.subject.starts_with("noise-subject-fts-")),
             "superseded facts must never surface via the FTS arm, got {:?}",
             hits.iter().map(|f| &f.subject).collect::<Vec<_>>()
         );
