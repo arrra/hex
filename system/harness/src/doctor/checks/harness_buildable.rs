@@ -187,18 +187,35 @@ fn ensure_target_cache_dir(dir: &Path) -> Result<(), String> {
 
 /// Distinguishes a genuine build failure (FAIL — the harness does not
 /// compile from what git has committed) from a `cargo check` that ran but
-/// could not resolve an offline dependency (WARN — a warm-cache problem,
-/// nothing to do with what's tracked by git). Mirrors the same offline-mode
-/// wording cargo uses regardless of subcommand.
+/// could not certify anything either way (WARN): an offline dependency it
+/// could not resolve, or a toolchain it could not even invoke (`rustc`
+/// unreachable). Both checks are gated on `looks_like_a_real_compiler_diagnostic`
+/// first — a genuine compile error (missing module/include, broken
+/// manifest target) always carries its own `error[E....]:`/`-->`/`could not
+/// compile` markers, and a fixture crafted so its OWN failing source text
+/// happens to *contain* the offline or toolchain wording (e.g. a
+/// `compile_error!` message quoting it) must still FAIL — a substring match
+/// against the whole stderr blob, with no such gate, would misclassify that
+/// real failure as an inconclusive WARN.
 fn classify_check_failure(output: &Output, elapsed: Duration) -> CheckResult {
     let stderr = String::from_utf8_lossy(&output.stderr);
     let lower = stderr.to_lowercase();
-    if lower.contains("offline mode (--offline)") || lower.contains("--offline was specified") {
+    let real_diagnostic = looks_like_a_real_compiler_diagnostic(&stderr, &lower);
+
+    if !real_diagnostic && is_offline_dependency_failure(&lower) {
         return CheckResult::warn(format!(
             "a dependency the lockfile resolves to is not present in the \
              local Cargo registry/git cache (dependency cache unavailable — \
              this is not a build failure) — fix: warm the cache with network \
              access, or run `cargo fetch` once online: {}",
+            stderr.trim()
+        ));
+    }
+    if !real_diagnostic && is_toolchain_unavailable_failure(&lower) {
+        return CheckResult::warn(format!(
+            "cargo could not execute `rustc` at all (toolchain unreachable \
+             on this machine — this is not a build failure) — fix: install \
+             or repair the rust toolchain: {}",
             stderr.trim()
         ));
     }
@@ -210,6 +227,35 @@ fn classify_check_failure(output: &Output, elapsed: Duration) -> CheckResult {
         first_error
     ))
     .with_details(stderr.into_owned())
+}
+
+/// `true` iff `stderr` carries the unmistakable shape of an actual `rustc`
+/// diagnostic (an error CODE, a `-->` source-location arrow, or cargo's own
+/// "could not compile" summary line) rather than a pre-compilation cargo
+/// failure (offline dependency resolution, an unreachable toolchain). Real
+/// compilation never gets far enough to emit any of these three markers
+/// until at least one translation unit has actually been fed to `rustc`.
+fn looks_like_a_real_compiler_diagnostic(stderr: &str, lower: &str) -> bool {
+    lower.contains("error[") || stderr.contains("-->") || lower.contains("could not compile `")
+}
+
+/// `cargo check --offline` reports an unresolvable dependency with this
+/// reminder wording regardless of subcommand — never itself the FIRST
+/// `error:` line (that names the missing package instead), which is why
+/// this checks the whole stderr blob, gated by `looks_like_a_real_compiler_diagnostic`
+/// above rather than trusted on its own.
+fn is_offline_dependency_failure(lower_stderr: &str) -> bool {
+    lower_stderr.contains("offline mode (--offline)")
+        || lower_stderr.contains("--offline was specified")
+}
+
+/// `cargo check` reports an unreachable `rustc` (missing from `PATH`, no
+/// working toolchain) as `error: could not execute process `rustc -vV`
+/// (never executed)` — a cargo-level failure, not a compile error, so it
+/// must WARN rather than FAIL just like the offline case above.
+fn is_toolchain_unavailable_failure(lower_stderr: &str) -> bool {
+    lower_stderr.contains("could not execute process `rustc")
+        || lower_stderr.contains("could not execute process 'rustc")
 }
 
 /// The first line of cargo's own diagnostic output that names a compile or
@@ -322,6 +368,39 @@ struct TreeEntry {
     path: String,
 }
 
+/// `true` iff a symlink recorded at `dest` (inside `export_root`) with the
+/// given raw `target` (the exact bytes git stored for a mode `120000`
+/// blob) resolves, purely LEXICALLY, to a path still inside `export_root`.
+/// The target is never required to exist — that is exactly the attack this
+/// guards against: a target naming a real but UNCOMMITTED file elsewhere on
+/// this machine (e.g. back in the actual checkout this export was made
+/// from). An absolute target, or a relative one whose `..` segments walk
+/// back out of `export_root`, must never be materialized: `cargo check`
+/// would then silently read content from outside the git-committed export
+/// and this check would falsely certify a broken commit as buildable.
+#[cfg(unix)]
+fn symlink_target_stays_within_export(export_root: &Path, dest: &Path, target: &str) -> bool {
+    let target_path = Path::new(target);
+    if target_path.is_absolute() {
+        return false;
+    }
+    let Some(start_dir) = dest.parent() else {
+        return false;
+    };
+    let mut resolved = start_dir.to_path_buf();
+    for component in target_path.components() {
+        match component {
+            std::path::Component::ParentDir => {
+                resolved.pop();
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(segment) => resolved.push(segment),
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return false,
+        }
+    }
+    resolved.starts_with(export_root)
+}
+
 /// Materializes the git-committed tree at `HEAD` of the repository rooted
 /// at `repo_root` into a fresh, unique temp directory, using ONLY raw git
 /// objects (`git ls-tree` + `git cat-file --batch`) — never `git archive`
@@ -342,7 +421,16 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
     let mut ls_tree = Command::new("git");
     ls_tree
         .args(["ls-tree", "-r", "-z", "--full-tree", "HEAD"])
-        .current_dir(repo_root);
+        .current_dir(repo_root)
+        // A locally configured `git replace` ref transparently substitutes
+        // a different object for the one a sha names, at any layer (the
+        // `HEAD` commit, a tree, or a blob) — silently walking the
+        // SUBSTITUTED tree here would export whatever the replacement
+        // graph says instead of what git actually has committed, letting a
+        // machine-local replacement defeat this check exactly like a
+        // smudge filter would. `GIT_NO_REPLACE_OBJECTS` disables that
+        // substitution for this process only.
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
     let ls_output = ls_tree
         .output()
         .map_err(|e| format!("git ls-tree failed to spawn: {e}"))?;
@@ -394,6 +482,11 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
     batch_cmd
         .args(["cat-file", "--batch"])
         .current_dir(repo_root)
+        // Same replacement-ref hazard as `ls-tree` above — a blob sha
+        // resolved through a local replace ref would hand this export
+        // substituted content instead of what `HEAD`'s tree actually
+        // records.
+        .env("GIT_NO_REPLACE_OBJECTS", "1")
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
@@ -464,6 +557,17 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
             let target = String::from_utf8_lossy(content).into_owned();
             #[cfg(unix)]
             {
+                if !symlink_target_stays_within_export(tempdir.path(), &dest, &target) {
+                    return Err(format!(
+                        "committed symlink {} -> {target} escapes the \
+                         export root — creating it would let `cargo check` \
+                         read whatever file (committed or not) happens to \
+                         sit at that path elsewhere on this machine, \
+                         falsely certifying a broken commit as buildable; \
+                         refusing to export it",
+                        entry.path
+                    ));
+                }
                 std::os::unix::fs::symlink(&target, &dest)
                     .map_err(|e| format!("failed to create symlink {}: {e}", dest.display()))?;
             }

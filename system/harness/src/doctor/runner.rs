@@ -496,19 +496,27 @@ mod tests {
 
     #[test]
     fn test_harness_buildable_fails_naming_a_missing_nested_module() {
-        // (e)
+        // (e) — G5 (review_b minor): the outer module must be declared
+        // INLINE (`mod outer { mod inner; }` inside lib.rs itself), not as
+        // its own file — this is the specific regression class ("inline
+        // module context") the hand-written source scanner repeatedly got
+        // wrong across earlier review rounds. rustc still resolves the
+        // nested `mod inner;` to `src/outer/inner.rs` even though `outer`
+        // has no file of its own (verified by hand: `cargo check` against
+        // this exact shape reports `file not found for module \`inner\``
+        // pointing at `src/outer/inner.rs`).
         let tmp = init_hex_harness_repo(
-            &[
-                (".hex/harness/src/lib.rs", "pub mod outer;\n"),
-                (".hex/harness/src/outer.rs", "pub mod inner;\n"),
-            ],
+            &[(
+                ".hex/harness/src/lib.rs",
+                "pub mod outer {\n    pub mod inner;\n}\n",
+            )],
             &[(".hex/harness/src/outer/inner.rs", "pub const X: i32 = 1;\n")],
         );
         let result = run_harness_buildable(tmp.path());
         assert_eq!(
             result.status,
             Status::Fail,
-            "a nested `mod inner;` inside a committed `mod outer;` whose \
+            "an inline `mod outer {{ mod inner; }}` whose nested module's \
              own file (src/outer/inner.rs) is on disk but not committed \
              must FAIL: {result:?}"
         );
@@ -744,6 +752,206 @@ mod tests {
             "the cap must actually bound the check's runtime — a 300ms cap \
              against a build.rs that sleeps 30s must return well inside a \
              generous ceiling, took {elapsed:?}"
+        );
+    }
+
+    #[test]
+    fn test_harness_buildable_ignores_local_replace_refs_and_still_fails() {
+        // G1 (review_b): `git replace` transparently substitutes a
+        // different object for the one a sha names, at the plumbing layer
+        // `ls-tree`/`cat-file --batch` read from — a local replace ref
+        // pointing HEAD's committed (broken) `lib.rs` blob at a different,
+        // buildable stand-in must never change what this check certifies.
+        // Verified by hand that `git cat-file --batch` honors replace refs
+        // by default and returns the replacement's content, not the
+        // original blob's, unless `GIT_NO_REPLACE_OBJECTS=1` is set.
+        let tmp = init_hex_harness_repo(&[(".hex/harness/src/lib.rs", "mod missing;\n")], &[]);
+
+        let committed_sha_output = std::process::Command::new("git")
+            .args(["rev-parse", "HEAD:.hex/harness/src/lib.rs"])
+            .current_dir(tmp.path())
+            .output()
+            .expect("git rev-parse spawns");
+        assert!(committed_sha_output.status.success());
+        let committed_sha = String::from_utf8_lossy(&committed_sha_output.stdout)
+            .trim()
+            .to_string();
+
+        let stand_in_path = tmp.path().join("stand-in-not-committed.rs");
+        std::fs::write(&stand_in_path, "pub fn f() -> i32 { 1 }\n").unwrap();
+        let hash_output = std::process::Command::new("git")
+            .args([
+                "hash-object",
+                "-w",
+                stand_in_path.to_str().expect("utf8 path"),
+            ])
+            .current_dir(tmp.path())
+            .output()
+            .expect("git hash-object spawns");
+        assert!(hash_output.status.success());
+        let replacement_sha = String::from_utf8_lossy(&hash_output.stdout)
+            .trim()
+            .to_string();
+        std::fs::remove_file(&stand_in_path).unwrap();
+
+        run_git(tmp.path(), &["replace", &committed_sha, &replacement_sha]);
+
+        let result = run_harness_buildable(tmp.path());
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "a local `git replace` ref substituting a buildable stand-in \
+             for the committed (broken) blob must never make this check \
+             PASS a tree that does not actually build from what git has \
+             committed: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_refuses_symlink_that_escapes_export_root() {
+        // G2 (review_b), export-level: a committed symlink (git mode
+        // 120000) whose target walks OUT of the export root via `..`
+        // segments must be refused outright rather than materialized —
+        // this is the mechanism-level guard the end-to-end test below
+        // exercises through the full check.
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(harness.join("Cargo.toml"), HEX_HARNESS_MANIFEST).unwrap();
+        std::fs::write(harness.join("Cargo.lock"), HEX_HARNESS_LOCKFILE).unwrap();
+        // Enough `..` segments to walk out of any plausible OS temp-dir
+        // nesting depth, regardless of how deep this machine's temp root
+        // happens to be.
+        let escape_target = "../".repeat(20) + "etc/hostname";
+        std::os::unix::fs::symlink(&escape_target, harness.join("src/data.txt")).unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &["commit", "-q", "-m", "fixture with escaping symlink"],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        assert!(
+            result.is_err(),
+            "a committed symlink whose target walks out of the export \
+             root must be refused, not silently materialized: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_never_falsely_passes_an_escaping_committed_symlink() {
+        // G2 (review_b), end-to-end: without the export-level guard, an
+        // escaping symlink could let `cargo check` silently read an
+        // untracked file from elsewhere on this machine and falsely PASS a
+        // commit that does not actually build from what git has. The
+        // export must instead be treated as untrustworthy — WARN, never
+        // PASS (and never FAIL, since there is no real compile error to
+        // report; the export itself could not be trusted).
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(harness.join("Cargo.toml"), HEX_HARNESS_MANIFEST).unwrap();
+        std::fs::write(harness.join("Cargo.lock"), HEX_HARNESS_LOCKFILE).unwrap();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str!(\"data.txt\");\n",
+        )
+        .unwrap();
+        let escape_target = "../".repeat(20) + "etc/hostname";
+        std::os::unix::fs::symlink(&escape_target, harness.join("src/data.txt")).unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fixture with escaping symlink include",
+            ],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+        assert_ne!(
+            result.status,
+            Status::Pass,
+            "an escaping committed symlink must never produce a false \
+             PASS: {result:?}"
+        );
+        assert_eq!(
+            result.status,
+            Status::Warn,
+            "an escaping committed symlink makes the export itself \
+             untrustworthy — this must WARN (cannot certify), not FAIL: \
+             {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_warns_inconclusive_when_cargo_present_but_rustc_unreachable() {
+        // G3 (review_b): cargo itself resolves, spawns, and only THEN fails
+        // because it cannot find/execute `rustc` — a toolchain problem,
+        // never a build failure, so it must WARN, not FAIL like a genuine
+        // compile error would. Simulated by restricting PATH to a
+        // directory containing ONLY a symlink to the real cargo binary
+        // (located via the `CARGO` env var cargo itself sets for test
+        // binaries it runs — verified by hand this is set and `RUSTC` is
+        // NOT, so nothing here leaks a real toolchain path back in), so
+        // cargo's own internal PATH lookup for `rustc` fails exactly like
+        // it would on a machine with no toolchain installed at all.
+        let tmp = init_hex_harness_repo(
+            &[(".hex/harness/src/lib.rs", "pub fn f() -> i32 { 1 }\n")],
+            &[],
+        );
+        let cargo_path = std::env::var("CARGO").expect("`cargo test` sets CARGO");
+        let bin_dir = tempfile::tempdir().unwrap();
+        std::os::unix::fs::symlink(&cargo_path, bin_dir.path().join("cargo")).unwrap();
+
+        let result =
+            crate::doctor::checks::harness_buildable::run_check_with_timeout_and_path_override(
+                tmp.path(),
+                std::time::Duration::from_secs(60),
+                &bin_dir.path().display().to_string(),
+            );
+        assert_eq!(
+            result.status,
+            Status::Warn,
+            "cargo present but unable to find/execute rustc must WARN \
+             (toolchain unreachable), never FAIL like a genuine compile \
+             error: {result:?}"
+        );
+    }
+
+    #[test]
+    fn test_harness_buildable_still_fails_when_a_real_compile_error_mentions_offline_wording() {
+        // G4 (review_b): the offline-dependency-failure classifier must
+        // never fire just because the word "offline" appears SOMEWHERE in
+        // stderr. A genuine compile error (a missing module) whose own
+        // diagnostic text happens to quote wording that overlaps cargo's
+        // offline-mode reminder must still FAIL, naming the real error —
+        // verified by hand that this exact fixture's stderr contains both
+        // `error[E0583]`/`-->` (real compiler diagnostic markers) AND the
+        // literal phrase "offline mode (--offline)".
+        let tmp = init_hex_harness_repo(
+            &[(
+                ".hex/harness/src/lib.rs",
+                "mod missing;\ncompile_error!(\"pretend this mentions offline mode (--offline) in the diagnostic text\");\n",
+            )],
+            &[],
+        );
+        let result = run_harness_buildable(tmp.path());
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "a real compile error must FAIL even when its own diagnostic \
+             text happens to contain the offline-mode reminder wording — a \
+             substring match against the whole stderr blob must never \
+             misclassify this as an inconclusive WARN: {result:?}"
         );
     }
 
