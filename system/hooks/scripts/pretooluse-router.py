@@ -261,6 +261,37 @@ def _expand_placeholders(pattern):
 _HEREDOC_START_RE = re.compile(r"<<(-)?\s*(?:'([^'\n]*)'|\"([^\"\n]*)\"|([A-Za-z_][A-Za-z0-9_]*))")
 
 
+def _is_comment_start(text, i):
+    """True when `text[i]` (a `#`) genuinely opens a shell comment: at the
+    very start of `text`, or immediately after whitespace or a real
+    separator character. Shared by `executable_mask` and
+    `_find_matching_paren` so both scanners agree on what a comment is
+    (F11, review round 9).
+
+    One deliberate exception: a `#` immediately after `{` is NOT a comment
+    start when that `{` is itself preceded by `$` -- that is bash's
+    parameter-length expansion (`${#name}`, `${#@}`, ...), which reads as
+    the length of the named variable/positional-parameter count, not a
+    command-grouping brace followed by a comment. A bare `{` only reserves
+    as the command-grouping keyword when followed by whitespace, so a `{`
+    directly followed by `#` with nothing in between is never that either
+    way; the `${#` case is the one that actually shows up in real shell,
+    so it is the one carved out below. Before this exception, a length
+    expansion inside a `cd $(...)` argument made the shared predicate blank
+    the rest of the line -- including the substitution's own real closing
+    paren and any real command after it (e.g. a later stash invocation) --
+    as if it were commented out, both silently bypassing policy and (via
+    `_find_matching_paren`'s forced
+    scan-to-end-of-text when a substitution's local depth never returns to
+    zero) making thousands of such invocations quadratic again."""
+    if i == 0:
+        return True
+    prev = text[i - 1]
+    if prev == "{" and i >= 2 and text[i - 2] == "$":
+        return False
+    return prev in " \t\n;&|(){}"
+
+
 def _find_matching_paren(text, open_idx):
     """`text[open_idx]` is '('; return `(index_just_past_close, terminated)`
     -- `terminated` is False when the substitution never closes (matching
@@ -303,7 +334,7 @@ def _find_matching_paren(text, open_idx):
     i = open_idx
     while i < n:
         ch = text[i]
-        if ch == "#" and (i == 0 or text[i - 1] in " \t\n;&|(){}"):
+        if ch == "#" and _is_comment_start(text, i):
             j = text.find("\n", i)
             i = j if j != -1 else n
             continue
@@ -557,7 +588,7 @@ def executable_mask(text):
     pending_heredocs = []
     while i < n:
         ch = text[i]
-        if ch == "#" and (i == 0 or text[i - 1] in " \t\n;&|(){}"):
+        if ch == "#" and _is_comment_start(text, i):
             j = text.find("\n", i)
             end = j if j != -1 else n
             for k in range(i, end):

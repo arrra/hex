@@ -570,6 +570,20 @@ EXTRA_FIXTURES = [
             "content": "intro\n.hex-events/policies/foo.yaml mentioned here",
         },
     ),
+    # Review round 9, F11: the comment predicate shared by
+    # `executable_mask`/`_find_matching_paren` treated a `#` right after a
+    # `{` as a comment start, so bash's parameter-length expansion
+    # (`${#name}`) blanked the rest of the line -- including a real stash
+    # invocation on the same line -- as commented-out text. The near miss
+    # keeps the same length-expansion prefix but pairs it with the
+    # already-exempt `stash list` subcommand, so it must still abstain.
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": "echo ${#HOME}; git stash"},
+        near_miss={"command": "echo ${#HOME}; git stash list"},
+    ),
 ]
 
 

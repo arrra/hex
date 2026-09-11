@@ -1318,6 +1318,39 @@ class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertEqual(proc.stdout.strip(), "")
 
+    def test_thousands_of_parameter_length_expansions_in_substitution_stays_under_hang_ceiling(self):
+        """Review round 9, F11: the comment predicate shared by
+        `executable_mask` and `_find_matching_paren` treats a `#` preceded by
+        `{` as a comment start. Bash's parameter-LENGTH expansion opens with
+        a dollar sign, then an open brace, then a hash mark, then a name,
+        then a close brace (giving the length of the named variable) -- and
+        that hash mark sits directly after the open brace, so the predicate
+        misreads it as a comment opener. Inside a `cd $(...)` argument this
+        means `_find_matching_paren` thinks everything from that hash mark
+        onward (including the substitution's own real closing paren) is
+        commented out, so it never finds a local close and keeps scanning
+        character-by-character to the end of the text -- and since
+        `_read_token`/`_precompute_cd_reach_info` calls this once per such
+        `cd`, thousands of them go quadratic again despite the F14/G7/G8
+        fixes. No tighter wall-clock number is asserted here (F18)."""
+        cmd = "cd $(echo ${#HOME}); " * 6000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on thousands of "
+                    "parameter-length-expansion `cd $(...)` invocations -- "
+                    "the shared comment predicate misreads a hash mark right "
+                    "after an open brace as a comment start (F11)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
 
 class TestPipeTailScopedToTestCommandPipeline(RouterTestCase):
     """F20: the masked-test-exit prior must only fire when the
@@ -1502,6 +1535,57 @@ class TestFindMatchingParenIsCommentAware(RouterTestCase):
                 make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"), ledger_dir
             )
             self.assertTrue(proc.stdout.strip(), f"{cmd!r} must still deny (G8 regression guard)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestCommentPredicateExcludesParameterLengthExpansion(RouterTestCase):
+    """Review round 9, F11: the shared comment predicate (used by both
+    `executable_mask` and `_find_matching_paren`) treats a `#` preceded by
+    `{` as a comment start. Bash's parameter-LENGTH expansion (dollar sign,
+    open brace, hash mark, name, close brace -- the length of the named
+    variable) puts a hash mark directly after an open brace with no real
+    comment involved, so the predicate wrongly blanks the rest of the line
+    -- including a real `git stash` that follows on the same line -- as if
+    it were commented out. A real shell comment still needs the hash mark
+    preceded by whitespace/start-of-line/a real separator; `{` immediately
+    before `#` is never that on its own (a bare `{` only reserves as the
+    command-grouping keyword when followed by whitespace, and here it is
+    immediately followed by `#`)."""
+
+    def test_parameter_length_expansion_does_not_mask_a_later_stash(self):
+        cmd = "echo ${#HOME}; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(
+                proc.stdout.strip(),
+                f"{cmd!r} must deny (F11): the hash mark is a length "
+                f"expansion, not a comment opener, so the trailing "
+                f"`git stash` is real executable text",
+            )
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_positional_parameter_count_expansion_does_not_mask_a_later_stash(self):
+        cmd = "[ ${#@} -gt 0 ] && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must deny (F11)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_plain_variable_reference_control_still_denies(self):
+        """Regression guard: the unaffected control case from the ledger."""
+        cmd = "echo $HOME; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must deny")
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
