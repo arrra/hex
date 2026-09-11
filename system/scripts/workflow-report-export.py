@@ -489,6 +489,26 @@ def redact(text: str, warnings: list[str] | None = None, label: str = "record") 
     return out
 
 
+def _source_marker(path: str) -> str:
+    """F10 — stable id for the on-disk source record at `path`, independent
+    of destination: the same file always yields the same marker, while two
+    unrelated records sharing a basename (see ProjectCollisionSafety) don't."""
+    return hashlib.sha256(os.path.abspath(path).encode("utf-8", "surrogateescape")).hexdigest()[:16]
+
+
+_SOURCE_MARKER_RE = re.compile(r"^<!-- workflow-report-export:source=([0-9a-f]+) -->")
+
+
+def _report_source_marker(file_path: str) -> str | None:
+    """The F10 marker embedded in an existing report's first line, if any."""
+    try:
+        with open(file_path, encoding="utf-8", errors="replace") as fh:
+            m = _SOURCE_MARKER_RE.match(fh.readline())
+    except OSError:
+        return None
+    return m.group(1) if m else None
+
+
 def unsafe_component_reason(s: str | None) -> str | None:
     """F4 — why `s` is unsafe as a single path component, or None if safe
     (non-empty, no separators, not "." / "..", not absolute)."""
@@ -584,6 +604,7 @@ def build_report(rec: dict, path: str, warnings: list[str]) -> str:
     phase_line = ", ".join(p.get("title", "?") for p in phases if isinstance(p, dict)) or "(none declared)"
 
     md = [
+        f"<!-- workflow-report-export:source={_source_marker(path)} -->",  # F10
         f"# Workflow report: {name} ({run_id})",
         "",
         f"- **Status:** {rec.get('status')}",
@@ -824,6 +845,21 @@ def main() -> int:
                     skipped += 1
                 else:
                     wrote += 1
+                    # F10 — a same-basename, same-marker report elsewhere
+                    # under projects_root is a stale copy of THIS record
+                    # left at a PRIOR destination by a remap; basename alone
+                    # is not enough (see ProjectCollisionSafety).
+                    marker = _source_marker(path)
+                    basename = os.path.basename(out)
+                    for stale in glob.glob(os.path.join(projects_root, "*", "workflow-reports", basename)):
+                        same = os.path.abspath(stale) == os.path.abspath(out)
+                        if same or not _is_contained(stale, projects_root) or _report_source_marker(stale) != marker:
+                            continue
+                        try:
+                            os.unlink(stale)
+                            warnings.append(f"{run_id}: removed stale report {redact(stale)} (remapped)")
+                        except OSError as e:
+                            warnings.append(f"{run_id}: stale report cleanup failed ({redact(str(e))})")
             except OSError as e:
                 failed += 1
                 warnings.append(f"{run_id}: write failed ({redact(str(e))}) -> {redact(out)}")
