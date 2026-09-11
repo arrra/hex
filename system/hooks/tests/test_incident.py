@@ -20,6 +20,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -207,6 +208,101 @@ class TestLedgerDirCreation(IncidentHookTestCase):
         self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
         self.assertTrue(Path(missing_dir).is_dir())
         self.assertEqual(len(self._read_lines(missing_dir)), 1)
+
+
+class TestF7RedactionAndLedgerPrivacy(IncidentHookTestCase):
+    """F7: this hook copies raw `error` and `args_preview` text straight
+    into the ledger, and creates the ledger dir/file with whatever the
+    process umask leaves (0755/0644 under a common 022 umask). A shared
+    redaction policy must scrub every persisted text field, and the
+    ledger dir/file must be private (0700/0600) regardless of umask."""
+
+    SECRET = "sk-ant-api03-REDACTME1234567890ABCDEFGHIJK"
+
+    def test_secrets_in_error_and_args_are_redacted(self):
+        proc = self._run(
+            _fixture(
+                tool_input={"command": f"curl -H 'Authorization: Bearer {self.SECRET}'"},
+                error=(
+                    "failed: password=hunter2secretvalue and "
+                    "token=ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+                ),
+            )
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn(self.SECRET, record["args_preview"])
+        self.assertNotIn("hunter2secretvalue", record["error"])
+        self.assertNotIn(
+            "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789", record["error"]
+        )
+
+    def test_ledger_dir_and_file_are_private_under_permissive_umask(self):
+        old_umask = os.umask(0o022)
+        try:
+            parent = tempfile.mkdtemp(prefix="hex-ledger-f7-")
+            self.addCleanup(shutil.rmtree, parent, ignore_errors=True)
+            fresh_dir = str(Path(parent) / "fresh-ledger-subdir")
+
+            proc = self._run(_fixture(), ledger_dir=fresh_dir)
+            self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+
+            incidents_path = Path(fresh_dir) / "incidents.jsonl"
+            self.assertTrue(incidents_path.exists())
+            dir_mode = stat.S_IMODE(Path(fresh_dir).stat().st_mode)
+            file_mode = stat.S_IMODE(incidents_path.stat().st_mode)
+            self.assertEqual(
+                oct(dir_mode), oct(0o700),
+                f"ledger dir must be 0700, got {oct(dir_mode)}",
+            )
+            self.assertEqual(
+                oct(file_mode), oct(0o600),
+                f"ledger file must be 0600, got {oct(file_mode)}",
+            )
+        finally:
+            os.umask(old_umask)
+
+
+class TestF15ProductionIsolationFlags(IncidentHookTestCase):
+    """F15: this test suite's `_run` helper invokes the hook as plain
+    `[sys.executable, str(SCRIPT)]`, without production's `-I -S` isolated
+    startup (required-hooks.json / router unittest helper both use it).
+    Proven behaviorally: plant a sitecustomize.py that only runs when site
+    processing happens (no -S) and is only visible via PYTHONPATH without
+    -I."""
+
+    def test_subprocess_helper_isolates_site_and_pythonpath(self):
+        sitedir = tempfile.mkdtemp(prefix="hex-f15-sitecustomize-")
+        self.addCleanup(shutil.rmtree, sitedir, ignore_errors=True)
+        marker = Path(self.ledger_dir) / "f15-marker"
+        Path(sitedir, "sitecustomize.py").write_text(
+            "import os\n"
+            "m = os.environ.get('F15_MARKER')\n"
+            "if m:\n    open(m, 'w').close()\n"
+        )
+
+        old_pythonpath = os.environ.get("PYTHONPATH")
+        old_marker_env = os.environ.get("F15_MARKER")
+        os.environ["PYTHONPATH"] = sitedir
+        os.environ["F15_MARKER"] = str(marker)
+        try:
+            self._run(_fixture())
+        finally:
+            if old_pythonpath is None:
+                os.environ.pop("PYTHONPATH", None)
+            else:
+                os.environ["PYTHONPATH"] = old_pythonpath
+            if old_marker_env is None:
+                os.environ.pop("F15_MARKER", None)
+            else:
+                os.environ["F15_MARKER"] = old_marker_env
+
+        self.assertFalse(
+            marker.exists(),
+            "F15: the test's own subprocess helper must invoke the hook "
+            "with python3 -I -S (production parity) -- sitecustomize.py "
+            "ran, proving site processing/PYTHONPATH were not isolated",
+        )
 
 
 if __name__ == "__main__":

@@ -34,6 +34,8 @@ import importlib.util
 import json
 import os
 import re
+import shutil
+import stat
 import statistics
 import subprocess
 import sys
@@ -554,6 +556,16 @@ class TestCombinedOutcomeSemantics(RouterTestCase):
             out = json.loads(stdout)
             hso = out["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny")
+            # F17: pin the EXACT winning message, not just the decision type --
+            # returning the wrong rule's text (or a concatenation) would still
+            # satisfy a bare `== "deny"` check.
+            self.assertEqual(
+                hso.get("permissionDecisionReason"),
+                "Standing Order 7: no stash save/push in a shared checkout - it "
+                "sweeps sibling agents' uncommitted work (2026-08-19/20, 23 files "
+                "lost). Work in a git worktree. Recovery ops (pop/apply/drop/list/"
+                "show) are allowed.",
+            )
             self.assertNotIn("additionalContext", hso)
 
             lines = read_ledger(ledger_dir)
@@ -582,7 +594,13 @@ class TestCombinedOutcomeSemantics(RouterTestCase):
             hso = out["hookSpecificOutput"]
             self.assertNotIn(hso.get("permissionDecision"), ("deny", "ask"))
             self.assertIn("additionalContext", hso)
-            self.assertIsInstance(hso["additionalContext"], str)
+            # F17: pin the EXACT winning message text (first prior in file
+            # order), not just that some string is present.
+            self.assertEqual(
+                hso["additionalContext"],
+                "Never merge while checks are pending; run `gh pr checks <n> "
+                "--watch` first.",
+            )
 
             lines = read_ledger(ledger_dir)
             rule_ids = sorted(l["rule_id"] for l in lines)
@@ -594,6 +612,40 @@ class TestCombinedOutcomeSemantics(RouterTestCase):
             self.assertEqual(
                 {l["rule_id"]: l["decision"] for l in lines},
                 {"gh-pr-merge-ci-green": "prior", "pipe-tail-masks-exit": "prior"},
+            )
+
+    def test_ask_beats_prior_exact_message_and_complete_ledger(self):
+        """F17: the missing ask-vs-prior precedence pair. git-push-force
+        (ask, fires on the leading `+` refspec) and gh-pr-merge-ci-green
+        (prior) both match; ask must win with its exact message, and both
+        rules must still each get a ledger line."""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            payload = make_payload(
+                "Bash",
+                {"command": "git push origin +HEAD:main; gh pr merge 42 --squash"},
+            )
+            proc = run_router_payload(payload, ledger_dir)
+
+            self.assertEqual(proc.returncode, 0)
+            stdout = proc.stdout.strip()
+            self.assertTrue(stdout)
+            out = json.loads(stdout)
+            hso = out["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask")
+            self.assertEqual(
+                hso.get("permissionDecisionReason"),
+                "Force-push is ASK-FIRST (operator policy). NEVER on a "
+                "stacked-PR branch (false-MERGED class) - use gh stack sync / "
+                "gh stack push. Personal single branch after a rebase: "
+                "confirm. (F5: a leading `+` on a refspec forces the update "
+                "the same as --force.)",
+            )
+            self.assertNotIn("additionalContext", hso)
+
+            lines = read_ledger(ledger_dir)
+            self.assertEqual(
+                {l["rule_id"]: l["decision"] for l in lines},
+                {"gh-pr-merge-ci-green": "prior", "git-push-force": "ask"},
             )
 
 
@@ -1669,6 +1721,274 @@ class TestMultilinePollingLoopScope(RouterTestCase):
             self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G5)")
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+
+class TestF7RedactionAndLedgerPrivacy(RouterTestCase):
+    """F7: the router persists raw `match`/`preview` text into the ledger,
+    and creates the ledger dir/file with whatever the process umask leaves
+    (0755/0644 under a common 022 umask) -- both a secret-leak and a
+    world/group-readable-file class of bug. A shared redaction policy must
+    scrub every persisted text field, and the ledger dir/file must be
+    private (0700/0600) regardless of umask."""
+
+    SECRET = "sk-ant-api03-REDACTME1234567890ABCDEFGHIJK"
+
+    def test_secret_in_command_is_redacted_from_match_and_preview(self):
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    f"curl -H 'Authorization: Bearer {self.SECRET}' https://x; "
+                    "git stash"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn(self.SECRET, entry.get("match", ""))
+                self.assertNotIn(self.SECRET, entry.get("preview", ""))
+
+    def test_ledger_dir_and_file_are_private_under_permissive_umask(self):
+        old_umask = os.umask(0o022)
+        try:
+            with tempfile.TemporaryDirectory() as base:
+                ledger_dir = Path(base) / "fresh-ledger-subdir"
+                payload = make_payload("Bash", {"command": "git stash"})
+                proc = run_router_payload(payload, ledger_dir)
+                self.assertEqual(proc.returncode, 0)
+
+                ledger_file = ledger_dir / LEDGER_FILENAME
+                self.assertTrue(ledger_file.exists())
+                dir_mode = stat.S_IMODE(ledger_dir.stat().st_mode)
+                file_mode = stat.S_IMODE(ledger_file.stat().st_mode)
+                self.assertEqual(
+                    oct(dir_mode), oct(0o700),
+                    f"ledger dir must be 0700, got {oct(dir_mode)}",
+                )
+                self.assertEqual(
+                    oct(file_mode), oct(0o600),
+                    f"ledger file must be 0600, got {oct(file_mode)}",
+                )
+        finally:
+            os.umask(old_umask)
+
+
+class TestF8ManifestQuoting(RouterTestCase):
+    """F8: required-hooks.json's two Python hook commands interpolate
+    $HEX_DIR unquoted (`python3 -I -S $HEX_DIR/.hex/hooks/scripts/...py`).
+    The hook runner executes these as a real shell command line (bash -c),
+    so a HEX_DIR containing a space is word-split: Python receives a
+    truncated, nonexistent script path as argv[0] and exits non-zero."""
+
+    MANIFEST = REPO_ROOT / "system" / "hooks" / "required-hooks.json"
+
+    def _hook_commands(self):
+        manifest = json.loads(self.MANIFEST.read_text())
+        router_cmd = next(
+            e["command"] for e in manifest["PreToolUse"]
+            if "pretooluse-router.py" in e.get("command", "")
+        )
+        incident_cmd = manifest["PostToolUseFailure"][0]["command"]
+        return router_cmd, incident_cmd
+
+    def _run_from_spaced_hex_dir(self, command, stdin_payload):
+        with tempfile.TemporaryDirectory() as base:
+            spaced = Path(base) / "hex workspace with spaces"
+            scripts_dir = spaced / ".hex" / "hooks" / "scripts"
+            scripts_dir.mkdir(parents=True)
+            shutil.copy(ROUTER_SCRIPT, scripts_dir / "pretooluse-router.py")
+            shutil.copy(
+                REPO_ROOT / "system" / "hooks" / "router-rules.json",
+                spaced / ".hex" / "hooks" / "router-rules.json",
+            )
+            shutil.copy(
+                REPO_ROOT / "system" / "hooks" / "scripts" / "posttoolusefailure-incident.py",
+                scripts_dir / "posttoolusefailure-incident.py",
+            )
+            with tempfile.TemporaryDirectory() as ledger_dir:
+                env = dict(os.environ)
+                env["HEX_DIR"] = str(spaced)
+                env["HEX_LEDGER_DIR"] = ledger_dir
+                return subprocess.run(
+                    ["bash", "-c", command],
+                    input=json.dumps(stdin_payload),
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=10,
+                )
+
+    def test_router_hook_runs_from_a_path_containing_a_space(self):
+        router_cmd, _ = self._hook_commands()
+        proc = self._run_from_spaced_hex_dir(
+            router_cmd, make_payload("Bash", {"command": "git stash"})
+        )
+        self.assertEqual(
+            proc.returncode, 0,
+            f"router hook command must run from a spaced HEX_DIR; "
+            f"stderr={proc.stderr!r}",
+        )
+        self.assertIn("permissionDecision", proc.stdout)
+
+    def test_incident_hook_runs_from_a_path_containing_a_space(self):
+        _, incident_cmd = self._hook_commands()
+        payload = {
+            "session_id": "s1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/repo",
+            "permission_mode": "default",
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": "Bash",
+            "tool_input": {"command": "npm test"},
+            "tool_use_id": "t1",
+            "error": "boom",
+            "is_interrupt": False,
+            "duration_ms": 1,
+        }
+        proc = self._run_from_spaced_hex_dir(incident_cmd, payload)
+        self.assertEqual(
+            proc.returncode, 0,
+            f"incident hook command must run from a spaced HEX_DIR; "
+            f"stderr={proc.stderr!r}",
+        )
+
+
+class TestF12PathRuleAnchoring(RouterTestCase):
+    """F12: rules are compiled with re.MULTILINE, so `^[^\\n]*...` matches
+    every line of the canonical text, not just the first (the actual file
+    path). A pattern that only appears inside file CONTENT must abstain --
+    only the real path, on the canonical first line, may fire."""
+
+    def test_vitest_pattern_in_content_only_abstains(self):
+        payload = make_payload(
+            "Write",
+            {"file_path": "notes.md", "content": "intro line\nfoo.test.ts\nspawnSync(cmd)"},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                "a .test.ts/spawnSync pair inside file CONTENT (not the "
+                "canonical file_path) must not fire vitest-spawnsync",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_hex_events_policy_pathname_in_content_only_abstains(self):
+        payload = make_payload(
+            "Write",
+            {
+                "file_path": "notes.md",
+                "content": "intro\n.hex-events/policies/foo.yaml mentioned here",
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                "a policy pathname mentioned inside file CONTENT (not the "
+                "canonical file_path) must not fire hex-events-flat-policy",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestF18LatencyGateIsOptIn(RouterTestCase):
+    """F18: the tight per-invocation wall-clock ceiling in
+    TestLatencySanityCeiling currently runs unconditionally on every
+    correctness pass (a bare `assertLess(d, 1.0, ...)` over 20 runs) and
+    is load-sensitive on a shared worker. It must move behind an opt-in
+    env gate (e.g. ROUTER_BENCH=1); the 5s subprocess hang timeout is a
+    separate, structural guarantee and stays mandatory."""
+
+    def test_tight_latency_assertion_is_env_gated_in_source(self):
+        text = Path(__file__).read_text()
+        start = text.index("class TestLatencySanityCeiling")
+        end = text.index("\nclass ", start + 1)
+        body = text[start:end]
+        self.assertIn(
+            "ROUTER_BENCH", body,
+            "F18: the per-invocation latency ceiling must be gated behind "
+            "an opt-in ROUTER_BENCH env var, not asserted unconditionally "
+            "in every correctness run",
+        )
+
+
+class TestF21NotebookEditCanonicalization(RouterTestCase):
+    """F21: NotebookEdit is listed in TEXT_TOOLS, but canonical_text()'s
+    TEXT_TOOLS branch only ever reads file_path/new_string/content/edits.
+    NotebookEdit's actual schema is notebook_path + new_source -- neither
+    is read, so a real NotebookEdit payload canonicalizes to an empty
+    string and no rule can ever inspect it."""
+
+    def _load_router_module(self):
+        spec = importlib.util.spec_from_file_location(
+            "pretooluse_router_under_test_f21", ROUTER_SCRIPT
+        )
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_notebook_path_and_new_source_both_reach_canonical_text(self):
+        mod = self._load_router_module()
+        # A real PostToolUse/PreToolUse NotebookEdit payload shape.
+        tool_input = {
+            "notebook_path": "/repo/analysis.ipynb",
+            "new_source": "result = spawnSync('ls', [])",
+            "cell_type": "code",
+            "edit_mode": "replace",
+        }
+        text = mod.canonical_text("NotebookEdit", tool_input)
+        self.assertIn("/repo/analysis.ipynb", text)
+        self.assertIn("spawnSync('ls', [])", text)
+
+    def test_new_source_alone_reaches_canonical_text_when_path_absent(self):
+        mod = self._load_router_module()
+        text = mod.canonical_text("NotebookEdit", {"new_source": "spawnSync(cmd)"})
+        self.assertIn("spawnSync(cmd)", text)
+
+
+class TestF22ProbeMktempFailure(RouterTestCase):
+    """F22: router-probe.sh only has `set -u`, never checking mktemp's own
+    exit status (`LEDGER_DIR="$(mktemp -d)"`). If mktemp fails, LEDGER_DIR
+    is empty (not unset, so `set -u` never trips); Python's `Path("")`
+    resolves to the current directory, so a failed run can silently drop
+    router-fires.jsonl into cwd while still reporting PASS/FAIL lines."""
+
+    PROBE = REPO_ROOT / "system" / "hooks" / "scripts" / "router-probe.sh"
+
+    def test_mktemp_failure_aborts_instead_of_writing_into_cwd(self):
+        with tempfile.TemporaryDirectory() as fake_bin, tempfile.TemporaryDirectory() as cwd:
+            mktemp_stub = Path(fake_bin) / "mktemp"
+            mktemp_stub.write_text(
+                "#!/bin/sh\necho 'mktemp: simulated failure' >&2\nexit 1\n"
+            )
+            mktemp_stub.chmod(0o755)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+
+            proc = subprocess.run(
+                ["bash", str(self.PROBE)],
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=cwd,
+                timeout=60,
+            )
+
+            self.assertNotEqual(
+                proc.returncode, 0,
+                "the probe must abort when mktemp -d fails, not report a "
+                f"clean run; stdout={proc.stdout[-500:]!r}",
+            )
+            self.assertFalse(
+                (Path(cwd) / LEDGER_FILENAME).exists(),
+                "a failed mktemp must never leave a ledger file behind in cwd",
+            )
 
 
 if __name__ == "__main__":

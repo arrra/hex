@@ -539,6 +539,37 @@ EXTRA_FIXTURES = [
             )
         },
     ),
+    # F12: rules are compiled with re.MULTILINE, so `^[^\n]*...` matches
+    # every line, not just the canonical first line (the actual file
+    # path). A `.test.ts`/`spawnSync` pair (or a policy pathname) that
+    # only appears inside file CONTENT must not fire -- only the real
+    # path, on the canonical first line, may.
+    dict(
+        id="vitest-spawnsync",
+        decision="prior",
+        tool_name="Write",
+        positive={
+            "file_path": "src/components/foo.test.ts",
+            "content": "const r = spawnSync('ls', []);",
+        },
+        near_miss={
+            "file_path": "notes.md",
+            "content": "intro line\nfoo.test.ts\nspawnSync(cmd)",
+        },
+    ),
+    dict(
+        id="hex-events-flat-policy",
+        decision="prior",
+        tool_name="Write",
+        positive={
+            "file_path": os.path.join(HOME_DIR, ".hex-events/policies/my-policy.yaml"),
+            "content": "trigger:\n  event: foo\naction:\n  type: shell\n  command: echo hi\n",
+        },
+        near_miss={
+            "file_path": "notes.md",
+            "content": "intro\n.hex-events/policies/foo.yaml mentioned here",
+        },
+    ),
 ]
 
 
@@ -647,6 +678,68 @@ print(
 )
 if not count_ok:
     failures += 1
+
+# F15 RED regression: production (required-hooks.json) invokes the router
+# as `python3 -I -S ...`. This probe is the acceptance oracle for BOTH the
+# Python reference and, eventually, the Rust port, so it must exercise the
+# same isolated startup -- not a plainer `python3 script.py` that pulls in
+# site-packages/PYTHONPATH the real hook never sees. Proven behaviorally:
+# plant a sitecustomize.py that only runs when site processing happens (no
+# -S) and is only visible via PYTHONPATH without -I. Run last (non-fatal,
+# tallied like every other check) so this self-check's own red state never
+# preempts the ordinary fixture loop above.
+if router_impl == "python":
+    _f15_sitedir = ledger_dir / "f15-sitecustomize"
+    _f15_sitedir.mkdir(exist_ok=True)
+    _f15_marker = ledger_dir / "f15-marker"
+    (_f15_sitedir / "sitecustomize.py").write_text(
+        "import os\n"
+        "m = os.environ.get('F15_MARKER')\n"
+        "if m:\n    open(m, 'w').close()\n"
+    )
+    _f15_env = dict(os.environ)
+    _f15_env["HEX_LEDGER_DIR"] = str(ledger_dir)
+    _f15_env["PYTHONPATH"] = str(_f15_sitedir)
+    _f15_env["F15_MARKER"] = str(_f15_marker)
+    _f15_cmd = [sys.executable, router]  # mirrors run()'s python-impl cmd construction
+    subprocess.run(
+        _f15_cmd,
+        input=json.dumps(make_payload("Bash", {"command": "echo hi"})),
+        capture_output=True,
+        text=True,
+        env=_f15_env,
+        timeout=5,
+    )
+    f15_ok = not _f15_marker.exists()
+    print(f"f15-production-isolation-flags expected=isolated got="
+          f"{'isolated' if f15_ok else 'sitecustomize-ran'} {'PASS' if f15_ok else 'FAIL'}")
+    if not f15_ok:
+        failures += 1
+
+# F16 RED regression: classify() must not report an internal router
+# failure (empty stdout, exit 0, but a nonempty stderr -- the exact shape
+# pretooluse-router.py's fail-open handler produces) as a clean "abstain".
+# Without this, a payload-specific internal bug could pass this probe as
+# an ordinary near miss. Run last (non-fatal) for the same reason as F15.
+if router_impl == "python":
+    _f16_env = dict(os.environ)
+    _f16_env["HEX_LEDGER_DIR"] = str(ledger_dir)
+    _f16_proc = subprocess.run(
+        [sys.executable, router],
+        input="{not valid json",
+        capture_output=True,
+        text=True,
+        env=_f16_env,
+        timeout=5,
+    )
+    _f16_result = classify(_f16_proc) if (
+        _f16_proc.returncode == 0 and _f16_proc.stdout.strip() == "" and _f16_proc.stderr.strip()
+    ) else "error:unexpected-fail-open-shape"
+    f16_ok = _f16_result != "abstain"
+    print(f"f16-classify-distinguishes-internal-error expected=not-abstain "
+          f"got={_f16_result} {'PASS' if f16_ok else 'FAIL'}")
+    if not f16_ok:
+        failures += 1
 
 sys.exit(1 if failures else 0)
 PYEOF
