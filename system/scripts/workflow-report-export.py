@@ -670,7 +670,11 @@ def main() -> int:
                 skipped += 1
                 continue
             if a.dry_run:
-                print(f"would write {out}")
+                # G2 (spec review round 2) — `out` embeds --hex-dir verbatim,
+                # which is attacker/user-controlled text just like any other
+                # printed path; route it through redact() like every other
+                # diagnostic instead of printing it raw.
+                print(f"would write {redact(out)}")
                 wrote += 1
                 continue
 

@@ -1139,5 +1139,29 @@ class UnderscoreHyphenPrefixedCredentialBoundary(unittest.TestCase):
         self.assertEqual(m.redact(text), text)
 
 
+class DryRunDestinationRedaction(unittest.TestCase):
+    """G2 — --dry-run printed the complete destination path (which embeds
+    --hex-dir) without ever routing it through redact()."""
+
+    def test_dry_run_redacts_a_credential_shaped_hex_dir_component(self):
+        with tempfile.TemporaryDirectory() as td:
+            secret = "sk-ant-" + "D" * 30
+            hex_dir = os.path.join(td, f"{secret}-hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            rec = {
+                "runId": "wf_g2dry1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "/tmp/acme-repo/src/main.py"},
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects, dry_run=True)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("would write", out)
+            self.assertNotIn(secret, out, "credential-shaped --hex-dir component leaked into --dry-run preview")
+
+
 if __name__ == "__main__":
     unittest.main()
