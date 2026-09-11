@@ -3322,4 +3322,257 @@ mod tests {
             result
         );
     }
+
+    // ---- tests for task Tygqwp59m (arrra/hex PR #7 round 2: replace the
+    // source scanner with a real build) ----
+    //
+    // Operator premise correction (2026-09-11, chief-of-staff): `git archive`
+    // runs the SAME convert-to-working-tree path as `git checkout` / `git
+    // worktree add` — a locally configured smudge filter defeats it exactly
+    // like it defeats the worktree-based scanner today. The export mechanism
+    // MUST instead materialize HEAD from raw git objects — `git ls-tree -r`
+    // (or `-z` + `git cat-file --batch`) followed by `git cat-file blob
+    // <sha>` per entry — which never invokes any filter driver, hook, or
+    // credential helper. These four tests pin that contract directly against
+    // `export_committed_head_for_tests`, a test-only entry point into the new
+    // export mechanism this task adds to `harness_buildable.rs`. The
+    // mechanism does not exist yet, so this module does not compile — that
+    // is the RED state; the next phase implements `export_committed_head`
+    // (production) and its `_for_tests` wrapper.
+
+    /// A dep-free fixture identical in shape to `init_repo_with_lib_rs_and_files`
+    /// but returned alongside its harness dir path.
+    fn init_repo_for_export_tests() -> (tempfile::TempDir, std::path::PathBuf) {
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(
+            harness.join("Cargo.toml"),
+            "[package]\nname = \"fixture-harness\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("Cargo.lock"), FIXTURE_LOCKFILE).unwrap();
+        let harness_path = harness.clone();
+        (tmp, harness_path)
+    }
+
+    #[test]
+    fn test_export_committed_head_uses_committed_bytes_and_ignores_smudge_side_effects() {
+        // (a) A smudge filter rewrites the committed content of `src/lib.rs`
+        // AND performs a side effect (writes an extra file) as part of the
+        // same filter invocation — exactly the shape of the operator's probe
+        // (`filter.evil.smudge = sed COMMITTED->SMUDGED plus touch of a
+        // side-effect file`). The export must equal the COMMITTED blob byte
+        // for byte, and the side-effect file must never appear anywhere
+        // under the export directory, because the export never runs any
+        // filter driver at all.
+        let (tmp, harness) = init_repo_for_export_tests();
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-export-probe.smudge",
+                "sed 's/COMMITTED/SMUDGED/'; touch .hex/harness/src/SIDE_EFFECT.marker",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &["config", "filter.hex-doctor-export-probe.clean", "cat"],
+        );
+        run_git(
+            tmp.path(),
+            &["config", "filter.hex-doctor-export-probe.required", "true"],
+        );
+        std::fs::write(
+            harness.join(".gitattributes"),
+            "src/lib.rs filter=hex-doctor-export-probe\n",
+        )
+        .unwrap();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const MARK: &str = \"COMMITTED\";\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(tmp.path(), &["commit", "-q", "-m", "add filtered lib.rs"]);
+
+        let export =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path())
+                .expect("export of a clean, buildable HEAD must succeed");
+
+        let exported_lib_rs = export.path().join(".hex/harness/src/lib.rs");
+        let bytes = std::fs::read_to_string(&exported_lib_rs)
+            .expect("exported lib.rs must exist and be readable");
+        assert_eq!(
+            bytes, "pub const MARK: &str = \"COMMITTED\";\n",
+            "the export must equal the COMMITTED git blob, never a locally \
+             configured smudge filter's rewritten content — got {bytes:?}"
+        );
+
+        let side_effect = export.path().join(".hex/harness/src/SIDE_EFFECT.marker");
+        assert!(
+            !side_effect.exists(),
+            "the export must never run any filter driver (smudge/clean) at \
+             all — a smudge filter's side-effect file must not appear \
+             anywhere under the export directory, found {}",
+            side_effect.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_preserves_committed_symlinks() {
+        // (b) A committed symlink (git mode 120000) must be exported AS a
+        // symlink, with its target equal to the committed blob content
+        // (git stores a symlink's target path as the blob bytes) — never
+        // dereferenced or rewritten.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str!(\"data.txt\");\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("src/real_data.txt"), "hello via symlink").unwrap();
+        std::os::unix::fs::symlink("real_data.txt", harness.join("src/data.txt")).unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(tmp.path(), &["commit", "-q", "-m", "add committed symlink"]);
+
+        let export =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path())
+                .expect("export of a clean, buildable HEAD must succeed");
+
+        let exported_link = export.path().join(".hex/harness/src/data.txt");
+        let meta = std::fs::symlink_metadata(&exported_link)
+            .expect("exported symlink entry must exist");
+        assert!(
+            meta.file_type().is_symlink(),
+            "a committed symlink (git mode 120000) must be exported AS a \
+             symlink, not dereferenced into a regular file, got {:?}",
+            meta.file_type()
+        );
+        let target = std::fs::read_link(&exported_link).unwrap();
+        assert_eq!(
+            target,
+            std::path::PathBuf::from("real_data.txt"),
+            "the exported symlink's target must equal the committed blob's \
+             content exactly, got {}",
+            target.display()
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_never_runs_filters_so_fabricated_modules_still_fail() {
+        // (c) `src/lib.rs` declares `mod missing_dep;` whose file is
+        // genuinely untracked. A locally configured filter would, on an
+        // ORDINARY checkout, fabricate `missing_dep.rs` as a side effect
+        // (mirroring the round-2 "smudge filter fabricates a symlink alias"
+        // finding). The export must never invoke that filter at all, so the
+        // fabricated file must never appear in the export, and an offline
+        // `cargo check` against the export must fail.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(harness.join("src/lib.rs"), "mod missing_dep;\n").unwrap();
+        std::fs::write(harness.join("src/real.rs"), "pub const REAL: i32 = 1;\n").unwrap();
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-export-fabricate.smudge",
+                "ln -sfn real.rs .hex/harness/src/missing_dep.rs; cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-export-fabricate.clean",
+                "cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-export-fabricate.required",
+                "true",
+            ],
+        );
+        std::fs::write(harness.join("zzz_trigger.txt"), "trigger").unwrap();
+        std::fs::write(
+            harness.join(".gitattributes"),
+            "zzz_trigger.txt filter=hex-doctor-export-fabricate\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "mod missing_dep with fabrication trap",
+            ],
+        );
+
+        let export =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path())
+                .expect("export itself must succeed even though the crate won't build");
+
+        let fabricated = export.path().join(".hex/harness/src/missing_dep.rs");
+        assert!(
+            !fabricated.exists(),
+            "the export must never invoke any filter driver — a \
+             checkout-time fabrication trap must not appear anywhere in \
+             the exported tree, found {}",
+            fabricated.display()
+        );
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new("cargo")
+            .args(["check", "-p", "fixture-harness", "--offline", "--locked"])
+            .current_dir(export.path().join(".hex/harness"))
+            .env("CARGO_TARGET_DIR", target_dir.path())
+            .env("CARGO_NET_OFFLINE", "true")
+            .output()
+            .expect("cargo check spawns");
+        assert!(
+            !output.status.success(),
+            "`mod missing_dep;` with no committed missing_dep.rs must fail \
+             an offline `cargo check` against the exported tree even though \
+             a checkout-time filter would have fabricated it, stdout: {} \
+             stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
+
+    #[test]
+    fn test_export_committed_head_then_offline_cargo_check_passes_for_a_buildable_tree() {
+        // (d) The passing case: a committed, buildable tree exported via
+        // `export_committed_head_for_tests` passes `cargo check -p
+        // fixture-harness --offline --locked` run directly in the export
+        // directory.
+        let tmp = init_repo_committed_include();
+        let export =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path())
+                .expect("export of a clean, buildable HEAD must succeed");
+
+        let target_dir = tempfile::tempdir().unwrap();
+        let output = std::process::Command::new("cargo")
+            .args(["check", "-p", "fixture-harness", "--offline", "--locked"])
+            .current_dir(export.path().join(".hex/harness"))
+            .env("CARGO_TARGET_DIR", target_dir.path())
+            .env("CARGO_NET_OFFLINE", "true")
+            .output()
+            .expect("cargo check spawns");
+        assert!(
+            output.status.success(),
+            "a committed, buildable tree exported via git ls-tree + \
+             cat-file must pass `cargo check -p fixture-harness --offline \
+             --locked`, stdout: {} stderr: {}",
+            String::from_utf8_lossy(&output.stdout),
+            String::from_utf8_lossy(&output.stderr)
+        );
+    }
 }
