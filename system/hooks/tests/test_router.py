@@ -1223,6 +1223,34 @@ class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertEqual(proc.stdout.strip(), "")
 
+    def test_thousands_of_leading_cds_stays_under_hang_ceiling(self):
+        """F14 (redo 2): the previous fix (19821fc) precomputes each `cd`'s
+        own reach data once, but `_precompute_cd_reach_info` still walks
+        forward from `token_end` to the end of `paren_depths` looking for
+        where the enclosing depth first drops, for EVERY `cd` it finds. At
+        depth 0 with no real parens anywhere, that walk never terminates
+        early, so thousands of `cd`s (not just thousands of candidates
+        after one `cd`) are themselves quadratic. Empirically: 12000
+        repeats already exceeds a 5s timeout against the 19821fc
+        implementation. No tighter wall-clock number is asserted here
+        (that would reintroduce F18)."""
+        cmd = "cd /shared; " * 12000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on thousands of leading "
+                    "`cd`s — quadratic per-cd forward scan in "
+                    "_precompute_cd_reach_info (F14 redo 2)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
 
 class TestPipeTailScopedToTestCommandPipeline(RouterTestCase):
     """F20: the masked-test-exit prior must only fire when the

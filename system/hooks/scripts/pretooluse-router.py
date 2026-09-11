@@ -748,10 +748,31 @@ def _paren_depths(scan_text):
 _OR_GUARD_RE = re.compile(r"[ \t]*\|\|")
 
 
+def _next_lower_paren_depth(paren_depths):
+    """`next_lower[j]` = the smallest `k > j` with `paren_depths[k] <
+    paren_depths[j]`, or `None` if no such `k` exists ("next smaller
+    element", computed once per `evaluate()` call in a single reverse pass
+    with a monotonic stack -- O(n) total, each index pushed/popped at most
+    once). Lets `_precompute_cd_reach_info` (F14 redo 2) answer "where does
+    the enclosing depth at this `cd`'s token first drop below its own
+    depth" in O(1) instead of a per-`cd` forward walk to the end of the
+    text (see that function's docstring for why the walk was quadratic)."""
+    n = len(paren_depths)
+    next_lower = [None] * n
+    stack = []
+    for j in range(n - 1, -1, -1):
+        d = paren_depths[j]
+        while stack and paren_depths[stack[-1]] >= d:
+            stack.pop()
+        next_lower[j] = stack[-1] if stack else None
+        stack.append(j)
+    return next_lower
+
+
 def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd):
-    """F14 (review round redo): `_effective_checkout` used to re-run
-    `_CD_LOCATE_RE.finditer(scan_text[:match_start])` (a full rescan of
-    everything before the candidate) AND re-slice/re-`min()`
+    """F14 (review round redo, then redo 2): `_effective_checkout` used to
+    re-run `_CD_LOCATE_RE.finditer(scan_text[:match_start])` (a full rescan
+    of everything before the candidate) AND re-slice/re-`min()`
     `paren_depths[token_end:target_pos+1]` (the old `_cd_reaches` helper) on
     EVERY candidate occurrence of a rule with `unless_cwd` -- both
     proportional to `match_start`/`target_pos`, so a leading `cd` followed by
@@ -767,14 +788,28 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd):
     drops below the depth at the `cd`'s own token start are computed ONCE
     per `cd` here (called once per `evaluate()` call, like
     `sep_positions`/`paren_depths`) instead of once per (`cd`, candidate)
-    pair. `_effective_checkout` then binary-searches this list and does an
-    O(1) reach check per candidate: a `cd` reaches `target_pos` iff it isn't
+    pair.
+
+    The first fix (19821fc) still found `break_pos` with a forward walk
+    from `token_end` to the end of `paren_depths` for EVERY `cd` -- fine for
+    one `cd` followed by many candidates, but quadratic again for thousands
+    of `cd`s themselves (at depth 0 with no real parens, the walk never
+    terminates early). `_next_lower_paren_depth` turns that per-`cd` walk
+    into an O(1) lookup: when the `cd`'s own token doesn't change the paren
+    depth (the common case -- `cd` and its argument contain no unmasked
+    parens, so `paren_depths[token_end] == enclosing`), `break_pos` is
+    exactly `next_lower[token_end]`. Only in the rare case the token itself
+    changed the depth does this fall back to the linear walk.
+
+    `_effective_checkout` then binary-searches this list and does an O(1)
+    reach check per candidate: a `cd` reaches `target_pos` iff it isn't
     guarded and (`break_pos` is `None` or `break_pos > target_pos`).
     Returns `(starts, infos)` -- `starts` (the sorted `cd` positions, for
     `_bisect_left`) kept separate from `infos` so callers never rebuild a
     per-candidate list just to search it."""
     starts = []
     infos = []
+    next_lower = None
     for cd_match in _CD_LOCATE_RE.finditer(scan_text):
         token_start = cd_match.end()
         value, token_end = _read_token(text, token_start)
@@ -783,10 +818,15 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd):
         enclosing = paren_depths[token_start]
         break_pos = None
         if not guarded:
-            for j in range(token_end, len(paren_depths)):
-                if paren_depths[j] < enclosing:
-                    break_pos = j
-                    break
+            if paren_depths[token_end] == enclosing:
+                if next_lower is None:
+                    next_lower = _next_lower_paren_depth(paren_depths)
+                break_pos = next_lower[token_end]
+            else:
+                for j in range(token_end, len(paren_depths)):
+                    if paren_depths[j] < enclosing:
+                        break_pos = j
+                        break
         starts.append(cd_match.start())
         infos.append((resolved, guarded, break_pos))
     return starts, infos
