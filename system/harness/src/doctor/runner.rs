@@ -2564,4 +2564,85 @@ mod tests {
             result
         );
     }
+
+    // -- G1 (review_b, iteration 2): a smudge filter's side effect can
+    // fabricate an untracked SYMLINK ALIAS for a missing module. The G1
+    // iteration-1 fix (`read_git_tracked_bytes` byte comparison) only
+    // proves the bytes reachable AT THE RESOLVED PATH match git's blob —
+    // it canonicalizes the `mod` target first (following the symlink to
+    // wherever it points) and then verifies THAT destination is tracked.
+    // If the destination is a real, tracked file (just committed under a
+    // different name), the byte comparison passes even though the exact
+    // path `mod missing_dep;` names is not itself a tracked entry at
+    // HEAD — the symlink alias is pure checkout-filter fabrication.
+
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_fails_when_smudge_filter_fabricates_a_symlink_alias_for_a_missing_module(
+    ) {
+        // `src/lib.rs` declares `mod missing_dep;`. `src/real.rs` is
+        // genuinely committed. No `src/missing_dep.rs` is ever tracked by
+        // git. A locally configured smudge filter on an unrelated trigger
+        // file symlinks `src/missing_dep.rs -> real.rs` as a side effect
+        // during the diagnostic checkout, then passes its own input
+        // through unchanged (`cat`) so the trigger file's checkout is
+        // otherwise unremarkable. A machine without this exact filter
+        // driver configured gets NO file at `src/missing_dep.rs` at all
+        // and fails to compile — this check must reach the same verdict.
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(
+            harness.join("Cargo.toml"),
+            "[package]\nname = \"fixture-harness\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("Cargo.lock"), FIXTURE_LOCKFILE).unwrap();
+        std::fs::write(harness.join("src/lib.rs"), "mod missing_dep;\n").unwrap();
+        std::fs::write(harness.join("src/real.rs"), "pub const REAL: i32 = 1;\n").unwrap();
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-symlink-alias.smudge",
+                "ln -sfn real.rs .hex/harness/src/missing_dep.rs; cat",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &["config", "filter.hex-doctor-g1-symlink-alias.clean", "cat"],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "config",
+                "filter.hex-doctor-g1-symlink-alias.required",
+                "true",
+            ],
+        );
+        std::fs::write(harness.join("zzz_trigger.txt"), "trigger").unwrap();
+        std::fs::write(
+            harness.join(".gitattributes"),
+            "zzz_trigger.txt filter=hex-doctor-g1-symlink-alias\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &["commit", "-q", "-m", "add symlink-alias smudge trap"],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "`mod missing_dep;` names a path that is not itself a tracked \
+             entry at HEAD — a smudge filter fabricating a symlink alias \
+             to a DIFFERENT tracked file must not let this check certify \
+             the module as present, got {:?}",
+            result
+        );
+    }
 }

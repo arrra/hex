@@ -1210,6 +1210,66 @@ fn read_git_tracked_bytes(
     Ok(output.stdout)
 }
 
+/// Verifies that `raw_path` — the exact path this check is about to treat
+/// as present, with its FINAL component still unresolved (any symlink
+/// there left in place) — is itself a git-tracked entry at HEAD (G1,
+/// review_b iteration 3).
+///
+/// `read_git_tracked_bytes` / `canonicalize_within_checkout` only prove
+/// that whatever `raw_path` ultimately *resolves to* (after following
+/// symlinks) is tracked and matches git's blob. That is not the same
+/// claim: a checkout-filter side effect can fabricate an untracked
+/// symlink ALIAS at `raw_path` pointing at a different, genuinely tracked
+/// file — e.g. `mod missing_dep;` resolving through a filter-created
+/// `src/missing_dep.rs -> real.rs` symlink. The byte comparison then
+/// passes (real.rs's content matches its own git blob), even though
+/// nothing at the literal path `missing_dep.rs` names is committed, so a
+/// machine without that exact filter driver gets no file there at all.
+/// Only `raw_path`'s parent directories are canonicalized here — the
+/// final component is checked exactly as named, so a symlink there must
+/// itself be a tracked git entry (whether a tracked symlink object or,
+/// after the caller's separate containment/content checks, a tracked
+/// regular file) for this to succeed.
+fn verify_raw_path_tracked_by_git(
+    checkout_root: &Path,
+    raw_path: &Path,
+    timeout: Duration,
+) -> Result<(), String> {
+    let canonical_root = std::fs::canonicalize(checkout_root)
+        .map_err(|e| format!("failed to canonicalize checkout root: {e}"))?;
+    let file_name = raw_path
+        .file_name()
+        .ok_or_else(|| "has no file name component".to_string())?;
+    let parent = raw_path.parent().unwrap_or_else(|| Path::new("."));
+    let canonical_parent = std::fs::canonicalize(parent).map_err(|_| {
+        "parent directory not tracked by git (missing from a fresh checkout)".to_string()
+    })?;
+    if !canonical_parent.starts_with(&canonical_root) {
+        return Err("resolves outside the checkout root (escaping path or symlink)".to_string());
+    }
+    let raw_check_path = canonical_parent.join(file_name);
+    let rel = raw_check_path
+        .strip_prefix(&canonical_root)
+        .map_err(|_| "resolves outside the checkout root".to_string())?;
+    let rel_git = rel
+        .components()
+        .map(|c| c.as_os_str().to_string_lossy().into_owned())
+        .collect::<Vec<_>>()
+        .join("/");
+    let mut cmd = Command::new("git");
+    cmd.args(["cat-file", "-e", &format!("HEAD:{rel_git}")])
+        .current_dir(checkout_root);
+    let output = run_with_timeout(&mut cmd, timeout)
+        .map_err(|e| format!("could not verify git tracking of {rel_git}: {e}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "{rel_git} is not itself a tracked entry at HEAD (only \
+             something it points to, e.g. via a symlink alias, is)"
+        ));
+    }
+    Ok(())
+}
+
 /// Canonicalizes `path` and confirms it resolves inside `checkout_root`
 /// (G1): a local package root, target entry point, or `mod` resolution
 /// reached only through an escaping absolute path or symlink must never
@@ -1249,6 +1309,10 @@ fn validate_include_target(
         .unwrap_or(referencing_file)
         .join(literal);
     let canonical_target = canonicalize_within_checkout(&candidate, checkout_root)?;
+    // G1 (review_b iteration 3): confirm the LITERAL path this macro names
+    // is itself tracked by git, not just whatever it resolves to after
+    // following symlinks — see `verify_raw_path_tracked_by_git`.
+    verify_raw_path_tracked_by_git(checkout_root, &candidate, timeout)?;
     let meta = std::fs::metadata(&canonical_target)
         .map_err(|e| format!("could not stat resolved target: {e}"))?;
     if !meta.is_file() {
@@ -1488,9 +1552,28 @@ impl ScanState {
             // must be rejected the same way an escaping include! target
             // already is (F4/F10), not silently followed and scanned as
             // if it were checked-out content.
-            match canonicalize_within_checkout(&resolved, &self.worktree_path) {
-                Ok(_) => self.scan_file_and_follow(&resolved, false),
-                Err(reason) => {
+            let containment = canonicalize_within_checkout(&resolved, &self.worktree_path);
+            // G1 (review_b iteration 3): containment alone proves
+            // `resolved` lives inside the checkout — it does not prove
+            // `resolved` itself (as opposed to whatever it points to) is
+            // tracked by git. A checkout-filter side effect can fabricate
+            // an untracked symlink alias at exactly this path pointing at
+            // a DIFFERENT, genuinely tracked file, which containment and
+            // the eventual byte comparison both miss.
+            let tracked = containment.as_ref().ok().and_then(|_| {
+                verify_raw_path_tracked_by_git(&self.worktree_path, &resolved, self.timeout).err()
+            });
+            match (containment, tracked) {
+                (Ok(_), None) => self.scan_file_and_follow(&resolved, false),
+                (Ok(_), Some(reason)) => {
+                    self.missing.push(format!(
+                        "{} -> {} (mod `{}` {reason})",
+                        self.rel(path),
+                        self.rel(&resolved),
+                        m.name,
+                    ));
+                }
+                (Err(reason), _) => {
                     self.missing.push(format!(
                         "{} -> {} (mod `{}` {reason})",
                         self.rel(path),
