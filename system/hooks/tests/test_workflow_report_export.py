@@ -1461,6 +1461,109 @@ class AmbiguousBoundaryNeverRoutesToNamedProject(unittest.TestCase):
                 f"expected a WARN naming the ambiguous candidate 'auth', got stderr: {err!r}",
             )
 
+    def test_clone_layout_shortcut_bypasses_ambiguity_check(self):
+        # review_b G1 (round 3, third redo): repo_root_of's clone-layout
+        # shortcut (`<host>/<owner>/<repo>/...`) returns as soon as it finds
+        # a recognized CLONE_HOSTS segment, before the multi-boundary
+        # ambiguity check ever runs. A path under that shortcut can still
+        # carry more than one recognized boundary (here "tests" then "src"),
+        # which must be just as ambiguous as the non-shortcut cases above.
+        warnings: list[str] = []
+        m = load_script()
+        self.assertIsNone(
+            m.repo_dir_basename(
+                "/github.com/acme/acme-repo/tests/auth/src/main.py", warnings, "record"
+            ),
+            "the clone-layout shortcut must not bypass the ambiguity check",
+        )
+        self.assertTrue(
+            any("auth" in w for w in warnings),
+            f"expected a WARN naming the ambiguous candidate 'auth', got {warnings!r}",
+        )
+
+    def test_on_disk_git_shortcut_bypasses_ambiguity_check(self):
+        # Same bug, the other shortcut: the nearest-ancestor `.git` walk
+        # returns the moment it finds a marker, before the ambiguity check
+        # runs, even though the path below that marker carries more than
+        # one recognized boundary.
+        warnings: list[str] = []
+        m = load_script()
+        with tempfile.TemporaryDirectory() as td:
+            root = os.path.join(td, "acme-repo")
+            os.makedirs(os.path.join(root, ".git"))
+            path = os.path.join(root, "tests", "auth", "src", "main.py")
+            self.assertIsNone(
+                m.repo_dir_basename(path, warnings, "record"),
+                "the on-disk .git shortcut must not bypass the ambiguity check",
+            )
+        self.assertTrue(
+            any("auth" in w for w in warnings),
+            f"expected a WARN naming the ambiguous candidate 'auth', got {warnings!r}",
+        )
+
+    def test_cli_probe_clone_layout_shortcut_lands_under_unmapped_with_warn(self):
+        # review_b's exact real CLI probe: exit 0, unmapped=1, no warnings=0,
+        # report never lands under a named project.
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            rec = {
+                "runId": "wf_g1r3clone1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-11T12:00:00Z",
+                "result": {"repo": "/github.com/acme/acme-repo/tests/auth/src/main.py"},
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("unmapped=1", out)
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(len(reports), 1, reports)
+            self.assertEqual(
+                reports[0].parent.parent.name,
+                "_unmapped",
+                "the clone-layout shortcut must never route an ambiguous path to a named project",
+            )
+            self.assertTrue(
+                any("WARN" in line and "auth" in line for line in err.splitlines()),
+                f"expected a WARN naming the ambiguous candidate 'auth', got stderr: {err!r}",
+            )
+
+    def test_cli_probe_on_disk_git_shortcut_lands_under_unmapped_with_warn(self):
+        # review_b's second real CLI probe: a temporary acme-repo containing
+        # a .git directory, suffixed with tests/auth/src/main.py.
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            repo_root = os.path.join(td, "acme-repo")
+            os.makedirs(os.path.join(repo_root, ".git"))
+            repo_path = os.path.join(repo_root, "tests", "auth", "src", "main.py")
+            rec = {
+                "runId": "wf_g1r3gitshortcut1",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-11T12:00:00Z",
+                "result": {"repo": repo_path},
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("unmapped=1", out)
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(len(reports), 1, reports)
+            self.assertEqual(
+                reports[0].parent.parent.name,
+                "_unmapped",
+                "the on-disk .git shortcut must never route an ambiguous path to a named project",
+            )
+            self.assertTrue(
+                any("WARN" in line and "auth" in line for line in err.splitlines()),
+                f"expected a WARN naming the ambiguous candidate 'auth', got stderr: {err!r}",
+            )
+
 
 class UnderscoreCompoundAndUppercaseKeyValuePairs(unittest.TestCase):
     """F1 (reviewer A) — the key=/token=/password=/secret= lookbehind

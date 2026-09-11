@@ -154,17 +154,7 @@ def repo_root_of(path: str, warnings: list[str] | None = None, label: str = "rec
     a WARN is appended naming both the winning and the rejected candidate.
     """
     p = path.rstrip("/")
-    cur = p
-    while cur and cur != "/":
-        marker = os.path.join(cur, ".git")
-        if os.path.isdir(marker) or os.path.isfile(marker):
-            return cur
-        cur = os.path.dirname(cur)
     parts = p.split("/")
-    for i, seg in enumerate(parts):
-        if seg in CLONE_HOSTS and len(parts) > i + 2:
-            return "/".join(parts[: i + 3])
-
     work = list(parts)
     # F8 — a trailing segment with an extension is ambiguous on its own (it
     # could be a real file, or a dotted directory like "service.api"), so it
@@ -172,6 +162,17 @@ def repo_root_of(path: str, warnings: list[str] | None = None, label: str = "rec
     # afterwards to decide the no-boundary-found / ambiguous case below.
     dir_parts = work[:-1] if work and FILE_EXT_RE.search(work[-1]) else work
 
+    # G1 (round 3, spec review_b's third redo) — the on-disk `.git` walk and
+    # the `<host>/<owner>/<repo>` clone-layout check below both used to
+    # `return` the moment they found their marker, WITHOUT ever consulting
+    # the multi-boundary ambiguity check that follows. A path can carry a
+    # `.git` ancestor (or sit under a recognized clone host) and STILL have
+    # more than one recognized NON_REPO_DIRS boundary further down (e.g.
+    # ".../acme-repo/tests/auth/src/main.py", where `.git` lives at
+    # "acme-repo/"): that must be just as ambiguous as the no-shortcut case.
+    # So the ambiguity check now runs first, unconditionally, before either
+    # shortcut gets a chance to return early.
+    #
     # F15 / review_b G3, generalized by G1 (round 3, third pass) — collect
     # EVERY recognized NON_REPO_DIRS segment anywhere in the path, full stop.
     # Earlier passes only counted a boundary whose immediate left neighbor
@@ -225,6 +226,16 @@ def repo_root_of(path: str, warnings: list[str] | None = None, label: str = "rec
                 f"not routing to a named project ({named})"
             )
         return None
+
+    cur = p
+    while cur and cur != "/":
+        marker = os.path.join(cur, ".git")
+        if os.path.isdir(marker) or os.path.isfile(marker):
+            return cur
+        cur = os.path.dirname(cur)
+    for i, seg in enumerate(parts):
+        if seg in CLONE_HOSTS and len(parts) > i + 2:
+            return "/".join(parts[: i + 3])
 
     if non_test_candidates:
         work = dir_parts[: non_test_candidates[0]]
