@@ -379,6 +379,22 @@ class TestF7RedactionAndLedgerPrivacy(IncidentHookTestCase):
         self.assertNotIn("bravo", record["error"])
         self.assertNotIn("charlie", record["error"])
 
+    def test_escaped_quote_followed_by_real_newline_does_not_leak_the_tail(self):
+        """G2 continued (review_b round 5): the escaped-char alternative
+        `\\.` in `(?:[^"\\]|\\.)*` requires `.`, which -- with no
+        re.DOTALL -- never matches a real newline. A backslash immediately
+        followed by a real newline is valid bash line-continuation inside a
+        double-quoted string, but the regex can't step past it, falls out
+        of the quoted branch, and the `\\S+` fallback leaks everything
+        after the newline into the plain-text `error` field."""
+        proc = self._run(
+            _fixture(error='failed: password="alpha \\\nbravo charlie" and retry')
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn("bravo", record["error"])
+        self.assertNotIn("charlie", record["error"])
+
 
 class TestF15ProductionIsolationFlags(IncidentHookTestCase):
     """F15: this test suite's `_run` helper invokes the hook as plain

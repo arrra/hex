@@ -1989,6 +1989,31 @@ class TestF7RedactionAndLedgerPrivacy(RouterTestCase):
                 self.assertNotIn("bravo", entry.get("preview", ""))
                 self.assertNotIn("charlie", entry.get("preview", ""))
 
+    def test_escaped_quote_followed_by_real_newline_does_not_leak_the_tail(self):
+        """G2 continued (review_b round 5): the escaped-char alternative
+        `\\.` in `(?:[^"\\]|\\.)*` requires `.`, which -- with no
+        re.DOTALL -- never matches a real newline. A trailing backslash
+        immediately before a real newline is valid bash line-continuation
+        inside a double-quoted string; confirmed against a real bash that
+        `password="alpha <backslash-newline>bravo" charlie` folds to
+        `alpha bravo charlie`. The regex alternation can't step past that
+        backslash-newline, falls out of the quoted branch, and the
+        `\\S+` fallback leaks everything after the newline in the
+        clear."""
+        payload = make_payload(
+            "Bash",
+            {"command": 'echo password="alpha \\\nbravo charlie" && git stash'},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("bravo", entry.get("match", ""))
+                self.assertNotIn("bravo", entry.get("preview", ""))
+                self.assertNotIn("charlie", entry.get("preview", ""))
+
 
 class TestF8ManifestQuoting(RouterTestCase):
     """F8: required-hooks.json's two Python hook commands interpolate

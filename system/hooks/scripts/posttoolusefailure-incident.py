@@ -72,10 +72,21 @@ _REDACT_PATTERNS = [
     # leaked in the clear. `(?:[^"\\]|\\.)*` walks past any
     # backslash-escaped character (including an escaped quote) and only
     # stops at a real, unescaped closing quote.
+    # G2 continued (review_b round 5): `\\.` requires `.`, which -- with
+    # no re.DOTALL on this pattern -- never matches a real newline. A
+    # trailing backslash immediately before a real newline is valid bash
+    # line-continuation inside a double-quoted string (folds away at
+    # execution time), but the old `\\.` couldn't step past it: the
+    # closure exited early, the quoted alternative failed to find its
+    # closing quote there, and the whole thing dropped to the `\S+`
+    # single-token fallback, leaking everything after the newline.
+    # `\\[\s\S]` matches an escaped character INCLUDING a newline without
+    # needing re.DOTALL (which would also loosen unrelated `.` uses
+    # elsewhere in this pattern).
     (
         re.compile(
             r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""(\\"(?:[^"\\]|\\.)*\\"|"(?:[^"\\]|\\.)*"|'[^']*'|\S+)"""
+            r"""(\\"(?:[^"\\]|\\[\s\S])*\\"|"(?:[^"\\]|\\[\s\S])*"|'[^']*'|\S+)"""
         ),
         r"\1=***REDACTED***",
     ),
