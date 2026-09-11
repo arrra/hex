@@ -1262,6 +1262,39 @@ class UnmappedFallbackSymlinkEscapeCounted(unittest.TestCase):
                 rc, 1, "a record silently dropped via a symlinked _unmapped escape must fail the run"
             )
 
+    def test_credential_shaped_hex_dir_never_leaks_into_containment_warnings(self):
+        # review round-2 redo F1: G2's fix only redacted the --dry-run
+        # preview. The two containment WARNs (both embed `projects_root`,
+        # which is built from --hex-dir) were printed raw, so a
+        # credential-shaped --hex-dir component leaked to stderr whenever
+        # the projects/_unmapped fallback itself escaped $HEX_DIR/projects.
+        with tempfile.TemporaryDirectory() as td:
+            secret = "sk-ant-" + "D" * 30
+            hex_dir = os.path.join(td, f"{secret}-hex")
+            projects = os.path.join(td, "claude-projects")
+            outside = os.path.join(td, "outside")
+            os.makedirs(hex_dir)
+            os.makedirs(os.path.join(hex_dir, "projects"))
+            os.makedirs(outside)
+            os.symlink(outside, os.path.join(hex_dir, "projects", "_unmapped"))
+            escape_root = os.path.join(tempfile.gettempdir(), f"hex-f1-escape-{uuid.uuid4().hex}")
+            cfg = Path(hex_dir, ".hex", "config")
+            cfg.mkdir(parents=True)
+            (cfg / "workflow-projects.toml").write_text(
+                f'[[map]]\nmatch = "trigger"\nproject = "{escape_root}"\n'
+            )
+            rec = {
+                "runId": "wf_f1warn1",
+                "workflowName": "trigger-flow",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": "trigger",
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 1, err)
+            self.assertNotIn(secret, err, "credential-shaped --hex-dir component leaked into a WARN line")
+
 
 class NoClobberLinkPublish(unittest.TestCase):
     """F3 (nit, reviewer A) — the atomic publish uses os.link with

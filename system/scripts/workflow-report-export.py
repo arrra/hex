@@ -763,7 +763,12 @@ def main() -> int:
                     pass
 
     for w in warnings:
-        print(f"workflow-report-export: WARN {w}", file=sys.stderr)
+        # F1 (review round 2 redo) — G2's fix only routed the --dry-run
+        # preview through redact(); these WARN lines can themselves embed
+        # `projects_root` (built from --hex-dir, attacker/user-controlled)
+        # raw, e.g. the two containment-escape warnings above. Redact every
+        # WARN on its way to stderr, same as every other printed path.
+        print(f"workflow-report-export: WARN {redact(w)}", file=sys.stderr)
     print(
         f"workflow-report-export: scanned={len(records)} wrote={wrote} skipped_existing={skipped} "
         f"unmapped={unmapped} nonterminal={nonterminal} unreadable={unreadable} invalid={invalid} "
