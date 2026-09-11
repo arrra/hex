@@ -1225,5 +1225,43 @@ class UnderscoreCompoundAndUppercaseKeyValuePairs(unittest.TestCase):
             self.assertNotIn(token, out, f"{token!r} survived redaction")
 
 
+class UnmappedFallbackSymlinkEscapeCounted(unittest.TestCase):
+    """F2 — when the projects/_unmapped fallback directory is itself a
+    symlink escaping $HEX_DIR/projects, the record was silently dropped
+    (WARN only): no counter incremented, exit code stayed 0."""
+
+    def test_symlinked_unmapped_fallback_is_counted_and_fails_the_run(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            outside = os.path.join(td, "outside")
+            os.makedirs(hex_dir)
+            os.makedirs(os.path.join(hex_dir, "projects"))
+            os.makedirs(outside)
+            os.symlink(outside, os.path.join(hex_dir, "projects", "_unmapped"))
+            escape_root = os.path.join(tempfile.gettempdir(), f"hex-f2-escape-{uuid.uuid4().hex}")
+            cfg = Path(hex_dir, ".hex", "config")
+            cfg.mkdir(parents=True)
+            (cfg / "workflow-projects.toml").write_text(
+                f'[[map]]\nmatch = "trigger"\nproject = "{escape_root}"\n'
+            )
+            rec = {
+                "runId": "wf_f2esc1",
+                "workflowName": "trigger-flow",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": "trigger",
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertFalse(
+                list(Path(outside).rglob("*.md")),
+                "report escaped through the symlinked _unmapped fallback",
+            )
+            self.assertEqual(
+                rc, 1, "a record silently dropped via a symlinked _unmapped escape must fail the run"
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

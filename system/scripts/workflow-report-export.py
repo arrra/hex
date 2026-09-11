@@ -709,7 +709,14 @@ def main() -> int:
                 out_dir = os.path.join(projects_root, project, "workflow-reports")
                 out = os.path.join(out_dir, f"{date}-{slug(workflow_name)}-{run_id_component}.md")
                 if not _is_contained(out_dir, projects_root):
+                    # F2 (reviewer A) — even the projects/_unmapped fallback
+                    # itself escaped (e.g. it is a symlink outside
+                    # $HEX_DIR/projects/). The record is dropped, not
+                    # written anywhere: count it as failed so the run's
+                    # exit code follows the existing exit-1 rule for
+                    # per-record failures instead of silently staying 0.
                     warnings.append(f"{run_id}: refusing to write outside {projects_root}")
+                    failed += 1
                     continue
 
             if os.path.exists(out):
