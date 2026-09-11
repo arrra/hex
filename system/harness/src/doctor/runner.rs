@@ -506,6 +506,27 @@ mod tests {
              (review finding G1: it must not be silently skipped), got {:?}",
             result
         );
+        // F19: `Status::Fail` alone also holds if the checkout materializer
+        // breaks, `.hex/harness` goes missing, or `cargo metadata` fails for
+        // an unrelated repository-input reason — none of which prove this
+        // fixture's actual cause (no Cargo.lock at all) was ever diagnosed.
+        // Assert cargo's own missing-lockfile diagnostic verbatim. A bare
+        // `contains("Cargo.lock")` is NOT enough: the generic metadata-
+        // failure message this check emits for every `cargo metadata`
+        // failure already names "Cargo.lock" in its own fixed wording
+        // (see `classify_metadata_failure`'s fail branch), so that
+        // substring alone can't tell "genuinely no lockfile" apart from,
+        // say, a missing local path dependency.
+        assert!(
+            result.message.contains("cannot create the lock file")
+                && result
+                    .message
+                    .contains("--locked was passed to prevent this"),
+            "must surface cargo's own lockfile-specific diagnostic, not just \
+             a generic metadata-failure message that happens to mention \
+             \"Cargo.lock\", got: {:?}",
+            result
+        );
         assert_eq!(
             worktree_count(tmp.path()),
             1,
