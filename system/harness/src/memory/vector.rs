@@ -90,22 +90,51 @@ pub fn insert_vec(conn: &Connection, rowid: i64, embedding: &[f32]) -> rusqlite:
 /// OR `facts.tombstone = 1` MUST call [`mark_fact_vec_dead`] in the same
 /// transaction to keep this column in sync — see that function's doc
 /// comment.
+///
+/// The `is_live` SELECT, the DELETE, and the INSERT run inside one `BEGIN
+/// IMMEDIATE` transaction (PR#9 r2 redo G1: as three separate autocommit
+/// statements, a concurrent tombstone writer's COMMIT could land between the
+/// SELECT and the INSERT, so this call would resurrect a fact tombstoned a
+/// moment ago as a live vector — the stale `is_live` it read before the
+/// commit). `BEGIN IMMEDIATE` takes the write lock up front, so a concurrent
+/// tombstone writer's own `BEGIN IMMEDIATE` (see [`mark_fact_vec_dead`]'s doc
+/// comment) either fully precedes or fully follows this transaction — never
+/// interleaves with it.
 pub fn insert_fact_vec(conn: &Connection, fact_id: &str, vec: &[f32]) -> rusqlite::Result<()> {
-    let is_live: i64 = conn
-        .query_row(
-            "SELECT CASE WHEN invalid_at IS NULL AND tombstone = 0 THEN 1 ELSE 0 END \
-             FROM facts WHERE id = ?1",
-            params![fact_id],
-            |r| r.get(0),
-        )
-        .optional()?
-        .unwrap_or(1);
-    conn.execute("DELETE FROM facts_vec WHERE fact_id = ?1", params![fact_id])?;
-    conn.execute(
-        "INSERT INTO facts_vec(fact_id, embedding, is_live) VALUES (?1, ?2, ?3)",
-        params![fact_id, f32s_to_le_bytes(vec), is_live],
-    )?;
-    Ok(())
+    conn.execute_batch("BEGIN IMMEDIATE")?;
+    let write = || -> rusqlite::Result<()> {
+        let is_live: i64 = conn
+            .query_row(
+                "SELECT CASE WHEN invalid_at IS NULL AND tombstone = 0 THEN 1 ELSE 0 END \
+                 FROM facts WHERE id = ?1",
+                params![fact_id],
+                |r| r.get(0),
+            )
+            .optional()?
+            .unwrap_or(1);
+        conn.execute("DELETE FROM facts_vec WHERE fact_id = ?1", params![fact_id])?;
+        conn.execute(
+            "INSERT INTO facts_vec(fact_id, embedding, is_live) VALUES (?1, ?2, ?3)",
+            params![fact_id, f32s_to_le_bytes(vec), is_live],
+        )?;
+        Ok(())
+    };
+    match write() {
+        Ok(()) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(()),
+            Err(commit_err) => {
+                // A failed COMMIT still leaves the connection inside the
+                // transaction (same gap as consolidate.rs's PR#9 r2 review_b
+                // G2) — roll back so a half-applied write never lingers.
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(commit_err)
+            }
+        },
+        Err(e) => {
+            let _ = conn.execute_batch("ROLLBACK");
+            Err(e)
+        }
+    }
 }
 
 /// Flip a fact's `facts_vec` row to non-live. Decision
@@ -774,6 +803,104 @@ mod tests {
             found_live,
             "the live fact must be returned even though 64 tombstoned facts rank nearer with k = 1 — is_live must fold in tombstone, not rely on the outer join, got {:?}",
             hits
+        );
+    }
+
+    /// RED for the spec-level R2 redo (operator finding, PR#9 r2 G1):
+    /// `insert_fact_vec` reads `is_live` in one autocommit SELECT, then
+    /// DELETEs and INSERTs in two more autocommit statements — three
+    /// separate round trips, not one transaction. A concurrent tombstone
+    /// writer (the same `UPDATE facts SET tombstone = 1` +
+    /// [`mark_fact_vec_dead`] pairing every real writer performs inside its
+    /// own `BEGIN IMMEDIATE`/`COMMIT`, e.g. `consolidate.rs`'s
+    /// `tombstone_duplicate_fact`) can COMMIT between `insert_fact_vec`'s
+    /// SELECT and its INSERT: the SELECT reads the still-live snapshot, the
+    /// tombstone writer's COMMIT lands the dead state, then
+    /// `insert_fact_vec`'s DELETE — which had to block on the tombstone
+    /// writer's lock, exactly as every real connection's `busy_timeout`
+    /// (`memory::open_db`) allows rather than erroring immediately — unblocks
+    /// and INSERTs the STALE `is_live = 1` it read before the commit,
+    /// resurrecting a tombstoned fact's vector as live.
+    ///
+    /// Driven deterministically with no sleeps: connection A takes the
+    /// tombstone writer's lock and withholds COMMIT; a custom `busy_handler`
+    /// on connection B signals over a channel the instant B's write is first
+    /// retried against that lock — proof B's SELECT already ran — and only
+    /// then does the main thread let A commit. Fails now: final `is_live` is
+    /// 1, not 0.
+    #[test]
+    fn insert_fact_vec_race_with_concurrent_tombstone_commit_leaves_dead_vector_live() {
+        register_sqlite_vec();
+        let tmp = tempfile::tempdir().unwrap();
+        let db_path = tmp.path().join("memory.db");
+
+        {
+            let conn = Connection::open(&db_path).unwrap();
+            crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
+            crate::memory::schema::apply_plan2(&conn).unwrap();
+            crate::memory::schema::apply_plan3(&conn).unwrap();
+            conn.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+                 VALUES ('01HFACT-RACE','project:hex','uses','a live object',0.5,'2026-06-11','2026-06-11')",
+                [],
+            )
+            .unwrap();
+        }
+
+        let conn_a = Connection::open(&db_path).unwrap();
+        let conn_b = Connection::open(&db_path).unwrap();
+
+        static BUSY_SIGNAL: std::sync::OnceLock<std::sync::mpsc::Sender<()>> =
+            std::sync::OnceLock::new();
+        fn signal_blocked_and_keep_retrying(_retries: i32) -> bool {
+            if let Some(tx) = BUSY_SIGNAL.get() {
+                let _ = tx.send(());
+            }
+            true
+        }
+        let (tx, rx) = std::sync::mpsc::channel::<()>();
+        BUSY_SIGNAL.set(tx).unwrap();
+        conn_b
+            .busy_handler(Some(signal_blocked_and_keep_retrying))
+            .unwrap();
+
+        // A takes the writer lock and performs the SAME statements every
+        // tombstone writer must (UPDATE + mark_fact_vec_dead), but withholds
+        // COMMIT until B proves — via the busy signal — that its read has
+        // already happened and its write is now blocked on this lock.
+        conn_a.execute_batch("BEGIN IMMEDIATE").unwrap();
+        conn_a
+            .execute(
+                "UPDATE facts SET tombstone = 1 WHERE id = '01HFACT-RACE' AND tombstone = 0",
+                [],
+            )
+            .unwrap();
+        mark_fact_vec_dead(&conn_a, "01HFACT-RACE").unwrap();
+
+        let v: Vec<f32> = (0..EMBED_DIM).map(|d| d as f32 * 0.001).collect();
+        let handle = std::thread::spawn(move || {
+            insert_fact_vec(&conn_b, "01HFACT-RACE", &v).unwrap();
+        });
+
+        // Blocks until B's write has hit A's lock — B's SELECT (reading the
+        // still-live, pre-commit snapshot) has necessarily already completed.
+        rx.recv().unwrap();
+        conn_a.execute_batch("COMMIT").unwrap();
+
+        handle.join().unwrap();
+
+        let is_live: i64 = conn_a
+            .query_row(
+                "SELECT is_live FROM facts_vec WHERE fact_id = '01HFACT-RACE'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            is_live, 0,
+            "insert_fact_vec must not resurrect a fact tombstoned by a concurrent \
+             writer that commits between its read and its write — got is_live = {is_live}, \
+             the stale value read before the tombstone committed"
         );
     }
 }
