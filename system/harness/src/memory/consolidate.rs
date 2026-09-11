@@ -382,6 +382,13 @@ fn tombstone_duplicate_fact(
         return Ok(());
     }
 
+    // Keep facts_vec.is_live in sync with the tombstone, in the same
+    // transaction as the UPDATE above (decision
+    // hex-knn-is-live-metadata-filter-2026-09-10.md §3, PR#9 r2 review_b G1) —
+    // without this, knn_facts can still surface the just-tombstoned loser
+    // until the next maintain_facts::backfill sweep.
+    crate::memory::vector::mark_fact_vec_dead(conn, &loser.id)?;
+
     // Durable audit row. Names the survivor so the collapse is reconstructable
     // from the ledger.
     conn.execute(
@@ -423,6 +430,14 @@ fn op_prune(conn: &mut Connection) -> anyhow::Result<()> {
          WHERE tombstone = 0 AND access_count = 0
            AND subject != 'user' AND predicate != 'decided'
            AND julianday('now') - julianday(updated_at) > 60",
+        [],
+    )?;
+    // Keep facts_vec.is_live in sync with the tombstone this op just set —
+    // same requirement as tombstone_duplicate_fact above (decision
+    // hex-knn-is-live-metadata-filter-2026-09-10.md §3, PR#9 r2 review_b G1).
+    conn.execute(
+        "UPDATE facts_vec SET is_live = 0
+         WHERE fact_id IN (SELECT id FROM facts WHERE tombstone = 1)",
         [],
     )?;
     Ok(())
@@ -896,6 +911,91 @@ mod tests {
             "a claim and its negation must never collapse — token overlap alone \
              is not high-confidence evidence of a duplicate when the differing \
              tokens flip polarity"
+        );
+    }
+
+    /// RED for G1 (reviewer-B redo): every code path that sets
+    /// `facts.tombstone = 1` must keep `facts_vec.is_live` in sync in the SAME
+    /// transaction, exactly like the existing supersede-not-overwrite writers
+    /// do via `mark_fact_vec_superseded`. `tombstone_duplicate_fact` (the
+    /// canonicalization collapse writer, called from `op_fact_canonicalize`
+    /// via `run`) is the one production path that sets `tombstone = 1` today,
+    /// and it currently does NOT touch `facts_vec` at all. Fails now:
+    /// `insert_fact_vec` only derives `is_live` from `invalid_at`, so after
+    /// the collapse below the loser's `facts_vec` row is still `is_live = 1`
+    /// and `knn_facts` still returns it.
+    #[test]
+    fn consolidate_tombstoning_flips_facts_vec_is_live_and_excludes_from_knn_facts() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.db");
+        let mut conn = memory::open_db(&db).unwrap();
+
+        insert_canon_fact(
+            &conn,
+            "dup-1",
+            "Mike",
+            "decided",
+            "reply in GDD style",
+            "2026-08-28",
+        );
+        insert_canon_fact(
+            &conn,
+            "dup-best",
+            "Mike",
+            "decided",
+            "reply in GDD style for all design replies",
+            "2026-08-31",
+        );
+
+        let v: Vec<f32> = (0..crate::memory::vector::EMBED_DIM)
+            .map(|d| d as f32 * 0.001)
+            .collect();
+        crate::memory::vector::insert_fact_vec(&conn, "dup-1", &v).unwrap();
+        let v_best: Vec<f32> = (0..crate::memory::vector::EMBED_DIM)
+            .map(|d| (d as f32 + 1.0) * 0.001)
+            .collect();
+        crate::memory::vector::insert_fact_vec(&conn, "dup-best", &v_best).unwrap();
+
+        let _ = run(&mut conn).unwrap();
+
+        // Precondition: the collapse actually happened (mirrors the existing
+        // canonicalization tests) — "dup-1" is the tombstoned loser.
+        let loser_tombstone: i64 = conn
+            .query_row(
+                "SELECT tombstone FROM facts WHERE id = 'dup-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            loser_tombstone, 1,
+            "test setup must reproduce a real canonicalization collapse — dup-1 must be tombstoned"
+        );
+
+        let is_live: i64 = conn
+            .query_row(
+                "SELECT is_live FROM facts_vec WHERE fact_id = 'dup-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            is_live, 0,
+            "tombstoning a fact through the consolidate collapse path must flip its facts_vec.is_live to 0"
+        );
+
+        let hits = crate::memory::vector::knn_facts(&conn, &v, 5).unwrap();
+        assert!(
+            !hits.iter().any(|(rowid, _)| {
+                let id: String = conn
+                    .query_row("SELECT id FROM facts WHERE rowid = ?1", [*rowid], |r| {
+                        r.get(0)
+                    })
+                    .unwrap();
+                id == "dup-1"
+            }),
+            "knn_facts must exclude a fact tombstoned by consolidate, got {:?}",
+            hits
         );
     }
 }

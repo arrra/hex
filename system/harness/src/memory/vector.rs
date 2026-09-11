@@ -79,19 +79,22 @@ pub fn insert_vec(conn: &Connection, rowid: i64, embedding: &[f32]) -> rusqlite:
 /// backfill selects only `id NOT IN facts_vec`), but symmetry keeps a future
 /// fact re-embed from silently retaining a stale vector.
 ///
-/// `is_live` is looked up from `facts.invalid_at` at insert time (decision
-/// `hex-knn-is-live-metadata-filter-2026-09-10.md` §3: synced in CODE, never
-/// triggers — a `facts` trigger corrupted the FTS5 external-content shadow
-/// tables in v1's F3). A fact with no matching `facts` row yet (embedded
-/// before its row is committed) defaults to live. [`knn_facts`] filters on
-/// this column inside the vec0 KNN query itself. Every code path that sets
-/// `facts.invalid_at` / `superseded_by` (supersede-not-overwrite) MUST call
-/// [`mark_fact_vec_superseded`] in the same transaction to keep this column
-/// in sync — see that function's doc comment.
+/// `is_live` is looked up from `facts.invalid_at` AND `facts.tombstone` at
+/// insert time (decision `hex-knn-is-live-metadata-filter-2026-09-10.md` §3,
+/// widened by PR#9 r2 review_b G1 to also cover tombstoning: synced in CODE,
+/// never triggers — a `facts` trigger corrupted the FTS5 external-content
+/// shadow tables in v1's F3). A fact with no matching `facts` row yet
+/// (embedded before its row is committed) defaults to live. [`knn_facts`]
+/// filters on this column inside the vec0 KNN query itself. Every code path
+/// that sets `facts.invalid_at` / `superseded_by` (supersede-not-overwrite)
+/// OR `facts.tombstone = 1` MUST call [`mark_fact_vec_dead`] in the same
+/// transaction to keep this column in sync — see that function's doc
+/// comment.
 pub fn insert_fact_vec(conn: &Connection, fact_id: &str, vec: &[f32]) -> rusqlite::Result<()> {
     let is_live: i64 = conn
         .query_row(
-            "SELECT CASE WHEN invalid_at IS NULL THEN 1 ELSE 0 END FROM facts WHERE id = ?1",
+            "SELECT CASE WHEN invalid_at IS NULL AND tombstone = 0 THEN 1 ELSE 0 END \
+             FROM facts WHERE id = ?1",
             params![fact_id],
             |r| r.get(0),
         )
@@ -106,15 +109,17 @@ pub fn insert_fact_vec(conn: &Connection, fact_id: &str, vec: &[f32]) -> rusqlit
 }
 
 /// Flip a fact's `facts_vec` row to non-live. Decision
-/// `hex-knn-is-live-metadata-filter-2026-09-10.md` §3: every code path that
-/// sets `facts.invalid_at` / `superseded_by` (supersede-not-overwrite) MUST
+/// `hex-knn-is-live-metadata-filter-2026-09-10.md` §3 (widened by PR#9 r2
+/// review_b G1): every code path that sets `facts.invalid_at` /
+/// `superseded_by` (supersede-not-overwrite) OR `facts.tombstone = 1` MUST
 /// call this in the SAME transaction as that UPDATE, so `knn_facts`'s
-/// `is_live = 1` filter never drifts from `facts.invalid_at`. No `facts`
-/// trigger may do this instead — the v1 F3 valid_from trigger corrupted the
-/// FTS5 external-content shadow tables ("database disk image is malformed").
-/// No production writer sets those columns yet (only test fixtures insert
-/// them directly); this helper exists for the future supersede path to call.
-pub fn mark_fact_vec_superseded(conn: &Connection, fact_id: &str) -> rusqlite::Result<()> {
+/// `is_live = 1` filter never drifts from either column. No `facts` trigger
+/// may do this instead — the v1 F3 valid_from trigger corrupted the FTS5
+/// external-content shadow tables ("database disk image is malformed").
+/// Named generically (`_dead`, not `_superseded`) because it now serves both
+/// the supersede path and the tombstone path (`memory/consolidate.rs`'s
+/// `tombstone_duplicate_fact`, the one production writer today).
+pub fn mark_fact_vec_dead(conn: &Connection, fact_id: &str) -> rusqlite::Result<()> {
     conn.execute(
         "UPDATE facts_vec SET is_live = 0 WHERE fact_id = ?1",
         params![fact_id],
@@ -174,24 +179,26 @@ pub fn knn(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(
 /// return the integer rowid: the RRF fusion key shared with the facts_fts
 /// arm. Same relevance floor as [`knn`].
 ///
-/// Superseded facts are excluded by the `is_live = 1` metadata constraint
-/// evaluated INSIDE the vec0 KNN query itself (decision
-/// `hex-knn-is-live-metadata-filter-2026-09-10.md`, closing PR#9 R2 G1):
-/// `facts_vec`'s `is_live` column (schema.rs) is kept in sync with
-/// `facts.invalid_at` in code, not by a trigger (see
-/// [`mark_fact_vec_superseded`]). This replaces the PR#9 r1 F2 / R2 F5
-/// adaptive-overfetch-and-clamp design, which fetched extra rows past `k`
-/// before join-filtering and widened/clamped that window to stay under
-/// sqlite-vec's `VEC0_K_MAX` hard cap on a vec0 KNN `LIMIT` (4096): a fixed
-/// overfetch window can never see past a wall of MORE than 4096 superseded
-/// neighbors ranked nearer than the query's live matches, no matter how far
-/// it widens. Filtering `is_live` inside the vec0 MATCH itself has no such
-/// wall — `k` passes straight through with no overfetch or clamp.
+/// Superseded AND tombstoned facts are excluded by the `is_live = 1`
+/// metadata constraint evaluated INSIDE the vec0 KNN query itself (decision
+/// `hex-knn-is-live-metadata-filter-2026-09-10.md`, closing PR#9 R2 G1 and,
+/// for the tombstone axis, PR#9 r2 review_b G1): `facts_vec`'s `is_live`
+/// column (schema.rs) is kept in sync with `facts.invalid_at` AND
+/// `facts.tombstone` in code, not by a trigger (see [`mark_fact_vec_dead`]).
+/// This replaces the PR#9 r1 F2 / R2 F5 adaptive-overfetch-and-clamp design,
+/// which fetched extra rows past `k` before join-filtering and
+/// widened/clamped that window to stay under sqlite-vec's `VEC0_K_MAX` hard
+/// cap on a vec0 KNN `LIMIT` (4096): a fixed overfetch window can never see
+/// past a wall of MORE than 4096 dead neighbors ranked nearer than the
+/// query's live matches, no matter how far it widens. Filtering `is_live`
+/// inside the vec0 MATCH itself has no such wall — `k` passes straight
+/// through with no overfetch or clamp.
 ///
-/// `tombstone` is NOT tracked in `facts_vec` metadata (only `invalid_at` is),
-/// so a freshly-tombstoned fact's vector can still be `is_live = 1` between
-/// maintenance sweeps (`maintain_facts::backfill` removes it from `facts_vec`
-/// entirely, but only periodically) — the outer join keeps excluding those.
+/// The outer `f.tombstone = 0` join is belt-and-braces, not load-bearing:
+/// `is_live` already folds in `tombstone`, so this only matters for a row
+/// tombstoned between a stale `facts_vec` write and a periodic
+/// `maintain_facts::backfill` sweep — the same narrow race the supersede
+/// path already tolerates.
 pub fn knn_facts(conn: &Connection, query: &[f32], k: usize) -> rusqlite::Result<Vec<(i64, f64)>> {
     let mut stmt = conn.prepare(
         "SELECT f.rowid, v.distance
@@ -638,13 +645,13 @@ mod tests {
 
     /// RED for the R1 review redo (`review-redo`, F2 major): `knn_facts`'s
     /// doc comment says every supersede-not-overwrite writer MUST call
-    /// [`mark_fact_vec_superseded`] in the same transaction as the
+    /// [`mark_fact_vec_dead`] in the same transaction as the
     /// `facts.invalid_at`/`superseded_by` UPDATE, but the helper itself had
     /// zero coverage — the only path pinning "invalidating a fact flips
     /// is_live" was the unrelated re-embed path in
     /// `insert_fact_vec_writes_is_live_from_facts_invalid_at`. Pins the
     /// actual supersede contract: a live fact is found by `knn_facts`, then
-    /// once its `facts` row is invalidated AND `mark_fact_vec_superseded` is
+    /// once its `facts` row is invalidated AND `mark_fact_vec_dead` is
     /// called (the exact pairing every real writer must do), `is_live` flips
     /// to 0 and `knn_facts` excludes it.
     #[test]
@@ -685,7 +692,7 @@ mod tests {
             [],
         )
         .unwrap();
-        mark_fact_vec_superseded(&conn, "01HFACT-SUPERSEDE-ME").unwrap();
+        mark_fact_vec_dead(&conn, "01HFACT-SUPERSEDE-ME").unwrap();
 
         let is_live: i64 = conn
             .query_row(
@@ -694,16 +701,79 @@ mod tests {
                 |r| r.get(0),
             )
             .unwrap();
-        assert_eq!(
-            is_live, 0,
-            "mark_fact_vec_superseded must flip is_live to 0"
-        );
+        assert_eq!(is_live, 0, "mark_fact_vec_dead must flip is_live to 0");
 
         let hits_after = knn_facts(&conn, &v, 1).unwrap();
         assert!(
             hits_after.is_empty(),
-            "knn_facts must exclude a fact right after mark_fact_vec_superseded flips its is_live, got {:?}",
+            "knn_facts must exclude a fact right after mark_fact_vec_dead flips its is_live, got {:?}",
             hits_after
+        );
+    }
+
+    /// RED for G1 (reviewer-B redo): `is_live` currently encodes ONLY
+    /// `invalid_at IS NULL` (see `insert_fact_vec`'s doc comment), so a
+    /// tombstoned-but-not-superseded fact (`facts.tombstone = 1`, set by
+    /// consolidate canonicalization, never deleted) still has `is_live = 1`
+    /// inside `facts_vec` and is only excluded by the OUTER `f.tombstone = 0`
+    /// join AFTER the vec0 `k` limit has already been applied. A wall of
+    /// tombstoned rows ranked nearer than the query consumes that `k` window
+    /// before the outer join ever runs, so a live match behind the wall is
+    /// lost — the exact F2 regression the overfetch-removal fix was supposed
+    /// to close, on the tombstone axis instead of the supersede axis. Fails
+    /// now: with k = 1, the inner `is_live = 1` subquery returns only the
+    /// single nearest TOMBSTONED row, and the outer join then filters it out,
+    /// leaving zero hits — the live fact never gets a chance to surface.
+    #[test]
+    fn knn_facts_returns_live_neighbor_behind_a_wall_of_tombstoned_ones() {
+        register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();
+        crate::memory::schema::apply_plan2(&conn).unwrap();
+        crate::memory::schema::apply_plan3(&conn).unwrap();
+
+        // 64 tombstoned facts, each strictly nearer to the query than the
+        // live fact below.
+        for i in 0..64 {
+            let id = format!("01HFACT-TOMB-{i:02}");
+            conn.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,tombstone)
+                 VALUES (?1,'project:hex','uses','tombstoned duplicate',0.5,'2026-06-11','2026-06-11',1)",
+                params![id],
+            )
+            .unwrap();
+            let v: Vec<f32> = (0..EMBED_DIM)
+                .map(|d| (i as f32 + d as f32) * 0.0001)
+                .collect();
+            insert_fact_vec(&conn, &id, &v).unwrap();
+        }
+
+        // The one live, eligible fact — farther from the query than all 64
+        // tombstoned facts above, so it ranks 65th by distance.
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at)
+             VALUES ('01HFACT-LIVE','project:hex','uses','live object',0.5,'2026-06-11','2026-06-11')",
+            [],
+        )
+        .unwrap();
+        let live_v: Vec<f32> = (0..EMBED_DIM).map(|d| (64.0 + d as f32) * 0.0001).collect();
+        insert_fact_vec(&conn, "01HFACT-LIVE", &live_v).unwrap();
+
+        let query: Vec<f32> = (0..EMBED_DIM).map(|d| d as f32 * 0.0001).collect();
+        let hits = knn_facts(&conn, &query, 1).unwrap();
+
+        let found_live = hits.iter().any(|(rowid, _)| {
+            let id: String = conn
+                .query_row("SELECT id FROM facts WHERE rowid = ?1", [*rowid], |r| {
+                    r.get(0)
+                })
+                .unwrap();
+            id == "01HFACT-LIVE"
+        });
+        assert!(
+            found_live,
+            "the live fact must be returned even though 64 tombstoned facts rank nearer with k = 1 — is_live must fold in tombstone, not rely on the outer join, got {:?}",
+            hits
         );
     }
 }

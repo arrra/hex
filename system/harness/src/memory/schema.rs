@@ -282,8 +282,9 @@ CREATE INDEX IF NOT EXISTS facts_live_idx ON facts(subject, predicate) WHERE inv
 /// copy/DROP-old/RENAME sequence — the RENAME step left `facts_vec` querying
 /// a since-renamed `facts_vec_rowids` shadow table and failed with "no such
 /// table: main.facts_vec_rowids". Same end state (embeddings preserved,
-/// `is_live` derived from each fact's CURRENT `invalid_at`, `facts_vec` rows
-/// with no matching `facts` row dropped) reached without RENAME instead:
+/// `is_live` derived from each fact's CURRENT `invalid_at` AND `tombstone`
+/// (PR#9 r2 review_b G1), `facts_vec` rows with no matching `facts` row
+/// dropped) reached without RENAME instead:
 /// buffer every existing row into memory, drop the old table, then recreate
 /// `facts_vec` directly under its final name and reinsert. Idempotent:
 /// skipped once `facts_vec` already carries the column (probed with `SELECT
@@ -318,7 +319,7 @@ fn rebuild_facts_vec_with_is_live(conn: &Connection) -> Result<()> {
             return Ok(());
         }
         let mut stmt = conn.prepare(
-            "SELECT v.fact_id, v.embedding, (f.invalid_at IS NULL)
+            "SELECT v.fact_id, v.embedding, (f.invalid_at IS NULL AND f.tombstone = 0)
                FROM facts_vec v
                JOIN facts f ON f.id = v.fact_id",
         )?;
@@ -1010,5 +1011,66 @@ mod tests {
             "embedding must survive the deferred rebuild unchanged"
         );
         assert_eq!(is_live, 1, "live fact must be rebuilt with is_live = 1");
+    }
+
+    /// RED for G1 (reviewer-B redo): `rebuild_facts_vec_with_is_live` derives
+    /// `is_live` from `(f.invalid_at IS NULL)` alone — a fact that is
+    /// tombstoned (`facts.tombstone = 1`, set by consolidate canonicalization,
+    /// never deleted) but never superseded (`invalid_at` still NULL) is a v4
+    /// row this migration must NOT mark live. Simulates a v4 DB with a
+    /// tombstoned fact whose `facts_vec` row predates the rebuild; after
+    /// `apply_plan3`, its `is_live` must be 0. Fails now: the migration's
+    /// copy expression ignores `tombstone` entirely, so this fact is rebuilt
+    /// with `is_live = 1`.
+    #[test]
+    fn apply_plan3_sets_is_live_zero_for_tombstoned_rows_on_v4_migration() {
+        crate::memory::vector::register_sqlite_vec();
+        let conn = Connection::open_in_memory().unwrap();
+        apply_plan1_baseline_for_test(&conn).unwrap();
+        apply_plan2(&conn).unwrap(); // v4: facts_vec is still (fact_id, embedding)
+
+        conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT", [])
+            .unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN invalid_at TEXT", [])
+            .unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN superseded_by TEXT", [])
+            .unwrap();
+
+        // Tombstoned, but NOT superseded: invalid_at stays NULL. This is the
+        // canonicalization-collapse shape (memory/consolidate.rs
+        // tombstone_duplicate_fact), distinct from the supersede-not-overwrite
+        // shape the other v4-migration tests already cover.
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by,tombstone)
+             VALUES ('01HFACT-TOMB','project:hex','uses','a tombstoned duplicate',0.5,'2026-06-11','2026-06-11','2026-06-11',NULL,NULL,1)",
+            [],
+        )
+        .unwrap();
+
+        let embedding: Vec<f32> = (0..crate::memory::vector::EMBED_DIM)
+            .map(|d| d as f32 * 0.001)
+            .collect();
+        conn.execute(
+            "INSERT INTO facts_vec(fact_id, embedding) VALUES (?1, ?2)",
+            rusqlite::params![
+                "01HFACT-TOMB",
+                crate::memory::vector::f32s_to_le_bytes(&embedding)
+            ],
+        )
+        .unwrap();
+
+        apply_plan3(&conn).unwrap();
+
+        let is_live: i64 = conn
+            .query_row(
+                "SELECT is_live FROM facts_vec WHERE fact_id = '01HFACT-TOMB'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            is_live, 0,
+            "a tombstoned (but not superseded) fact must be rebuilt with is_live = 0, not just invalid_at IS NULL"
+        );
     }
 }
