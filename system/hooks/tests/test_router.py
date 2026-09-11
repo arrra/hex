@@ -1192,6 +1192,37 @@ class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertEqual(proc.stdout.strip(), "")
 
+    def test_thousands_of_exempt_stash_list_invocations_with_leading_cd_stays_under_hang_ceiling(self):
+        """F14 (review round redo): `_window_bounds` was fixed, but
+        `_effective_checkout` -- called once per candidate occurrence for
+        any rule with `unless_cwd` (git-stash-shared-checkout) -- still
+        rescans `scan_text[:match_start]` with `_CD_LOCATE_RE` from
+        scratch on EVERY candidate, and once a `cd` is found,
+        `_cd_reaches` slices `paren_depths[token_end:target_pos+1]` and
+        calls `min()` over it, again per candidate. A single leading `cd`
+        followed by thousands of exempt `git stash list` invocations (the
+        cwd is a `/worktrees/` checkout, matching the real F4 scenario)
+        makes both of those per-candidate scans quadratic in the number of
+        invocations. Empirically: 6000 repeats already exceeds a 5s
+        timeout against the current implementation. No tighter wall-clock
+        number is asserted here (that would reintroduce F18)."""
+        cmd = "cd /shared && " + "git stash list; " * 6000
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on a large all-exempt "
+                    "input with a leading `cd` — quadratic rescanning in "
+                    "_effective_checkout/_cd_reaches (F14)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
 
 class TestPipeTailScopedToTestCommandPipeline(RouterTestCase):
     """F20: the masked-test-exit prior must only fire when the
