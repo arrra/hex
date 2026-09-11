@@ -357,7 +357,13 @@ def validate_record(rec: object) -> str | None:
 # has a second space before the next "/", so the old single-hop regex never
 # found it. Match any run of space-separated word-tokens that eventually
 # reaches a "/", however many spaces it takes.
-_SPACE_CONTINUATION_RE = re.compile(r"(?: [\w.\-]+)+/")
+#
+# F7/F16 (round 2) — each token was separated by exactly one literal space
+# (" "), so a run of 2+ consecutive spaces ("Jane  Doe/...") broke the very
+# first hop of the continuation check and the truncated prefix was accepted
+# as a complete path. Match one-or-more spaces between tokens instead of
+# exactly one.
+_SPACE_CONTINUATION_RE = re.compile(r"(?: +[\w.\-]+)+/")
 
 
 def _looks_truncated_by_space(text: str, end: int) -> bool:
@@ -399,15 +405,25 @@ _STRUCTURED_PATH_KEYS = ("repo", "repoPath", "repository", "repoDir", "path", "c
 
 
 def _structured_repo_path(result: object) -> str | None:
-    """An explicit repo/path field from a structured `result` dict, if any."""
+    """An explicit repo/path field from a structured `result` dict, if any.
+
+    F7/F16 (round 2) — the value of a field the record itself labeled as a
+    repo/path/cwd was still being run through `_extract_repo_path()`, the
+    free-text tokenizer built for scanning prose that merely CONTAINS a
+    path. That tokenizer stops at the first space, so a genuine directory
+    name with a space in it ("/tmp/acme repo") was truncated to a prefix
+    ("/tmp/acme"). A structured field carries no surrounding prose to
+    separate from — the whole value IS the path — so it is consumed as a
+    complete value, never tokenized or truncated. Only a value that looks
+    like an absolute path at all (starts with "/") is treated as a match,
+    so an unrelated non-path field still falls through to the next key.
+    """
     if not isinstance(result, dict):
         return None
     for key in _STRUCTURED_PATH_KEYS:
         value = result.get(key)
-        if isinstance(value, str) and value.strip():
-            found = _extract_repo_path(value)
-            if found:
-                return found
+        if isinstance(value, str) and value.strip().startswith("/"):
+            return value.strip()
     return None
 
 
