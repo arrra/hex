@@ -98,6 +98,35 @@ def read_ledger(ledger_dir):
     return [json.loads(l) for l in lines]
 
 
+# Full ledger-row schema (matches the `entry` dict `evaluate()` writes, not
+# just the two fields a precedence test cares about winning) -- used by
+# `assert_complete_ledger` below so a "complete ledger" assertion actually
+# checks completeness (row count AND full row shape), not just a
+# rule_id -> decision dict comprehension that silently collapses a
+# duplicate row and can't see whether the other fields were stripped
+# (G4, review_b round 3).
+LEDGER_ROW_KEYS = {
+    "ts", "session_id", "rule_id", "tool", "decision", "match", "preview", "cwd",
+}
+
+
+def assert_complete_ledger(testcase, lines, expected_rule_decisions):
+    """G4: assert the ledger has EXACTLY the expected rows -- right count
+    (catches an appended duplicate), right rule_id->decision mapping, and
+    every row carries the full schema (catches rows reduced to a subset of
+    fields)."""
+    testcase.assertEqual(
+        len(lines), len(expected_rule_decisions),
+        f"expected exactly {len(expected_rule_decisions)} ledger row(s), "
+        f"got {len(lines)}: {lines!r}",
+    )
+    for line in lines:
+        testcase.assertEqual(set(line.keys()), LEDGER_ROW_KEYS)
+    testcase.assertEqual(
+        {l["rule_id"]: l["decision"] for l in lines}, expected_rule_decisions
+    )
+
+
 # Seed rules in the order the spec lists them (deliverable 4). The router's
 # "first prior wins" behavior is pinned against this order.
 SEED_RULE_ORDER = [
@@ -655,8 +684,8 @@ class TestCombinedOutcomeSemantics(RouterTestCase):
             self.assertNotIn("additionalContext", hso)
 
             lines = read_ledger(ledger_dir)
-            self.assertEqual(
-                {l["rule_id"]: l["decision"] for l in lines},
+            assert_complete_ledger(
+                self, lines,
                 {"gh-pr-merge-ci-green": "prior", "git-push-force": "ask"},
             )
 
@@ -688,8 +717,8 @@ class TestCombinedOutcomeSemantics(RouterTestCase):
             self.assertNotIn("additionalContext", hso)
 
             lines = read_ledger(ledger_dir)
-            self.assertEqual(
-                {l["rule_id"]: l["decision"] for l in lines},
+            assert_complete_ledger(
+                self, lines,
                 {"git-push-force": "ask", "git-stash-shared-checkout": "deny"},
             )
 
@@ -1827,6 +1856,99 @@ class TestF7RedactionAndLedgerPrivacy(RouterTestCase):
                 )
         finally:
             os.umask(old_umask)
+
+    # --- review_b round 3 (G1/G2/G3): the F7 redaction policy has three
+    # concrete gaps, each demonstrated with a real-shaped secret. ---------
+
+    def test_sk_proj_and_svcacct_style_keys_are_redacted(self):
+        """G1: the generic `sk-` pattern only allows [A-Za-z0-9] in the key
+        body, so real OpenAI-shaped keys with internal hyphens/underscores
+        (`sk-proj-...`, `sk-svcacct-...`) are only partially matched (or not
+        at all) and the live suffix survives into the ledger unchanged."""
+        # No "Bearer "/"password="/etc wrapper -- isolates the `sk-`
+        # pattern itself (a wrapping keyword's own greedy `\S+` would mask
+        # this bug by accident).
+        proj_key = "sk-proj-AbCdEfGh_IjKlMnOp-QrStUvWx1234567890"
+        svcacct_key = "sk-svcacct-ZyXwVuTs_RqPoNmLk-JiHgFeDc0987654321"
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    f"echo {proj_key} {svcacct_key} && git stash"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn(proj_key, entry.get("match", ""))
+                self.assertNotIn(proj_key, entry.get("preview", ""))
+                self.assertNotIn(svcacct_key, entry.get("match", ""))
+                self.assertNotIn(svcacct_key, entry.get("preview", ""))
+
+    def test_quoted_password_with_spaces_is_fully_redacted(self):
+        """G2a: `password=...` matches `\\S+` for the value, so a quoted
+        password containing spaces (`password="hunter two secret"`) only
+        redacts up to the first space and leaks the rest of the phrase."""
+        payload = make_payload(
+            "Bash",
+            {"command": 'echo password="hunter two secret" && git stash'},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("hunter two secret", entry.get("match", ""))
+                self.assertNotIn("hunter two secret", entry.get("preview", ""))
+                self.assertNotIn("two secret", entry.get("preview", ""))
+
+    def test_pem_block_survives_a_preceding_secret_assignment(self):
+        """G2b: `secret=...` is matched (and its value truncated at the
+        first token) BEFORE the PEM-block pattern runs, so a `secret=` (or
+        `token=`) prefix right before a PEM block eats the `-----BEGIN`
+        marker and the PEM pattern can no longer recognize (and redact) the
+        private-key body that follows."""
+        pem = (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEREDACTMEREDACTMEREDACTME\n"
+            "-----END PRIVATE KEY-----"
+        )
+        payload = make_payload(
+            "Bash",
+            {"command": f'echo "secret={pem}" && git stash'},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn(
+                    "MIIEvQIBADANBgkqhkiG9w0BAQEREDACTMEREDACTMEREDACTME",
+                    entry.get("preview", ""),
+                )
+
+    def test_cwd_field_in_ledger_entry_is_redacted(self):
+        """G3: the router persists the raw hook-payload `cwd` straight into
+        every ledger line without passing it through `redact()` -- only
+        `match`/`preview` are scrubbed. A secret embedded in `cwd` (payload
+        metadata, fully attacker-controlled) survives into the ledger."""
+        secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        payload = make_payload(
+            "Bash", {"command": "git stash"}, cwd=f"/tmp/{secret}/repo"
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn(secret, entry.get("cwd", ""))
 
 
 class TestF8ManifestQuoting(RouterTestCase):

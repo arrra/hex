@@ -74,23 +74,40 @@ TEXT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 # preview, incident error/args_preview) never carries a live credential.
 _REDACT_PATTERNS = [
     (re.compile(r"sk-ant-[A-Za-z0-9\-_]{8,}"), "sk-ant-***REDACTED***"),
-    (re.compile(r"sk-[A-Za-z0-9]{8,}"), "sk-***REDACTED***"),
+    # G1 (review_b round 3): real OpenAI-shaped keys (sk-proj-..., sk-svcacct-...)
+    # use hyphens/underscores inside the key body, not just alnum -- the old
+    # alnum-only charset stopped at the first "-" and left most of the key
+    # (everything after "proj"/"svcacct") unredacted.
+    (re.compile(r"sk-[A-Za-z0-9\-_]{8,}"), "sk-***REDACTED***"),
     (re.compile(r"ghp_[A-Za-z0-9]{16,}"), "***REDACTED-GH-TOKEN***"),
     (re.compile(r"github_pat_[A-Za-z0-9_]{16,}"), "***REDACTED-GH-TOKEN***"),
     (re.compile(r"xox[abp]-[A-Za-z0-9\-]{8,}"), "***REDACTED-SLACK-TOKEN***"),
     (re.compile(r"AKIA[A-Z0-9]{16}"), "***REDACTED-AWS-KEY***"),
     (re.compile(r"(?i)\bpit-[A-Za-z0-9\-_]{8,}"), "pit-***REDACTED***"),
     (re.compile(r"(?i)bearer\s+\S+"), "Bearer ***REDACTED***"),
-    (
-        re.compile(r"(?i)\b(password|token|secret|api[_-]?key)\s*=\s*\S+"),
-        r"\1=***REDACTED***",
-    ),
+    # G2b (review_b round 3): the PEM-block pattern MUST run before the
+    # generic `secret=`/`token=` pattern below -- that pattern's value is
+    # `\S+` (stops at the first whitespace), so a `secret=` immediately
+    # before a PEM block used to eat only "-----BEGIN" and leave the rest
+    # of the (now unrecognizable) PEM body, key material included, exposed.
     (
         re.compile(
             r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?"
             r"-----END [A-Z0-9 ]*PRIVATE KEY-----"
         ),
         "***REDACTED-PEM-BLOCK***",
+    ),
+    # G2a (review_b round 3): the value used to be `\S+`, so a quoted value
+    # containing spaces (`password="hunter two secret"`) only redacted up
+    # to the first space and leaked the rest of the phrase. Prefer a
+    # quoted value (single or double) when present, else fall back to the
+    # original single-token match.
+    (
+        re.compile(
+            r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
+            r"""("[^"]*"|'[^']*'|\S+)"""
+        ),
+        r"\1=***REDACTED***",
     ),
 ]
 
@@ -1090,7 +1107,11 @@ def evaluate(payload):
                 # prompt after the fact, nor let step 3 cluster fires by context
                 # (2026-09-06 04:06Z operator question).
                 "preview": preview,
-                "cwd": cwd,
+                # G3 (review_b round 3): payload `cwd` is attacker-controlled
+                # metadata like every other persisted field -- redact it too
+                # (matching logic above still uses the RAW `cwd`, only the
+                # persisted copy is scrubbed).
+                "cwd": redact(cwd),
             }
             lines.append(json.dumps(entry, sort_keys=True))
         with _open_private_append(ledger_path()) as lf:  # F7: 0600 regardless of umask

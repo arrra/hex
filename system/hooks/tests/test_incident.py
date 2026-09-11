@@ -266,6 +266,68 @@ class TestF7RedactionAndLedgerPrivacy(IncidentHookTestCase):
         finally:
             os.umask(old_umask)
 
+    # --- review_b round 3 (G1/G2/G3): same redaction-policy gaps as the
+    # router, duplicated verbatim into this hook. -------------------------
+
+    def test_sk_proj_and_svcacct_style_keys_are_redacted(self):
+        """G1: real OpenAI-shaped keys with internal hyphens/underscores
+        are only partially matched by the generic `sk-` pattern (alnum-only
+        body) and the live suffix survives into the ledger unchanged."""
+        # No "Bearer "/"password="/etc wrapper -- isolates the `sk-`
+        # pattern itself (a wrapping keyword's own greedy `\S+` would mask
+        # this bug by accident).
+        proj_key = "sk-proj-AbCdEfGh_IjKlMnOp-QrStUvWx1234567890"
+        proc = self._run(
+            _fixture(
+                tool_input={"command": f"echo {proj_key}"},
+                error=f"failed with key {proj_key}",
+            )
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn(proj_key, record["args_preview"])
+        self.assertNotIn(proj_key, record["error"])
+
+    def test_quoted_password_with_spaces_is_fully_redacted(self):
+        """G2a: `password=...` matches `\\S+` for the value, so a quoted
+        password containing spaces only redacts up to the first space."""
+        proc = self._run(
+            _fixture(error='failed: password="hunter two secret" and retry')
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn("hunter two secret", record["error"])
+        self.assertNotIn("two secret", record["error"])
+
+    def test_pem_block_survives_a_preceding_secret_assignment(self):
+        """G2b: `secret=...` is matched (and truncated at the first token)
+        BEFORE the PEM-block pattern runs, so a `secret=` prefix right
+        before a PEM block eats the `-----BEGIN` marker and the PEM body
+        leaks unredacted."""
+        pem = (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEREDACTMEREDACTMEREDACTME\n"
+            "-----END PRIVATE KEY-----"
+        )
+        proc = self._run(_fixture(error=f"secret={pem}"))
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn(
+            "MIIEvQIBADANBgkqhkiG9w0BAQEREDACTMEREDACTMEREDACTME",
+            record["error"],
+        )
+
+    def test_cwd_field_is_redacted(self):
+        """G3: this hook copies the raw hook-payload `cwd` straight into
+        the ledger record without passing it through `redact()` -- only
+        `error`/`args_preview` are scrubbed. A secret embedded in `cwd`
+        (payload metadata, fully attacker-controlled) survives."""
+        secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        proc = self._run(_fixture(cwd=f"/tmp/{secret}/repo"))
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn(secret, record["cwd"])
+
 
 class TestF15ProductionIsolationFlags(IncidentHookTestCase):
     """F15: this test suite's `_run` helper invokes the hook as plain
