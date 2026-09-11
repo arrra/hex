@@ -497,6 +497,25 @@ EXTRA_FIXTURES = [
         positive={"command": "git push origin +HEAD:main"},
         near_miss={"command": 'echo "x\ngit push --force"'},
     ),
+    # G4 (review_b round 2, re-opened): the backslash-escape branch inside
+    # `_mask_double_quoted` special-cased `\<newline>` (a real shell line
+    # continuation -- the shell deletes both characters, joining the two
+    # source lines into one) by leaving BOTH characters unmasked, so the
+    # embedded real newline never reached the `_SEPARATOR_CHARS` branch
+    # that the fixture above already covers for a BARE embedded newline.
+    # `echo "x\` + newline + `cd /worktrees/x"` is exactly one quoted
+    # string with no executable `cd` at all -- same bug, different escape
+    # path into it. Near miss: the same backslash-newline join in a commit
+    # message mentioning `git stash` must stay inert too.
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        cwd="/shared/checkout",
+        positive={"command": 'echo "x\\\ncd /worktrees/x"; git stash'},
+        near_miss={"command": 'git commit -m "fix\\\ngit stash was wrong"'},
+        near_miss_cwd="/shared/checkout",
+    ),
     # G5 (review_b round 2): a nested bounded loop placed AFTER the
     # `gh`+sleep pair (rather than before, G3's case) left the lazy
     # gh-fast-polling candidate UNCLOSED at the nested loop's own `done`

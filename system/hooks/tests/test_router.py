@@ -1418,6 +1418,30 @@ class TestStashExemptionEffectiveCheckout(RouterTestCase):
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
+    def test_double_quoted_backslash_newline_does_not_fake_a_cd(self):
+        """G4 (review_b round 2, re-opened): `_mask_double_quoted`'s
+        backslash-escape branch special-cased `\\<newline>` (a real shell
+        line continuation -- the shell deletes both characters and joins
+        the two source lines into one logical line) by leaving BOTH the
+        backslash and the newline unmasked, so the general `_SEPARATOR_CHARS`
+        branch (which blanks a bare embedded newline, fixed for the first
+        G4) never got a chance to run on this one. The unmasked real
+        newline still puts a fresh line-start inside the quoted span, so
+        `_CMD_PREFIX`'s `\\n\\s*` alternative anchors `cd /worktrees/x` as
+        a brand new command and `_effective_checkout` wrongly treats it as
+        a real `cd`, exempting a `git stash` that actually runs from a
+        real shared checkout with no real `cd` at all. A harmless shell
+        mock confirms the quoted `cd` line never actually executes -- the
+        echo just prints `xcd /worktrees/x` as one line."""
+        cmd = 'echo "x\\\ncd /worktrees/x"; git stash'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
 
 class TestForceRefspecAsksFirst(RouterTestCase):
     """F5: a leading `+` on any push refspec forces the update, the same as

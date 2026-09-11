@@ -330,16 +330,29 @@ def _mask_double_quoted(text, start, result):
     anchored the next line as if it were a brand new command (e.g. a
     double-quoted, multi-line `cd /worktrees/x` mention got picked up by
     `_effective_checkout` as a REAL `cd`). This function had its own
-    inline masking loop and was missed by that fix."""
+    inline masking loop and was missed by that fix.
+
+    A backslash-newline pair (`\\` immediately followed by a REAL newline)
+    is a shell line continuation even inside double quotes — the shell
+    deletes both characters and joins the two source lines into one
+    logical line, so `"x\\` + newline + `cd /worktrees/x"` is exactly
+    `"xcd /worktrees/x"`, a single quoted string with no executable `cd`
+    at all. The backslash-escape branch below used to special-case this
+    pair by leaving BOTH characters unmasked (reasoning it should not
+    "double-blank" an escape it wasn't otherwise touching), which let the
+    embedded real newline slip past the `_SEPARATOR_CHARS` branch further
+    down (that branch never runs here because `continue` skips it) and
+    fool `_CMD_PREFIX` the same way a bare embedded newline did before the
+    first G4 fix (review_b round 2, re-opened). Blank both characters like
+    any other escape pair — length-preserving, so offsets stay identical."""
     n = len(text)
     result[start] = " "
     i = start + 1
     while i < n:
         ch = text[i]
         if ch == "\\" and i + 1 < n:
-            if text[i + 1] != "\n":
-                result[i] = " "
-                result[i + 1] = " "
+            result[i] = " "
+            result[i + 1] = " "
             i += 2
             continue
         if ch == '"':
