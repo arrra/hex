@@ -748,26 +748,51 @@ def _paren_depths(scan_text):
 _OR_GUARD_RE = re.compile(r"[ \t]*\|\|")
 
 
-def _cd_reaches(scan_text, paren_depths, token_start, token_end, target_pos):
-    """A `cd` whose own argument occupies `scan_text[token_start:token_end)`
-    actually changes the cwd by the time `target_pos` is reached only if
-    (G1, review_b round 1): (a) its own enclosing subshell -- if any -- is
-    still open at `target_pos`: `(cd /worktrees/x); <stash invocation>`
-    must not inherit the subshell-local `cd`, because the `)` closes it
-    before the stash ever runs; and (b) it isn't immediately guarded by
-    `||`: `cd /worktrees/x || <stash invocation>` only reaches that
-    right-hand side when the `cd` FAILED, meaning the directory never
-    actually changed. `paren_depths[token_start]` -- not
-    `paren_depths[cd_match.start()]` -- is the depth that governs: it's
-    measured AFTER the leading separator/`(` that opened `cd`'s own
-    enclosing scope has already been counted."""
-    if _OR_GUARD_RE.match(scan_text, token_end):
-        return False
-    enclosing = paren_depths[token_start]
-    return min(paren_depths[token_end : target_pos + 1]) >= enclosing
+def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd):
+    """F14 (review round redo): `_effective_checkout` used to re-run
+    `_CD_LOCATE_RE.finditer(scan_text[:match_start])` (a full rescan of
+    everything before the candidate) AND re-slice/re-`min()`
+    `paren_depths[token_end:target_pos+1]` (the old `_cd_reaches` helper) on
+    EVERY candidate occurrence of a rule with `unless_cwd` -- both
+    proportional to `match_start`/`target_pos`, so a leading `cd` followed by
+    thousands of exempt invocations was quadratic overall (same shape
+    `_window_bounds` fixed for separator lookups). Each `cd`'s own reach
+    data -- (a) its own enclosing subshell must still be open at the target
+    (G1, review_b round 1: `(cd /worktrees/x); <stash>` must not inherit the
+    subshell-local `cd`, because the `)` closes it first); and (b) it must
+    not be immediately guarded by `||` (`cd /worktrees/x || <stash>` only
+    reaches when the `cd` FAILED) -- depends only on the `cd` itself, never
+    on the later candidate being checked. So `resolved` value, `guarded`,
+    and the first position (`break_pos`) where the enclosing paren depth
+    drops below the depth at the `cd`'s own token start are computed ONCE
+    per `cd` here (called once per `evaluate()` call, like
+    `sep_positions`/`paren_depths`) instead of once per (`cd`, candidate)
+    pair. `_effective_checkout` then binary-searches this list and does an
+    O(1) reach check per candidate: a `cd` reaches `target_pos` iff it isn't
+    guarded and (`break_pos` is `None` or `break_pos > target_pos`).
+    Returns `(starts, infos)` -- `starts` (the sorted `cd` positions, for
+    `_bisect_left`) kept separate from `infos` so callers never rebuild a
+    per-candidate list just to search it."""
+    starts = []
+    infos = []
+    for cd_match in _CD_LOCATE_RE.finditer(scan_text):
+        token_start = cd_match.end()
+        value, token_end = _read_token(text, token_start)
+        resolved = _resolve_against_cwd(value, payload_cwd) if value is not None else None
+        guarded = bool(_OR_GUARD_RE.match(scan_text, token_end))
+        enclosing = paren_depths[token_start]
+        break_pos = None
+        if not guarded:
+            for j in range(token_end, len(paren_depths)):
+                if paren_depths[j] < enclosing:
+                    break_pos = j
+                    break
+        starts.append(cd_match.start())
+        infos.append((resolved, guarded, break_pos))
+    return starts, infos
 
 
-def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd, paren_depths):
+def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd, cd_reach_starts, cd_reach_infos):
     invocation = scan_text[match_start:match_end]
     if _GIT_DIR_LOCATE_RE.search(invocation):
         return None
@@ -775,16 +800,15 @@ def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd, pa
     if c_locates:
         value, _ = _read_token(text, match_start + c_locates[-1].end())
         return _resolve_against_cwd(value, payload_cwd) if value is not None else None
-    cd_locates = list(_CD_LOCATE_RE.finditer(scan_text[:match_start]))
-    for cd_match in reversed(cd_locates):
-        token_start = cd_match.end()
-        value, token_end = _read_token(text, token_start)
-        if not _cd_reaches(scan_text, paren_depths, token_start, token_end, match_start):
-            # G1: this `cd` never actually took effect by match_start (its
-            # subshell closed, or it's guarded by `||`) -- try whatever `cd`
-            # came before it instead of falling straight to payload_cwd.
-            continue
-        return _resolve_against_cwd(value, payload_cwd) if value is not None else None
+    idx = _bisect_left(cd_reach_starts, match_start) - 1
+    while idx >= 0:
+        resolved, guarded, break_pos = cd_reach_infos[idx]
+        if not guarded and (break_pos is None or break_pos > match_start):
+            return resolved
+        # G1: this `cd` never actually took effect by match_start (its
+        # subshell closed, or it's guarded by `||`) -- try whatever `cd`
+        # came before it instead of falling straight to payload_cwd.
+        idx -= 1
     return payload_cwd
 
 
@@ -949,6 +973,7 @@ def evaluate(payload):
     scan_text = executable_mask(text) if tool_name == "Bash" else text
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
     paren_depths = _paren_depths(scan_text)
+    cd_reach_starts, cd_reach_infos = _precompute_cd_reach_info(text, scan_text, paren_depths, cwd)
     rules = load_rules()
 
     fires = []
@@ -967,7 +992,9 @@ def evaluate(payload):
             # an unresolved target never exempts (keeps protection).
             if _unless_cwd_re is None:
                 return False
-            eff_cwd = _effective_checkout(text, scan_text, candidate.start(), candidate.end(), cwd, paren_depths)
+            eff_cwd = _effective_checkout(
+                text, scan_text, candidate.start(), candidate.end(), cwd, cd_reach_starts, cd_reach_infos
+            )
             if eff_cwd is None:
                 return False
             return bool(_unless_cwd_re.search(eff_cwd))
