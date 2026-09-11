@@ -229,10 +229,21 @@ def _mask_literal_span(text, start, end, result, quote_char):
     """Blank `text[start:end)` to spaces in `result`, but ONLY the quote
     delimiter itself (`quote_char`) and any `_SEPARATOR_CHARS` character
     (G2, review_b round 1) — ordinary argument content stays visible. See
-    the executable-region-scanner comment above for why this is safe."""
+    the executable-region-scanner comment above for why this is safe.
+
+    A REAL newline inside the span is a `_SEPARATOR_CHARS` member too and
+    gets blanked like any other (review R4 regression from G2): leaving it
+    visible put a fresh line-start inside quoted text, and `_CMD_PREFIX`'s
+    `\\n\\s*` alternative then anchored the next line as if it were a brand
+    new command — e.g. a multi-line commit message merely mentioning the
+    stash rule's keyword denied, and a multi-line quoted `echo` argument
+    mentioning a force-push flag asked. Length-preserving (a blanked
+    newline is still one character), so all offsets stay identical; this
+    function is never called on heredoc bodies (see
+    `_consume_heredoc_body`), so they are unaffected."""
     for k in range(start, end):
         ch = text[k]
-        if ch == quote_char or (ch in _SEPARATOR_CHARS and ch != "\n"):
+        if ch == quote_char or ch in _SEPARATOR_CHARS:
             result[k] = " "
 
 

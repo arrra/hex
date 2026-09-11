@@ -452,6 +452,27 @@ EXTRA_FIXTURES = [
             )
         },
     ),
+    # Review R4 (regression from G2): `_mask_literal_span` excluded a REAL
+    # newline from blanking, so a multi-line quoted literal's second line
+    # sat at a fresh line-start and `_CMD_PREFIX`'s `\n\s*` alternative
+    # anchored it as if it were a brand new command -- a multi-line `-m`
+    # message merely mentioning `git stash` denied, and a multi-line quoted
+    # `echo` argument mentioning `git push --force` asked. Both must stay
+    # inert, same as their single-line equivalents.
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": "git stash"},
+        near_miss={"command": "git commit -m 'fix\n\ngit stash was wrong'"},
+    ),
+    dict(
+        id="git-push-force",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git push origin +HEAD:main"},
+        near_miss={"command": "echo 'x\ngit push --force'"},
+    ),
 ]
 
 

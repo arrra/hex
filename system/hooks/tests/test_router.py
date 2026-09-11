@@ -908,6 +908,31 @@ class TestExecutableRegionScanner(RouterTestCase):
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
+    def test_real_newline_inside_quoted_literal_stays_inert(self):
+        """Review R4 regression from G2 (review_b round 1): G2 stopped
+        blanking _SEPARATOR_CHARS content inside a quoted literal so the
+        shell's actual argument text (e.g. a quoted leading `+` refspec)
+        stayed visible to rules -- but `_mask_literal_span` also excluded
+        the REAL newline inside that quoted span from blanking, so a
+        multi-line quoted string's second line stayed at a fresh line-start
+        and `_CMD_PREFIX`'s `\\n\\s*` alternative anchored it as if it were
+        a brand new command. A multi-line `-m` message that merely
+        mentions `git stash`, or a multi-line quoted `echo` argument that
+        mentions `git push --force`, must both stay inert -- same as their
+        single-line equivalents already do."""
+        cases = (
+            ("git commit -m 'fix\n\ngit stash was wrong'", DEFAULT_CWD),
+            ("echo 'x\ngit push --force'", DEFAULT_CWD),
+        )
+        for cmd, cwd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd=cwd), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"multi-line quoted literal must abstain: {cmd!r} -> {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
 
 class TestHeredocBoundToItsDelimiter(RouterTestCase):
     """F13: heredoc detection must stop at the ACTUAL terminator instead of
