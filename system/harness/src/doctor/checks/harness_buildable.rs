@@ -377,7 +377,7 @@ fn diagnose(worktree_path: &Path, empty_hooks_dir: &Path, timeout: Duration) -> 
         // inside the checkout root before trusting anything under it,
         // the same containment discipline F4/F10 already applies to leaf
         // include! targets.
-        if let Err(reason) = canonicalize_within_checkout(&pkg.root, worktree_path) {
+        if let Err(reason) = canonicalize_within_checkout(&pkg.root, worktree_path, timeout) {
             return CheckResult::fail(format!(
                 "local package root {} escapes the checkout — {reason}",
                 pkg.root.display()
@@ -397,7 +397,7 @@ fn diagnose(worktree_path: &Path, empty_hooks_dir: &Path, timeout: Duration) -> 
             ));
         }
         for entry in &pkg.target_entry_points {
-            if let Err(reason) = canonicalize_within_checkout(entry, worktree_path) {
+            if let Err(reason) = canonicalize_within_checkout(entry, worktree_path, timeout) {
                 return CheckResult::fail(format!(
                     "target entry point {} escapes the checkout — {reason}",
                     entry.display()
@@ -453,6 +453,15 @@ fn diagnose(worktree_path: &Path, empty_hooks_dir: &Path, timeout: Duration) -> 
             state.errors.join("; ")
         ))
         .with_details(state.errors.join("\n"));
+    }
+    if !state.submodule_uninitialized.is_empty() {
+        return CheckResult::fail(format!(
+            "{} include target(s) referenced by the harness live inside a git \
+             submodule that has not been initialized in this checkout — \
+             fix: git submodule update --init",
+            state.submodule_uninitialized.len()
+        ))
+        .with_details(state.submodule_uninitialized.join("\n"));
     }
     if !state.missing.is_empty() {
         return CheckResult::fail(format!(
@@ -1383,15 +1392,85 @@ fn verify_raw_path_tracked_by_git(
 /// be treated as present just because something exists there on this
 /// host — only content this check can prove came from the git checkout
 /// (i.e. lives inside the fresh `git worktree`) counts.
-fn canonicalize_within_checkout(path: &Path, checkout_root: &Path) -> Result<PathBuf, String> {
+fn canonicalize_within_checkout(
+    path: &Path,
+    checkout_root: &Path,
+    timeout: Duration,
+) -> Result<PathBuf, String> {
     let canonical_root = std::fs::canonicalize(checkout_root)
         .map_err(|e| format!("failed to canonicalize checkout root: {e}"))?;
-    let canonical = std::fs::canonicalize(path)
-        .map_err(|_| "not tracked by git (missing from a fresh checkout)".to_string())?;
+    let canonical = match std::fs::canonicalize(path) {
+        Ok(c) => c,
+        Err(_) => {
+            // F11: `git worktree add` materializes a recorded submodule's
+            // own directory but never initializes its contents, so a
+            // required input hidden behind one is empty/missing on disk
+            // without ever having been "untracked" by git. Name that cause
+            // (and its actual remedy) instead of misreporting it the same
+            // way as ordinary untracked content.
+            if let Some(gitlink) = find_uninitialized_submodule(checkout_root, path, timeout) {
+                return Err(format!(
+                    "is inside git submodule `{gitlink}`, which is not initialized in \
+                     this checkout — fix: git submodule update --init"
+                ));
+            }
+            return Err("not tracked by git (missing from a fresh checkout)".to_string());
+        }
+    };
     if !canonical.starts_with(&canonical_root) {
         return Err("resolves outside the checkout root (escaping path or symlink)".to_string());
     }
     Ok(canonical)
+}
+
+/// Walks upward from `path`'s nearest existing ancestor directory (F11)
+/// looking for a git gitlink — a `160000` tree entry, how git records a
+/// submodule reference — that `path` lives under. Returns the gitlink's
+/// checkout-relative path if found.
+fn find_uninitialized_submodule(
+    checkout_root: &Path,
+    path: &Path,
+    timeout: Duration,
+) -> Option<String> {
+    let canonical_root = std::fs::canonicalize(checkout_root).ok()?;
+    let mut dir = path.parent()?.to_path_buf();
+    loop {
+        if let Ok(canonical_dir) = std::fs::canonicalize(&dir) {
+            if canonical_dir == canonical_root {
+                return None;
+            }
+            if let Ok(rel) = canonical_dir.strip_prefix(&canonical_root) {
+                let rel_git = rel
+                    .components()
+                    .map(|c| c.as_os_str().to_string_lossy().into_owned())
+                    .collect::<Vec<_>>()
+                    .join("/");
+                if !rel_git.is_empty() && is_gitlink(checkout_root, &rel_git, timeout) {
+                    return Some(rel_git);
+                }
+            }
+        }
+        if !dir.pop() {
+            return None;
+        }
+    }
+}
+
+/// True if `rel_git` is recorded at `HEAD` as a gitlink (mode `160000`) —
+/// a git submodule reference, not a plain tracked file or directory.
+fn is_gitlink(checkout_root: &Path, rel_git: &str, timeout: Duration) -> bool {
+    let mut cmd = Command::new("git");
+    cmd.args(["ls-tree", "HEAD", "--", rel_git])
+        .current_dir(checkout_root);
+    match run_with_timeout(&mut cmd, timeout) {
+        Ok(output) if output.status.success() => {
+            String::from_utf8_lossy(&output.stdout)
+                .split_whitespace()
+                .next()
+                == Some("160000")
+        }
+        _ => false,
+    }
 }
 
 /// Validates an include target for repository-containment (F4/F10):
@@ -1415,7 +1494,7 @@ fn validate_include_target(
         .parent()
         .unwrap_or(referencing_file)
         .join(literal);
-    let canonical_target = canonicalize_within_checkout(&candidate, checkout_root)?;
+    let canonical_target = canonicalize_within_checkout(&candidate, checkout_root, timeout)?;
     // G1 (review_b iteration 3): confirm the LITERAL path this macro names
     // is itself tracked by git, not just whatever it resolves to after
     // following symlinks — see `verify_raw_path_tracked_by_git`. Keep the
@@ -1492,6 +1571,11 @@ struct ScanState {
     worktree_path: PathBuf,
     checked: usize,
     missing: Vec<String>,
+    /// F11: required inputs hidden behind a recorded-but-uninitialized git
+    /// submodule (gitlink). Kept separate from `missing` because the fix is
+    /// `git submodule update --init`, not `git add` — the two must never
+    /// share one summary message.
+    submodule_uninitialized: Vec<String>,
     inconclusive: Vec<String>,
     errors: Vec<String>,
     visited: HashSet<PathBuf>,
@@ -1520,6 +1604,7 @@ impl ScanState {
             worktree_path,
             checked: 0,
             missing: Vec::new(),
+            submodule_uninitialized: Vec::new(),
             inconclusive: Vec::new(),
             errors: Vec::new(),
             visited: HashSet::new(),
@@ -1712,7 +1797,8 @@ impl ScanState {
             // must be rejected the same way an escaping include! target
             // already is (F4/F10), not silently followed and scanned as
             // if it were checked-out content.
-            let containment = canonicalize_within_checkout(&resolved, &self.worktree_path);
+            let containment =
+                canonicalize_within_checkout(&resolved, &self.worktree_path, self.timeout);
             // G1 (review_b iteration 3): containment alone proves
             // `resolved` lives inside the checkout — it does not prove
             // `resolved` itself (as opposed to whatever it points to) is
@@ -1775,8 +1861,16 @@ impl ScanState {
                     }
                 }
                 Err(reason) => {
-                    self.missing
-                        .push(format!("{} -> {literal} ({reason})", self.rel(path),));
+                    // F11: an uninitialized-submodule cause gets its own
+                    // bucket so the aggregate summary never tells the user
+                    // to `git add` a path git already fully tracks.
+                    if reason.contains("git submodule update --init") {
+                        self.submodule_uninitialized
+                            .push(format!("{} -> {literal} ({reason})", self.rel(path),));
+                    } else {
+                        self.missing
+                            .push(format!("{} -> {literal} ({reason})", self.rel(path),));
+                    }
                 }
             }
         }

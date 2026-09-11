@@ -534,6 +534,104 @@ mod tests {
         );
     }
 
+    /// Fixture: a required include target (`include_str!`) lives inside a
+    /// git submodule (gitlink, mode 160000) that IS committed and recorded
+    /// in the parent repo, but — exactly like any `git worktree add` of a
+    /// checkout that never ran `git submodule update --init` — is left as
+    /// an empty, uninitialized directory in the diagnostic worktree. F11:
+    /// this is not a "not tracked by git" problem (the gitlink itself is
+    /// fully committed); it needs `git submodule update --init`, not
+    /// `git add`.
+    fn init_repo_uninitialized_submodule_include() -> (tempfile::TempDir, tempfile::TempDir) {
+        let vendor = tempfile::tempdir().unwrap();
+        run_git(vendor.path(), &["init", "-q"]);
+        std::fs::write(vendor.path().join("data.txt"), "hello\n").unwrap();
+        run_git(vendor.path(), &["add", "-A"]);
+        run_git(vendor.path(), &["commit", "-q", "-m", "vendor init"]);
+
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(
+            harness.join("Cargo.toml"),
+            "[package]\nname = \"fixture-harness\"\nversion = \"0.1.0\"\nedition = \"2021\"\n",
+        )
+        .unwrap();
+        std::fs::write(harness.join("Cargo.lock"), FIXTURE_LOCKFILE).unwrap();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str!(\"../vendor/data.txt\");\n",
+        )
+        .unwrap();
+        // `git submodule add` needs local-file-protocol submodules
+        // explicitly allowed (git >= 2.38); this is a command-local `-c`,
+        // never a process-global config write (F18 discipline).
+        run_git(
+            tmp.path(),
+            &[
+                "-c",
+                "protocol.file.allow=always",
+                "submodule",
+                "add",
+                "-q",
+                vendor.path().to_str().unwrap(),
+                ".hex/harness/vendor",
+            ],
+        );
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "init harness with vendored submodule include",
+            ],
+        );
+        (tmp, vendor)
+    }
+
+    #[test]
+    fn test_harness_buildable_names_uninitialized_submodule_not_missing_from_git() {
+        let (tmp, _vendor) = init_repo_uninitialized_submodule_include();
+        let ctx = Context {
+            hex_dir: tmp.path().to_path_buf(),
+            home: PathBuf::from("/tmp"),
+            fix: false,
+        };
+        let results = Runner::filtered("harness-buildable-from-git").run(&ctx);
+        let (_, result) = results
+            .iter()
+            .find(|(name, _)| name == "harness-buildable-from-git")
+            .expect("expected a doctor check named `harness-buildable-from-git` to run");
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "an include target hidden behind an uninitialized submodule must \
+             still FAIL (it is not buildable from this checkout), got {:?}",
+            result
+        );
+        let combined = format!(
+            "{} {}",
+            result.message,
+            result.details.clone().unwrap_or_default()
+        )
+        .to_lowercase();
+        assert!(
+            combined.contains("submodule"),
+            "F11: the diagnostic must name the real cause — an uninitialized \
+             git submodule — not misreport it as untracked content, got: {:?}",
+            result
+        );
+        assert!(
+            !combined.contains("git add"),
+            "F11: `git add` is the wrong remedy for a submodule that only \
+             needs `git submodule update --init` — got: {:?}",
+            result
+        );
+    }
+
     #[test]
     fn test_harness_buildable_fails_and_names_missing_include_target() {
         let tmp = init_repo_missing_include();
