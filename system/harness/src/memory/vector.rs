@@ -655,7 +655,7 @@ mod tests {
     /// called (the exact pairing every real writer must do), `is_live` flips
     /// to 0 and `knn_facts` excludes it.
     #[test]
-    fn mark_fact_vec_superseded_flips_is_live_and_excludes_from_knn_facts() {
+    fn mark_fact_vec_dead_flips_is_live_and_excludes_from_knn_facts() {
         register_sqlite_vec();
         let conn = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&conn).unwrap();

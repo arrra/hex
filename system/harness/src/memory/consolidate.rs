@@ -411,7 +411,15 @@ fn tombstone_duplicate_fact(
 
     let result = write();
     match &result {
-        Ok(_) => conn.execute_batch("COMMIT")?,
+        Ok(_) => {
+            if let Err(commit_err) = conn.execute_batch("COMMIT") {
+                // A failed COMMIT still leaves the connection inside the
+                // transaction (PR#9 r2 review_b G2) — roll it back so the
+                // half-applied writes never linger uncommitted.
+                let _ = conn.execute_batch("ROLLBACK");
+                return Err(commit_err.into());
+            }
+        }
         Err(_) => {
             let _ = conn.execute_batch("ROLLBACK");
         }
@@ -472,10 +480,16 @@ fn op_prune(conn: &mut Connection) -> anyhow::Result<()> {
         Ok(())
     };
     match write() {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(())
-        }
+        Ok(()) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(()),
+            Err(commit_err) => {
+                // Same failed-COMMIT gap as tombstone_duplicate_fact above
+                // (PR#9 r2 review_b G2) — roll back rather than leave the
+                // connection sitting inside an uncommitted transaction.
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(commit_err.into())
+            }
+        },
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(e)
@@ -957,7 +971,7 @@ mod tests {
     /// RED for G1 (reviewer-B redo): every code path that sets
     /// `facts.tombstone = 1` must keep `facts_vec.is_live` in sync in the SAME
     /// transaction, exactly like the existing supersede-not-overwrite writers
-    /// do via `mark_fact_vec_superseded`. `tombstone_duplicate_fact` (the
+    /// do via `mark_fact_vec_dead`. `tombstone_duplicate_fact` (the
     /// canonicalization collapse writer, called from `op_fact_canonicalize`
     /// via `run`) is the one production path that sets `tombstone = 1` today,
     /// and it currently does NOT touch `facts_vec` at all. Fails now:
