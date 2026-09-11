@@ -1091,5 +1091,53 @@ class TerminalStateAndFailureBranchCoverage(unittest.TestCase):
             self.assertIn("**Status:** completed", content)
 
 
+class UnderscoreHyphenPrefixedCredentialBoundary(unittest.TestCase):
+    """G1 — the credential-prefix lookbehind excluded a preceding '_'/'-', so
+    identifiers glued onto those characters (exactly how the harness names
+    things: wf_<runId>, deploy-<name>) leaked the complete credential into
+    report bodies, filenames, warnings, and --dry-run previews. Digits (not
+    letters) fill the token tails below so the assertions survive slug()'s
+    lower() step used to build the filename component."""
+
+    def test_underscore_and_hyphen_prefixed_tokens_are_redacted_everywhere(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            ghp_secret = "ghp_" + "1234567890" * 4
+            pat_secret = "github_pat_" + "1357924680" * 3
+            rec = {
+                "runId": f"wf_{ghp_secret}",
+                "workflowName": f"deploy-{pat_secret}",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"summary": f"triggered by wf_{ghp_secret} via deploy-{pat_secret}"},
+            }
+            _write_record(projects, rec)
+
+            # --dry-run preview + warning line
+            rc, out, err = _run_export(hex_dir, projects, dry_run=True)
+            self.assertNotIn(ghp_secret, out, "_-prefixed ghp_ token leaked into --dry-run preview")
+            self.assertNotIn(pat_secret, out, "--prefixed github_pat_ token leaked into --dry-run preview")
+            self.assertNotIn(ghp_secret, err, "_-prefixed ghp_ token leaked into a warning")
+            self.assertNotIn(pat_secret, err, "--prefixed github_pat_ token leaked into a warning")
+
+            # report body + filename component (a real, non-dry-run write)
+            rc2, out2, err2 = _run_export(hex_dir, projects)
+            self.assertEqual(rc2, 0, err2)
+            reports = list(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(len(reports), 1, reports)
+            self.assertNotIn(ghp_secret, reports[0].name, "ghp_ token leaked into the report filename")
+            self.assertNotIn(pat_secret, reports[0].name, "github_pat_ token leaked into the report filename")
+            content = reports[0].read_text()
+            self.assertNotIn(ghp_secret, content, "ghp_ token leaked into the report body")
+            self.assertNotIn(pat_secret, content, "github_pat_ token leaked into the report body")
+
+    def test_ghp_shaped_substring_inside_an_ordinary_word_is_untouched(self):
+        m = load_script()
+        text = "graph_nodes stay intact"
+        self.assertEqual(m.redact(text), text)
+
+
 if __name__ == "__main__":
     unittest.main()

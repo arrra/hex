@@ -80,14 +80,24 @@ LOG_CAP = 150
 # word ("ta"+"sk-", "ri"+"sk-", "de"+"sk-"). Legitimate ids in this codebase
 # embed "sk-" directly after "_"/"-" ("wf_sk-ant-...", "deploy-sk-ant-..."),
 # which this lookbehind still allows.
+#
+# G1 (spec review round 2) — the OTHER prefixed-token alternatives each used
+# a lookbehind that additionally excluded a preceding "_"/"-"
+# ("(?<![A-Za-z0-9_-])"), unlike the sk- lookbehind above. The harness names
+# things exactly like that ("wf_<runId>", "deploy-<name>"), so an identifier
+# such as "wf_ghp_<token>" or "deploy-github_pat_<token>" was never even
+# tried against the pattern — the leading "_"/"-" blocked the match and the
+# complete credential leaked verbatim. Match the sk- lookbehind's boundary
+# on every alternative: block only when glued onto another alnum character,
+# never on "_"/"-".
 SECRET_RE = re.compile(
     r"(?<![A-Za-z0-9])sk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}"
-    r"|(?<![A-Za-z0-9_-])github_pat_[A-Za-z0-9_]{20,}"
-    r"|(?<![A-Za-z0-9_-])gh[pousr]_[A-Za-z0-9]{20,}"
-    r"|(?<![A-Za-z0-9_-])xox[abps]-[A-Za-z0-9-]{10,}"
-    r"|(?<![A-Za-z0-9_-])AKIA[A-Z0-9]{12,}"
+    r"|(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}"
+    r"|(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|(?<![A-Za-z0-9])xox[abps]-[A-Za-z0-9-]{10,}"
+    r"|(?<![A-Za-z0-9])AKIA[A-Z0-9]{12,}"
     r"|Bearer [A-Za-z0-9._-]{20,}"
-    r"|(?<![A-Za-z0-9_-])pit-[a-f0-9-]{20,}"
+    r"|(?<![A-Za-z0-9])pit-[a-f0-9-]{20,}"
     r"|(?<![A-Za-z0-9_])(?:key|token|password|secret)=\S+"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
 )
