@@ -1263,5 +1263,29 @@ class UnmappedFallbackSymlinkEscapeCounted(unittest.TestCase):
             )
 
 
+class NoClobberLinkPublish(unittest.TestCase):
+    """F3 (nit, reviewer A) — the atomic publish uses os.link with
+    no-clobber semantics: a race that creates the destination between the
+    exists-check and the link must be skipped, never overwritten."""
+
+    def test_link_race_is_skipped_not_overwritten(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir, cp = os.path.join(td, "hex"), os.path.join(td, "cp")
+            os.makedirs(hex_dir)
+            rec = {"runId": "wf_f3", "workflowName": "wf", "status": "completed",
+                   "timestamp": "2026-09-09T12:00:00Z", "result": "hi"}
+            _write_record(cp, rec)
+
+            def racing_link(src, dst):
+                Path(dst).write_text("winner")
+                raise FileExistsError(dst)
+
+            with unittest.mock.patch.object(os, "link", side_effect=racing_link):
+                rc, out, err = _run_export(hex_dir, cp)
+            self.assertEqual(rc, 0, err)
+            report = next(Path(hex_dir, "projects").rglob("*.md"))
+            self.assertEqual(report.read_text(), "winner", "the race winner's write must not be clobbered")
+
+
 if __name__ == "__main__":
     unittest.main()
