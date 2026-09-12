@@ -1063,10 +1063,27 @@ where
                 // finalization step, so it succeeds even while the blocking
                 // reader is still active. A secondary failure to unwind is
                 // logged loudly (S6) but does not shadow the original error.
-                if let Err(unwind_err) = conn.execute_batch("ROLLBACK") {
+                //
+                // B-F-new1 (major, arrra/hex PR #9 round 2, prior-round
+                // carry): that full `ROLLBACK` must only run when this call
+                // owns the transaction (see `owns_transaction` above) — the
+                // same gate F7 (below) already applies on the Err arm. A
+                // caller that wraps one or more `index_file_with_reuse`
+                // calls inside its own already-open transaction must not
+                // have that ENTIRE outer transaction discarded just because
+                // this call's own nested RELEASE failed to finalize.
+                if owns_transaction {
+                    if let Err(unwind_err) = conn.execute_batch("ROLLBACK") {
+                        eprintln!(
+                            "  ERROR: failed to unwind index_file_with_reuse savepoint after a \
+                             failed RELEASE ({release_err}): {unwind_err}"
+                        );
+                    }
+                } else {
                     eprintln!(
-                        "  ERROR: failed to unwind index_file_with_reuse savepoint after a \
-                         failed RELEASE ({release_err}): {unwind_err}"
+                        "  ERROR: failed to release index_file_with_reuse savepoint after a \
+                         failed RELEASE ({release_err}); leaving the caller-owned outer \
+                         transaction in place"
                     );
                 }
                 Err(release_err.into())
