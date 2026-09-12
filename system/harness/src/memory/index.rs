@@ -3419,8 +3419,8 @@ mod tests {
     // above, but the failure this time comes from the embedder (the Err arm)
     // instead of a successful commit (the Ok arm).
     #[test]
-    fn index_file_with_reuse_embedding_failure_under_blocking_reader_unwinds_and_next_call_persists()
-    {
+    fn index_file_with_reuse_embedding_failure_under_blocking_reader_unwinds_and_next_call_persists(
+    ) {
         let tmp = TempDir::new().unwrap();
         let hex_root = tmp.path();
         let db_path = tmp.path().join("memory.db");
