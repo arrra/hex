@@ -2143,6 +2143,54 @@ class TestStashExemptionEffectiveCheckout(RouterTestCase):
             )
             self.assertEqual(read_ledger(ledger_dir), [])
 
+    def test_or_guard_end_extends_past_a_bracketed_fallback_operand(self):
+        """A-R1/B-R1 (round 2 reopen review, generation 3): `guard_end` is
+        computed as the first `_SEPARATOR_CHARS` position after `||`, but
+        `{` and `(` are themselves members of `_SEPARATOR_CHARS` -- when
+        the fallback operand OPENS with a brace-group or subshell (`cd X
+        || { ...; }` / `cd X || (...)`), `guard_end` landed on that
+        opening bracket itself, so the group's own body (at-or-past that
+        position) was treated as already past the guard and wrongly
+        inherited the `cd` that just FAILED to reach it. A real shell only
+        runs the bracketed group when the `cd` failed, i.e. in the
+        directory from BEFORE the `cd` -- so each case here must resolve
+        against the payload cwd (`/shared/checkout`, not exempt) and deny,
+        exactly like the existing unbracketed `|| exit 1; <stash>` cases
+        above."""
+        cases = (
+            "cd /worktrees/review || { git stash; }",
+            "cd /worktrees/review || (git stash)",
+            "cd /worktrees/review || {\n  echo fail\n  git stash\n}",
+            "cd /worktrees/review || { cd . && git stash; }",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-R1/B-R1)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_or_guard_end_bracketed_fallback_inverse_still_abstains(self):
+        """B-R1 near miss (round 2 reopen review, generation 3): same
+        bracketed-fallback shape, but the `cd`'s own target IS the exempt
+        /worktrees/ checkout and the payload cwd is the real shared one.
+        Excluding the fallback's body from this `cd`'s reach must fall
+        through to the payload cwd (`/worktrees/review`, exempt) and
+        abstain -- not flip to a false deny by over-extending the guard in
+        the other direction."""
+        cmd = "cd /shared/checkout || { git stash; }"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"bracketed fallback with an exempt payload cwd must abstain (B-R1): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
 
 class TestForceRefspecAsksFirst(RouterTestCase):
     """F5: a leading `+` on any push refspec forces the update, the same as

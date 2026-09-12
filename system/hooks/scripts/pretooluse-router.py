@@ -1015,6 +1015,35 @@ def _paren_depths(scan_text):
 _OR_GUARD_RE = re.compile(r"[ \t]*\|\|")
 
 
+def _skip_balanced_group(scan_text, open_idx):
+    """`scan_text[open_idx]` is `(` or `{`; return the index just past its
+    matching closer. `scan_text` has already had quoted/commented/heredoc
+    text masked to spaces (real `(`/`)`/`{`/`}` characters only remain
+    where they are genuine shell syntax), so plain depth counting on the
+    SAME bracket character as `open_idx` suffices -- an unrelated bracket
+    type nested inside (e.g. a `(...)` subshell inside a `{...}` group)
+    never affects this count, since a well-formed script always closes it
+    before the enclosing group's own closer. Falls back to the end of
+    `scan_text` when the group never closes (EOF), matching this file's
+    other unterminated/EOF conventions (`_find_matching_paren`,
+    `_consume_heredoc_body`)."""
+    open_ch = scan_text[open_idx]
+    close_ch = ")" if open_ch == "(" else "}"
+    depth = 0
+    n = len(scan_text)
+    i = open_idx
+    while i < n:
+        ch = scan_text[i]
+        if ch == open_ch:
+            depth += 1
+        elif ch == close_ch:
+            depth -= 1
+            if depth == 0:
+                return i + 1
+        i += 1
+    return n
+
+
 def _next_lower_paren_depth(paren_depths):
     """`next_lower[j]` = the smallest `k > j` with `paren_depths[k] <
     paren_depths[j]`, or `None` if no such `k` exists ("next smaller
@@ -1130,6 +1159,20 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd, sep_po
             guard_end = (
                 sep_positions[sep_idx] if sep_idx < len(sep_positions) else len(scan_text)
             )
+            # A-R1/B-R1 (round 2 reopen review, generation 3): `{`/`(` are
+            # themselves `_SEPARATOR_CHARS` members, so when the fallback
+            # operand OPENS with a brace-group or subshell (`cd X || {
+            # ...; }` / `cd X || (...)`), the lookup above lands `guard_end`
+            # on that OPENING bracket -- the group's own body then sits at
+            # or past `guard_end` and is wrongly treated as already outside
+            # the guard, inheriting a `cd` that just failed to reach it. A
+            # real shell only runs the group when the `cd` failed, i.e. in
+            # whatever directory was in effect BEFORE it. Extend `guard_end`
+            # past the bracket's own matching closer so the entire operand
+            # -- not just its first character -- stays excluded from this
+            # `cd`'s reach.
+            if guard_end < len(scan_text) and scan_text[guard_end] in "({":
+                guard_end = _skip_balanced_group(scan_text, guard_end)
         enclosing = paren_depths[token_start]
         break_pos = None
         if paren_depths[token_end] == enclosing:
