@@ -438,36 +438,6 @@ def validate_record(rec: object) -> str | None:
 # ConservativeFreeTextAmbiguityRouting for the reviewer's exact probes.
 _CONTINUATION_TOKEN_RE = re.compile(r"\S+")
 
-# Round-9 review, F7/F16: common English coordinating conjunctions and
-# prepositions — a token exactly matching one of these (case-insensitive,
-# trailing sentence punctuation stripped) signals that ordinary sentence
-# PROSE has resumed after a free-text path match, as opposed to a
-# continuing (space-containing) directory/person's-name component. See
-# `_free_text_ambiguity`'s doc comment for why this replaces a hop-count
-# cutoff. Deliberately short and unambiguous: every word here is a closed-
-# class function word that essentially never appears as one component of
-# a real directory or person's name.
-_PROSE_RESUMES_AT = frozenset(
-    {
-        "and",
-        "or",
-        "but",
-        "then",
-        "on",
-        "in",
-        "via",
-        "with",
-        "for",
-        "to",
-        "at",
-        "from",
-        "after",
-        "before",
-        "while",
-        "of",
-    }
-)
-
 
 def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
     """None if `match` is trusted as a complete path; otherwise a short
@@ -490,42 +460,39 @@ def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
     hiding the fact that the real directory is `outer.v2 backup`) — shows
     the IMMEDIATE next token can itself be a real multi-segment path
     continuation rather than ordinary prose. So: only hop 1 (the token
-    immediately after the match) is checked, and
-    only for 2+ slashes (the same bar a bare match's LATER hops use) —
+    immediately after the match) is checked, and only for 2+ slashes —
     anything beyond hop 1, or a hop 1 with fewer than 2 slashes (a
     genuine idiom like "and/or", or plain prose like "and updated"),
     stays trusted.
 
-    BARE (no-extension) matches: round-9 review — hop-index cutoffs (hop
-    1, then hops 1-2) were each defeated by one more word in the
-    directory name ("Jane Doe Smith" beat hop 1; "Jane Doe Middle Smith"
-    beat hops 1-2), and the reviewer asked for a rule that doesn't just
-    move the cutoff again. A person's real home-directory name
-    (`/Users/<Full Name>/...`) can contain an UNBOUNDED number of words,
-    so any fixed hop count is defeated by one more word — the cutoff
-    itself was the wrong shape of rule. Replaced with a STATE change
-    instead of a COUNT: walk the whitespace-separated tokens right after
-    the match, staying in "plausible directory name" mode as long as each
-    token is an ORDINARY word (not a common English function word) —
-    ANY slash in such a token is ambiguous, no matter how many ordinary
-    words came before it, closing the unbounded-word-count class of
-    counter-example outright. The moment a token IS a recognized function
-    word (`_PROSE_RESUMES_AT`: coordinating conjunctions and common
-    prepositions — "and", "on", "via", "for", ...) that is NOT itself
-    Title-Cased and NOT immediately followed by a Title-Cased word, that
-    word reads as the start of ordinary sentence prose, not a
-    directory-name component, and every hop from there on is trusted as
-    an idiom ("and/or", "via CI/CD") unless IT ALONE carries two or more
-    "/" — a real multi-segment relative path
-    ("Smith/acme-repo/src/main.py"), still ambiguous.
-
-    Round-10 review: a function word can ALSO be part of a genuine
-    Title-Case proper noun ("Research and Development", "Documents and
-    Settings") rather than a real conjunction — the capitalization check
-    is what tells `/Volumes/Research and Development/acme-repo` (still
-    ambiguous: "and" is Title-Case-adjacent on both sides) apart from
-    "...main.py and updated docs/README.md" (genuine prose: neither
-    "and" nor "updated" is Title-Cased).
+    BARE (no-extension) matches: FULLY CONSERVATIVE — ANY slash anywhere
+    in the whitespace-separated continuation is ambiguous, unconditionally,
+    with no exception for a common-English-word "hop" or an idiom shape.
+    Rounds 7 through 10 each tried a narrower escape hatch for the
+    idiom/prose case ("and/or", "via CI/CD") — a hop-count cutoff (beaten
+    by one more word: "Jane Doe Smith", then "Jane Doe Middle Smith"), a
+    function-word state transition (beaten by a real directory NAME that
+    happens to contain a function word: "Research and Development"), then
+    a capitalization refinement on top of that (beaten by the same
+    directory name spelled without Title Case: "research and
+    development" — round 10's own words: "Directory names need not
+    follow title-case conventions"). Every one of those was a LOCAL
+    lexical heuristic trying to distinguish "still inside a real,
+    space-containing directory/person's name" from "ordinary prose
+    resumed" using only nearby words — and every one of them was
+    genuinely undecidable that way: the identical token sequence ("word1
+    and word2/word3") is truly ambiguous between the two readings without
+    external context (which is exactly what the on-disk `.git`-marker
+    path this free-text scanner falls back FROM already provides, when
+    available). Rather than attempt a fifth heuristic, this drops the
+    escape hatch entirely for bare matches: a real directory mention
+    followed by unrelated prose that happens to contain a slash-joined
+    idiom ("...hex on branch main via CI/CD") now also routes to
+    `_unmapped` — a usability regression for that one shape, traded for
+    closing the entire class of miscategorization the last four rounds
+    kept finding a new member of. Matches this whole file's own stated
+    design philosophy: never guess, prefer `_unmapped` over a wrong
+    project.
     """
     if FILE_EXT_RE.search(match.group(0)):
         pos = match.end()
@@ -536,7 +503,6 @@ def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
             return f"{match.group(0)!r} vs. a continuation through {tm.group(0)!r}"
         return None
     pos = match.end()
-    in_prose = False
     while True:
         skip_start = pos
         while pos < len(text) and text[pos] == " ":
@@ -547,38 +513,8 @@ def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
         if not tm:
             break
         token = tm.group(0)
-        slashes = token.count("/")
-        if in_prose:
-            if slashes >= 2:
-                return f"{match.group(0)!r} vs. a continuation through {token!r}"
-        else:
-            if slashes >= 1:
-                return f"{match.group(0)!r} vs. a continuation through {token!r}"
-            if token.strip(".,;:!?").lower() in _PROSE_RESUMES_AT:
-                # Round-10 review: a function word can ALSO be part of a
-                # genuine Title-Case proper noun ("Research and
-                # Development", "Documents and Settings") rather than a
-                # real prose conjunction — "/Volumes/Research and
-                # Development/acme-repo" must stay ambiguous, not resolve
-                # to "Research". Capitalization is the signal a human
-                # reader uses to tell the two apart: ordinary prose
-                # essentially never Title-Cases "and"/"or"/"the"
-                # mid-sentence, and the word immediately after a genuine
-                # conjunction in prose isn't Title-Cased either ("...and
-                # pushed", "...and updated docs"). Peek at the very next
-                # token (without consuming it — the transition decision
-                # is made HERE, but the token itself is still evaluated
-                # normally on the next iteration) and only transition to
-                # prose mode when NEITHER this token NOR the next one is
-                # Title-Cased.
-                peek_pos = tm.end()
-                while peek_pos < len(text) and text[peek_pos] == " ":
-                    peek_pos += 1
-                peek_tm = _CONTINUATION_TOKEN_RE.match(text, peek_pos)
-                this_titlecase = token[:1].isupper()
-                next_titlecase = bool(peek_tm and peek_tm.group(0)[:1].isupper())
-                if not (this_titlecase or next_titlecase):
-                    in_prose = True
+        if "/" in token:
+            return f"{match.group(0)!r} vs. a continuation through {token!r}"
         pos = tm.end()
     return None
 

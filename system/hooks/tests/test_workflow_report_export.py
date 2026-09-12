@@ -2113,10 +2113,22 @@ class TrailingProseWithASlashDoesNotTruncateACompletePath(unittest.TestCase):
         rec = {"result": "Fixed the bug in /home/x/acme-repo/src/main.py and updated docs/README.md"}
         self.assertEqual(m.infer_project(rec, []), "acme-repo")
 
-    def test_bare_repo_dir_followed_by_multi_word_prose_with_a_slash_does_not_truncate(self):
+    def test_bare_repo_dir_followed_by_multi_word_prose_with_a_slash_is_now_ambiguous(self):
+        # Round 10 (ledger arrra-hex-pr-12-r4): this used to assert that a
+        # slash-joined idiom ("via CI/CD") appearing several clean words
+        # after a bare match stayed trusted. That leniency for BARE
+        # matches is deleted, not patched a fifth time — see
+        # `_free_text_ambiguity`'s doc comment: every local heuristic
+        # meant to distinguish this idiom shape from a genuine
+        # space-containing directory/person's name that happens to
+        # contain the SAME function word ("Research and Development",
+        # "research and development" without Title Case) was defeated in
+        # turn. A bare match is now ambiguous the moment ANY later token
+        # contains a slash, full stop — this specific idiom-tolerance
+        # convenience is the traded-away cost of closing that whole class.
         m = load_script()
         rec = {"result": "Ran tests in /Users/sagar/Github/Arrra/hex on branch main via CI/CD"}
-        self.assertEqual(m.infer_project(rec, []), "hex")
+        self.assertIsNone(m.infer_project(rec, []))
 
     def test_and_or_immediately_after_a_complete_path_does_not_truncate(self):
         m = load_script()
@@ -2318,6 +2330,27 @@ class ConservativeFreeTextAmbiguityRouting(unittest.TestCase):
         m = load_script()
         rec = {"result": "Ran tests in /Users/sagar/Github/Arrra/hex and pushed the branch"}
         self.assertEqual(m.infer_project(rec, []), "hex")
+
+    def test_round11_probe_lowercase_directory_name_containing_a_function_word_is_ambiguous(self):
+        # Round 11 (ledger arrra-hex-pr-12-r4): the reviewer's own words —
+        # "directory names need not follow title-case conventions" —
+        # defeated the round-10 capitalization signal with the SAME
+        # example, un-capitalized. Confirms the fully conservative rule
+        # (any slash anywhere in a bare match's continuation is
+        # ambiguous, no exceptions) closes this without relying on
+        # capitalization at all.
+        m = load_script()
+        rec = {"result": "/Volumes/research and development/acme-repo"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_round11_probe_mixed_case_directory_name_is_ambiguous(self):
+        # The reviewer's second named example: capitalization anywhere
+        # near the function word (here, several tokens LATER than the
+        # word immediately following it) can no longer matter at all,
+        # since the fully conservative rule never looks at case.
+        m = load_script()
+        rec = {"result": "/Volumes/Research and advanced Development/acme-repo"}
+        self.assertIsNone(m.infer_project(rec, []))
 
     def test_round8_probe_extension_match_still_trusts_a_clean_hop_one(self):
         # Regression guard: the new extension-match hop-1 check must not
