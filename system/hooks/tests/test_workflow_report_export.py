@@ -8,6 +8,7 @@ fallback (repository root, never a file's immediate parent), and idempotence
 from __future__ import annotations
 
 import contextlib
+import hashlib
 import importlib.util
 import io
 import json
@@ -1893,6 +1894,38 @@ class RedactedDictKeysStayDistinct(unittest.TestCase):
         self.assertIn("[REDACTED]", report)
         self.assertIn("only account", report)
 
+    def test_fingerprinted_candidate_that_already_exists_gets_further_disambiguated(self):
+        # Round-4 review: the fingerprinted candidate itself was never
+        # checked against `out` — a pre-existing key that happens to
+        # ALREADY equal the exact "{redacted}-{fingerprint}" string a
+        # later credential-keyed entry will compute still overwrote it
+        # silently. Uses the review's own reproduction, keeping the
+        # dict's insertion order load-bearing: the plain-looking key
+        # arrives FIRST, then the two credentials.
+        m = load_script()
+        a = "sk-proj-" + "A" * 40
+        b = "sk-proj-" + "B" * 40
+        fingerprint_b = hashlib.sha256(b.encode("utf-8", "surrogateescape")).hexdigest()[:8]
+        collider_key = f"[REDACTED]-{fingerprint_b}"
+        rec = {
+            "runId": "wf_f20dict4",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": {
+                collider_key: {"outcome": "existing outcome"},
+                a: {"outcome": "first account failed"},
+                b: {"outcome": "second account succeeded"},
+            },
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(a, report)
+        self.assertNotIn(b, report)
+        self.assertIn(
+            "existing outcome", report, "the pre-existing entry must not be overwritten by the collision"
+        )
+        self.assertIn("first account failed", report)
+        self.assertIn("second account succeeded", report)
+
 
 class EncodingArtifactBoundaryStillRedacted(unittest.TestCase):
     """A-R1 (ledger arrra-hex-pr-12-r4, round 4 re-review, major) —
@@ -2248,6 +2281,24 @@ class ConservativeFreeTextAmbiguityRouting(unittest.TestCase):
         # reading of that specific text.
         m = load_script()
         rec = {"result": "/tmp/outer.v2 backup/acme/main.py"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_round9_probe_four_word_directory_name_is_ambiguous(self):
+        # Round-9 review: the hops-1-2 cutoff was defeated by ONE more
+        # word than it checked ("Jane Doe Middle Smith/acme-repo" — the
+        # real continuation surfaces at hop 3, "Middle" being hop 2). The
+        # replacement rule has no word-count limit at all: every ordinary
+        # word before the first recognized function word stays in the
+        # strict (1+ slash is ambiguous) zone.
+        m = load_script()
+        rec = {"result": "/Users/Jane Doe Middle Smith/acme-repo"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_round9_probe_five_word_directory_name_is_also_ambiguous(self):
+        # Confirms the fix is genuinely unbounded, not just one word wider
+        # than round 9's own counter-example.
+        m = load_script()
+        rec = {"result": "/Users/Jane Doe Middle Ann Smith/acme-repo"}
         self.assertIsNone(m.infer_project(rec, []))
 
     def test_round8_probe_extension_match_still_trusts_a_clean_hop_one(self):

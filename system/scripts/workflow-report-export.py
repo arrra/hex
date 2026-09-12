@@ -438,6 +438,36 @@ def validate_record(rec: object) -> str | None:
 # ConservativeFreeTextAmbiguityRouting for the reviewer's exact probes.
 _CONTINUATION_TOKEN_RE = re.compile(r"\S+")
 
+# Round-9 review, F7/F16: common English coordinating conjunctions and
+# prepositions — a token exactly matching one of these (case-insensitive,
+# trailing sentence punctuation stripped) signals that ordinary sentence
+# PROSE has resumed after a free-text path match, as opposed to a
+# continuing (space-containing) directory/person's-name component. See
+# `_free_text_ambiguity`'s doc comment for why this replaces a hop-count
+# cutoff. Deliberately short and unambiguous: every word here is a closed-
+# class function word that essentially never appears as one component of
+# a real directory or person's name.
+_PROSE_RESUMES_AT = frozenset(
+    {
+        "and",
+        "or",
+        "but",
+        "then",
+        "on",
+        "in",
+        "via",
+        "with",
+        "for",
+        "to",
+        "at",
+        "from",
+        "after",
+        "before",
+        "while",
+        "of",
+    }
+)
+
 
 def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
     """None if `match` is trusted as a complete path; otherwise a short
@@ -466,25 +496,27 @@ def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
     genuine idiom like "and/or", or plain prose like "and updated"),
     stays trusted.
 
-    BARE (no-extension) matches: walk the run of whitespace-separated
-    tokens right after the match, one hop at a time.
-      - Hops 1-2 are the strongest signal: a "/" anywhere in either one
-        means the space could just as well sit inside the real (space-
-        containing) directory name as it could start unrelated prose —
-        ambiguous immediately, however many "/" that hop has. Round-7
-        review: a hop-1-ONLY version of this rule missed a THREE-word
-        directory name ("Jane Doe Smith/acme-repo" — "Doe" is a clean
-        hop 1, "Smith/acme-repo" only surfaces at hop 2), so both of the
-        first two hops now get this treatment. This remains a bounded,
-        NAMED cutoff, not a general fix: a four-word directory name
-        would still slip past hop 3 the same way — see the module-level
-        note on this file's overall scope for why an unbounded lexical
-        model is not attempted here.
-      - A LATER hop (reached only after two earlier, slash-free hops
-        already read as ordinary prose) is trusted as a common English
-        word-pair idiom ("and/or", "via CI/CD") unless IT ALONE carries
-        two or more "/" — a real multi-segment relative path
-        ("Smith/acme-repo/src/main.py"), which is still ambiguous.
+    BARE (no-extension) matches: round-9 review — hop-index cutoffs (hop
+    1, then hops 1-2) were each defeated by one more word in the
+    directory name ("Jane Doe Smith" beat hop 1; "Jane Doe Middle Smith"
+    beat hops 1-2), and the reviewer asked for a rule that doesn't just
+    move the cutoff again. A person's real home-directory name
+    (`/Users/<Full Name>/...`) can contain an UNBOUNDED number of words,
+    so any fixed hop count is defeated by one more word — the cutoff
+    itself was the wrong shape of rule. Replaced with a STATE change
+    instead of a COUNT: walk the whitespace-separated tokens right after
+    the match, staying in "plausible directory name" mode as long as each
+    token is an ORDINARY word (not a common English function word) —
+    ANY slash in such a token is ambiguous, no matter how many ordinary
+    words came before it, closing the unbounded-word-count class of
+    counter-example outright. The moment a token IS a recognized function
+    word (`_PROSE_RESUMES_AT`: coordinating conjunctions and common
+    prepositions — "and", "on", "via", "for", ...), that word reads as the
+    start of ordinary sentence prose, not a directory-name component, and
+    every hop from there on is trusted as an idiom ("and/or", "via
+    CI/CD") unless IT ALONE carries two or more "/" — a real
+    multi-segment relative path ("Smith/acme-repo/src/main.py"), still
+    ambiguous.
     """
     if FILE_EXT_RE.search(match.group(0)):
         pos = match.end()
@@ -495,7 +527,7 @@ def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
             return f"{match.group(0)!r} vs. a continuation through {tm.group(0)!r}"
         return None
     pos = match.end()
-    hop_index = 0
+    in_prose = False
     while True:
         skip_start = pos
         while pos < len(text) and text[pos] == " ":
@@ -506,10 +538,15 @@ def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
         if not tm:
             break
         token = tm.group(0)
-        hop_index += 1
         slashes = token.count("/")
-        if (hop_index <= 2 and slashes >= 1) or slashes >= 2:
-            return f"{match.group(0)!r} vs. a continuation through {token!r}"
+        if in_prose:
+            if slashes >= 2:
+                return f"{match.group(0)!r} vs. a continuation through {token!r}"
+        else:
+            if slashes >= 1:
+                return f"{match.group(0)!r} vs. a continuation through {token!r}"
+            if token.strip(".,;:!?").lower() in _PROSE_RESUMES_AT:
+                in_prose = True
         pos = tm.end()
     return None
 
@@ -768,6 +805,15 @@ def _redact_deep(obj, warnings: list[str] | None = None, label: str = "record"):
     the RAW (pre-redaction) key so entries stay distinct without ever
     exposing the raw credential. A key that never collides gets no
     fingerprint at all — this only disambiguates an actual collision.
+
+    Round-4 review: the fingerprinted CANDIDATE itself was never checked
+    against `out` — a pre-existing key that happens to already equal
+    `"{redacted}-{fingerprint}"` (a contrived but zero-collision-required
+    construction: the attacker just has to know or guess the fingerprint,
+    which is only 8 hex chars) still overwrote silently. Disambiguation
+    now loops, appending an incrementing counter (never derived from the
+    credential, so nothing further to keep secret) until the candidate is
+    actually free in `out` — not merely computed once and trusted.
     """
     if isinstance(obj, str):
         return redact(obj, warnings, label)
@@ -779,7 +825,12 @@ def _redact_deep(obj, warnings: list[str] | None = None, label: str = "record"):
                 fingerprint = hashlib.sha256(
                     (k if isinstance(k, str) else str(k)).encode("utf-8", "surrogateescape")
                 ).hexdigest()[:8]
-                new_key = f"{new_key}-{fingerprint}"
+                candidate = f"{new_key}-{fingerprint}"
+                suffix = 1
+                while candidate in out:
+                    suffix += 1
+                    candidate = f"{new_key}-{fingerprint}-{suffix}"
+                new_key = candidate
             out[new_key] = _redact_deep(v, warnings, label)
         return out
     if isinstance(obj, list):
