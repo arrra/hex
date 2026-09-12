@@ -226,9 +226,9 @@ fn classify_check_failure(output: &Output, elapsed: Duration) -> CheckResult {
     }
     if !real_diagnostic && is_toolchain_unavailable_failure(&lower) {
         return CheckResult::warn(format!(
-            "cargo could not execute `rustc` at all (toolchain unreachable \
-             on this machine — this is not a build failure) — fix: install \
-             or repair the rust toolchain: {}",
+            "cargo could not get a working rustc toolchain (unreachable, or \
+             present but failing cargo's own version probe — this is not a \
+             build failure) — fix: install or repair the rust toolchain: {}",
             stderr.trim()
         ));
     }
@@ -289,9 +289,21 @@ fn is_toolchain_unavailable_failure(lower_stderr: &str) -> bool {
     // with the same `-vV` flag before it runs anything else, which
     // uniquely identifies this as a toolchain-unreachable failure (never a
     // real compile error — no source has been fed to `rustc` yet).
-    lower_stderr.contains("could not execute process `")
+    if lower_stderr.contains("could not execute process `")
         && lower_stderr.contains("-vv`")
         && lower_stderr.contains("(never executed)")
+    {
+        return true;
+    }
+    // A toolchain binary that EXISTS and RUNS, but exits non-zero on that
+    // same `-vV` probe (a broken rustup proxy naming a toolchain that
+    // isn't installed, or any other broken `RUSTC` override pointing at a
+    // real-but-wrong executable) never reaches the ENOENT wrapper above —
+    // cargo instead reports its own "process didn't exit successfully"
+    // wrapper around the probe command. Still gated on the `-vv\`` marker
+    // so a real compile failure that happens to mention "-vV" elsewhere in
+    // its own diagnostic text still falls through to FAIL.
+    lower_stderr.contains("process didn't exit successfully:") && lower_stderr.contains("-vv`")
 }
 
 /// The first line of cargo's own diagnostic output that names a compile or
@@ -665,76 +677,126 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
         })
         .collect();
 
+    // `git ls-tree` guarantees every entry's path is a distinct byte
+    // string, but on a case- or Unicode-normalization-insensitive
+    // filesystem (macOS APFS by default) two distinct committed paths can
+    // fold onto the SAME directory entry. If an earlier entry already
+    // materialized something at that real location (most dangerously: a
+    // symlink), writing or linking "through" it here would silently mix
+    // one committed path's bytes into another's — `std::fs::write` follows
+    // an existing symlink (O_TRUNC) rather than replacing it.
+    // `symlink_metadata` never follows the final component, so it reports
+    // the collision itself rather than whatever a followed symlink points
+    // at.
+    let refuse_if_dest_collides = |dest: &Path, entry_path: &str| -> Result<(), String> {
+        if std::fs::symlink_metadata(dest).is_ok() {
+            return Err(format!(
+                "committed path {entry_path} collides, on this filesystem, \
+                 with a different committed path already materialized at \
+                 the same location (a case- or Unicode-normalization- \
+                 insensitive filesystem folding two distinct committed \
+                 names onto one directory entry) — writing or linking \
+                 through it would silently mix one committed path's bytes \
+                 into another's, which could falsely certify a broken \
+                 commit as buildable; refusing to export it"
+            ));
+        }
+        Ok(())
+    };
+
+    // PASS 1: materialize every regular (non-symlink) entry FIRST, in
+    // `git ls-tree` order — before ANY symlink is created. A regular
+    // file's `create_dir_all(parent)`/`fs::write` FOLLOWS an existing
+    // symlink at any intermediate path component (there is no way to make
+    // either syscall refuse to traverse a symlink it did not itself
+    // create); if a committed DIRECTORY symlink already existed on disk
+    // here, a case- or Unicode-normalization-folded intermediate
+    // component could silently redirect this write to a different,
+    // already-materialized location entirely — reading a real file's
+    // bytes into the wrong committed path (round-4 review, A-R1), or
+    // (round-4 review, B-R1) straight through a symlink that itself
+    // escapes the export root, landing real committed bytes OUTSIDE it
+    // before any later check could refuse the export. With no symlink
+    // materialized yet, `create_dir_all`/`fs::write` below can only ever
+    // create REAL directories and REAL files, entirely inside the export
+    // root.
     for (entry, content) in entries.iter().zip(contents.iter()) {
-        let content = content.as_slice();
+        if entry.mode == "120000" {
+            continue;
+        }
         let dest = tempdir.path().join(&entry.path);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
         }
-        // `git ls-tree` guarantees every entry's path is a distinct byte
-        // string, but on a case- or Unicode-normalization-insensitive
-        // filesystem (macOS APFS by default) two distinct committed paths
-        // can fold onto the SAME directory entry. If an earlier entry in
-        // this loop already materialized something at that real location
-        // (most dangerously: a symlink), writing or linking "through" it
-        // here would silently mix one committed path's bytes into
-        // another's — `std::fs::write` follows an existing symlink
-        // (O_TRUNC) rather than replacing it. `symlink_metadata` never
-        // follows the final component, so it reports the collision itself
-        // rather than whatever a followed symlink points at.
-        if std::fs::symlink_metadata(&dest).is_ok() {
-            return Err(format!(
-                "committed path {} collides, on this filesystem, with a \
-                 different committed path already materialized at the \
-                 same location (a case- or Unicode-normalization- \
-                 insensitive filesystem folding two distinct committed \
-                 names onto one directory entry) — writing or linking \
-                 through it would silently mix one committed path's bytes \
-                 into another's, which could falsely certify a broken \
-                 commit as buildable; refusing to export it",
-                entry.path
-            ));
+        refuse_if_dest_collides(&dest, &entry.path)?;
+        std::fs::write(&dest, content.as_slice())
+            .map_err(|e| format!("failed to write {}: {e}", dest.display()))?;
+        #[cfg(unix)]
+        if entry.mode == "100755" {
+            use std::os::unix::fs::PermissionsExt;
+            let mut perm = std::fs::metadata(&dest)
+                .map_err(|e| format!("failed to stat {}: {e}", dest.display()))?
+                .permissions();
+            perm.set_mode(0o755);
+            std::fs::set_permissions(&dest, perm)
+                .map_err(|e| format!("failed to chmod {}: {e}", dest.display()))?;
         }
-        if entry.mode == "120000" {
-            let target = String::from_utf8_lossy(content).into_owned();
-            #[cfg(unix)]
-            {
-                if !symlink_target_stays_within_export(Path::new(&entry.path), &target, &symlinks) {
-                    return Err(format!(
-                        "committed symlink {} -> {target} escapes the \
-                         export root — creating it would let `cargo check` \
-                         read whatever file (committed or not) happens to \
-                         sit at that path elsewhere on this machine, \
-                         falsely certifying a broken commit as buildable; \
-                         refusing to export it",
-                        entry.path
-                    ));
-                }
-                std::os::unix::fs::symlink(&target, &dest)
-                    .map_err(|e| format!("failed to create symlink {}: {e}", dest.display()))?;
+    }
+
+    // PASS 2: materialize every committed symlink. Because pass 1 already
+    // wrote every real file, NOTHING below ever runs `fs::write` again —
+    // `symlink()` only ever creates a link entry, it never copies bytes
+    // through wherever that link's target resolves — so even an entry
+    // that turns out to escape can only ever leave a dangling/escaping
+    // LINK behind (removed wholesale when the caller's `TempDir` guard
+    // drops), never smuggle real committed content outside the root the
+    // way pass 1 running after symlinks did (round-4 review, B-R1). A
+    // per-entry realpath check right here (rather than batched after this
+    // whole pass) would be premature: one committed symlink's chain can
+    // depend on ANOTHER committed symlink that this loop has not reached
+    // yet (`git ls-tree` order is lexical, not dependency order — e.g. a
+    // `link_escape` entry sorting before the `link_identity` entry its own
+    // target chains through), so `verify_symlinks_resolve_within_export`
+    // below still runs once, after every symlink in this pass exists —
+    // but that is still strictly before pass 3 would exist, because there
+    // isn't one: no `fs::write` of real content ever runs again after
+    // this point, so "before any byte lands outside the export" (B-R1) is
+    // already guaranteed by pass 1/pass 2 ordering alone.
+    for (entry, content) in entries.iter().zip(contents.iter()) {
+        if entry.mode != "120000" {
+            continue;
+        }
+        let dest = tempdir.path().join(&entry.path);
+        if let Some(parent) = dest.parent() {
+            std::fs::create_dir_all(parent)
+                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+        }
+        refuse_if_dest_collides(&dest, &entry.path)?;
+        let target = String::from_utf8_lossy(content).into_owned();
+        #[cfg(unix)]
+        {
+            if !symlink_target_stays_within_export(Path::new(&entry.path), &target, &symlinks) {
+                return Err(format!(
+                    "committed symlink {} -> {target} escapes the export \
+                     root — creating it would let `cargo check` read \
+                     whatever file (committed or not) happens to sit at \
+                     that path elsewhere on this machine, falsely \
+                     certifying a broken commit as buildable; refusing to \
+                     export it",
+                    entry.path
+                ));
             }
-            #[cfg(not(unix))]
-            {
-                // No portable symlink primitive on this platform; write the
-                // target's raw (never smudged/dereferenced) content instead
-                // of failing the whole export outright.
-                std::fs::write(&dest, content)
-                    .map_err(|e| format!("failed to write {}: {e}", dest.display()))?;
-            }
-        } else {
-            std::fs::write(&dest, content)
+            std::os::unix::fs::symlink(&target, &dest)
+                .map_err(|e| format!("failed to create symlink {}: {e}", dest.display()))?;
+        }
+        #[cfg(not(unix))]
+        {
+            // No portable symlink primitive on this platform; write the
+            // target's raw (never smudged/dereferenced) content instead of
+            // failing the whole export outright.
+            std::fs::write(&dest, content.as_slice())
                 .map_err(|e| format!("failed to write {}: {e}", dest.display()))?;
-            #[cfg(unix)]
-            if entry.mode == "100755" {
-                use std::os::unix::fs::PermissionsExt;
-                let mut perm = std::fs::metadata(&dest)
-                    .map_err(|e| format!("failed to stat {}: {e}", dest.display()))?
-                    .permissions();
-                perm.set_mode(0o755);
-                std::fs::set_permissions(&dest, perm)
-                    .map_err(|e| format!("failed to chmod {}: {e}", dest.display()))?;
-            }
         }
     }
 
@@ -754,11 +816,16 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
 /// (macOS APFS by default) can bypass: a reference that differs only by
 /// case or normalization from a committed symlink's name still resolves,
 /// on the real filesystem, to that same symlink, even though the lexical
-/// walk never substitutes it and so never flags the escape. Every entry is
-/// already materialized by this point, so a symlink that is simply
-/// dangling (its target committed nowhere) fails to canonicalize with
-/// `NotFound` — that is not an escape, just a broken link `cargo check`
-/// will itself fail to read, so it is left alone here.
+/// walk never substitutes it and so never flags the escape. Runs after
+/// every symlink in pass 2 has been created — never after pass 1's
+/// regular-file writes too, which is what let a round-4-review finding
+/// (B-R1) observe a real file's bytes already outside the export root by
+/// the time this ran; with symlinks materialized last and no further
+/// `fs::write` of real content after this point, that ordering hazard is
+/// gone regardless of exactly where within pass 2 this check sits. A
+/// symlink that is simply dangling (its target committed nowhere) fails
+/// to canonicalize with `NotFound` — that is not an escape, just a broken
+/// link `cargo check` will itself fail to read, so it is left alone here.
 #[cfg(unix)]
 fn verify_symlinks_resolve_within_export(
     export_root: &Path,
@@ -785,11 +852,8 @@ fn verify_symlinks_resolve_within_export(
                  — outside the export root — even though a purely lexical \
                  check did not catch it (a case- or Unicode-normalization- \
                  insensitive filesystem folding a reference onto a \
-                 differently-spelled committed symlink); creating it would \
-                 let `cargo check` read whatever file (committed or not) \
-                 happens to sit at that real path elsewhere on this \
-                 machine, falsely certifying a broken commit as \
-                 buildable; refusing to export it",
+                 differently-spelled committed symlink); refusing to \
+                 continue the export",
                 entry.path,
                 resolved.display()
             ));
