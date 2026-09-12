@@ -3368,6 +3368,149 @@ mod tests {
         );
     }
 
+    // F7 (major, arrra/hex PR #9 round 2): the `Err(e)` arm executes
+    // `ROLLBACK TO index_file_with_reuse; RELEASE index_file_with_reuse` and
+    // propagates any cleanup failure straight through `?`. `ROLLBACK TO`
+    // undoes this call's own writes, but the finalizing `RELEASE` of the
+    // OUTERMOST savepoint is still a COMMIT — needing the identical
+    // RESERVED->EXCLUSIVE lock upgrade as the Ok-arm's RELEASE above — and
+    // can fail with SQLITE_BUSY under the same blocking-reader condition
+    // even though there is nothing left to write. Left unhandled, the
+    // SAVEPOINT stays open: the next call nests a new savepoint under it and
+    // can report success without ever reaching disk. Same construction as
+    // `index_file_with_reuse_release_failure_unwinds_and_next_call_persists`
+    // above, but the failure this time comes from the embedder (the Err arm)
+    // instead of a successful commit (the Ok arm).
+    #[test]
+    fn index_file_with_reuse_embedding_failure_under_blocking_reader_unwinds_and_next_call_persists()
+    {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let db_path = tmp.path().join("memory.db");
+        let conn = super::super::open_db(&db_path).unwrap();
+        init_db(&conn).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mode, "delete",
+            "test setup: must be off WAL to reproduce a commit-time lock-upgrade failure"
+        );
+        conn.busy_timeout(std::time::Duration::from_millis(0))
+            .unwrap();
+        let filepath = hex_root.join("embed-fail.md");
+
+        let content_v1 = build_40_chunk_content();
+        let old_chash = content_hash(&content_v1);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.21f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        // A second connection holding an open read transaction: its SHARED
+        // lock blocks `conn`'s RESERVED->EXCLUSIVE upgrade at commit time —
+        // reached here via the Err(e) arm's `ROLLBACK TO ...; RELEASE ...`
+        // once the embedder fails below.
+        let conn2 = Connection::open(&db_path).unwrap();
+        conn2.execute_batch("BEGIN;").unwrap();
+        let _: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        let result = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |_batch| anyhow::bail!("embedding service unavailable"),
+        );
+        assert!(
+            result.is_err(),
+            "a simulated embedding failure must surface as an error"
+        );
+
+        assert!(
+            conn.is_autocommit(),
+            "F7: a failed error-path cleanup (ROLLBACK TO + RELEASE) must \
+             still unwind to the connection's entry (autocommit) state, not \
+             leave the savepoint open"
+        );
+
+        let chash_after_failed_cleanup: String = conn
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'embed-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            chash_after_failed_cleanup, old_chash,
+            "F7: the previous file's content_hash must survive a failed error-path cleanup"
+        );
+
+        // Let the blocking reader go, then a subsequent unimpeded call must
+        // commit durably — not nest under a still-open outer savepoint left
+        // behind by the failed cleanup.
+        conn2.execute_batch("COMMIT;").unwrap();
+        drop(conn2);
+
+        let content_v3 = content_v1.replace(
+            "Content for chunk number 3, unique text here.",
+            "Content for chunk number 3, EDITED again.",
+        );
+        let new_chash = content_hash(&content_v3);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v3,
+            3.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.42f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        drop(conn);
+        let reopened = super::super::open_db(&db_path).unwrap();
+        let durable_chash: String = reopened
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'embed-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            durable_chash, new_chash,
+            "F7: a subsequent successful call must persist durably to disk — \
+             not be discarded when the connection is dropped"
+        );
+    }
+
     // F9 (minor, arrra/hex PR #8 round 2): the `chunk_meta.file_id` migration
     // is `ALTER TABLE ... ADD COLUMN file_id ... DEFAULT 0` followed by a
     // SEPARATE `UPDATE ... backfill`, gated only on `if
