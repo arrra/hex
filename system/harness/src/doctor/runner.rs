@@ -997,7 +997,12 @@ mod tests {
         run_git(tmp.path(), &["add", "-A"]);
         run_git(
             tmp.path(),
-            &["commit", "-q", "-m", "fixture with chained escaping symlink"],
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fixture with chained escaping symlink",
+            ],
         );
 
         let result =

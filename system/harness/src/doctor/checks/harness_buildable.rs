@@ -103,7 +103,11 @@ pub(crate) fn last_export_path_for_tests() -> Option<std::path::PathBuf> {
     LAST_EXPORT_PATH.with(|p| p.borrow().clone())
 }
 
-fn run_check_impl(hex_dir: &Path, timeout: Duration, env_overrides: &[(&str, &str)]) -> CheckResult {
+fn run_check_impl(
+    hex_dir: &Path,
+    timeout: Duration,
+    env_overrides: &[(&str, &str)],
+) -> CheckResult {
     let start = Instant::now();
 
     // Export cleanup (success, failure, or panic-unwind) is handled by
@@ -434,7 +438,8 @@ fn resolve_realpath_within_export(
             }
             std::path::Component::CurDir => {}
             std::path::Component::Normal(segment) => {
-                let candidate: std::path::PathBuf = stack.iter().collect::<std::path::PathBuf>().join(segment);
+                let candidate: std::path::PathBuf =
+                    stack.iter().collect::<std::path::PathBuf>().join(segment);
                 if let Some(target) = symlinks.get(&candidate) {
                     let target_path = Path::new(target);
                     if target_path.is_absolute() {
@@ -442,7 +447,12 @@ fn resolve_realpath_within_export(
                     }
                     let mut new_remaining: Vec<_> = target_path.components().collect();
                     new_remaining.extend(queue);
-                    return resolve_realpath_within_export(stack, new_remaining, symlinks, depth + 1);
+                    return resolve_realpath_within_export(
+                        stack,
+                        new_remaining,
+                        symlinks,
+                        depth + 1,
+                    );
                 }
                 stack.push(segment.to_os_string());
             }
@@ -666,8 +676,7 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
             let target = String::from_utf8_lossy(content).into_owned();
             #[cfg(unix)]
             {
-                if !symlink_target_stays_within_export(Path::new(&entry.path), &target, &symlinks)
-                {
+                if !symlink_target_stays_within_export(Path::new(&entry.path), &target, &symlinks) {
                     return Err(format!(
                         "committed symlink {} -> {target} escapes the \
                          export root — creating it would let `cargo check` \
