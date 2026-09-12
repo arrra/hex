@@ -396,6 +396,65 @@ class TestF7RedactionAndLedgerPrivacy(IncidentHookTestCase):
         self.assertNotIn("charlie", record["error"])
 
 
+class TestRound3RedactionParity(IncidentHookTestCase):
+    """new-defects R3 (arrra-hex-pr-5-wf-open-ledger.md, minor): the
+    router's A-R6 fixtures (quote-wraps-whole-pair, ANSI-C `$'...'`) were
+    never mirrored into this hook's own test module, even though
+    `_REDACT_PATTERNS` is duplicated verbatim -- a future edit to one file
+    could silently desync the other with every existing test here still
+    green. R7 (major, this hook's own copy of the same generic pattern)
+    is pinned here too."""
+
+    def test_quote_wraps_whole_pair_is_fully_redacted(self):
+        proc = self._run(
+            _fixture(error='failed: "password=alpha bravo charlie" and retry')
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        for word in ("alpha", "bravo", "charlie"):
+            self.assertNotIn(word, record["error"])
+
+    def test_dollar_quoted_value_is_fully_redacted(self):
+        proc = self._run(
+            _fixture(error="failed: password=$'alpha bravo charlie' and retry")
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        for word in ("alpha", "bravo", "charlie"):
+            self.assertNotIn(word, record["error"])
+
+    def test_backslash_escaped_spaces_are_fully_redacted(self):
+        """R7: the generic pattern's unquoted fallback must also handle a
+        bash backslash-escaped-space value here (same fix, both files)."""
+        proc = self._run(
+            _fixture(error=r"failed: password=alpha\ bravo\ charlie and retry")
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        for word in ("alpha", "bravo", "charlie"):
+            self.assertNotIn(word, record["error"])
+
+    def test_redact_patterns_block_is_byte_identical_to_the_router(self):
+        """Pin the cross-file sync itself -- a future edit to one file's
+        `_REDACT_PATTERNS` block that isn't mirrored into the other must
+        fail a test, not silently desync (the router and this hook can't
+        share a module: both run `python3 -I -S`)."""
+        router_src = (
+            REPO_ROOT / "system" / "hooks" / "scripts" / "pretooluse-router.py"
+        ).read_text()
+        incident_src = SCRIPT.read_text()
+
+        def _extract(src):
+            start = src.index("_REDACT_PATTERNS = [")
+            end = src.index("\n]\n", start) + len("\n]\n")
+            return src[start:end]
+
+        self.assertEqual(
+            _extract(router_src), _extract(incident_src),
+            "the router's and incident hook's _REDACT_PATTERNS blocks have drifted apart",
+        )
+
+
 class TestF15ProductionIsolationFlags(IncidentHookTestCase):
     """F15: this test suite's `_run` helper invokes the hook as plain
     `[sys.executable, str(SCRIPT)]`, without production's `-I -S` isolated
