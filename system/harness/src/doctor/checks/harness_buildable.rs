@@ -1036,6 +1036,113 @@ fn try_resolve_concat_literal(content: &[u8], start: usize) -> Option<(Vec<u8>, 
     }
 }
 
+/// A-R-4 (round-7 review, F4): recognizes
+/// `concat!(env!("OUT_DIR"), <literal>, <literal>, …)` or
+/// `concat!(env!("CARGO_MANIFEST_DIR"), <literal>, …)` — the idiomatic
+/// Rust pattern for including a build-script-generated file, and the
+/// EXACT shape all three genuine computed includes in this very
+/// workspace use (`main.rs`, `workers/mod.rs`, `integration.rs`).
+///
+/// Cargo GUARANTEES both of these two specific variables' values (never
+/// any other env var): `CARGO_MANIFEST_DIR` is always the crate's own
+/// manifest directory — already inside this export by construction,
+/// since `cargo check` runs against the EXPORTED harness directory (see
+/// `run_check_impl`). `OUT_DIR` is always THIS crate's own build-script
+/// output directory for the CURRENT build, populated by running the
+/// crate's own (also-committed) `build.rs` against this same export —
+/// never a pre-existing external file coincidentally present on the
+/// machine, which is the entire hazard F4 guards against. A path built
+/// from either variable is therefore verified-safe BY CONSTRUCTION, not
+/// merely unverifiable: this is a bounded, named exception to F4's
+/// unresolved-argument refusal in
+/// `validate_source_include_targets_stay_within_export`, not a general
+/// `env!()` allowance — any OTHER environment variable's value genuinely
+/// IS arbitrary external state and is NOT recognized here (round-6
+/// review already rejected general `env!()` support for exactly that
+/// reason).
+///
+/// Returns the offset one past the call's closing `)` on a match. The
+/// literal SUFFIX arguments (if any) are parsed to confirm the whole
+/// call is well-formed, but their bytes are deliberately never validated
+/// against `target_escapes_export`: they are resolved against Cargo's
+/// OWN build-tree layout (relative to `OUT_DIR`/the manifest directory),
+/// not the source file's directory, and reproducing Cargo's OUT_DIR
+/// layout rules here is out of scope. A `..`-laden suffix deliberately
+/// trying to climb out of `OUT_DIR` is a residual, documented gap —
+/// symmetric with every other narrow scope boundary in this file, and
+/// far outside anything a real build-script-generated-file include
+/// would ever spell.
+fn try_resolve_cargo_safe_concat(content: &[u8], start: usize) -> Option<usize> {
+    const CONCAT: &[u8] = b"concat!";
+    const ENV: &[u8] = b"env!";
+    if start > 0 {
+        let prev = content[start - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    if !content.get(start..)?.starts_with(CONCAT) {
+        return None;
+    }
+    let mut i = start + CONCAT.len();
+    while i < content.len() && content[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if content.get(i) != Some(&b'(') {
+        return None;
+    }
+    i += 1;
+    while i < content.len() && content[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if !content.get(i..)?.starts_with(ENV) {
+        return None;
+    }
+    i += ENV.len();
+    while i < content.len() && content[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if content.get(i) != Some(&b'(') {
+        return None;
+    }
+    i += 1;
+    while i < content.len() && content[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    let (var_name, after_var) = extract_string_literal_argument(content, i)?;
+    if !matches!(var_name.as_slice(), b"OUT_DIR" | b"CARGO_MANIFEST_DIR") {
+        return None;
+    }
+    i = after_var;
+    while i < content.len() && content[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if content.get(i) != Some(&b')') {
+        return None; // env!(...) itself malformed or has a second argument
+    }
+    i += 1; // past env!(...)'s own closing paren
+    loop {
+        while i < content.len() && content[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        match content.get(i) {
+            Some(&b')') => return Some(i + 1),
+            Some(&b',') => {
+                i += 1;
+                while i < content.len() && content[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if content.get(i) == Some(&b')') {
+                    return Some(i + 1); // trailing comma before concat!'s own close
+                }
+                let (_, after) = extract_string_literal_argument(content, i)?;
+                i = after;
+            }
+            _ => return None,
+        }
+    }
+}
+
 /// A-R-4 (round-2/round-4/round-6 review, F4): an `include_str!`/
 /// `include_bytes!`/`include!` literal in a committed `.rs` file is
 /// resolved by `rustc` directly against the SOURCE file's own directory
@@ -1047,26 +1154,44 @@ fn try_resolve_concat_literal(content: &[u8], start: usize) -> Option<(Vec<u8>, 
 /// string literal is never mistaken for a real call (F3, reintroduced by
 /// this check's own first draft and fixed here). Once a genuine call site
 /// is found — the macro name, then only whitespace, then `(`, then only
-/// whitespace — the argument is resolved from the UNMASKED original via
-/// `extract_string_literal_argument` (an ordinary/byte-string-excluded/
-/// C-string-excluded/raw literal) OR, failing that,
-/// `try_resolve_concat_literal` (an all-literal `concat!(...)` call,
-/// round-6 review), and the call must close with only whitespace, an
-/// optional trailing comma, then `)` — anything else after the argument
-/// is out of scope.
+/// whitespace — the argument is resolved from the UNMASKED original as
+/// one of: an ordinary/byte-string-excluded/C-string-excluded/raw literal
+/// (`extract_string_literal_argument`); an all-literal `concat!(...)`
+/// call (`try_resolve_concat_literal`, round-6 review); or the one named,
+/// bounded exception to "all-literal" —
+/// `concat!(env!("OUT_DIR"|"CARGO_MANIFEST_DIR"), <literal>, …)`
+/// (`try_resolve_cargo_safe_concat`, round-7 review) — and the call must
+/// close with only whitespace, an optional trailing comma, then `)`.
 ///
-/// This remains a narrow, BOUNDED check: a path built any OTHER way
-/// (`env!(...)`, a `#[path]`-relocated module, a `concat!` containing
-/// anything but literals, any other non-literal expression) is invisible
-/// to it and is silently allowed through, exactly as compilation itself
-/// is blind to where in a file's TEXT a path came from. This is a
-/// deliberate, documented gap, not an attempt to re-build the unbounded
-/// mod/include-graph model this whole redesign replaced — evaluating an
-/// arbitrary constant expression to a path IS that same unbounded
-/// modeling problem one level down, and this check exists only to catch
-/// the review's own named adversarial shapes: a literal (or
-/// literal-built-via-`concat!`) path handed straight to one of these
-/// three macros.
+/// ROUND-7 REVIEW CHANGED THE FAILURE MODE: an argument that resolves to
+/// NONE of the above is no longer silently skipped. Compilation
+/// succeeding on such a call would not establish that its actual input
+/// came from this export — an `env!()`-derived (any OTHER variable), a
+/// `concat!` mixing in a non-literal, an identifier, or any other
+/// non-literal expression could all name a pre-existing, uncommitted,
+/// merely-coincidental file on this one machine, exactly the false-PASS
+/// hazard F4 names. This guard now refuses the export outright (the
+/// caller's existing "could not export" WARN path) rather than silently
+/// certifying unverifiable input as buildable — per the review's own
+/// stated remedy: "an inconclusive result when provenance cannot be
+/// established."
+///
+/// This remains a BOUNDED check, not an attempt to re-build the unbounded
+/// mod/include-graph model this whole redesign replaced: it recognizes
+/// exactly the shapes named above and, crucially, does NOT attempt to
+/// evaluate an arbitrary Rust constant expression (that IS the same
+/// unbounded modeling problem one level down). `env!("OUT_DIR")` and
+/// `env!("CARGO_MANIFEST_DIR")` are the only two environment variables
+/// recognized, and only because Cargo itself guarantees both are tied
+/// to THIS build/THIS crate's own directory, never arbitrary external
+/// state (see `try_resolve_cargo_safe_concat`'s doc comment) — this is
+/// exactly the pattern all three genuine computed includes in this
+/// workspace already use (`main.rs`, `workers/mod.rs`,
+/// `integration.rs`); the earlier, unconditional "any unresolved
+/// argument is fine" posture would have made THIS check permanently
+/// unable to certify PASS on the very repository it protects, the same
+/// A-R-1 anti-pattern this whole check has already learned to avoid
+/// once.
 fn validate_source_include_targets_stay_within_export(
     entries: &[TreeEntry],
     contents: &[Vec<u8>],
@@ -1125,32 +1250,69 @@ fn validate_source_include_targets_stay_within_export(
                 while i < content.len() && content[i].is_ascii_whitespace() {
                     i += 1;
                 }
-                let Some((literal_bytes, after)) = extract_string_literal_argument(content, i)
-                    .or_else(|| try_resolve_concat_literal(content, i))
-                else {
-                    continue;
-                };
-                let mut j = after;
-                while j < content.len() && content[j].is_ascii_whitespace() {
-                    j += 1;
+                enum ResolvedArgument {
+                    Literal(Vec<u8>),
+                    CargoBuildTree,
                 }
-                if j < content.len() && content[j] == b',' {
-                    // A trailing comma after the sole argument is valid
-                    // Rust for a macro call (round-5 review, F4:
-                    // `include_str!("...",)`) — accept it before requiring
-                    // the closing `)`.
-                    j += 1;
+
+                let resolved = extract_string_literal_argument(content, i)
+                    .map(|(bytes, after)| (ResolvedArgument::Literal(bytes), after))
+                    .or_else(|| {
+                        try_resolve_concat_literal(content, i)
+                            .map(|(bytes, after)| (ResolvedArgument::Literal(bytes), after))
+                    })
+                    .or_else(|| {
+                        try_resolve_cargo_safe_concat(content, i)
+                            .map(|after| (ResolvedArgument::CargoBuildTree, after))
+                    });
+
+                // Only a resolution followed by (optional trailing comma,
+                // then) the call's OWN closing `)` counts — anything else
+                // trailing (a second real argument, unexpected tokens)
+                // means this isn't the single-bare-argument shape this
+                // guard understands either, and falls into the same
+                // "unresolved" refusal below.
+                let resolved = resolved.and_then(|(outcome, after)| {
+                    let mut j = after;
                     while j < content.len() && content[j].is_ascii_whitespace() {
                         j += 1;
                     }
-                }
-                if j >= content.len() || content[j] != b')' {
-                    // Not a single bare-literal argument — e.g. a second
-                    // real argument follows, or an expression rather than
-                    // a literal closes the call. Out of scope; see the doc
-                    // comment above.
-                    continue;
-                }
+                    if j < content.len() && content[j] == b',' {
+                        // A trailing comma after the sole argument is
+                        // valid Rust for a macro call (round-5 review,
+                        // F4: `include_str!("...",)`).
+                        j += 1;
+                        while j < content.len() && content[j].is_ascii_whitespace() {
+                            j += 1;
+                        }
+                    }
+                    (j < content.len() && content[j] == b')').then_some(outcome)
+                });
+
+                let Some(outcome) = resolved else {
+                    let macro_name = String::from_utf8_lossy(macro_name);
+                    return Err(format!(
+                        "committed source {} calls {macro_name}(...) with an \
+                         argument this guard cannot resolve to a literal path, \
+                         an all-literal concat!(...), or a recognized cargo \
+                         build-tree reference (env!(\"OUT_DIR\")/ \
+                         env!(\"CARGO_MANIFEST_DIR\")) — its actual input \
+                         cannot be verified to come from this export, so \
+                         `cargo check` succeeding on it would not establish \
+                         that the commit actually contains what it reads; \
+                         refusing to export it rather than falsely certifying \
+                         unverified input as buildable",
+                        path.display()
+                    ));
+                };
+
+                let literal_bytes = match outcome {
+                    ResolvedArgument::Literal(bytes) => bytes,
+                    // Verified safe by construction — Cargo's own build
+                    // tree (OUT_DIR) or manifest directory, never external
+                    // machine state; see `try_resolve_cargo_safe_concat`.
+                    ResolvedArgument::CargoBuildTree => continue,
+                };
                 // A non-UTF-8 literal can't name a valid Rust path string in
                 // the first place; compilation itself will reject the
                 // source, so there's nothing for this guard to add here.

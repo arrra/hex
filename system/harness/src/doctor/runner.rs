@@ -2418,6 +2418,152 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_export_committed_head_accepts_include_via_cargo_provided_out_dir() {
+        // A-R-4 round-7 review: `include!(concat!(env!("OUT_DIR"), "/x.rs"))`
+        // is the idiomatic Rust pattern for including a build-script-
+        // generated file, and the EXACT shape all three genuine computed
+        // includes in this very workspace use. `env!("OUT_DIR")` is
+        // Cargo-guaranteed to be THIS crate's own build-script output
+        // directory for the current build — never external machine
+        // state — so this must remain accepted even under the stricter
+        // round-7 fail-closed posture for everything else.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "include!(concat!(env!(\"OUT_DIR\"), \"/generated.rs\"));\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add OUT_DIR-based generated-file include",
+            ],
+        );
+
+        crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path())
+            .expect(
+                "include!(concat!(env!(\"OUT_DIR\"), \"...\")) must remain \
+                 accepted — Cargo guarantees OUT_DIR is this crate's own \
+                 build-tree output, never external machine state",
+            );
+    }
+
+    #[test]
+    fn test_export_committed_head_accepts_include_via_cargo_manifest_dir() {
+        // Same as above, for the other Cargo-guaranteed variable used by
+        // this workspace's `integration.rs`:
+        // `include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/src/x.rs"))`.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str =\n    \
+             include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"/src/lib.rs\"));\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add CARGO_MANIFEST_DIR-based self-referential include",
+            ],
+        );
+
+        crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path())
+            .expect(
+                "include_str!(concat!(env!(\"CARGO_MANIFEST_DIR\"), \"...\")) \
+                 must remain accepted — Cargo guarantees this is the \
+                 crate's own manifest directory, already inside the export",
+            );
+    }
+
+    #[test]
+    fn test_export_committed_head_refuses_an_include_target_that_cannot_be_resolved_at_all() {
+        // A-R-4 round-7 review, F4: an include!-family call whose argument
+        // cannot be resolved to a literal, an all-literal concat!, or a
+        // recognized cargo build-tree reference now REFUSES the export
+        // (inconclusive) instead of silently allowing unverifiable input
+        // through — per the review's own stated remedy. A bare identifier
+        // (a `const` path, in this case) is the plainest such shape: its
+        // actual value is impossible to know from source text alone, and
+        // could name any pre-existing, uncommitted file on this machine.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "const PATH: &str = \"data.txt\";\n\
+             pub const DATA: &str = include_str!(PATH);\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add unresolvable identifier-based include",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "an include_str! call whose argument cannot be resolved at all \
+             must refuse the export as inconclusive, never silently allow \
+             unverifiable input through",
+        );
+        assert!(
+            err.contains("include_str!") && err.contains("cannot be verified"),
+            "error must name the unresolved include! call and explain why, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_export_committed_head_refuses_an_env_var_that_is_not_cargo_guaranteed() {
+        // A-R-4 round-7 review: the cargo-safe-concat carve-out is
+        // deliberately narrow — ONLY `env!("OUT_DIR")` and
+        // `env!("CARGO_MANIFEST_DIR")` are recognized, because Cargo
+        // guarantees both are tied to this build/this crate's own
+        // directory. Any OTHER environment variable's value is genuinely
+        // arbitrary external state and must still refuse the export.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str =\n    \
+             include_str!(concat!(env!(\"HOME\"), \"/example.txt\"));\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add non-cargo-guaranteed env! based include",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "an include target built from a NON-cargo-guaranteed \
+             environment variable must still refuse the export, not be \
+             treated as a recognized cargo build-tree reference",
+        );
+        assert!(
+            err.contains("include_str!") && err.contains("cannot be verified"),
+            "error must name the unresolved include! call and explain why, got: {err}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_export_committed_head_refuses_an_include_target_escaping_through_a_committed_symlink() {
