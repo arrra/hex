@@ -753,18 +753,22 @@ fn validate_manifest_path_dependencies_stay_within_export(
 }
 
 /// Recognizes any Rust string-literal-LIKE token beginning at `source[i]`:
-/// an ordinary `"..."`, a byte string `b"..."`, a raw string
-/// `r"..."`/`r#"..."#`/…, or a raw BYTE string `br"..."`/`br#"..."#`/… —
-/// round-5 review, F3: the first masking draft recognized only a bare
-/// `r`-prefixed raw string, so `is_raw_string_start` rejected the `r` in
-/// `br#"..."#` (its preceding byte, `b`, is alphanumeric), leaving the
-/// masking pass to treat that whole literal as ordinary code and expose
-/// its fixture text — which can itself contain the literal characters
-/// `include_str!("...")` — to the macro-name search below. Returns
+/// an ordinary `"..."`, a byte string `b"..."`, a C string `c"..."`
+/// (Rust 2021+), a raw string `r"..."`/`r#"..."#`/…, a raw byte string
+/// `br"..."`/`br#"..."#`/…, or a raw C string `cr"..."`/`cr#"..."#`/… —
+/// round-5/round-6 review, F3: the first masking draft recognized only a
+/// bare `r`-prefixed raw string (missing `br…`); the next recognized `b`
+/// and `r` prefixes but not `c` at all, so a `c"..."` literal's opening
+/// `"` (preceded by the alphanumeric `c`) was rejected by the
+/// identifier-boundary check below and left as ordinary code — the
+/// literal's CLOSING `"` (preceded by a non-identifier byte) was then
+/// mistaken for the OPENING of a brand-new string, and the search for
+/// ITS closing `"` swallowed everything up to and including whatever
+/// real macro call followed, hiding it from the search entirely. Returns
 /// `(is_raw, quote_pos, hash_count)`: `quote_pos` is the index of the
 /// literal's OPENING `"`, and for a raw form, `hash_count` is how many
 /// `#`s its closing delimiter must match (always 0 for a non-raw form).
-/// `None` if nothing at `i` matches any of these four forms, or the byte
+/// `None` if nothing at `i` matches any of these six forms, or the byte
 /// immediately before `i` is itself an identifier character (so this
 /// can't be misread as the tail of some longer identifier).
 fn string_literal_start(source: &[u8], i: usize) -> Option<(bool, usize, usize)> {
@@ -781,12 +785,16 @@ fn string_literal_start(source: &[u8], i: usize) -> Option<(bool, usize, usize)>
     if source[i] == b'"' {
         return Some((false, i, 0));
     }
-    if source[i] == b'b' && i + 1 < n && source[i + 1] == b'"' {
+    // One-byte prefix, ordinary (non-raw) form: `b"..."` (byte string) or
+    // `c"..."` (C string, Rust 2021+).
+    if (source[i] == b'b' || source[i] == b'c') && i + 1 < n && source[i + 1] == b'"' {
         return Some((false, i + 1, 0));
     }
+    // Raw forms: `r"..."`/`r#"..."#`/… ; `br"..."`/`br#"..."#`/… (raw byte
+    // string); `cr"..."`/`cr#"..."#`/… (raw C string, Rust 2021+).
     let r_at = if source[i] == b'r' {
         i
-    } else if source[i] == b'b' && i + 1 < n && source[i + 1] == b'r' {
+    } else if (source[i] == b'b' || source[i] == b'c') && i + 1 < n && source[i + 1] == b'r' {
         i + 1
     } else {
         return None;
@@ -924,13 +932,19 @@ fn mask_comments_and_strings_for_search(source: &[u8]) -> Vec<u8> {
 /// for correctly skipping one elsewhere in the file during masking.
 /// `None` if `start` begins neither literal form, or it is unterminated.
 fn extract_string_literal_argument(content: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
-    // Reject a byte-string prefix by its FIRST byte, not by comparing
+    // Reject a byte-string (`b"..."`/`br"..."`) or C-string
+    // (`c"..."`/`cr"..."`) prefix by its FIRST byte, not by comparing
     // `quote_pos` to `start`: `string_literal_start` also advances
-    // `quote_pos` past `start` for a bare `r"..."` raw string (no `b`
-    // involved at all), so that comparison alone can't tell the two
+    // `quote_pos` past `start` for a bare `r"..."` raw string (no prefix
+    // byte involved at all), so that comparison alone can't tell the two
     // apart — an earlier draft of this check used it and rejected every
-    // legitimate raw string as a result.
-    if content.get(start) == Some(&b'b') {
+    // legitimate raw string as a result. Neither a `&[u8]` nor a
+    // `&core::ffi::CStr` is valid syntax for `include_str!`'s/
+    // `include_bytes!`'s/`include!`'s path argument (a plain `&str`
+    // shape only) — only `string_literal_start`'s recognition of these
+    // prefix forms matters here, and only for correctly skipping one
+    // elsewhere in the file during masking.
+    if matches!(content.get(start), Some(&b'b') | Some(&b'c')) {
         return None;
     }
     let (is_raw, quote_pos, hashes) = string_literal_start(content, start)?;
@@ -960,35 +974,98 @@ fn extract_string_literal_argument(content: &[u8], start: usize) -> Option<(Vec<
     Some((out, end))
 }
 
-/// A-R-4 (round-2/round-4 review, F4): an `include_str!`/`include_bytes!`/
-/// `include!` literal in a committed `.rs` file is resolved by `rustc`
-/// directly against the SOURCE file's own directory on the real
-/// filesystem — never through this export. Same hazard and same remedy as
-/// the manifest path-dependency guard above.
+/// A-R-4 (round-6 review, F4): resolves `concat!(<lit>, <lit>, …)` to the
+/// concatenation of its arguments' bytes, IF every argument is itself a
+/// plain literal `extract_string_literal_argument` already recognizes,
+/// separated by commas (an optional trailing comma before `)` is
+/// accepted, same as the outer `include!`-family call). Returns the
+/// concatenated bytes and the offset one past `concat!`'s closing `)`.
+///
+/// `None` the moment anything inside the parens ISN'T a literal this
+/// module already knows how to read — an identifier, a number, `env!`,
+/// a NESTED `concat!`, any other expression. That is a deliberate
+/// stopping point, not an oversight: an `env!`-derived argument reads
+/// the environment, not git, so no lexical check could EVER validate it
+/// against export containment regardless of effort — repository content
+/// is simply not where its value comes from. Extending this to a nested
+/// `concat!` or an arbitrary constant expression would mean evaluating a
+/// general Rust constant expression, which is the exact unbounded
+/// modeling problem this whole redesign exists to avoid (see the
+/// module-level doc comment on `HarnessBuildableFromGit`). This closes
+/// the common, BOUNDED case named by the review — a `concat!` of nothing
+/// but plain literals — while leaving genuinely dynamic construction out
+/// of scope by construction, not merely by choice.
+fn try_resolve_concat_literal(content: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+    const CONCAT: &[u8] = b"concat!";
+    if start > 0 {
+        let prev = content[start - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return None;
+        }
+    }
+    if !content.get(start..)?.starts_with(CONCAT) {
+        return None;
+    }
+    let mut i = start + CONCAT.len();
+    while i < content.len() && content[i].is_ascii_whitespace() {
+        i += 1;
+    }
+    if content.get(i) != Some(&b'(') {
+        return None;
+    }
+    i += 1;
+    let mut out = Vec::new();
+    loop {
+        while i < content.len() && content[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        if content.get(i) == Some(&b')') {
+            return Some((out, i + 1));
+        }
+        let (piece, after) = extract_string_literal_argument(content, i)?;
+        out.extend_from_slice(&piece);
+        i = after;
+        while i < content.len() && content[i].is_ascii_whitespace() {
+            i += 1;
+        }
+        match content.get(i) {
+            Some(&b',') => i += 1,
+            Some(&b')') => return Some((out, i + 1)),
+            _ => return None, // not an all-literal concat! call — out of scope
+        }
+    }
+}
+
+/// A-R-4 (round-2/round-4/round-6 review, F4): an `include_str!`/
+/// `include_bytes!`/`include!` literal in a committed `.rs` file is
+/// resolved by `rustc` directly against the SOURCE file's own directory
+/// on the real filesystem — never through this export. Same hazard and
+/// same remedy as the manifest path-dependency guard above.
 ///
 /// Searches a MASKED copy of the source (`mask_comments_and_strings_for_search`)
 /// for the macro name, so a mention inside a comment or an unrelated
 /// string literal is never mistaken for a real call (F3, reintroduced by
 /// this check's own first draft and fixed here). Once a genuine call site
 /// is found — the macro name, then only whitespace, then `(`, then only
-/// whitespace — the argument is extracted from the UNMASKED original via
-/// `extract_string_literal_argument`, which recognizes BOTH an ordinary
-/// `"..."` literal and a raw `r"..."`/`r#"..."#`/… literal (round-4
-/// review: raw strings were an explicit named gap in the first draft;
-/// closed here), and the call must close with only whitespace then `)` —
-/// a second argument or any expression after the literal is out of scope.
+/// whitespace — the argument is resolved from the UNMASKED original via
+/// `extract_string_literal_argument` (an ordinary/byte-string-excluded/
+/// C-string-excluded/raw literal) OR, failing that,
+/// `try_resolve_concat_literal` (an all-literal `concat!(...)` call,
+/// round-6 review), and the call must close with only whitespace, an
+/// optional trailing comma, then `)` — anything else after the argument
+/// is out of scope.
 ///
-/// This remains a narrow, LITERAL-ONLY check: a path built any other way
-/// (`concat!(...)`, `env!(...)`, a `#[path]`-relocated module, any other
-/// non-literal expression) is invisible to it and is silently allowed
-/// through, exactly as compilation itself is blind to where in a file's
-/// TEXT a path came from. This is a deliberate, documented gap, not an
-/// attempt to re-build the unbounded mod/include-graph model this whole
-/// redesign replaced (see the module-level doc comment on
-/// `HarnessBuildableFromGit`) — evaluating an arbitrary constant
-/// expression to a path IS that same unbounded modeling problem one level
-/// down, and this check exists only to catch the review's own named
-/// adversarial shape: a literal path handed straight to one of these
+/// This remains a narrow, BOUNDED check: a path built any OTHER way
+/// (`env!(...)`, a `#[path]`-relocated module, a `concat!` containing
+/// anything but literals, any other non-literal expression) is invisible
+/// to it and is silently allowed through, exactly as compilation itself
+/// is blind to where in a file's TEXT a path came from. This is a
+/// deliberate, documented gap, not an attempt to re-build the unbounded
+/// mod/include-graph model this whole redesign replaced — evaluating an
+/// arbitrary constant expression to a path IS that same unbounded
+/// modeling problem one level down, and this check exists only to catch
+/// the review's own named adversarial shapes: a literal (or
+/// literal-built-via-`concat!`) path handed straight to one of these
 /// three macros.
 fn validate_source_include_targets_stay_within_export(
     entries: &[TreeEntry],
@@ -1049,6 +1126,7 @@ fn validate_source_include_targets_stay_within_export(
                     i += 1;
                 }
                 let Some((literal_bytes, after)) = extract_string_literal_argument(content, i)
+                    .or_else(|| try_resolve_concat_literal(content, i))
                 else {
                     continue;
                 };

@@ -2337,6 +2337,87 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_export_committed_head_still_refuses_a_real_include_after_a_c_string_literal() {
+        // A-R-4 round-6 review: `string_literal_start` didn't recognize
+        // `c"..."` (a C string literal, Rust 2021+) at all — its opening
+        // `"` is preceded by the alphanumeric `c`, so the
+        // identifier-boundary check rejected it, leaving the masking pass
+        // to treat `c` as ordinary code. The literal's CLOSING `"`
+        // (preceded by `.`, not alphanumeric) was then mistaken for the
+        // OPENING of a brand-new string, and the search for its closing
+        // `"` swallowed everything up to and including the real
+        // `include_str!(` call that followed — masking the genuine call's
+        // own NAME and hiding it from the search entirely (worse than
+        // merely skipping a recognized-but-out-of-scope call: this call
+        // was never found at all).
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const C: &core::ffi::CStr = c\"hello.\";\n\
+             pub const DATA: &str = include_str!(\"/tmp/example.txt\");\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add C-string literal preceding a real absolute include_str!",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "a genuine include_str! call following a C-string literal \
+             elsewhere in the file must still be found and refused",
+        );
+        assert!(
+            err.contains("include_str!") && err.contains("outside this export's root"),
+            "error must name the escaping include! call and explain why, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_export_committed_head_refuses_an_absolute_include_str_target_built_via_concat() {
+        // A-R-4 round-6 review, F4: `include_str!(concat!(...))` with an
+        // all-literal-argument `concat!` call was an explicitly accepted
+        // gap — under this review's rules, a deferred MAJOR still counts
+        // as must-fix. `try_resolve_concat_literal` closes the bounded
+        // case where every `concat!` argument is itself a plain literal.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str!(concat!(\"/tmp/\", \"example.txt\"));\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add absolute include_str! target built via an all-literal concat!",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "an absolute include_str! target built from an all-literal \
+             concat!(...) call must be resolved and refused, not silently \
+             allowed through as an unrecognized expression",
+        );
+        assert!(
+            err.contains("include_str!") && err.contains("outside this export's root"),
+            "error must name the escaping include! call and explain why, got: {err}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_export_committed_head_refuses_an_include_target_escaping_through_a_committed_symlink() {
