@@ -115,10 +115,17 @@ _REDACT_PATTERNS = [
     # `\\[\s\S]` matches an escaped character INCLUDING a newline without
     # needing re.DOTALL (which would also loosen unrelated `.` uses
     # elsewhere in this pattern).
+    # R7 (round 3): the UNQUOTED fallback was a bare `\S+`, so a bash
+    # backslash-escaped SPACE (the third shell-quoting mechanism, alongside
+    # single/double quotes -- `password=alpha\ bravo\ charlie` is ONE shell
+    # word) stopped at the first escaped space and leaked the rest.
+    # `(?:[^\s\\]|\\.)+` walks past an escaped character (including an
+    # escaped space) the same way the quoted alternatives above already
+    # walk past an escaped quote.
     (
         re.compile(
             r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""(\\"(?:[^"\\]|\\[\s\S])*\\"|"(?:[^"\\]|\\[\s\S])*"|'[^']*'|\S+)"""
+            r"""(\\"(?:[^"\\]|\\[\s\S])*\\"|"(?:[^"\\]|\\[\s\S])*"|'[^']*'|(?:[^\s\\]|\\.)+)"""
         ),
         r"\1=***REDACTED***",
     ),

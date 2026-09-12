@@ -3260,6 +3260,13 @@ class TestSubstitutionInsideUnquotedHeredocIsRecursivelyMasked(RouterTestCase):
     nesting shape."""
 
     def test_quoted_or_commented_mention_inside_a_nested_substitution_abstains(self):
+        # The second case's LITERAL backtick pair is a genuine, unrelated
+        # match for the separate `backticks-in-unquoted-heredoc` rule (any
+        # backtick in an unquoted heredoc body is inherently risky,
+        # independent of what it contains) -- R5 is about the
+        # `git-stash-shared-checkout` rule specifically, so that rule's
+        # ABSENCE from the ledger is the precise assertion, not blank
+        # stdout for every case.
         cases = (
             "cat <<EOF\n$(printf '%s' 'x; git stash')\nEOF",
             "cat <<EOF\n`printf '%s' 'x; git stash'`\nEOF",
@@ -3271,10 +3278,11 @@ class TestSubstitutionInsideUnquotedHeredocIsRecursivelyMasked(RouterTestCase):
                 proc = run_router_payload(
                     make_payload("Bash", {"command": cmd}, cwd="/shared/c"), ledger_dir
                 )
-                self.assertEqual(
-                    proc.stdout.strip(), "",
-                    f"quoted/commented mention inside a nested substitution "
-                    f"must abstain (R5): {proc.stdout!r}",
+                fired_ids = {line["rule_id"] for line in read_ledger(ledger_dir)}
+                self.assertNotIn(
+                    "git-stash-shared-checkout", fired_ids,
+                    f"a quoted/commented mention inside a nested substitution "
+                    f"must not falsely deny the stash rule (R5): {proc.stdout!r}",
                 )
 
     def test_real_stash_inside_a_substitution_in_a_heredoc_body_still_denies(self):

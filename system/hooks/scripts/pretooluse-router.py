@@ -161,10 +161,17 @@ _REDACT_PATTERNS = [
     # `\\[\s\S]` matches an escaped character INCLUDING a newline without
     # needing re.DOTALL (which would also loosen unrelated `.` uses
     # elsewhere in this pattern).
+    # R7 (round 3): the UNQUOTED fallback was a bare `\S+`, so a bash
+    # backslash-escaped SPACE (the third shell-quoting mechanism, alongside
+    # single/double quotes -- `password=alpha\ bravo\ charlie` is ONE shell
+    # word) stopped at the first escaped space and leaked the rest.
+    # `(?:[^\s\\]|\\.)+` walks past an escaped character (including an
+    # escaped space) the same way the quoted alternatives above already
+    # walk past an escaped quote.
     (
         re.compile(
             r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""(\\"(?:[^"\\]|\\[\s\S])*\\"|"(?:[^"\\]|\\[\s\S])*"|'[^']*'|\S+)"""
+            r"""(\\"(?:[^"\\]|\\[\s\S])*\\"|"(?:[^"\\]|\\[\s\S])*"|'[^']*'|(?:[^\s\\]|\\.)+)"""
         ),
         r"\1=***REDACTED***",
     ),
@@ -227,9 +234,22 @@ _SEPARATOR_CHARS = ";&|(){}\n"
 # backtracking engine explored every combination on adversarial input
 # (`env A=B=C A=B=C ... true`). Restricting the name to an unambiguous class
 # removes the ambiguity, so each iteration matches exactly one way.
-_ASSIGN = r"[A-Za-z_][A-Za-z0-9_]*=\S*"
+#
+# R4 (round 3): the value used to be a bare `\S*`, which can never span a
+# QUOTED value containing a real space (`FOO="a b" cmd`) -- masking blanks
+# the quote DELIMITERS by default (see the executable-region-scanner
+# comment below), so by the time this pattern runs against scan_text the
+# quote characters are already gone and only the raw spaces remain,
+# indistinguishable from real argument-separating whitespace. The scanner
+# special-cases an assignment's own value (`_is_assignment_value_quote`)
+# to leave ITS quote delimiters visible instead, specifically so this
+# pattern's quoted-value alternatives have real quote characters to match
+# against; ordinary argument content stays visible either way, so the
+# interior of the value is unaffected.
+_ASSIGN_VALUE = r"""(?:[^\s'"]*|'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\$'(?:[^'\\]|\\.)*')"""
+_ASSIGN = r"[A-Za-z_][A-Za-z0-9_]*=" + _ASSIGN_VALUE
 _WRAPPER_SKIP = (
-    r"(?:(?:" + _ASSIGN + r"\s+)*(?:time|env|command|exec|sudo)\s+)*"
+    r"(?:(?:" + _ASSIGN + r"\s+)*(?:time|env|command|exec|sudo|builtin)\s+)*"
     r"(?:" + _ASSIGN + r"\s+)*"
 )
 # G3 (spec-level review, reopen generation 2): a bare backtick is a valid
@@ -242,7 +262,24 @@ _WRAPPER_SKIP = (
 # glued to a real command word, which no rule/fixture in this router
 # exercises and which real shell word-concatenation makes vanishingly
 # rare in practice.)
-_CMD_PREFIX = r"(?:^|[;&|({]\s*|\$\(\s*|`\s*|\n\s*)\s*" + _WRAPPER_SKIP
+#
+# R3 (round 3): a reserved word (if/then/elif/else/while/until/do) is
+# ALSO a valid command-position lead-in -- a real invocation right after
+# `then` genuinely starts a new command the same way one right after `;`
+# does, but none of those reserved words are `_SEPARATOR_CHARS`. No
+# lookaround is available (Rust `regex` port target), so this is a plain
+# alternative in the same top-level group as the separator/start-of-text
+# ones, not a lookbehind assertion on the reserved word's OWN position --
+# a reserved word that is itself only a QUOTED MENTION (an echoed string
+# containing the word `then`) will over-match here rather than abstain.
+# That is the router's existing conservative bias (ask/deny-leaning over
+# silent abstention): the fail-safe direction for a permission gate is an
+# unnecessary prompt, not a missed dangerous command.
+_RESERVED_LEADIN = r"(?:if|then|elif|else|while|until|do)\s+"
+_CMD_PREFIX = (
+    r"(?:^|[;&|({]\s*|\$\(\s*|`\s*|\n\s*|" + _RESERVED_LEADIN + r")\s*"
+    + _WRAPPER_SKIP
+)
 
 # Git global options (F3: "most Git rules also miss global options") skipped
 # between `git` and its subcommand: `-C <path>`, `-c k=v`, `--git-dir=...`,
@@ -252,6 +289,27 @@ _GIT_GLOBAL_OPTS = r"(?:(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+)\s+)*
 
 def _expand_placeholders(pattern):
     return pattern.replace("@PREFIX@", _CMD_PREFIX).replace("@GITOPTS@", _GIT_GLOBAL_OPTS)
+
+
+# R4 (round 3): a quote immediately preceded by `NAME=` (optionally with a
+# `$` right before it, for `NAME=$'...'` ANSI-C quoting) is an assignment
+# PREFIX's own value, not an ordinary quoted argument/mention -- the
+# executable-mask scanner leaves such a quote's DELIMITERS visible (see
+# `mask_delims` on `_mask_literal_span`/`_mask_double_quoted`) so `_ASSIGN`'s
+# quoted-value alternatives can match the real characters in scan_text.
+# Deliberately not anchored to "genuine command position" beyond this local
+# check: no rule regex references a literal quote character, so leaving one
+# extra quote visible elsewhere is inert everywhere else in this router, and
+# `_ASSIGN` is itself only ever consulted at a `_CMD_PREFIX`/`_WRAPPER_SKIP`
+# anchor point, so an over-permissive match here can't smuggle anything past
+# that separate, still-enforced check.
+_ASSIGN_QUOTE_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\$?\Z")
+_ASSIGN_QUOTE_LOOKBACK = 64  # assignment names are short; bounds the check to O(1)
+
+
+def _is_assignment_value_quote(text, quote_idx):
+    lookback = text[max(0, quote_idx - _ASSIGN_QUOTE_LOOKBACK) : quote_idx]
+    return bool(_ASSIGN_QUOTE_PREFIX_RE.search(lookback))
 
 
 # --- Executable-region scanner (F2, F13) -----------------------------------
@@ -429,12 +487,18 @@ def _skip_double_quoted(text, start):
     return n
 
 
-def _mask_literal_span(text, start, end, result, quote_char):
+def _mask_literal_span(text, start, end, result, quote_char, mask_delims=True):
     """Blank `text[start:end)` to spaces in `result`, but ONLY the quote
     delimiter itself (`quote_char`), any `_SEPARATOR_CHARS` character
     (G2, review_b round 1), and a backtick (B-R1, round 2 reopen review)
     — ordinary argument content stays visible. See the
     executable-region-scanner comment above for why this is safe.
+
+    `mask_delims=False` (R4, round 3): leave the quote CHARACTER itself
+    visible -- used only for a quote that is an assignment-prefix's OWN
+    value (`_is_assignment_value_quote`), so `_ASSIGN`'s quoted-value
+    alternative can still see and match the real delimiters in scan_text.
+    Interior separator/backtick characters are still blanked either way.
 
     A REAL newline inside the span is a `_SEPARATOR_CHARS` member too and
     gets blanked like any other (review R4 regression from G2): leaving it
@@ -457,6 +521,8 @@ def _mask_literal_span(text, start, end, result, quote_char):
     new command started right after the second backtick."""
     for k in range(start, end):
         ch = text[k]
+        if ch == quote_char and not mask_delims:
+            continue
         if ch == quote_char or ch in _SEPARATOR_CHARS or ch == "`":
             result[k] = " "
 
@@ -464,17 +530,46 @@ def _mask_literal_span(text, start, end, result, quote_char):
 def _mask_span_preserving_substitutions(text, start, end, result):
     """Mask text[start:end) to spaces (newlines untouched), except `$(...)`
     and backtick spans, which stay visible because the shell still executes
-    them there (inside double quotes or an unquoted heredoc body)."""
+    them there (inside double quotes or an unquoted heredoc body).
+
+    R5 (round 3): a substitution's CONTENT used to be preserved wholesale
+    -- visible, but never itself scanned -- so a quoted literal, comment,
+    or quoted heredoc genuinely nested inside one (e.g. `$(printf '%s'
+    'x; <cmd> stash')`, where the `;` is just part of a literal string
+    argument to printf) stayed fully visible/executable and falsely
+    tripped a command-position rule. `_mask_double_quoted` already
+    recurses into a nested substitution's content via
+    `_mask_quotes_recursive` (G1, review_b round 2) for the identical
+    nesting shape inside double quotes; doing the same here makes this
+    scanner agree with that one about what stays inert, while the
+    substitution's own ordinary command text (not itself quoted/commented)
+    stays visible exactly as before."""
     i = start
     while i < end:
         ch = text[i]
         if ch == "$" and i + 1 < end and text[i + 1] == "(":
-            close, _ = _find_matching_paren(text, i + 1)
-            i = min(close, end)
+            raw_close, terminated = _find_matching_paren(text, i + 1)
+            if terminated and raw_close <= end:
+                close, body_end = raw_close, raw_close - 1
+            else:
+                close = body_end = min(raw_close, end)
+            _mask_quotes_recursive(text, i + 2, body_end, result)
+            i = close
             continue
         if ch == "`":
             j = text.find("`", i + 1)
-            i = (j + 1) if (j != -1 and j < end) else end
+            if j != -1 and j < end:
+                close, body_end = j + 1, j
+                # A-R1 pattern (see `_mask_double_quoted`): blank only the
+                # CLOSING backtick -- the opener still anchors real
+                # substitution text, the closer must not also anchor a
+                # fresh command position for whatever ordinary body text
+                # follows it in the same (unquoted heredoc) span.
+                result[j] = " "
+            else:
+                close = body_end = end
+            _mask_quotes_recursive(text, i + 1, body_end, result)
+            i = close
             continue
         if ch != "\n":
             result[i] = " "
@@ -524,6 +619,13 @@ def _mask_quotes_recursive(text, start, end, result):
     while i < end:
         ch = text[i]
         if ch == "\\" and i + 1 < end:
+            # R1/R8 (round 3): blank both characters, mirroring the
+            # top-level `executable_mask` loop's identical fix -- an
+            # escaped real newline here must stop being a newline too, or
+            # a line-continuation nested inside a substitution still
+            # anchors a fresh command position past it.
+            result[i] = " "
+            result[i + 1] = " "
             i += 2
             continue
         if ch == "#" and _is_comment_start(text, i):
@@ -559,11 +661,13 @@ def _mask_quotes_recursive(text, start, end, result):
         if ch == "'":
             j = text.find("'", i + 1)
             close = (j + 1) if (j != -1 and j < end) else end
-            _mask_literal_span(text, i, close, result, "'")
+            keep_delims = _is_assignment_value_quote(text, i)
+            _mask_literal_span(text, i, close, result, "'", mask_delims=not keep_delims)
             i = close
             continue
         if ch == '"':
-            i = min(_mask_double_quoted(text, i, result), end)
+            keep_delims = _is_assignment_value_quote(text, i)
+            i = min(_mask_double_quoted(text, i, result, mask_delims=not keep_delims), end)
             continue
         if ch == "$" and i + 1 < end and text[i + 1] == "(":
             raw_close, terminated = _find_matching_paren(text, i + 1)
@@ -593,12 +697,16 @@ def _mask_quotes_recursive(text, start, end, result):
         i += 1
 
 
-def _mask_double_quoted(text, start, result):
+def _mask_double_quoted(text, start, result, mask_delims=True):
     """`text[start]` is the opening '"'; mask the double-quoted span,
     preserving `$(...)`/backtick substitutions' executable structure while
     recursively masking any quoted literal NESTED inside one of them (G1,
     review_b round 2 — see `_mask_quotes_recursive`). Returns the index
     just past the closing quote (or len(text) if unterminated).
+
+    `mask_delims=False` (R4, round 3): leave the opening/closing '"'
+    characters themselves visible -- see `_mask_literal_span`'s matching
+    parameter for why (an assignment-prefix's own quoted value).
 
     A REAL newline inside the span is blanked too (G4, review_b round 2):
     `_mask_literal_span` (single quotes) already blanks it for the same
@@ -623,7 +731,8 @@ def _mask_double_quoted(text, start, result):
     first G4 fix (review_b round 2, re-opened). Blank both characters like
     any other escape pair — length-preserving, so offsets stay identical."""
     n = len(text)
-    result[start] = " "
+    if mask_delims:
+        result[start] = " "
     i = start + 1
     while i < n:
         ch = text[i]
@@ -633,7 +742,8 @@ def _mask_double_quoted(text, start, result):
             i += 2
             continue
         if ch == '"':
-            result[i] = " "
+            if mask_delims:
+                result[i] = " "
             return i + 1
         if ch == "$" and i + 1 < n and text[i + 1] == "(":
             raw_close, terminated = _find_matching_paren(text, i + 1)
@@ -742,7 +852,13 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=No
     return end_index, terminated
 
 
-def executable_mask(text):
+def executable_mask(text, quote_spans=None):
+    """`quote_spans` (R6, round 3): when given a list, every TOP-LEVEL
+    single-/double-quoted span this scanner walks past is appended to it
+    as `(start, end)` (end just past the closing delimiter, or len(text)
+    if unterminated) -- `evaluate()` uses this to extend a rule's match
+    span past a quoted secret value it ended in the middle of, before
+    redact() ever sees the slice (see `_extend_end_past_quote`)."""
     n = len(text)
     result = list(text)
     i = 0
@@ -760,7 +876,26 @@ def executable_mask(text):
         # its bare `'` mistaken for a genuine (unterminated) quote opener,
         # which masked the real `;` separator right after it to a space
         # and hid the anchored stash invocation that follows.
+        #
+        # R1/R8 (round 3, ledger arrra-hex-pr-5-wf-open-ledger.md): the
+        # pair used to be left FULLY VISIBLE (only `i` advanced past it).
+        # That's right for an ordinary escaped character (a literal `\;`
+        # must not fake a real separator -- R8), but wrong for the one
+        # shape where the escaped character IS a real newline: bash
+        # LINE-CONTINUATION deletes a `\<newline>` pair outright, folding
+        # the two source lines into one logical line (verified: `cd /tmp
+        # && cd \<nl>/usr && pwd` prints /usr). A rule's own `[^\n;&|]*`
+        # character class explicitly excludes a real newline, so leaving
+        # one visible here broke every Bash rule whose target sat on the
+        # continued line (R1). Blanking BOTH characters to spaces --
+        # mirroring `_mask_double_quoted`'s identical escape branch --
+        # fixes both at once: an escaped separator no longer fakes a
+        # boundary (R8), and an escaped real newline is no longer a
+        # newline at all, so `[^\n;&|]*` keeps matching straight through
+        # it exactly as if the line had never been split.
         if ch == "\\" and i + 1 < n:
+            result[i] = " "
+            result[i + 1] = " "
             i += 2
             continue
         if ch == "`":
@@ -812,11 +947,18 @@ def executable_mask(text):
         if ch == "'":
             j = text.find("'", i + 1)
             end = (j + 1) if j != -1 else n
-            _mask_literal_span(text, i, end, result, "'")
+            keep_delims = _is_assignment_value_quote(text, i)
+            _mask_literal_span(text, i, end, result, "'", mask_delims=not keep_delims)
+            if quote_spans is not None:
+                quote_spans.append((i, end))
             i = end
             continue
         if ch == '"':
-            i = _mask_double_quoted(text, i, result)
+            start = i
+            keep_delims = _is_assignment_value_quote(text, i)
+            i = _mask_double_quoted(text, i, result, mask_delims=not keep_delims)
+            if quote_spans is not None:
+                quote_spans.append((start, i))
             continue
         if ch == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
             m = _HEREDOC_START_RE.match(text, i)
@@ -940,7 +1082,20 @@ def _window_bounds(sep_positions, text_len, start, end):
 # whitespace itself before parsing the argument.
 _DASH_C_LOCATE_RE = re.compile(r"-C\s")
 _GIT_DIR_LOCATE_RE = re.compile(r"--git-dir=")
-_CD_LOCATE_RE = re.compile(r"(?:^|[;&|(){}\n])\s*cd\s")
+# R3 (round 3): a bare separator-anchor missed a `cd`/`pushd`/`popd` right
+# after a reserved word (`if`/`then`/`do`/...) or a `command`/`builtin`
+# wrapper -- none of those are `_SEPARATOR_CHARS`, so the effective-checkout
+# tracker never saw them at all and fell back to the (possibly exempt)
+# payload cwd. Shares `_RESERVED_LEADIN`/`_WRAPPER_SKIP` with `_CMD_PREFIX`
+# so the two anchors agree on what counts as command position; `pushd`
+# changes the effective directory exactly like `cd` (handled identically
+# below), `popd` pops a directory STACK this router doesn't track, so its
+# target is always treated as uncertain (see `_precompute_cd_reach_info`).
+_CD_LOCATE_RE = re.compile(
+    r"(?:^|[;&|(){}\n]\s*|" + _RESERVED_LEADIN + r")"
+    + _WRAPPER_SKIP
+    + r"(cd|pushd|popd)\b"
+)
 
 
 def _looks_like_resolvable_path(token):
@@ -962,10 +1117,23 @@ def _read_token(text, pos):
     runtime), or an unquoted token with `$`/backtick/`*`/`~`/a leading `-`
     (a flag, not a path). A single-quoted value is always literal -- single
     quotes suppress all shell expansion, so its content is exactly the
-    path."""
+    path.
+
+    R1 (round 3): the leading-whitespace skip also steps over a
+    `\\<newline>` line-continuation pair -- bash deletes it outright, so
+    `cd \\` + newline + `/usr` genuinely targets `/usr`, not a literal
+    backslash character (the token-start skip previously stopped at the
+    very first non-space/tab character, landing ON the backslash and
+    reading it as the whole token)."""
     n = len(text)
-    while pos < n and text[pos] in " \t":
-        pos += 1
+    while pos < n:
+        if text[pos] in " \t":
+            pos += 1
+            continue
+        if text[pos] == "\\" and pos + 1 < n and text[pos + 1] == "\n":
+            pos += 2
+            continue
+        break
     if pos < n and text[pos] == "'":
         end = text.find("'", pos + 1)
         if end == -1:
@@ -1060,6 +1228,45 @@ def _skip_balanced_group(scan_text, open_idx):
     return n
 
 
+def _or_operand_end(scan_text, start):
+    """Find where a `||` operand genuinely ends, starting at `start` (just
+    past the `||` and its leading spaces, per `_OR_GUARD_RE`).
+
+    new-defects R1 (round 3): the previous implementation just took the
+    first `_SEPARATOR_CHARS` position at/after `start` -- but a lone pipe
+    (`|`) or `|&` binds TIGHTER than `||` and stays part of the SAME
+    operand (bash: `A || B | C` parses as `A || (B | C)`, confirmed: `cd
+    /nonexist || true | echo RAN` prints RAN only when the `cd` failed --
+    the pipeline is the whole fallback), so treating a bare `|`/`|&` as a
+    terminator let a command AFTER it wrongly escape the guard and inherit
+    the failed `cd`'s target. Only a REAL list separator -- `;`, `&`
+    (whether alone or as the first half of `&&`), a real newline, or a
+    bracket/group opener (handled by the caller's own
+    `_skip_balanced_group` extension) -- ends the operand. `||` itself
+    (two consecutive `|` characters) also ends it: a chained `A || B ||
+    C` only guards `B` with the first `||`.
+
+    (A backslash-newline continuation is already invisible by the time
+    scan_text exists -- see `executable_mask`'s escape-pair blanking --
+    so any REAL `\\n` reaching this scan genuinely is one.)"""
+    n = len(scan_text)
+    i = start
+    while i < n:
+        ch = scan_text[i]
+        if ch in ";&\n(){}":
+            return i
+        if ch == "|":
+            if i + 1 < n and scan_text[i + 1] == "|":
+                return i
+            # A lone pipe or `|&` -- part of the SAME pipeline, not a `||`
+            # terminator. Skip past it (1 char for `|`, 2 for `|&`) and
+            # keep scanning for the operand's real end.
+            i += 2 if (i + 1 < n and scan_text[i + 1] == "&") else 1
+            continue
+        i += 1
+    return n
+
+
 def _next_lower_paren_depth(paren_depths):
     """`next_lower[j]` = the smallest `k > j` with `paren_depths[k] <
     paren_depths[j]`, or `None` if no such `k` exists ("next smaller
@@ -1086,8 +1293,11 @@ def _base_cwd_before(position, starts, infos, payload_cwd):
     backward over `cd` reach data (as built by
     `_precompute_cd_reach_info`) for the nearest one that still reaches
     `position` -- not confined to an OR-guard's own right-hand operand
-    (`guard_end`, A-R4) and not already closed by its enclosing subshell
-    (`break_pos`, G1). No reaching `cd` at all falls back to `payload_cwd`.
+    (`guard_end`, A-R4), not already closed by its enclosing subshell
+    (`break_pos`, G1), and not itself confined to an EARLIER cd's
+    OR-guard operand (`ceiling`, R2/new-defects R2, round 3 -- see
+    `_precompute_cd_reach_info`). No reaching `cd` at all falls back to
+    `payload_cwd`.
 
     Shared by `_effective_checkout` (an invocation's own base directory)
     and `_precompute_cd_reach_info` itself (A-R2, round 2 reopen review):
@@ -1101,9 +1311,11 @@ def _base_cwd_before(position, starts, infos, payload_cwd):
     back onto the exempt path."""
     idx = _bisect_left(starts, position) - 1
     while idx >= 0:
-        resolved, guard_end, break_pos = infos[idx]
-        if (guard_end is None or position >= guard_end) and (
-            break_pos is None or break_pos > position
+        resolved, guard_end, break_pos, ceiling = infos[idx]
+        if (
+            (guard_end is None or position >= guard_end)
+            and (break_pos is None or break_pos > position)
+            and (ceiling is None or position < ceiling)
         ):
             return resolved
         idx -= 1
@@ -1151,12 +1363,42 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd, sep_po
     per-candidate list just to search it."""
     starts = []
     infos = []
+    operand_windows = []  # [(operand_start, operand_end), ...] -- R2/round 3
     next_lower = None
     for cd_match in _CD_LOCATE_RE.finditer(scan_text):
+        keyword = cd_match.group(1)
         token_start = cd_match.end()
         value, token_end = _read_token(text, token_start)
+        if keyword == "popd":
+            # R3 (round 3): `popd` pops a directory STACK this router
+            # doesn't track -- its real target is genuinely unknown, so
+            # treat it as uncertain (never exempt) rather than resolving
+            # whatever stray token happens to follow it as a path.
+            value = None
         base_for_this_cd = _base_cwd_before(cd_match.start(), starts, infos, payload_cwd)
         resolved = _resolve_against_cwd(value, base_for_this_cd) if value is not None else None
+        # R2 (round 3): a `cd` that is ITSELF the right-hand operand of an
+        # earlier `cd`'s `||` (e.g. the second `cd` in `cd A || cd B;
+        # <stash>`) only ever runs when that earlier `cd` FAILED -- it
+        # must not be usable as a base for anything past the earlier
+        # `cd`'s own `guard_end` (where its whole OR-compound ends),
+        # because when the earlier `cd` SUCCEEDS (the common case) ITS
+        # target governs there instead. `ceiling` records the nearest
+        # enclosing operand's end; `_base_cwd_before` skips this entry
+        # for any position at or past it and keeps walking backward --
+        # which naturally finds the enclosing `cd` next, exactly the
+        # fix new-defects R2 asked for as the symmetric case. Checked
+        # against the KEYWORD's own start (group 1), not the overall
+        # match start: `_CD_LOCATE_RE`'s separator alternative can anchor
+        # on the SECOND `|` of a `||` (a lone `|` is itself a separator
+        # char), which sits one character before an operand window that
+        # starts right after the whole `||` -- the keyword itself is
+        # still genuinely inside the operand either way.
+        ceiling = None
+        keyword_start = cd_match.start(1)
+        for op_start, op_end in operand_windows:
+            if op_start <= keyword_start < op_end and (ceiling is None or op_end < ceiling):
+                ceiling = op_end
         # A-R4 (round 2 reopen review): `cd X || <fallback>` only skips the
         # `cd`'s effect for `<fallback>` itself -- the OR's own right-hand
         # operand -- never for anything after it. Once a `;`/newline/`&`/
@@ -1164,17 +1406,18 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd, sep_po
         # governs every later command exactly as an unguarded `cd` would;
         # a permanent `guarded` flag (the previous design) wrongly
         # discarded the `cd` for candidates far past its own OR-compound
-        # too. `guard_end` is the position where the operand ends (the
-        # next separator character after the `||`), or `None` when there
-        # is no `||` at all; a candidate at or past `guard_end` is never
-        # blocked by this guard (see `_base_cwd_before`).
+        # too. `guard_end` is the position where the operand ends, or
+        # `None` when there is no `||` at all; a candidate at or past
+        # `guard_end` is never blocked by this guard (see
+        # `_base_cwd_before`).
         guard_end = None
         or_match = _OR_GUARD_RE.match(scan_text, token_end)
         if or_match:
-            sep_idx = _bisect_left(sep_positions, or_match.end())
-            guard_end = (
-                sep_positions[sep_idx] if sep_idx < len(sep_positions) else len(scan_text)
-            )
+            # new-defects R1 (round 3): `_or_operand_end` -- not a bare
+            # "first separator" lookup -- so a lone pipe/`|&` (which binds
+            # tighter than `||` and stays part of the SAME operand) never
+            # ends it early (see that function's docstring).
+            guard_end = _or_operand_end(scan_text, or_match.end())
             # A-R1/B-R1 (round 2 reopen review, generation 3): `{`/`(` are
             # themselves `_SEPARATOR_CHARS` members, so when the fallback
             # operand OPENS with a brace-group or subshell (`cd X || {
@@ -1189,6 +1432,7 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd, sep_po
             # `cd`'s reach.
             if guard_end < len(scan_text) and scan_text[guard_end] in "({":
                 guard_end = _skip_balanced_group(scan_text, guard_end)
+            operand_windows.append((or_match.end(), guard_end))
         enclosing = paren_depths[token_start]
         break_pos = None
         if paren_depths[token_end] == enclosing:
@@ -1201,7 +1445,7 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd, sep_po
                     break_pos = j
                     break
         starts.append(cd_match.start())
-        infos.append((resolved, guard_end, break_pos))
+        infos.append((resolved, guard_end, break_pos, ceiling))
     return starts, infos
 
 
@@ -1407,6 +1651,19 @@ def load_rules():
     return compiled
 
 
+def _extend_end_past_quote(quote_spans, end):
+    """R6 (round 3): if `end` falls STRICTLY inside one of the top-level
+    quoted spans `executable_mask` collected, return that span's own end
+    instead -- so a rule's match sliced mid-quote still reaches the
+    value's real closing delimiter before redact() ever sees it. Returns
+    `end` unchanged when it doesn't land inside any span (including
+    exactly AT a span's boundary, which is already a complete slice)."""
+    for q_start, q_end in quote_spans:
+        if q_start < end < q_end:
+            return q_end
+    return end
+
+
 def ledger_path():
     ledger_dir = os.environ.get("HEX_LEDGER_DIR") or os.path.join(
         os.path.expanduser("~"), ".hex", "ledger"
@@ -1426,7 +1683,8 @@ def evaluate(payload):
     # quoted/commented/heredoc-body text is masked to spaces first (real
     # `$(...)`/backtick substitutions stay visible). Other tools' canonical
     # text (file paths/content) isn't Bash syntax, so it is used as-is.
-    scan_text = executable_mask(text) if tool_name == "Bash" else text
+    quote_spans = []
+    scan_text = executable_mask(text, quote_spans) if tool_name == "Bash" else text
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
     paren_depths = _paren_depths(scan_text)
     cd_reach_starts, cd_reach_infos = _precompute_cd_reach_info(
@@ -1614,6 +1872,14 @@ def evaluate(payload):
         # G1: sliced from `text` (the unmasked original), never
         # `scan_text` -- see the comment above `match_override_span`.
         raw_start, raw_end = match_override_span if match_override_span is not None else m.span()
+        # R6 (round 3): a rule's own match span can end INSIDE a quoted
+        # secret value (e.g. the `+refspec` alternative matching the `+`
+        # in the MIDDLE of `password="alpha bravo +charlie"`) -- slicing
+        # there drops the value's own closing quote, so redact()'s
+        # quoted-value alternative can't find it and falls back to the
+        # bare-token alternative, leaking the rest of the value. Extend
+        # the slice to the enclosing quote's real end first.
+        raw_end = _extend_end_past_quote(quote_spans, raw_end)
         raw_matched = text[raw_start:raw_end]
         # F7: redact BEFORE truncating -- truncating first could slice a
         # secret in half and leave the visible fragment unredacted.
