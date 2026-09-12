@@ -1939,6 +1939,95 @@ class TestStashExemptionEffectiveCheckout(RouterTestCase):
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
+    def test_chained_relative_cd_resolves_against_the_prior_cd_not_payload_cwd(self):
+        """A-R2 (round 2 reopen review): `_precompute_cd_reach_info` always
+        resolved a relative `cd` target against the raw hook PAYLOAD cwd
+        (`_resolve_against_cwd(value, payload_cwd)`), never against
+        whatever effective directory an EARLIER `cd` in the same command
+        already established. From a /worktrees/ payload cwd, a relative
+        `cd` chained after a `cd /shared/checkout` genuinely stays inside
+        /shared/... (the shell's real current directory after the first
+        `cd`, not the hook's payload cwd) -- but resolving each `cd`
+        independently against payload_cwd instead joined the relative
+        target back onto /worktrees/ and wrongly exempted."""
+        cases = (
+            "cd /shared/checkout && cd . && git stash",
+            "cd /shared && cd checkout && git stash",
+            "cd /shared/checkout; cd ../other; git stash",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-R2)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_dash_c_folds_left_to_right_like_real_git(self):
+        """A-R3/B-R3 (round 2 reopen review): git(1) interprets each
+        subsequent non-absolute `-C <path>` relative to the PRECEDING `-C
+        <path>`, not the shell's cwd. `_effective_checkout` read only the
+        LAST `-C` occurrence (`c_locates[-1]`), so a leading absolute `-C`
+        followed by a relative one (`-C /shared/checkout -C .`) lost the
+        absolute anchor entirely and the relative `.` resolved against the
+        hook's payload/cd cwd instead -- from a /worktrees/ cwd, that
+        wrongly abstained a stash that git(1) genuinely runs in
+        /shared/checkout."""
+        cases = (
+            ("git -C /shared/checkout -C . stash", "/worktrees/review"),
+            ("git -C /shared -C . stash", "/Users/x/worktrees/a"),
+        )
+        for cmd, cwd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd=cwd), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-R3/B-R3)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_cd_reaches_past_its_own_or_guards_failure_branch(self):
+        """A-R4 (round 2 reopen review): `_precompute_cd_reach_info` marked
+        a `cd` immediately followed by `||` as permanently `guarded` --
+        excluded from reaching ANYTHING later, even a real command well
+        past the `||`'s own right-hand operand. A real shell only skips the
+        `cd`'s effect for that operand itself (`cd X || <fallback>`); once
+        a `;`/newline ends the OR-compound, the `cd`'s effect (when it
+        succeeded) governs every later command normally -- so `cd
+        /shared/checkout || exit 1; git stash` genuinely runs the stash in
+        /shared/checkout, but the old code fell through to the payload cwd
+        as if the `cd` never happened at all, wrongly abstaining."""
+        cases = (
+            "cd /shared/checkout || exit 1; git stash",
+            "cd /shared/checkout || { echo no; exit 1; }; git stash",
+            "cd /shared/checkout || return 1\ngit stash",
+            "cd /shared/checkout || exit 1; git -C . stash",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-R4)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_cd_or_guard_inverse_still_abstains_when_the_reached_target_is_a_worktree(self):
+        """A-R4 near miss: same shape, but the `cd`'s real target IS a
+        /worktrees/ checkout and the payload cwd is the shared one -- once
+        the guard is scoped to only its own right-hand operand, the `cd`
+        must still reach the trailing `git stash` and correctly abstain,
+        not over-deny by keeping the guard permanent."""
+        cmd = "cd /worktrees/review || exit 1; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"cd reaching a real worktree checkout must abstain (A-R4): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
 
 class TestForceRefspecAsksFirst(RouterTestCase):
     """F5: a leading `+` on any push refspec forces the update, the same as

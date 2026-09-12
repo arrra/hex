@@ -951,7 +951,36 @@ def _next_lower_paren_depth(paren_depths):
     return next_lower
 
 
-def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd):
+def _base_cwd_before(position, starts, infos, payload_cwd):
+    """The effective directory just before `position`, found by walking
+    backward over `cd` reach data (as built by
+    `_precompute_cd_reach_info`) for the nearest one that still reaches
+    `position` -- not confined to an OR-guard's own right-hand operand
+    (`guard_end`, A-R4) and not already closed by its enclosing subshell
+    (`break_pos`, G1). No reaching `cd` at all falls back to `payload_cwd`.
+
+    Shared by `_effective_checkout` (an invocation's own base directory)
+    and `_precompute_cd_reach_info` itself (A-R2, round 2 reopen review):
+    a RELATIVE `cd` target must resolve against whatever directory the
+    CLOSEST EARLIER `cd` already reached, never unconditionally against
+    the raw payload cwd -- `cd /shared/checkout && cd . && <stash>`
+    genuinely stays inside /shared/checkout (the second `cd`'s `.`
+    resolves against the shell's real current directory after the first
+    `cd` ran), but resolving every `cd` independently against the hook's
+    own /worktrees/ payload cwd instead joined the relative target right
+    back onto the exempt path."""
+    idx = _bisect_left(starts, position) - 1
+    while idx >= 0:
+        resolved, guard_end, break_pos = infos[idx]
+        if (guard_end is None or position >= guard_end) and (
+            break_pos is None or break_pos > position
+        ):
+            return resolved
+        idx -= 1
+    return payload_cwd
+
+
+def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd, sep_positions):
     """F14 (review round redo, then redo 2): `_effective_checkout` used to
     re-run `_CD_LOCATE_RE.finditer(scan_text[:match_start])` (a full rescan
     of everything before the candidate) AND re-slice/re-`min()`
@@ -960,17 +989,19 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd):
     proportional to `match_start`/`target_pos`, so a leading `cd` followed by
     thousands of exempt invocations was quadratic overall (same shape
     `_window_bounds` fixed for separator lookups). Each `cd`'s own reach
-    data -- (a) its own enclosing subshell must still be open at the target
-    (G1, review_b round 1: `(cd /worktrees/x); <stash>` must not inherit the
-    subshell-local `cd`, because the `)` closes it first); and (b) it must
-    not be immediately guarded by `||` (`cd /worktrees/x || <stash>` only
-    reaches when the `cd` FAILED) -- depends only on the `cd` itself, never
-    on the later candidate being checked. So `resolved` value, `guarded`,
-    and the first position (`break_pos`) where the enclosing paren depth
-    drops below the depth at the `cd`'s own token start are computed ONCE
-    per `cd` here (called once per `evaluate()` call, like
-    `sep_positions`/`paren_depths`) instead of once per (`cd`, candidate)
-    pair.
+    data -- its RESOLVED target (A-R2: against whatever `cd` already
+    reached ITS OWN position, via `_base_cwd_before`, never unconditionally
+    payload_cwd), the extent of its own OR-guard's right-hand operand if
+    any (`guard_end`; A-R4, replacing a permanent `guarded` boolean -- see
+    that function's docstring), and the first position (`break_pos`) where
+    its enclosing paren depth drops below the depth at the `cd`'s own
+    token start (G1, review_b round 1: `(cd /worktrees/x); <stash>` must
+    not inherit the subshell-local `cd`, because the `)` closes it first)
+    -- depends only on the `cd` itself (and `cd`s already processed before
+    it in this same left-to-right pass), never on the later candidate
+    being checked. Computed ONCE per `cd` here (called once per
+    `evaluate()` call, like `sep_positions`/`paren_depths`) instead of once
+    per (`cd`, candidate) pair.
 
     The first fix (19821fc) still found `break_pos` with a forward walk
     from `token_end` to the end of `paren_depths` for EVERY `cd` -- fine for
@@ -983,10 +1014,9 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd):
     exactly `next_lower[token_end]`. Only in the rare case the token itself
     changed the depth does this fall back to the linear walk.
 
-    `_effective_checkout` then binary-searches this list and does an O(1)
-    reach check per candidate: a `cd` reaches `target_pos` iff it isn't
-    guarded and (`break_pos` is `None` or `break_pos > target_pos`).
-    Returns `(starts, infos)` -- `starts` (the sorted `cd` positions, for
+    `_effective_checkout` then binary-searches this list (via
+    `_base_cwd_before`) for an O(1) reach check per candidate. Returns
+    `(starts, infos)` -- `starts` (the sorted `cd` positions, for
     `_bisect_left`) kept separate from `infos` so callers never rebuild a
     per-candidate list just to search it."""
     starts = []
@@ -995,22 +1025,39 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd):
     for cd_match in _CD_LOCATE_RE.finditer(scan_text):
         token_start = cd_match.end()
         value, token_end = _read_token(text, token_start)
-        resolved = _resolve_against_cwd(value, payload_cwd) if value is not None else None
-        guarded = bool(_OR_GUARD_RE.match(scan_text, token_end))
+        base_for_this_cd = _base_cwd_before(cd_match.start(), starts, infos, payload_cwd)
+        resolved = _resolve_against_cwd(value, base_for_this_cd) if value is not None else None
+        # A-R4 (round 2 reopen review): `cd X || <fallback>` only skips the
+        # `cd`'s effect for `<fallback>` itself -- the OR's own right-hand
+        # operand -- never for anything after it. Once a `;`/newline/`&`/
+        # etc ends that operand, a `cd` that SUCCEEDED (the common case)
+        # governs every later command exactly as an unguarded `cd` would;
+        # a permanent `guarded` flag (the previous design) wrongly
+        # discarded the `cd` for candidates far past its own OR-compound
+        # too. `guard_end` is the position where the operand ends (the
+        # next separator character after the `||`), or `None` when there
+        # is no `||` at all; a candidate at or past `guard_end` is never
+        # blocked by this guard (see `_base_cwd_before`).
+        guard_end = None
+        or_match = _OR_GUARD_RE.match(scan_text, token_end)
+        if or_match:
+            sep_idx = _bisect_left(sep_positions, or_match.end())
+            guard_end = (
+                sep_positions[sep_idx] if sep_idx < len(sep_positions) else len(scan_text)
+            )
         enclosing = paren_depths[token_start]
         break_pos = None
-        if not guarded:
-            if paren_depths[token_end] == enclosing:
-                if next_lower is None:
-                    next_lower = _next_lower_paren_depth(paren_depths)
-                break_pos = next_lower[token_end]
-            else:
-                for j in range(token_end, len(paren_depths)):
-                    if paren_depths[j] < enclosing:
-                        break_pos = j
-                        break
+        if paren_depths[token_end] == enclosing:
+            if next_lower is None:
+                next_lower = _next_lower_paren_depth(paren_depths)
+            break_pos = next_lower[token_end]
+        else:
+            for j in range(token_end, len(paren_depths)):
+                if paren_depths[j] < enclosing:
+                    break_pos = j
+                    break
         starts.append(cd_match.start())
-        infos.append((resolved, guarded, break_pos))
+        infos.append((resolved, guard_end, break_pos))
     return starts, infos
 
 
@@ -1021,38 +1068,30 @@ def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd, cd
     # G2 (spec-level review, reopen generation 2): find whatever `cd`
     # already reached this invocation FIRST, before looking at `-C` --
     # `base_cwd` is the invocation's own effective working directory
-    # absent any `-C` override, and a RELATIVE `-C <path>` (e.g. the
-    # bare `.` in `<cmd> -C . stash`) resolves against THAT, never
-    # unconditionally against the raw hook payload cwd. From a
-    # /worktrees/ payload cwd, `cd /shared/checkout && <cmd> -C . stash`
-    # genuinely targets /shared/checkout (`.` resolves against the
-    # shell's CURRENT directory after the `cd` already ran, not the
-    # hook's payload cwd) -- resolving it against the payload cwd
-    # instead joined straight back to the exempt /worktrees/ path and
-    # wrongly abstained.
-    base_cwd = payload_cwd
-    idx = _bisect_left(cd_reach_starts, match_start) - 1
-    while idx >= 0:
-        resolved, guarded, break_pos = cd_reach_infos[idx]
-        if not guarded and (break_pos is None or break_pos > match_start):
-            base_cwd = resolved
-            break
-        # G1: this `cd` never actually took effect by match_start (its
-        # subshell closed, or it's guarded by `||`) -- try whatever `cd`
-        # came before it instead of falling straight to payload_cwd.
-        idx -= 1
-    c_locates = list(_DASH_C_LOCATE_RE.finditer(invocation))
-    if c_locates:
-        value, _ = _read_token(text, match_start + c_locates[-1].end())
+    # absent any `-C` override.
+    base_cwd = _base_cwd_before(match_start, cd_reach_starts, cd_reach_infos, payload_cwd)
+    # A-R3/B-R3 (round 2 reopen review): git(1) folds MULTIPLE `-C`
+    # options left-to-right -- each subsequent non-absolute `-C <path>`
+    # resolves relative to the PRECEDING `-C <path>`, never straight
+    # against the shell's cwd. Reading only the LAST occurrence
+    # (`c_locates[-1]`) silently dropped an earlier absolute `-C`
+    # entirely, so `-C /shared/checkout -C .` resolved the relative `.`
+    # against `base_cwd` (the payload/cd cwd) instead of
+    # `/shared/checkout`, the real preceding `-C`.
+    for c_locate in _DASH_C_LOCATE_RE.finditer(invocation):
+        value, _ = _read_token(text, match_start + c_locate.end())
         if value is None:
             return None
         if value.startswith("/"):
-            return value
-        # `base_cwd` itself may be None (the reaching `cd`'s own target
-        # was unresolvable, e.g. `cd $VAR`) -- a relative `-C` then has no
-        # known base to resolve against either, so this stays uncertain
-        # too rather than silently falling back to the payload cwd.
-        return _resolve_against_cwd(value, base_cwd) if base_cwd else None
+            base_cwd = value
+        elif base_cwd is not None:
+            base_cwd = _resolve_against_cwd(value, base_cwd)
+        else:
+            # A relative `-C` with no known base to resolve against
+            # (the running base itself is unresolvable, e.g. a `cd $VAR`
+            # earlier) -- stays uncertain, keep protection rather than
+            # silently falling back to the payload cwd.
+            return None
     return base_cwd
 
 
@@ -1246,7 +1285,9 @@ def evaluate(payload):
     scan_text = executable_mask(text) if tool_name == "Bash" else text
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
     paren_depths = _paren_depths(scan_text)
-    cd_reach_starts, cd_reach_infos = _precompute_cd_reach_info(text, scan_text, paren_depths, cwd)
+    cd_reach_starts, cd_reach_infos = _precompute_cd_reach_info(
+        text, scan_text, paren_depths, cwd, sep_positions
+    )
     rules = load_rules()
 
     fires = []
