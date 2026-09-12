@@ -2694,6 +2694,32 @@ class TestF7RedactionAndLedgerPrivacy(RouterTestCase):
                 self.assertNotIn("hunter two secret", entry.get("preview", ""))
                 self.assertNotIn("two secret", entry.get("preview", ""))
 
+    def test_escaped_json_colon_password_is_fully_redacted(self):
+        """F7 (round 3 review, blocker): the round-2 pattern only matches
+        an UNESCAPED `"key":"value"` -- a raw shell argument with
+        backslash-escaped inner quotes (valid bash: `\\"` inside a
+        double-quoted string is a literal quote), or a tool_input string
+        re-escaped by `json.dumps`, produces exactly this shape and
+        matched none of the round-2 patterns."""
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    'curl --data "{\\"password\\":\\"hunter two secret\\"}" '
+                    "&& git stash"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("hunter two secret", entry.get("match", ""))
+                self.assertNotIn("hunter two secret", entry.get("preview", ""))
+                self.assertNotIn("two secret", entry.get("preview", ""))
+
     def test_pem_block_survives_a_preceding_secret_assignment(self):
         """G2b: `secret=...` is matched (and its value truncated at the
         first token) BEFORE the PEM-block pattern runs, so a `secret=` (or

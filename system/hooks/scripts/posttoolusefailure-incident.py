@@ -145,6 +145,22 @@ _REDACT_PATTERNS = [
         ),
         r'"\1":"***REDACTED***"',
     ),
+    # F7 (round 3 review, blocker): the pattern above only matches an
+    # UNESCAPED `"key":"value"` -- but a Bash tool_input's "command" field
+    # is itself a STRING, and a JSON credential fragment inside that
+    # string's own text (e.g. a curl request body arg) has its quotes
+    # escaped once MORE by `json.dumps(tool_input)`:
+    # `curl --data '{\"password\":\"hunter two secret\"}'`. `args_preview`
+    # never matched anything and leaked the value whole. Mirrors the
+    # JSON-escaped alternative already present in the assignment-style
+    # pattern below for the identical reason (G2, review round 3 redo).
+    (
+        re.compile(
+            r"""(?i)\\"(password|token|secret|api[_-]?key)\\"\s*:\s*\\\""""
+            r"""(?:[^"\\]|\\[\s\S])*\\\""""
+        ),
+        r'\\"\1\\":\\"***REDACTED***\\"',
+    ),
 ]
 
 

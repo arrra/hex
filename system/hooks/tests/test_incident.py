@@ -426,6 +426,32 @@ class TestF7JsonColonCredentialRedaction(IncidentHookTestCase):
         self.assertIn("alice", record["args_preview"])
 
 
+class TestF7NestedJsonEscapedCredentialRedaction(IncidentHookTestCase):
+    """F7 (round 3 review, blocker): the round-2 pattern only matches an
+    UNESCAPED `"key":"value"`. A Bash tool_input's "command" field is
+    itself a string, and a JSON credential fragment embedded in that
+    string's own text (e.g. a curl request body) has its quotes escaped
+    once MORE by json.dumps(tool_input) -- `args_preview` never matched
+    anything for `curl --data '{\\"password\\":\\"hunter two secret\\"}'`
+    and leaked the value whole."""
+
+    def test_escaped_json_password_inside_a_command_string_is_fully_redacted(self):
+        proc = self._run(
+            _fixture(
+                tool_input={
+                    "command": (
+                        "curl --data '{\"password\":\"hunter two secret\"}' "
+                        "https://example.test"
+                    )
+                }
+            )
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn("hunter two secret", record["args_preview"])
+        self.assertNotIn("two secret", record["args_preview"])
+
+
 class TestRound3RedactionParity(IncidentHookTestCase):
     """new-defects R3 (arrra-hex-pr-5-wf-open-ledger.md, minor): the
     router's A-R6 fixtures (quote-wraps-whole-pair, ANSI-C `$'...'`) were
