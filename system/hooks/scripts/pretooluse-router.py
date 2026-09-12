@@ -311,7 +311,23 @@ _ASSIGN_VALUE = (
     _RUN_CHAR + "*"
     r"""(?:(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\$'(?:[^'\\]|\\.)*')""" + _RUN_CHAR + "*)*"
 )
-_ASSIGN = r"[A-Za-z_][A-Za-z0-9_]*=" + _ASSIGN_VALUE
+# F3 (round 3 review, continuation of F9 round 2): `_RUN_CHAR` deliberately
+# can't consume a trailing bare `$` that's followed by whitespace (pairing
+# it with that whitespace would eat the very separator `_WRAPPER_SKIP`'s
+# `\s+` needs next; see `_RUN_CHAR`'s own comment). But a real shell DOES
+# treat `A=$ ` + a real invocation as assigning the literal string `$` to
+# `A`, then running that real command -- with `_ASSIGN_VALUE` stopping one
+# character short, `_ASSIGN` itself stopped at `A=` and the following
+# `\s+` in `_WRAPPER_SKIP` never matched (the actual next character is
+# `$`, not whitespace), so the whole prefix was never recognized as a
+# skippable assignment and the real invocation right after it went
+# UNDETECTED -- worse than the router's usual fail-safe bias, since this
+# direction under-protects rather than over-prompts. A single OPTIONAL
+# trailing `$` is a fixed, unambiguous, zero-backtracking-cost bolt-on
+# (never two ways to match a `?`), so it can't reopen the ReDoS class F9
+# closed -- it just lets the wrapper consume the one leftover character
+# `_ASSIGN_VALUE` deliberately left behind, exactly where it's safe to.
+_ASSIGN = r"[A-Za-z_][A-Za-z0-9_]*=" + _ASSIGN_VALUE + r"\$?"
 _WRAPPER_SKIP = (
     r"(?:(?:" + _ASSIGN + r"\s+)*(?:time|env|command|exec|sudo|builtin)\s+)*"
     r"(?:" + _ASSIGN + r"\s+)*"
@@ -364,7 +380,7 @@ _GIT_GLOBAL_OPTS = r"(?:(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+)\s+)*
 _GIT_OPT_TAKING_ARG = ("-C", "-c", "--git-dir=", "--work-tree=")
 
 
-def _widen_quoted_global_opt_args(text, scan_text, quote_spans):
+def _widen_quoted_global_opt_args(text, scan_text, quote_spans, live_spans=None):
     """Returns a copy of `scan_text` with every INTERNAL space of a
     QUOTED `-C`/`-c`/`--git-dir=`/`--work-tree=` argument value replaced
     with `\\x01` -- a byte `\\S` still matches, so `_GIT_GLOBAL_OPTS`'s
@@ -383,15 +399,32 @@ def _widen_quoted_global_opt_args(text, scan_text, quote_spans):
     argument genuinely opens with a quote, immediately after the flag
     (and its own `=`, for the two long-option forms) or after `-C`/`-c`
     plus whitespace. An unquoted argument (no span starts there) is left
-    untouched; `\\S+` already handles it correctly."""
+    untouched; `\\S+` already handles it correctly.
+
+    `live_spans` (F3, round 3 review, blocker): a quoted global-option
+    value can itself contain a genuinely LIVE substitution -- a `-c
+    "user.name=..."` value whose `...` embeds a real invocation via
+    `$(...)` -- and widening used to rewrite EVERY space in the whole
+    quoted span unconditionally, including ones INSIDE that
+    substitution's own executable body, joining two real words into one
+    with `\\x01`. That substitution's own rule no longer has the
+    whitespace its own `\\s+` needs,
+    silently hiding a real invocation. Positions inside a recorded live
+    span are left untouched -- widening only ever needs to touch the
+    quoted value's own literal characters, never a live substitution
+    nested in it."""
     out = list(scan_text)
+    live_spans = live_spans or ()
 
     def _widen_span_if_quoted_at(arg_start):
         for q_start, q_end in quote_spans:
             if q_start == arg_start:
                 for k in range(q_start, q_end):
-                    if out[k] == " ":
-                        out[k] = "\x01"
+                    if out[k] != " ":
+                        continue
+                    if any(l_start <= k < l_end for l_start, l_end in live_spans):
+                        continue
+                    out[k] = "\x01"
                 return
 
     for opt in _GIT_OPT_TAKING_ARG:
@@ -407,9 +440,14 @@ def _widen_quoted_global_opt_args(text, scan_text, quote_spans):
                 continue
             j = idx + len(opt)
             if opt in ("-C", "-c"):
-                # These take a SEPARATE argument after whitespace; the
-                # long `--...=` forms glue the value on with no space.
-                while j < len(text) and text[j] == " ":
+                # These take a SEPARATE argument after whitespace -- ANY
+                # whitespace (F3, round 3 review, blocker: a literal TAB
+                # between the flag and a quoted value used to defeat this
+                # entirely, since only a literal space was skipped here,
+                # so the span-start check below never lined up with the
+                # quote's real opening position). The long `--...=` forms
+                # glue the value on with no space.
+                while j < len(text) and text[j] in " \t":
                     j += 1
             _widen_span_if_quoted_at(j)
 
@@ -2108,7 +2146,7 @@ def evaluate(payload):
     live_spans = []
     scan_text = executable_mask(text, quote_spans, live_spans) if tool_name == "Bash" else text
     if tool_name == "Bash":
-        scan_text = _widen_quoted_global_opt_args(text, scan_text, quote_spans)
+        scan_text = _widen_quoted_global_opt_args(text, scan_text, quote_spans, live_spans)
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
     paren_depths = _paren_depths(scan_text)
     cd_reach_starts, cd_reach_infos = _precompute_cd_reach_info(

@@ -3495,6 +3495,43 @@ class TestQuotedGlobalOptionArgumentWithASpace(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestQuotedGlobalOptionArgumentRoundThreeGaps(RouterTestCase):
+    """F3 (round 3 review, blocker) — three gaps in the round-2 widening
+    fix: (1) only a literal SPACE was skipped between `-C`/`-c` and a
+    quoted value, so a TAB there defeated the widening entirely; (2) every
+    space in the whole quoted span was widened unconditionally, including
+    ones inside a genuinely LIVE substitution nested in the value, joining
+    two real command words into one and hiding the substitution's own
+    invocation; (3) `A=$ ` followed by a real command (F9 round 2's own
+    documented trade-off) went undetected because `_ASSIGN_VALUE`
+    couldn't consume the trailing bare `$`, so the assignment prefix was
+    never recognized as skippable at all."""
+
+    def test_tab_between_dash_capital_c_and_a_quoted_value_still_denies(self):
+        cmd = "git -C\t'/shared/my repo' stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_live_substitution_nested_in_a_quoted_value_still_denies(self):
+        cmd = 'git -c "user.name=$(git stash)" status'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_bare_dollar_assignment_value_still_lets_the_real_command_deny(self):
+        cmd = "A=$ git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 class TestReservedWordAnchorIgnoresQuotedMentions(RouterTestCase):
     """F2 (round 2 review, major) — `_RESERVED_LEADIN` ("if|then|elif|
     else|while|until|do") is a plain alternative in `_CMD_PREFIX`, with no
