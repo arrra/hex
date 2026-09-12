@@ -1816,6 +1816,65 @@ class PreExistingEscapedDelimiterStillRedacted(unittest.TestCase):
             self.assertEqual(m.redact(text), text, f"{text!r} was mangled by redaction")
 
 
+class EncodingArtifactBoundaryStillRedacted(unittest.TestCase):
+    """A-R1 (ledger arrra-hex-pr-12-r4, round 4 re-review, major) —
+    PreExistingEscapedDelimiterStillRedacted (A-R2, prior round) only
+    widened the boundary to the five backslash-letter control escapes
+    (\\n \\t \\r \\f \\b). Every OTHER pre-existing escaped form a real
+    encoder produces ends in a hex digit instead of a letter, so the plain
+    alphanumeric lookbehind still blocks the match: a JSON \\uXXXX control
+    escape (json.dumps()/JSON.stringify emit this for every control
+    character other than the five above, and also for some printable
+    characters like a literal quote under .NET's default encoder), a
+    repr-style \\xXX escape, and a percent-encoded byte in a URL-encoded
+    form body all leave an alphanumeric hex digit glued directly onto the
+    credential's first character. Widen the boundary to also accept those
+    three escaped forms immediately before the match."""
+
+    def test_json_unicode_escaped_control_char_before_token_is_redacted(self):
+        m = load_script()
+        token = "sk-proj-" + "A" * 40
+        for escape in ("\\u000a", "\\u000A", "\\u001f", "\\u0027"):
+            raw = escape + token
+            self.assertNotIn(
+                token,
+                m.redact(raw),
+                f"credential preceded by JSON escape {escape!r} survived",
+            )
+
+    def test_repr_style_hex_escape_before_token_is_redacted(self):
+        m = load_script()
+        token = "sk-proj-" + "B" * 40
+        raw = "\\x0a" + token
+        self.assertNotIn(token, m.redact(raw), "credential preceded by a \\x hex escape survived")
+
+    def test_percent_encoded_boundary_before_token_is_redacted(self):
+        m = load_script()
+        sk_token = "sk-proj-" + "C" * 40
+        ghp_token = "ghp_" + "D" * 36
+        self.assertNotIn(
+            sk_token,
+            m.redact("body=token%3D" + sk_token),
+            "credential preceded by a percent-encoded '=' in a URL-encoded form body survived",
+        )
+        self.assertNotIn(
+            ghp_token,
+            m.redact("a%0A" + ghp_token),
+            "credential preceded by a percent-encoded newline survived",
+        )
+
+    def test_prose_near_misses_still_untouched(self):
+        # The wider boundary must not start matching ordinary hyphenated
+        # prose that merely contains a hex-looking tail near a prefix.
+        m = load_script()
+        for text in [
+            "task-review-changes-and-summarize",
+            "risk-assessment-and-mitigation-plan",
+            "let's prioritize the risky-migration tasks before Friday",
+        ]:
+            self.assertEqual(m.redact(text), text, f"{text!r} was mangled by redaction")
+
+
 class StructuredPathConsumedAsCompleteValue(unittest.TestCase):
     """F7/F16 (round 2) — an explicit structured path field (repo, path,
     cwd, ...) was still pushed through the free-text extractor, which

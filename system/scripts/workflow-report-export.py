@@ -106,7 +106,25 @@ LOG_CAP = 150
 # backslash followed by one of the control-character escape letters — a
 # combination that does not occur in ordinary hyphenated prose next to any
 # of these prefixes.
-_BOUNDARY = r"(?:(?<![A-Za-z0-9])|(?<=\\[ntrfb]))"
+#
+# A-R1 (spec review round 4 re-review) — the five backslash-letter escapes
+# above (\n \t \r \f \b) are not the only pre-existing escaped form a real
+# encoder leaves in front of a credential. json.dumps()/JSON.stringify emit
+# a \uXXXX escape for every OTHER control character (and .NET's default
+# encoder emits ' for a literal single quote); a repr()-style dump
+# emits \xXX; and a URL-encoded form body spells a delimiter as a raw
+# percent-triplet (no backslash at all). Every one of these ends in a hex
+# digit, which the plain alphanumeric lookbehind still blocks identically
+# to the letter case above. Accept those three escaped forms as boundaries
+# too — each is a fixed-width lookbehind, and none occurs in ordinary
+# hyphenated prose next to any of these prefixes.
+_BOUNDARY = (
+    r"(?:(?<![A-Za-z0-9])"
+    r"|(?<=\\[ntrfb])"
+    r"|(?<=\\u[0-9A-Fa-f]{4})"
+    r"|(?<=\\x[0-9A-Fa-f]{2})"
+    r"|(?<=%[0-9A-Fa-f]{2}))"
+)
 SECRET_RE = re.compile(
     _BOUNDARY + r"sk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}"
     r"|" + _BOUNDARY + r"github_pat_[A-Za-z0-9_]{20,}"
