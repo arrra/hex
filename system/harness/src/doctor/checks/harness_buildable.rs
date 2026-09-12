@@ -931,3 +931,19 @@ pub(crate) fn export_committed_head_for_tests(
 ) -> Result<tempfile::TempDir, String> {
     export_committed_head(repo_root)
 }
+
+/// Test-only entry point for the F14 wall-clock-cap contract: same as
+/// `export_committed_head_for_tests`, but lets a test inject a tiny
+/// `timeout` to assert the git ls-tree/cat-file plumbing this export runs
+/// is actually bounded by it (a wedged git process must never hang this
+/// health check any more than a wedged `cargo` can).
+#[cfg(test)]
+pub(crate) fn export_committed_head_for_tests_with_timeout(
+    repo_root: &Path,
+    timeout: Duration,
+) -> Result<tempfile::TempDir, String> {
+    // NOTE: `timeout` is not yet threaded into the git plumbing below —
+    // this is the RED state for the F14 regression test.
+    let _ = timeout;
+    export_committed_head(repo_root)
+}

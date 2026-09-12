@@ -2334,4 +2334,87 @@ mod tests {
             result.message
         );
     }
+
+    /// F14 (re-added after the scanner deletion, adapted for the new
+    /// design): the redesign replaced `git worktree add` + checkout
+    /// filters with `git ls-tree`/`git cat-file --batch` plumbing, which
+    /// runs no filters or hooks at all — the OLD F14 fixture (a hanging
+    /// smudge filter) no longer applies. The same wall-clock discipline
+    /// still must: a wedged `git` binary (lock contention, a hung
+    /// credential helper some environments configure globally) must never
+    /// hang this health check any more than a wedged `cargo` can. Guards
+    /// against races with any OTHER concurrently running test that spawns
+    /// `git`/`cargo` — the same accepted tradeoff `CARGO_HOME_MUTEX`
+    /// documents above for the F1 fixture.
+    static PATH_OVERRIDE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    #[test]
+    fn test_export_committed_head_bounds_git_ls_tree_to_the_same_wall_clock_cap_as_cargo_check() {
+        let _guard = PATH_OVERRIDE_MUTEX
+            .lock()
+            .unwrap_or_else(|poisoned| poisoned.into_inner());
+
+        let real_git = String::from_utf8(
+            std::process::Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("resolve real git")
+                .stdout,
+        )
+        .expect("utf8 git path")
+        .trim()
+        .to_string();
+        assert!(!real_git.is_empty(), "must resolve a real `git` on PATH");
+
+        let bin_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            bin_dir.path().join("git"),
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$1\" = \"ls-tree\" ]; then\n  sleep 5\nfi\n\
+                 exec \"{real_git}\" \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                bin_dir.path().join("git"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let tmp = init_hex_harness_repo(
+            &[(".hex/harness/src/lib.rs", "pub fn f() -> i32 { 1 }\n")],
+            &[],
+        );
+
+        let prev_path = std::env::var("PATH").unwrap_or_default();
+        std::env::set_var("PATH", format!("{}:{prev_path}", bin_dir.path().display()));
+        let start = std::time::Instant::now();
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests_with_timeout(
+                tmp.path(),
+                std::time::Duration::from_millis(300),
+            );
+        let elapsed = start.elapsed();
+        std::env::set_var("PATH", prev_path);
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(3),
+            "F14: `git ls-tree` must be bounded by the same wall-clock cap \
+             as `cargo check` instead of blocking for however long a \
+             wedged git binary takes — a 300ms cap against a `git` that \
+             sleeps 5s on `ls-tree` must return well inside a generous \
+             ceiling, took {elapsed:?}"
+        );
+        assert!(
+            result.is_err(),
+            "a `git ls-tree` that cannot finish inside the wall-clock cap \
+             must be reported as an export failure (surfaced as WARN by \
+             the caller), not silently treated as success: {result:?}"
+        );
+    }
 }
