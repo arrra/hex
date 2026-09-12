@@ -447,18 +447,40 @@ def validate_record(rec: object) -> str | None:
 # resolves to the truncated prefix instead of _unmapped. Pinned by
 # StructuredPathConsumedAsCompleteValue.test_bare_final_component_with_no_further_slash_is_accepted_as_the_prefix
 # and FreeTextPathFollowedByOrdinaryProseIsNotTruncated.
-_SPACE_CONTINUATION_RE = re.compile(r"(?: +[\w.\-]+)+/")
+#
+# A-R2 (spec review round 4 re-review) — B-R1's premise ("trailing prose
+# after a complete path essentially never reaches a further /") was still
+# false for the dominant realistic shape: ordinary sentences that name one
+# complete path routinely go on to name a second relative path ("... and
+# updated docs/README.md", "... and src/util.py"), or use an ordinary
+# slash-joined word pair right next to the match ("and/or", "via CI/CD").
+# Each of those reaches exactly ONE "/" past the space — structurally
+# identical to a genuinely truncated single-word directory name ("Jane
+# Doe/repo"), so word-counting alone cannot tell them apart. What DOES
+# tell them apart: a genuinely truncated path continues on past that first
+# "/" into a real deeper path (more segments: ".../acme-repo/src/main.py"),
+# while an English word pair or a lone trailing relative path stops at
+# that first "/" (end of string, or a lone filename with nothing past a
+# second "/"). Require the continuation to reach a SECOND "/" before
+# counting it as truncation. This is a documented trade-off, same spirit
+# as B-R1's: a genuinely truncated single-word directory name mentioned
+# with nothing deeper after it (rare) is no longer caught either, but the
+# realistic sentence shapes above resolve correctly.
+_SPACE_CONTINUATION_RE = re.compile(r"(?: +[\w.\-]+)+/[^/\s]*/")
 
 
 def _looks_truncated_by_space(text: str, end: int) -> bool:
     """True if a path match ends right at a space that is followed by more
-    (possibly multi-word, multi-space) path-like text that eventually
-    reaches another "/" — a strong signal the real path continued past the
-    space(s) and the match is only a truncated prefix (e.g. ".../Jane Doe
-    Smith/repo/...": the match stops at "Jane" but " Doe Smith/..." keeps
-    going to another "/"). A space followed by prose with no further "/"
-    (B-R1, round 4) is trusted as trailing text, not truncation — see the
-    round-4 comment on _SPACE_CONTINUATION_RE above."""
+    (possibly multi-word, multi-space) path-like text that reaches a
+    SECOND "/" — a strong signal the real path continued past the space(s)
+    into a deeper path and the match is only a truncated prefix (e.g.
+    ".../Jane Doe/acme-repo/src/main.py": the match stops at "Jane" but "
+    Doe/acme-repo/src/main.py" keeps going well past the first "/"). A
+    space followed by prose with no further "/" at all (B-R1, round 4), or
+    by prose that reaches only ONE "/" and no deeper path after it (A-R2,
+    round 4 re-review — "and/or", "via CI/CD", a lone trailing relative
+    path), is trusted as trailing text, not truncation — see the round-4
+    comment on _SPACE_CONTINUATION_RE above."""
     if end >= len(text) or text[end] != " ":
         return False
     return bool(_SPACE_CONTINUATION_RE.match(text, end))

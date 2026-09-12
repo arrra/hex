@@ -1970,6 +1970,40 @@ class FreeTextPathFollowedByOrdinaryProseIsNotTruncated(unittest.TestCase):
         self.assertEqual(m.infer_project(rec, []), "acme-repo")
 
 
+class TrailingProseWithASlashDoesNotTruncateACompletePath(unittest.TestCase):
+    """A-R2 (ledger arrra-hex-pr-12-r4, round 4 re-review, major) —
+    FreeTextPathFollowedByOrdinaryProseIsNotTruncated closed the single
+    trailing-word case ("... main.py and pushed"), but real sentences
+    routinely go on to name a second relative path ("... and updated
+    docs/README.md") or use an ordinary slash-joined word pair right next
+    to the match ("and/or", "via CI/CD") — each reaching exactly ONE "/"
+    past the space, the same shape _SPACE_CONTINUATION_RE already accepted
+    as truncation evidence. Fix: require the continuation to reach a
+    SECOND "/" (a real deeper path, not just one more slash) before
+    counting it as truncation — see the round-4 comment on
+    _SPACE_CONTINUATION_RE."""
+
+    def test_trailing_prose_naming_a_second_relative_path_does_not_truncate(self):
+        m = load_script()
+        rec = {"result": "Fixed the bug in /home/x/acme-repo/src/main.py and updated docs/README.md"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    def test_bare_repo_dir_followed_by_multi_word_prose_with_a_slash_does_not_truncate(self):
+        m = load_script()
+        rec = {"result": "Ran tests in /Users/sagar/Github/Arrra/hex on branch main via CI/CD"}
+        self.assertEqual(m.infer_project(rec, []), "hex")
+
+    def test_and_or_immediately_after_a_complete_path_does_not_truncate(self):
+        m = load_script()
+        rec = {"result": "Fixed /home/x/acme-repo/src/main.py and/or the tests"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    def test_trailing_prose_naming_a_second_file_in_the_same_directory_does_not_truncate(self):
+        m = load_script()
+        rec = {"result": "Edited /home/x/acme-repo/src/main.py and src/util.py"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+
 class StructuredPathDoubleSlashDoesNotHang(unittest.TestCase):
     """A-R1 (ledger arrra-hex-pr-12-r4, round 4, blocker) — a structured path
     value is consumed whole (F7/F16) and handed straight to
