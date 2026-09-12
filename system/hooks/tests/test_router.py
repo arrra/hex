@@ -3408,5 +3408,33 @@ class TestQuoteSpansCoverNestedSubstitutionSecrets(RouterTestCase):
                     self.assertNotIn(word, entry.get("match", ""), f"{cmd!r}: {entry}")
 
 
+class TestAssignmentValueConcatenatedSegments(RouterTestCase):
+    """A-REFUTE-3 (major): `_ASSIGN_VALUE` is a single alternation with no
+    repetition, so it can't span a value built from concatenated
+    unquoted+quoted segments (a single shell word, since bash concatenates
+    adjacent unquoted/quoted fragments with no whitespace between them --
+    `FOO=bar"baz qux"` assigns `barbaz qux`). `_ASSIGN`'s own regex could
+    only ever match ONE segment, so `_WRAPPER_SKIP`'s `(?:_ASSIGN\\s+)*`
+    iteration failed on the trailing unmatched fragment and the whole
+    wrapper-skip never reached the real subcommand. Separately,
+    `_is_assignment_value_quote`'s lookback required the quote to sit
+    DIRECTLY after `NAME=`(`$`?), so a quote preceded by unquoted content
+    had its own delimiters blanked like an ordinary quote instead of kept
+    visible for `_ASSIGN` to match."""
+
+    def test_concatenated_unquoted_and_quoted_assignment_value_does_not_hide_the_command(self):
+        cases = (
+            'FOO=bar"baz qux" git push --force origin main',
+            "FOO=bar'baz qux' git push --force origin main",
+            'FOO="a b"baz git push --force origin main',
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-REFUTE-3)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
