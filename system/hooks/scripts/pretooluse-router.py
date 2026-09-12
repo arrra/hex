@@ -1705,7 +1705,7 @@ def _next_lower_paren_depth(paren_depths):
     return next_lower
 
 
-def _base_cwd_before(position, starts, infos, payload_cwd, min_idx=0):
+def _base_cwd_before(position, starts, infos, payload_cwd):
     """The effective directory just before `position`, found by walking
     backward over `cd` reach data (as built by
     `_precompute_cd_reach_info`) for the nearest one that still reaches
@@ -1716,28 +1716,27 @@ def _base_cwd_before(position, starts, infos, payload_cwd, min_idx=0):
     `_precompute_cd_reach_info`). No reaching `cd` at all falls back to
     `payload_cwd`.
 
-    Shared by `_effective_checkout` (an invocation's own base directory)
-    and `_precompute_cd_reach_info` itself (A-R2, round 2 reopen review):
-    a RELATIVE `cd` target must resolve against whatever directory the
+    Used by `_effective_checkout` (an invocation's own base directory) for
+    an ARBITRARY candidate position, in no particular order -- it needs
+    this full, general, non-destructive search every time.
+    `_precompute_cd_reach_info`'s OWN internal self-lookup (computing each
+    new `cd`'s base against every EARLIER `cd`, strictly LEFT-TO-RIGHT) is
+    a different access pattern with a cheaper amortized answer available
+    -- see that function's own `_self_base_cwd_before`/union-find, which
+    duplicates the same three-condition check rather than sharing this
+    function, specifically so this one stays simple and correct for the
+    non-monotonic case (F14, round 3 review).
+
+    A RELATIVE `cd` target must resolve against whatever directory the
     CLOSEST EARLIER `cd` already reached, never unconditionally against
     the raw payload cwd -- `cd /shared/checkout && cd . && <stash>`
     genuinely stays inside /shared/checkout (the second `cd`'s `.`
     resolves against the shell's real current directory after the first
     `cd` ran), but resolving every `cd` independently against the hook's
     own /worktrees/ payload cwd instead joined the relative target right
-    back onto the exempt path.
-
-    `min_idx` (F14, round 2 review, major continued): an optional lower
-    bound on how far back this walk is willing to go. `_effective_checkout`
-    (arbitrary candidate positions, in no particular order) always leaves
-    this at its default 0 -- it needs the full, general search.
-    `_precompute_cd_reach_info`'s OWN internal self-lookup (computing each
-    new `cd`'s base against every EARLIER `cd`, strictly left-to-right) is
-    the one caller that passes a real bound, once it has proven those
-    earlier indices are dead not just for the current position but for
-    every later one too -- see that function's `alive_from` watermark."""
+    back onto the exempt path."""
     idx = _bisect_left(starts, position) - 1
-    while idx >= min_idx:
+    while idx >= 0:
         resolved, guard_end, break_pos, ceiling = infos[idx]
         if (
             (guard_end is None or position >= guard_end)
@@ -1803,19 +1802,68 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd, sep_po
     # the `break_pos > position` check and the walk runs all the way back
     # to index 0 -- n(n-1)/2 visits total (7,998,000 for 4,000 of them).
     #
-    # `alive_from` is a watermark, advanced only forward, past any PREFIX
-    # of entries that are now dead for this position AND -- since
-    # `cd_match.start()` only increases as this loop scans left-to-right --
-    # provably dead for every later position too (`break_pos`/`ceiling`
-    # are fixed once computed; an entry only ever transitions live->dead,
-    # never back). Each index is skipped past at most once across the
-    # whole pass, so the AMORTIZED cost of maintaining it is O(n) total,
-    # turning the self-referential lookup from O(n) per `cd` into O(1)
-    # amortized. `_effective_checkout`'s own calls (arbitrary candidate
-    # positions, not monotonic) never see this -- they always pass
-    # `_base_cwd_before`'s default `min_idx=0` and keep the full, general
-    # search.
-    alive_from = 0
+    # F14 (round 3 review, blocker): the FIRST fix here was an `alive_from`
+    # watermark advanced past any PREFIX of now-dead entries -- amortized
+    # O(1) when entries die in the SAME order they were created, but
+    # `"cd /tmp; " + "(cd /tmp); " * n` defeats exactly that: the very
+    # FIRST entry (an unguarded `cd`, no `break_pos`/`ceiling` at all) is
+    # ALIVE FOREVER, so the watermark can never advance past index 0 no
+    # matter how many later subshell entries die -- every self-lookup
+    # still walked backward past all of them to confirm they're dead
+    # before reaching the one entry that was never going to move. A
+    # focused count: 8,002,000 visits for 4,000 repetitions.
+    #
+    # `_dead` implements the same idea properly, as a union-find over
+    # indices: once an entry is PROVEN dead for the current (and hence,
+    # by the position-monotonic argument above, every later) position,
+    # `parent[idx]` is permanently set to `idx - 1` and never touched
+    # again for that index -- a query that reaches a dead index jumps
+    # straight to whatever it was unioned to, with path compression
+    # flattening any chain of dead entries it walks past along the
+    # way. This correctly skips an ARBITRARY run of dead entries sitting
+    # anywhere in the list, not just a dead PREFIX, so a live entry
+    # anywhere (first, middle, or last) never blocks pruning the dead
+    # ones around it. An entry that merely hasn't reached its `guard_end`
+    # yet is NOT dead (it may still become the right answer once a later
+    # position passes that point) and is never unioned away -- only
+    # `break_pos`/`ceiling` expiring is permanent.
+    #
+    # `_effective_checkout`'s own calls (arbitrary candidate positions,
+    # not monotonic) never see any of this -- they always call
+    # `_base_cwd_before` directly with its default `min_idx=0` and keep
+    # the full, general, non-destructive search.
+    parent = {}
+
+    def _find(idx):
+        path = []
+        while idx in parent:
+            path.append(idx)
+            idx = parent[idx]
+        for p in path:
+            parent[p] = idx
+        return idx
+
+    def _self_base_cwd_before(position):
+        idx = _find(_bisect_left(starts, position) - 1)
+        while idx >= 0:
+            resolved, guard_end, break_pos, ceiling = infos[idx]
+            dead_forever = (break_pos is not None and break_pos <= position) or (
+                ceiling is not None and ceiling <= position
+            )
+            if not dead_forever and (guard_end is None or position >= guard_end):
+                return resolved
+            if dead_forever:
+                parent[idx] = idx - 1
+                idx = _find(idx - 1)
+            else:
+                # Not yet born (still inside an enclosing `||`'s operand)
+                # -- may still become valid at a larger future position,
+                # so it must stay available; walk past it without unioning
+                # it, but still resolve past any ALREADY-dead run below
+                # it via `_find` rather than visiting each one again.
+                idx = _find(idx - 1)
+        return payload_cwd
+
     for cd_match in _CD_LOCATE_RE.finditer(scan_text):
         keyword = cd_match.group(1)
         token_start = cd_match.end()
@@ -1827,15 +1875,7 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd, sep_po
             # whatever stray token happens to follow it as a path.
             value = None
         position = cd_match.start()
-        while alive_from < len(infos):
-            _, _, watermark_break_pos, watermark_ceiling = infos[alive_from]
-            if (watermark_break_pos is not None and watermark_break_pos <= position) or (
-                watermark_ceiling is not None and watermark_ceiling <= position
-            ):
-                alive_from += 1
-            else:
-                break
-        base_for_this_cd = _base_cwd_before(position, starts, infos, payload_cwd, min_idx=alive_from)
+        base_for_this_cd = _self_base_cwd_before(position)
         resolved = _resolve_against_cwd(value, base_for_this_cd) if value is not None else None
         # R2 (round 3): a `cd` that is ITSELF the right-hand operand of an
         # earlier `cd`'s `||` (e.g. the second `cd` in `cd A || cd B;

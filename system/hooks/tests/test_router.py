@@ -1447,6 +1447,38 @@ class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertEqual(proc.stdout.strip(), "")
 
+    def test_thousands_of_closed_subshells_after_one_persistent_leading_cd_stays_under_hang_ceiling(self):
+        """F14 (round 3 review, blocker): the round-2 `alive_from`
+        watermark only ever advances past a dead PREFIX -- amortized O(1)
+        when entries die in creation order, but a leading UNGUARDED `cd`
+        (no `break_pos`/`ceiling` at all, so it is alive forever) sitting
+        before thousands of immediately-closed-subshell `cd`s blocks the
+        watermark from ever advancing past index 0, no matter how many
+        later entries are dead: every self-lookup still walks backward
+        through all of them to confirm they're dead before reaching the
+        one entry that was never going anywhere. A focused count: 8,002,000
+        visits for 4,000 repetitions, per the reviewer's own reproduction.
+        Empirically: 30000 repeats already exceeds an 8s timeout against
+        the round-2 (`alive_from`-only) implementation. No tighter
+        wall-clock number is asserted here (that would reintroduce F18)."""
+        cmd = "cd /tmp; " + "(cd /tmp); " * 30000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=8,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 8s hang ceiling on thousands of "
+                    "immediately-closed-subshell `cd`s following one persistent "
+                    "leading `cd` -- the alive_from watermark can never advance "
+                    "past a permanently-alive leading entry (F14 round 3)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
 
 class TestPipeTailScopedToTestCommandPipeline(RouterTestCase):
     """F20: the masked-test-exit prior must only fire when the
