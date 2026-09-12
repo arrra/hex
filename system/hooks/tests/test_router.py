@@ -996,6 +996,38 @@ class TestAssignmentPrefixReDoS(RouterTestCase):
             self.assertEqual(proc.stdout.strip(), "", "not a real git/gh invocation, must abstain")
 
 
+class TestAssignmentValueDollarQuoteReDoS(RouterTestCase):
+    """F9 (round 2 review, blocker): `_ASSIGN_VALUE`'s old `[^\\s'\"]*` run
+    didn't exclude `$`, so a value like `$'x'` had two equal-length parses
+    (run eats `$` then the plain single-quote alt eats `'x'`, OR the ANSI-C
+    alt eats `$'x'` whole) -- ambiguity that multiplies 2**N across N
+    repeated assignments once the surrounding match ultimately fails. The
+    reviewer's exact reproduction: `env ` + 24x `A=$'x' ` + `true`."""
+
+    def test_env_repeated_dollar_quoted_assignments_does_not_hang(self):
+        cmd = "env " + "A=$'x' " * 24 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir, timeout=5)
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router hung (>5s) on adversarial $'...' assignment input — "
+                    "exponential backtracking in the assignment-value regex (F9 round 2)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "", "not a real git/gh invocation, must abstain")
+
+    def test_single_dollar_quoted_assignment_still_skips_to_the_real_command(self):
+        # Regression guard: the fix must not stop `$'...'` values from
+        # being recognized as a benign leading assignment at all.
+        cmd = "A=$'x' git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F9 round 2)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 class TestPipefailIsShellWideAcrossPipelines(RouterTestCase):
     """F10: the pipefail exemption is SHELL-wide for subsequent pipelines in
     the same command, unlike the stash rule's invocation-local exemption

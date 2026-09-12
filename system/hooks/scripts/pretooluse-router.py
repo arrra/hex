@@ -272,9 +272,28 @@ _SEPARATOR_CHARS = ";&|(){}\n"
 # name -- confirmed via TestAssignmentPrefixReDoS's own adversarial
 # fixture, `env ` + `A=B=C ` * 24 + `true`, which has no quotes in it at
 # all and so exercises only the leading `[^\s'"]*`, matched once).
+# F9 (round 2 review): `[^\s'"]*` doesn't exclude `$`, so for a value like
+# `$'x'` there were TWO ways to consume the same text -- the run eating the
+# lone `$` and then the plain single-quote alternative eating `'x'`, OR the
+# run eating nothing and the ANSI-C alternative eating `$'x'` whole. Both
+# land at the same end position; repeating that per-assignment 2-way choice
+# across N assignments multiplies into 2**N parses once the overall match
+# ultimately fails (the reported reproduction: 24 `A=$'x' ` assignments then
+# an unmonitored command). `_RUN_CHAR` removes the overlap instead of just
+# picking a side: `$` is excluded from the plain branch entirely, and can
+# ONLY be consumed together with whatever immediately follows it, provided
+# that follower isn't a quote character -- so `$` directly before `'` (or
+# `"`) is never consumable by the run at all, leaving the ANSI-C branch as
+# the sole way to consume it. (Trade-off, deliberately accepted: a value
+# ending in a bare `$` with nothing after it, or containing bash's `$"..."`
+# locale-string form, now falls out of the run early instead of being
+# swallowed -- untested edge cases, and failing toward treating more of the
+# command as "not a recognized safe prefix" is this router's existing
+# fail-safe bias, not a new one.)
+_RUN_CHAR = r"""(?:[^\s'"$]|\$[^'"\s])"""
 _ASSIGN_VALUE = (
-    r"""[^\s'"]*"""
-    r"""(?:(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\$'(?:[^'\\]|\\.)*')[^\s'"]*)*"""
+    _RUN_CHAR + "*"
+    r"""(?:(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\$'(?:[^'\\]|\\.)*')""" + _RUN_CHAR + "*)*"
 )
 _ASSIGN = r"[A-Za-z_][A-Za-z0-9_]*=" + _ASSIGN_VALUE
 _WRAPPER_SKIP = (
