@@ -2342,18 +2342,24 @@ mod tests {
     /// smudge filter) no longer applies. The same wall-clock discipline
     /// still must: a wedged `git` binary (lock contention, a hung
     /// credential helper some environments configure globally) must never
-    /// hang this health check any more than a wedged `cargo` can. Guards
-    /// against races with any OTHER concurrently running test that spawns
-    /// `git`/`cargo` — the same accepted tradeoff `CARGO_HOME_MUTEX`
-    /// documents above for the F1 fixture.
-    static PATH_OVERRIDE_MUTEX: std::sync::Mutex<()> = std::sync::Mutex::new(());
-
+    /// hang this health check any more than a wedged `cargo` can.
+    ///
+    /// B-F1 (round-2 review): the original version of this test simulated
+    /// a wedged `git` by mutating the process-wide `PATH` env var with
+    /// `std::env::set_var`, guarded by a mutex that only serialized it
+    /// against copies of ITSELF — a genuine data race under `cargo
+    /// test`'s default multi-threaded runner, since virtually every OTHER
+    /// test in this module spawns `git` with no per-command PATH override
+    /// and so inherits whatever `PATH` happens to be live in the process
+    /// at spawn time, not a snapshot taken at test start. This version
+    /// threads the override through `export_committed_head_for_tests_with_timeout_and_env_override`
+    /// as a per-`Command` `cmd.env()` call instead — exactly the pattern
+    /// `run_check_with_timeout_and_path_override` already uses for the
+    /// `cargo check` child (see the toolchain-unreachable tests above) —
+    /// so this test never touches process-global state and needs no mutex
+    /// at all.
     #[test]
     fn test_export_committed_head_bounds_git_ls_tree_to_the_same_wall_clock_cap_as_cargo_check() {
-        let _guard = PATH_OVERRIDE_MUTEX
-            .lock()
-            .unwrap_or_else(|poisoned| poisoned.into_inner());
-
         let real_git = String::from_utf8(
             std::process::Command::new("sh")
                 .args(["-c", "command -v git"])
@@ -2391,16 +2397,19 @@ mod tests {
             &[],
         );
 
+        // Read-only: takes a snapshot of the current PATH to prepend the
+        // wrapper dir to, but never writes it back — no process-global
+        // mutation anywhere in this test.
         let prev_path = std::env::var("PATH").unwrap_or_default();
-        std::env::set_var("PATH", format!("{}:{prev_path}", bin_dir.path().display()));
+        let overridden_path = format!("{}:{prev_path}", bin_dir.path().display());
         let start = std::time::Instant::now();
         let result =
-            crate::doctor::checks::harness_buildable::export_committed_head_for_tests_with_timeout(
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests_with_timeout_and_env_override(
                 tmp.path(),
                 std::time::Duration::from_millis(300),
+                &[("PATH", &overridden_path)],
             );
         let elapsed = start.elapsed();
-        std::env::set_var("PATH", prev_path);
 
         assert!(
             elapsed < std::time::Duration::from_secs(3),
@@ -2415,6 +2424,91 @@ mod tests {
             "a `git ls-tree` that cannot finish inside the wall-clock cap \
              must be reported as an export failure (surfaced as WARN by \
              the caller), not silently treated as success: {result:?}"
+        );
+    }
+
+    /// A-R-F14-1 (round-2 major, adjudication file): the fix above (and the
+    /// `cat-file --batch` call right after it in `export_committed_head`)
+    /// each independently received the FULL `timeout` value instead of a
+    /// single shared, decreasing budget — three commands that are each
+    /// individually fast enough to finish under the cap can still sum to
+    /// several times the advertised wall-clock cap before anything is
+    /// ever killed. Reproduced exactly the way the finding's own probe
+    /// did: a `git` wrapper that sleeps on BOTH the `ls-tree` and
+    /// `cat-file` arms, each individually well under the injected cap.
+    /// Under a per-command (re-armed) budget, `ls-tree` finishes inside
+    /// its own fresh window and `cat-file` finishes inside a SECOND fresh
+    /// window unaware of the first's elapsed time, so the export as a
+    /// whole silently succeeds in roughly double the single cap it was
+    /// given. Under a correctly shared budget, `cat-file` only inherits
+    /// whatever the cap has left over after `ls-tree` consumed most of
+    /// it, and must time out instead.
+    #[test]
+    fn test_export_committed_head_shares_one_wall_clock_budget_across_ls_tree_and_cat_file() {
+        let real_git = String::from_utf8(
+            std::process::Command::new("sh")
+                .args(["-c", "command -v git"])
+                .output()
+                .expect("resolve real git")
+                .stdout,
+        )
+        .expect("utf8 git path")
+        .trim()
+        .to_string();
+        assert!(!real_git.is_empty(), "must resolve a real `git` on PATH");
+
+        let bin_dir = tempfile::tempdir().unwrap();
+        std::fs::write(
+            bin_dir.path().join("git"),
+            format!(
+                "#!/bin/sh\n\
+                 if [ \"$1\" = \"ls-tree\" ] || [ \"$1\" = \"cat-file\" ]; then\n  sleep 3\nfi\n\
+                 exec \"{real_git}\" \"$@\"\n"
+            ),
+        )
+        .unwrap();
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(
+                bin_dir.path().join("git"),
+                std::fs::Permissions::from_mode(0o755),
+            )
+            .unwrap();
+        }
+
+        let tmp = init_hex_harness_repo(
+            &[(".hex/harness/src/lib.rs", "pub fn f() -> i32 { 1 }\n")],
+            &[],
+        );
+
+        let prev_path = std::env::var("PATH").unwrap_or_default();
+        let overridden_path = format!("{}:{prev_path}", bin_dir.path().display());
+        let start = std::time::Instant::now();
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests_with_timeout_and_env_override(
+                tmp.path(),
+                std::time::Duration::from_secs(4),
+                &[("PATH", &overridden_path)],
+            );
+        let elapsed = start.elapsed();
+
+        assert!(
+            elapsed < std::time::Duration::from_secs(5),
+            "the 4s cap given to this export must bound `ls-tree` AND \
+             `cat-file` TOGETHER, not re-arm a fresh 4s window for each — \
+             a git wrapper that sleeps 3s on EACH of the two commands \
+             finishes both within their own independent 4s windows \
+             (total ~6s) if the budget is not shared; a shared budget \
+             leaves `cat-file` only ~1s after `ls-tree` spends ~3s of the \
+             4s cap, so it must time out well before the second command \
+             could ever finish. took {elapsed:?}"
+        );
+        assert!(
+            result.is_err(),
+            "`cat-file --batch` must be starved of whatever budget \
+             `ls-tree` already spent and time out, not silently succeed \
+             on a second, independently-capped window: {result:?}"
         );
     }
 }
