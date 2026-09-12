@@ -511,12 +511,21 @@ def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
     words came before it, closing the unbounded-word-count class of
     counter-example outright. The moment a token IS a recognized function
     word (`_PROSE_RESUMES_AT`: coordinating conjunctions and common
-    prepositions — "and", "on", "via", "for", ...), that word reads as the
-    start of ordinary sentence prose, not a directory-name component, and
-    every hop from there on is trusted as an idiom ("and/or", "via
-    CI/CD") unless IT ALONE carries two or more "/" — a real
-    multi-segment relative path ("Smith/acme-repo/src/main.py"), still
-    ambiguous.
+    prepositions — "and", "on", "via", "for", ...) that is NOT itself
+    Title-Cased and NOT immediately followed by a Title-Cased word, that
+    word reads as the start of ordinary sentence prose, not a
+    directory-name component, and every hop from there on is trusted as
+    an idiom ("and/or", "via CI/CD") unless IT ALONE carries two or more
+    "/" — a real multi-segment relative path
+    ("Smith/acme-repo/src/main.py"), still ambiguous.
+
+    Round-10 review: a function word can ALSO be part of a genuine
+    Title-Case proper noun ("Research and Development", "Documents and
+    Settings") rather than a real conjunction — the capitalization check
+    is what tells `/Volumes/Research and Development/acme-repo` (still
+    ambiguous: "and" is Title-Case-adjacent on both sides) apart from
+    "...main.py and updated docs/README.md" (genuine prose: neither
+    "and" nor "updated" is Title-Cased).
     """
     if FILE_EXT_RE.search(match.group(0)):
         pos = match.end()
@@ -546,7 +555,30 @@ def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
             if slashes >= 1:
                 return f"{match.group(0)!r} vs. a continuation through {token!r}"
             if token.strip(".,;:!?").lower() in _PROSE_RESUMES_AT:
-                in_prose = True
+                # Round-10 review: a function word can ALSO be part of a
+                # genuine Title-Case proper noun ("Research and
+                # Development", "Documents and Settings") rather than a
+                # real prose conjunction — "/Volumes/Research and
+                # Development/acme-repo" must stay ambiguous, not resolve
+                # to "Research". Capitalization is the signal a human
+                # reader uses to tell the two apart: ordinary prose
+                # essentially never Title-Cases "and"/"or"/"the"
+                # mid-sentence, and the word immediately after a genuine
+                # conjunction in prose isn't Title-Cased either ("...and
+                # pushed", "...and updated docs"). Peek at the very next
+                # token (without consuming it — the transition decision
+                # is made HERE, but the token itself is still evaluated
+                # normally on the next iteration) and only transition to
+                # prose mode when NEITHER this token NOR the next one is
+                # Title-Cased.
+                peek_pos = tm.end()
+                while peek_pos < len(text) and text[peek_pos] == " ":
+                    peek_pos += 1
+                peek_tm = _CONTINUATION_TOKEN_RE.match(text, peek_pos)
+                this_titlecase = token[:1].isupper()
+                next_titlecase = bool(peek_tm and peek_tm.group(0)[:1].isupper())
+                if not (this_titlecase or next_titlecase):
+                    in_prose = True
         pos = tm.end()
     return None
 

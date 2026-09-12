@@ -2301,6 +2301,24 @@ class ConservativeFreeTextAmbiguityRouting(unittest.TestCase):
         rec = {"result": "/Users/Jane Doe Middle Ann Smith/acme-repo"}
         self.assertIsNone(m.infer_project(rec, []))
 
+    def test_round10_probe_title_case_and_in_a_directory_name_is_ambiguous(self):
+        # Round-10 review: "and" is a recognized function word, but here
+        # it's part of a genuine proper noun ("Research and Development"),
+        # not a real prose conjunction — both "and" and the word right
+        # after it ("Development") are Title-Cased, the signal that keeps
+        # the strict (1+ slash is ambiguous) zone active.
+        m = load_script()
+        rec = {"result": "/Volumes/Research and Development/acme-repo"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_round10_probe_lowercase_and_in_ordinary_prose_still_resolves(self):
+        # Regression guard: the capitalization check must not make the
+        # rule MORE conservative than it needs to be — ordinary lowercase
+        # prose right after a bare match still resolves normally.
+        m = load_script()
+        rec = {"result": "Ran tests in /Users/sagar/Github/Arrra/hex and pushed the branch"}
+        self.assertEqual(m.infer_project(rec, []), "hex")
+
     def test_round8_probe_extension_match_still_trusts_a_clean_hop_one(self):
         # Regression guard: the new extension-match hop-1 check must not
         # start flagging the ordinary idiom case it was never meant to
