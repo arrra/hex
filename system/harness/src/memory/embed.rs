@@ -187,34 +187,28 @@ mod tests {
     // RED (T7ngzd5vn task Tnp7675fh, spec Sb82zegf2): rss_mb() is Linux-only
     // today (cfg(target_os = "linux") in the fn above), so on macOS this
     // currently fails at the `.is_some()` assert. Pins the contract: Some(>0)
-    // on macOS, and a 64 MB touched allocation raises RSS by roughly that
-    // much (loose bound >= 32 MB delta — proves the read tracks real
-    // resident memory, not a timing assertion).
+    // on macOS.
+    //
+    // F8 (minor, arrra/hex PR #8 round 1): this test previously also
+    // asserted RSS grew by >= 32 MB after touching a 64 MB allocation. That
+    // bound is unsound in-process — the allocator can satisfy the touch from
+    // pages it already holds resident (no growth at all), and a parallel
+    // test thread can free memory between the two measurements (a spurious
+    // shrink), so the assertion can fail despite `rss_mb()`/`proc_pidinfo`
+    // being entirely correct. Keeping only the availability + positive-value
+    // checks (per the finding's own remediation: isolate the growth probe in
+    // a subprocess with a controlled baseline, OR keep only these) avoids
+    // adding subprocess plumbing for a minor, non-regression-bearing
+    // assertion.
     #[cfg(target_os = "macos")]
     #[test]
     fn rss_mb_reports_resident_memory_on_macos() {
-        let before = rss_mb();
+        let rss = rss_mb();
+        assert!(rss.is_some(), "rss_mb() should be Some on macOS, got None");
+        let rss_mb_value = rss.unwrap();
         assert!(
-            before.is_some(),
-            "rss_mb() should be Some on macOS, got None"
-        );
-        let before_mb = before.unwrap();
-        assert!(before_mb > 0, "rss_mb() should be > 0, got {before_mb}");
-
-        // Allocate and touch 64 MB so it's actually resident, not just
-        // reserved virtual address space.
-        let mut v: Vec<u8> = Vec::with_capacity(64 * 1024 * 1024);
-        for i in 0..(64 * 1024 * 1024) {
-            v.push((i % 256) as u8);
-        }
-        std::hint::black_box(&v);
-
-        let after_mb = rss_mb().expect("rss_mb() should still be Some on macOS");
-        let delta = after_mb.saturating_sub(before_mb);
-        assert!(
-            delta >= 32,
-            "expected RSS to grow by roughly 64 MB after touching a 64 MB vec, \
-             got before={before_mb} after={after_mb} delta={delta}"
+            rss_mb_value > 0,
+            "rss_mb() should be > 0, got {rss_mb_value}"
         );
     }
 
