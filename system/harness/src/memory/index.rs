@@ -862,6 +862,13 @@ where
     // `&mut` needed) and RELEASEs (commits) only when the closure below
     // returns `Ok`; any `Err` — including one propagated by `?` from the
     // embed/storage step — rolls back to the pre-call state first.
+    //
+    // F7 (major, arrra/hex PR #9 round 2): whether this call is the one
+    // opening the transaction (`conn` was in autocommit mode right before
+    // the SAVEPOINT below) is captured up front so the Err-arm cleanup
+    // further down can fully abort ONLY the transaction this function
+    // itself owns, never a transaction a caller already had open.
+    let owns_transaction = conn.is_autocommit();
     conn.execute_batch("SAVEPOINT index_file_with_reuse")?;
 
     let result = (|| -> anyhow::Result<IndexOutcome> {
@@ -1066,7 +1073,37 @@ where
             }
         },
         Err(e) => {
-            conn.execute_batch("ROLLBACK TO index_file_with_reuse; RELEASE index_file_with_reuse")?;
+            // F7 (major, arrra/hex PR #9 round 2): as with the Ok-arm's
+            // failed RELEASE above, `ROLLBACK TO` undoes this call's own
+            // writes, but the `RELEASE` half of this combined statement is
+            // still a COMMIT of the (now effectively empty) outermost
+            // savepoint — needing the identical RESERVED->EXCLUSIVE lock
+            // upgrade — and can fail with SQLITE_BUSY under the same
+            // blocking-reader condition. Propagating that failure via `?`
+            // used to leave the SAVEPOINT open: later calls then nest under
+            // it and can report success without ever reaching disk. Fall
+            // back to a full `ROLLBACK` only when this call owns the
+            // transaction (see `owns_transaction` above) — a caller-owned
+            // outer transaction already survived the `ROLLBACK TO` and must
+            // not be blown away by a plain `ROLLBACK` here.
+            if let Err(cleanup_err) = conn
+                .execute_batch("ROLLBACK TO index_file_with_reuse; RELEASE index_file_with_reuse")
+            {
+                if owns_transaction {
+                    if let Err(unwind_err) = conn.execute_batch("ROLLBACK") {
+                        eprintln!(
+                            "  ERROR: failed to unwind index_file_with_reuse savepoint after a \
+                             failed error-path cleanup ({cleanup_err}): {unwind_err}"
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "  ERROR: failed to release index_file_with_reuse savepoint after a \
+                         failed error-path cleanup ({cleanup_err}); leaving the caller-owned \
+                         outer transaction in place"
+                    );
+                }
+            }
             Err(e)
         }
     }
