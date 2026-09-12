@@ -1110,7 +1110,24 @@ def evaluate(payload):
 
         unless_re = rule["unless_match_re"]
         scope = rule["unless_scope"]
-        match_override = None
+        # G1 (spec-level review, reopen generation 2): this carries the
+        # (start, end) span of the winning occurrence IN `scan_text`
+        # coordinates, never the already-masked text itself -- masking is
+        # length-preserving (see the executable-region-scanner comment
+        # above `_mask_literal_span`), so the same offsets index the
+        # ORIGINAL, unmasked `text` too. `raw_matched` below is always
+        # sliced from `text`, not `scan_text`: `_mask_literal_span`/
+        # `_mask_double_quoted` blank a quoted value's surrounding quote
+        # CHARACTERS (by design, so ordinary quoted argument content stays
+        # visible to command rules -- see G2, review_b round 1), so by the
+        # time `scan_text` exists, `password="alpha bravo charlie"` has
+        # already lost its quotes. `redact()`'s quoted-value alternative
+        # needs to see an actual quote character to take the "can contain
+        # spaces" branch; without it, it dropped to the bare `\S+`
+        # fallback and only the first word of a multi-word secret got
+        # redacted -- the rest persisted in the ledger's `match` field in
+        # the clear.
+        match_override_span = None
         if unless_re is None:
             m = None
             if rule["id"] == "gh-fast-polling":
@@ -1150,7 +1167,7 @@ def evaluate(payload):
                         search_pos = candidate.start() + 1
                         continue
                     m = candidate
-                    match_override = scan_text[candidate.start():end]
+                    match_override_span = (candidate.start(), end)
                     break
             else:
                 for candidate in all_matches:
@@ -1237,8 +1254,11 @@ def evaluate(payload):
                 continue
         # G5: gh-fast-polling's candidate may have been extended past its
         # own (too-short) regex match to reach the loop's real `done`;
-        # `match_override` carries that extended span when set.
-        raw_matched = match_override if match_override is not None else m.group(0)
+        # `match_override_span` carries that extended span when set.
+        # G1: sliced from `text` (the unmasked original), never
+        # `scan_text` -- see the comment above `match_override_span`.
+        raw_start, raw_end = match_override_span if match_override_span is not None else m.span()
+        raw_matched = text[raw_start:raw_end]
         # F7: redact BEFORE truncating -- truncating first could slice a
         # secret in half and leave the visible fragment unredacted.
         matched = redact(raw_matched)[:MATCH_TRUNCATE]
