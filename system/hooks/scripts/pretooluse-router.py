@@ -200,7 +200,17 @@ _WRAPPER_SKIP = (
     r"(?:(?:" + _ASSIGN + r"\s+)*(?:time|env|command|exec|sudo)\s+)*"
     r"(?:" + _ASSIGN + r"\s+)*"
 )
-_CMD_PREFIX = r"(?:^|[;&|({]\s*|\$\(\s*|\n\s*)\s*" + _WRAPPER_SKIP
+# G3 (spec-level review, reopen generation 2): a bare backtick is a valid
+# command-position anchor too, the same as `\$\(` -- an opening backtick
+# genuinely starts a new backtick command substitution's script text, so
+# `` `<cmd>\n<subcmd>` `` anchors `<cmd>` exactly where `$(<cmd> <subcmd>)`
+# already does. (A backtick reuses the SAME character to open and close, unlike
+# `$(`/`)`, so this can also anchor right after a CLOSING backtick; that
+# only misfires if a substitution's output is immediately, unspacedly
+# glued to a real command word, which no rule/fixture in this router
+# exercises and which real shell word-concatenation makes vanishingly
+# rare in practice.)
+_CMD_PREFIX = r"(?:^|[;&|({]\s*|\$\(\s*|`\s*|\n\s*)\s*" + _WRAPPER_SKIP
 
 # Git global options (F3: "most Git rules also miss global options") skipped
 # between `git` and its subcommand: `-C <path>`, `-c k=v`, `--git-dir=...`,
@@ -441,12 +451,52 @@ def _mask_quotes_recursive(text, start, end, result):
     alone (only its true end was located, quote-aware), so a quoted
     literal nested inside it (e.g. a `printf '%s' '...'` argument quoting a
     fake stash-invocation string) stayed fully visible to Bash rules and
-    fired a false deny."""
+    fired a false deny.
+
+    Comment- and heredoc-aware (G3, spec-level review, reopen generation
+    2), matching what the top-level `executable_mask` loop already does,
+    so the two scanners agree on what stays inert: before this fix, a `#`
+    that opened a real shell comment inside a `$(...)` nested in double
+    quotes left everything after it (a fake `; <stash>` mention, including
+    the real `;` separator character) fully visible, tripping a false
+    deny; a heredoc with a QUOTED delimiter (`<<'H'`) makes its whole body
+    inert the same as any other single-quoted literal, but with no
+    heredoc case here at all the body text stayed visible too. Only a
+    SINGLE heredoc immediately following its own `<<DELIM` is handled
+    (no queueing of several heredocs sharing one upcoming newline, unlike
+    `executable_mask`'s `pending_heredocs`) -- multiple heredocs opened on
+    one line INSIDE a substitution nested in double quotes is a
+    combination no fixture exercises."""
     i = start
     while i < end:
         ch = text[i]
         if ch == "\\" and i + 1 < end:
             i += 2
+            continue
+        if ch == "#" and _is_comment_start(text, i):
+            j = text.find("\n", i)
+            comment_end = j if (j != -1 and j < end) else end
+            for k in range(i, comment_end):
+                result[k] = " "
+            i = comment_end
+            continue
+        if ch == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
+            m = _HEREDOC_START_RE.match(text, i)
+            nl = text.find("\n", m.end()) if m else None
+            if m and nl is not None and nl < end:
+                strip_tabs = m.group(1) == "-"
+                if m.group(2) is not None:
+                    delim, quoted = m.group(2), True
+                elif m.group(3) is not None:
+                    delim, quoted = m.group(3), True
+                else:
+                    delim, quoted = m.group(4), False
+                close, _terminated = _consume_heredoc_body(
+                    text, nl + 1, delim, quoted, strip_tabs, result
+                )
+                i = min(close, end)
+                continue
+            i += 1
             continue
         if ch == "'":
             j = text.find("'", i + 1)
@@ -560,7 +610,20 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result):
     (or len(text) if the heredoc is never terminated, matching real shell
     behavior of consuming to EOF); `terminated` is False only in that
     never-closed case (F8: callers use it to represent the EOF-close in
-    scan_text without ever scanning past a REAL terminator)."""
+    scan_text without ever scanning past a REAL terminator).
+
+    The terminator search walks line-by-line (delimiter comparison is
+    inherently per-line), but the actual masking of an UNQUOTED body is
+    done in ONE pass over the whole body span (G3, spec-level review,
+    reopen generation 2), not per physical line: a real shell command
+    substitution genuinely spans multiple lines (an embedded real newline
+    inside `` `...` ``/`$(...)` is just whitespace to the substitution),
+    but masking line-by-line reset `_mask_span_preserving_substitutions`'s
+    open-span tracking at every newline -- an unclosed backtick/`$(` at
+    the end of one line was treated as closed by the time the NEXT line
+    started, so that next line's own content (including a real command
+    the still-open substitution was genuinely about to execute) was
+    masked away as ordinary inert body text instead of staying visible."""
     n = len(text)
     i = start
     while True:
@@ -569,16 +632,21 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result):
         line = text[i:line_end]
         check_line = line.lstrip("\t") if strip_tabs else line
         if check_line == delim:
-            return (n if nl == -1 else nl + 1), True
-        if quoted:
-            for k in range(i, line_end):
-                if text[k] != "\n":
-                    result[k] = " "
-        else:
-            _mask_span_preserving_substitutions(text, i, line_end, result)
+            body_end = i
+            end_index, terminated = (n if nl == -1 else nl + 1), True
+            break
         if nl == -1:
-            return n, False
+            body_end = n
+            end_index, terminated = n, False
+            break
         i = nl + 1
+    if quoted:
+        for k in range(start, body_end):
+            if text[k] != "\n":
+                result[k] = " "
+    else:
+        _mask_span_preserving_substitutions(text, start, body_end, result)
+    return end_index, terminated
 
 
 def executable_mask(text):
@@ -588,6 +656,19 @@ def executable_mask(text):
     pending_heredocs = []
     while i < n:
         ch = text[i]
+        # G3 (spec-level review, reopen generation 2): a backslash outside
+        # any quoting is bash for a literal next character, not a real
+        # quote/comment opener -- `_mask_quotes_recursive` (the scanner
+        # used for text inside a `$(...)`/backtick nested in double
+        # quotes) already skips an escaped character pair like this; this
+        # top-level loop had no such case, so `echo \'; <cmd> stash` (a
+        # literal escaped apostrophe, not a real single-quote span) had
+        # its bare `'` mistaken for a genuine (unterminated) quote opener,
+        # which masked the real `;` separator right after it to a space
+        # and hid the anchored stash invocation that follows.
+        if ch == "\\" and i + 1 < n:
+            i += 2
+            continue
         if ch == "#" and _is_comment_start(text, i):
             j = text.find("\n", i)
             end = j if j != -1 else n
