@@ -1816,6 +1816,84 @@ class PreExistingEscapedDelimiterStillRedacted(unittest.TestCase):
             self.assertEqual(m.redact(text), text, f"{text!r} was mangled by redaction")
 
 
+class RedactedDictKeysStayDistinct(unittest.TestCase):
+    """F20 (round 3, major, NEW) — `_redact_deep()`'s dict comprehension
+    uses the REDACTED key as the new dict's identity: `{redact(k): ...}`.
+    Two distinct raw keys that both redact to the same literal
+    `[REDACTED]` (e.g. two different credential-shaped strings) therefore
+    collide, and the dict comprehension keeps only the LAST one —
+    silently dropping every earlier entry's value. Fixed the same way
+    F19's unsafe-id collision was fixed: when a redacted key collides
+    with one already placed in the output dict, a short non-reversible
+    fingerprint of the RAW (pre-redaction) key is appended to keep the
+    entries distinct, without ever exposing the raw credential itself.
+    """
+
+    def test_two_distinct_credential_keys_both_survive_redaction(self):
+        m = load_script()
+        key_a = "sk-proj-" + "A" * 40
+        key_b = "sk-proj-" + "B" * 40
+        rec = {
+            "runId": "wf_f20dict1",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": {
+                key_a: {"outcome": "first account failed"},
+                key_b: {"outcome": "second account succeeded"},
+            },
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(key_a, report, "raw credential key A leaked into the report")
+        self.assertNotIn(key_b, report, "raw credential key B leaked into the report")
+        self.assertIn(
+            "first account failed",
+            report,
+            "the first credential-keyed entry's value was silently dropped by the key collision",
+        )
+        self.assertIn(
+            "second account succeeded",
+            report,
+            "the second credential-keyed entry's value must also survive",
+        )
+
+    def test_two_distinct_credential_keys_in_a_structured_log_both_survive(self):
+        # Same collision, reached through the logs path (str()-rendered
+        # dicts) instead of the result path (json.dumps()-rendered).
+        m = load_script()
+        key_a = "ghp_" + "A" * 36
+        key_b = "ghp_" + "B" * 36
+        rec = {
+            "runId": "wf_f20dict2",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": "ok",
+            "logs": [{key_a: "first note", key_b: "second note"}],
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(key_a, report)
+        self.assertNotIn(key_b, report)
+        self.assertIn("first note", report, "first credential-keyed log entry was silently dropped")
+        self.assertIn("second note", report, "second credential-keyed log entry must also survive")
+
+    def test_a_lone_redacted_key_gets_no_spurious_fingerprint_suffix(self):
+        # Regression guard: a credential-shaped key that does NOT collide
+        # with any other key in the same dict must render as the plain
+        # "[REDACTED]" placeholder — the fingerprint suffix is only for
+        # disambiguating an actual collision, never added unconditionally.
+        m = load_script()
+        key = "sk-proj-" + "A" * 40
+        rec = {
+            "runId": "wf_f20dict3",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": {key: {"outcome": "only account"}},
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(key, report)
+        self.assertIn("[REDACTED]", report)
+        self.assertIn("only account", report)
+
+
 class EncodingArtifactBoundaryStillRedacted(unittest.TestCase):
     """A-R1 (ledger arrra-hex-pr-12-r4, round 4 re-review, major) —
     PreExistingEscapedDelimiterStillRedacted (A-R2, prior round) only
@@ -2140,6 +2218,45 @@ class ConservativeFreeTextAmbiguityRouting(unittest.TestCase):
         self.assertTrue(
             any("ambiguous free-text path" in w and "/Users/Jane" in w for w in warnings), warnings
         )
+
+    # round-8 review probes: hops 1-2 (not just hop 1) need the 1+-slash
+    # ambiguity check for bare directory-name matches, and an
+    # extension-complete match needs its OWN hop-1 (2+ slash) check
+    # instead of an unconditional bypass.
+    def test_round8_probe_three_word_directory_name_is_ambiguous(self):
+        # Hop 1 ("Doe") is clean; hop 2 ("Smith/acme-repo") is where the
+        # real continuation surfaces. A hop-1-only check missed this.
+        m = load_script()
+        rec = {"result": "/Users/Jane Doe Smith/acme-repo"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_round8_probe_dotted_directory_name_before_a_space_is_ambiguous(self):
+        # A directory literally named "outer.v2 backup" reads, up to the
+        # space, as a "complete file" via its fake ".v2 extension" — this
+        # is the shape the extension-shortcut's old unconditional bypass
+        # would have trusted outright. Note: this specific construction
+        # already resolves to None even WITHOUT this round's fix, via the
+        # unrelated F8 dotted-repository-leaf guard in repo_dir_basename()
+        # — so this test is a defense-in-depth regression guard for the
+        # new hop-1 check (which the review's stated principle,
+        # "an extension-shaped prefix does not establish completeness,"
+        # calls for), not a confirmed before/after bug fix the way the
+        # three-word-directory-name probe above is. The literal example
+        # in the review (`/tmp/outer/src/service.py backup/acme/main.py`)
+        # was checked directly and does NOT misroute either before or
+        # after this change — "outer" is in fact the correct, complete
+        # reading of that specific text.
+        m = load_script()
+        rec = {"result": "/tmp/outer.v2 backup/acme/main.py"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_round8_probe_extension_match_still_trusts_a_clean_hop_one(self):
+        # Regression guard: the new extension-match hop-1 check must not
+        # start flagging the ordinary idiom case it was never meant to
+        # touch — "and/or" has only 1 slash, well under the 2+ bar.
+        m = load_script()
+        rec = {"result": "Fixed /home/x/acme-repo/src/main.py and/or the tests"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
 
 
 class StructuredFieldInvalidValueRoutesToUnmappedNoFallback(unittest.TestCase):

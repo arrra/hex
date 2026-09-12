@@ -443,31 +443,59 @@ def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
     """None if `match` is trusted as a complete path; otherwise a short
     description of the second (rejected) reading, for the caller's WARN.
 
-    A match already ending in a recognized file extension (FILE_EXT_RE)
-    can never be a truncated directory-name prefix — no filename is ever
-    cut short mid-extension — so it is accepted outright regardless of
-    what prose follows (this alone closes refute-R2/new-defects-R1: every
-    probe there starts with a complete "...main.py"/"...route.ts" match).
+    Two separate rules, keyed on whether `match` already ends in a
+    recognized file extension (FILE_EXT_RE):
 
-    Otherwise walk the run of whitespace-separated tokens right after the
-    match, one hop at a time:
-      - The FIRST hop is the strongest signal: a "/" anywhere in it means
-        the space could just as well sit inside the real (space-
+    EXTENSION-COMPLETE matches (round-8 review, F7/F16: "an extension-
+    shaped prefix does not establish completeness" — round-5's original
+    "trust it outright, full stop" rule was too broad). No filename is
+    ever cut short mid-extension, so a genuine trailing word or a
+    SEPARATE, correctly-formed path mentioned later in the same sentence
+    ("... main.py and updated packages/core/src/index.ts") must never
+    invalidate an already-complete match — this is what closed
+    refute-R2/new-defects-R1, and it still must hold. But round 8's named
+    counter-example — a directory component that happens to contain a dot
+    immediately before a space, e.g. `/tmp/outer.v2 backup/acme/main.py`
+    (`outer.v2` reads as a complete "file" via its fake ".v2 extension",
+    hiding the fact that the real directory is `outer.v2 backup`) — shows
+    the IMMEDIATE next token can itself be a real multi-segment path
+    continuation rather than ordinary prose. So: only hop 1 (the token
+    immediately after the match) is checked, and
+    only for 2+ slashes (the same bar a bare match's LATER hops use) —
+    anything beyond hop 1, or a hop 1 with fewer than 2 slashes (a
+    genuine idiom like "and/or", or plain prose like "and updated"),
+    stays trusted.
+
+    BARE (no-extension) matches: walk the run of whitespace-separated
+    tokens right after the match, one hop at a time.
+      - Hops 1-2 are the strongest signal: a "/" anywhere in either one
+        means the space could just as well sit inside the real (space-
         containing) directory name as it could start unrelated prose —
-        ambiguous immediately, however many "/" that first hop has. This
-        no longer depends on the segment after the first "/" being
-        space-free, closing refute-R1's second-space-bearing-component
-        case.
-      - A LATER hop (reached only after at least one earlier, slash-free
-        hop already read as ordinary prose) is trusted as a common
-        English word-pair idiom ("and/or", "via CI/CD") unless IT ALONE
-        carries two or more "/" — a real multi-segment relative path
+        ambiguous immediately, however many "/" that hop has. Round-7
+        review: a hop-1-ONLY version of this rule missed a THREE-word
+        directory name ("Jane Doe Smith/acme-repo" — "Doe" is a clean
+        hop 1, "Smith/acme-repo" only surfaces at hop 2), so both of the
+        first two hops now get this treatment. This remains a bounded,
+        NAMED cutoff, not a general fix: a four-word directory name
+        would still slip past hop 3 the same way — see the module-level
+        note on this file's overall scope for why an unbounded lexical
+        model is not attempted here.
+      - A LATER hop (reached only after two earlier, slash-free hops
+        already read as ordinary prose) is trusted as a common English
+        word-pair idiom ("and/or", "via CI/CD") unless IT ALONE carries
+        two or more "/" — a real multi-segment relative path
         ("Smith/acme-repo/src/main.py"), which is still ambiguous.
     """
     if FILE_EXT_RE.search(match.group(0)):
+        pos = match.end()
+        while pos < len(text) and text[pos] == " ":
+            pos += 1
+        tm = _CONTINUATION_TOKEN_RE.match(text, pos)
+        if tm and tm.group(0).count("/") >= 2:
+            return f"{match.group(0)!r} vs. a continuation through {tm.group(0)!r}"
         return None
     pos = match.end()
-    first_hop = True
+    hop_index = 0
     while True:
         skip_start = pos
         while pos < len(text) and text[pos] == " ":
@@ -478,10 +506,10 @@ def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
         if not tm:
             break
         token = tm.group(0)
+        hop_index += 1
         slashes = token.count("/")
-        if (first_hop and slashes >= 1) or slashes >= 2:
+        if (hop_index <= 2 and slashes >= 1) or slashes >= 2:
             return f"{match.group(0)!r} vs. a continuation through {token!r}"
-        first_hop = False
         pos = tm.end()
     return None
 
@@ -729,14 +757,31 @@ def _redact_deep(obj, warnings: list[str] | None = None, label: str = "record"):
     untouched by the dict-comprehension below, reached json.dumps()/str()
     completely raw, and its escaped form defeated the post-serialization
     belt-and-braces pass exactly like an unredacted value would.
+
+    F20 (round 3, major, NEW): building the result with a plain dict
+    comprehension keyed on `redact(k, ...)` collides two distinct raw
+    keys that both redact to the same literal "[REDACTED]" string (e.g.
+    two different credential-shaped strings) — the LAST entry silently
+    overwrites every earlier one under that shared key, dropping their
+    values entirely. Fixed the same way F19's unsafe-id collision was
+    fixed: on a collision, append a short, non-reversible fingerprint of
+    the RAW (pre-redaction) key so entries stay distinct without ever
+    exposing the raw credential. A key that never collides gets no
+    fingerprint at all — this only disambiguates an actual collision.
     """
     if isinstance(obj, str):
         return redact(obj, warnings, label)
     if isinstance(obj, dict):
-        return {
-            (redact(k, warnings, label) if isinstance(k, str) else k): _redact_deep(v, warnings, label)
-            for k, v in obj.items()
-        }
+        out: dict = {}
+        for k, v in obj.items():
+            new_key = redact(k, warnings, label) if isinstance(k, str) else k
+            if isinstance(new_key, str) and new_key in out:
+                fingerprint = hashlib.sha256(
+                    (k if isinstance(k, str) else str(k)).encode("utf-8", "surrogateescape")
+                ).hexdigest()[:8]
+                new_key = f"{new_key}-{fingerprint}"
+            out[new_key] = _redact_deep(v, warnings, label)
+        return out
     if isinstance(obj, list):
         return [_redact_deep(v, warnings, label) for v in obj]
     return obj
