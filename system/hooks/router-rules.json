@@ -19,7 +19,7 @@
     "id": "git-stash-shared-checkout",
     "tool": "^Bash$",
     "match": "@PREFIX@git\\s+@GITOPTS@stash\\b",
-    "unless_match": "stash\\s+(list|show|pop|apply|drop|branch)\\b",
+    "unless_match": "stash[ \\t]+(list|show|pop|apply|drop|branch)\\b",
     "unless_scope": "invocation",
     "unless_cwd": "/worktrees/",
     "decision": "deny",

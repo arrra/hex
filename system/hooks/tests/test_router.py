@@ -3221,6 +3221,56 @@ class TestEffectiveCheckoutAfterReservedWordsAndWrappers(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestStashExemptionDoesNotCrossARealNewline(RouterTestCase):
+    """F1 (round 2 review, major) — the stash exemption's `unless_match`
+    pattern, `stash\\s+(list|show|pop|apply|drop|branch)\\b`, used `\\s+`
+    between `stash` and the exempting subcommand. `\\s` matches a literal
+    newline regardless of the `re.MULTILINE` flag this pattern is compiled
+    with (MULTILINE only changes what `^`/`$` anchor to). `git
+    stash\\nlist` is bash for TWO separate commands — a bare `git stash`
+    that genuinely runs, immediately followed by an unrelated `list`
+    command — but the exemption matched straight across that newline as
+    if it read "stash list", one safe read-only invocation, and the
+    router abstained on a real stash it should have denied.
+
+    Fixed by changing the pattern's `\\s+` to `[ \\t]+` (horizontal
+    whitespace only). This still exempts a genuine backslash-continued
+    line (`git stash \\` + newline + `list`, one logical bash command):
+    `executable_mask` already blanks a `\\<real-newline>` pair to two
+    spaces (see its own doc comment on that escape branch), so by the
+    time `unless_match` runs against `scan_text` there is no newline
+    character left there at all — only an UNESCAPED, genuinely separating
+    newline (which stays a literal `\\n` in scan_text) fails to match
+    `[ \\t]+`, exactly the case this fix targets."""
+
+    def test_stash_then_a_separate_list_command_on_the_next_line_still_denies(self):
+        cmd = "git stash\nlist"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_stash_list_on_one_line_still_abstains(self):
+        # Regression guard: the genuine same-line exemption must be
+        # unaffected by restricting `\s+` to horizontal whitespace.
+        cmd = "git stash list"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must still abstain: {proc.stdout!r}")
+
+    def test_stash_list_across_a_backslash_continued_line_still_abstains(self):
+        # Regression guard: a genuine bash line continuation (backslash
+        # immediately before the newline) is ONE logical command and must
+        # still be recognized as the exempt "stash list" invocation --
+        # executable_mask blanks the `\<newline>` pair to spaces before
+        # unless_match ever runs.
+        cmd = "git stash \\\nlist"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must still abstain: {proc.stdout!r}")
+
+
 class TestQuotedGlobalOptionArgumentWithASpace(RouterTestCase):
     """F3 (round 2 review, major) — `_GIT_GLOBAL_OPTS`'s argument
     alternatives (`-C\\s+\\S+`, `-c\\s+\\S+`, `--git-dir=\\S+`,
