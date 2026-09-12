@@ -2438,6 +2438,73 @@ class TestF7RedactionAndLedgerPrivacy(RouterTestCase):
                     self.assertNotIn(word, entry.get("match", ""))
                     self.assertNotIn(word, entry.get("preview", ""))
 
+    def test_quote_wraps_whole_pair_is_fully_redacted(self):
+        """A-R6 (round 2 reopen review): the previous G1 fix only handles
+        `key="value"` (the quote wraps just the VALUE). A git option-value
+        pair is often quoted as a WHOLE `"key=value"` argument (the quote
+        sits BEFORE `password`, not right after `=`) -- `redact()`'s
+        pattern anchors on `\\bpassword\\s*=\\s*` and only then looks for a
+        quote character, so it never sees the leading quote and drops
+        straight to the bare `\\S+` fallback, redacting only the first
+        word."""
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    'git push -o "password=alpha bravo charlie" '
+                    "origin +HEAD:main"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            raw_line = (Path(ledger_dir) / LEDGER_FILENAME).read_text()
+            for word in ("alpha", "bravo", "charlie"):
+                self.assertNotIn(
+                    word, raw_line,
+                    f"secret word {word!r} leaked into the raw ledger line "
+                    f"(A-R6): {raw_line!r}",
+                )
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                for word in ("alpha", "bravo", "charlie"):
+                    self.assertNotIn(word, entry.get("match", ""))
+                    self.assertNotIn(word, entry.get("preview", ""))
+
+    def test_dollar_quoted_value_is_fully_redacted(self):
+        """A-R6 (round 2 reopen review): bash's ANSI-C quoting
+        (`password=$'alpha bravo charlie'`) is a common way to embed a
+        multi-word value too -- `redact()`'s quoted-value alternatives only
+        recognize a bare `"..."`/`'...'`, never `$'...'`, so it drops to
+        `\\S+` and stops at the first space (right after the leading `$'`)."""
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    "git push -o password=$'alpha bravo charlie' "
+                    "origin +HEAD:main"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            raw_line = (Path(ledger_dir) / LEDGER_FILENAME).read_text()
+            for word in ("alpha", "bravo", "charlie"):
+                self.assertNotIn(
+                    word, raw_line,
+                    f"secret word {word!r} leaked into the raw ledger line "
+                    f"(A-R6): {raw_line!r}",
+                )
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                for word in ("alpha", "bravo", "charlie"):
+                    self.assertNotIn(word, entry.get("match", ""))
+                    self.assertNotIn(word, entry.get("preview", ""))
+
 
 class TestF8ManifestQuoting(RouterTestCase):
     """F8: required-hooks.json's two Python hook commands interpolate

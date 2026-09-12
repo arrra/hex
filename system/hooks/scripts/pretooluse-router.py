@@ -97,6 +97,38 @@ _REDACT_PATTERNS = [
         ),
         "***REDACTED-PEM-BLOCK***",
     ),
+    # A-R6 (round 2 reopen review): the key=value patterns below all anchor
+    # on `\bpassword\s*=\s*` and only look for a quote AFTER the `=` -- two
+    # real shell quoting shapes never reach that far because the quote
+    # comes BEFORE the key name (the whole `key=value` pair is one quoted
+    # argument, e.g. a push command's `-o "password=alpha bravo charlie"`)
+    # or uses `$'...'` ANSI-C quoting instead of `"..."`/`'...'`
+    # (`password=$'alpha bravo charlie'`). Neither reaches any quoted-value
+    # alternative below, so both drop straight to the bare `\S+` one and
+    # only the first word gets redacted. These two patterns must run
+    # BEFORE the generic pattern for the same reason the PEM pattern does
+    # (a partial match by the generic pattern would eat the leading
+    # `"`/`$'` and leave the rest unrecognizable).
+    (
+        re.compile(
+            r"""(?i)"(password|token|secret|api[_-]?key)\s*=\s*"""
+            r"""(?:[^"\\]|\\[\s\S])*\""""
+        ),
+        r'"\1=***REDACTED***"',
+    ),
+    (
+        re.compile(
+            r"""(?i)'(password|token|secret|api[_-]?key)\s*=\s*[^']*'"""
+        ),
+        r"'\1=***REDACTED***'",
+    ),
+    (
+        re.compile(
+            r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
+            r"""\$'(?:[^'\\]|\\.)*'"""
+        ),
+        r"\1=***REDACTED***",
+    ),
     # G2a (review_b round 3): the value used to be `\S+`, so a quoted value
     # containing spaces (`password="hunter two secret"`) only redacted up
     # to the first space and leaked the rest of the phrase. Prefer a
