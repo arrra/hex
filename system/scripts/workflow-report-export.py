@@ -404,100 +404,101 @@ def validate_record(rec: object) -> str | None:
     return None
 
 
-# review_b G1: a name with MORE than one space ("Jane Doe Smith") was not
-# caught by looking just one space-separated word ahead — "Doe Smith/..."
-# has a second space before the next "/", so the old single-hop regex never
-# found it. Match any run of space-separated word-tokens that eventually
-# reaches a "/", however many spaces it takes.
+# review_b G1 through A-R2 (rounds 2-4) all tried to tell a genuinely
+# space-broken directory name ("Jane Doe/repo" — the match is a truncated
+# PREFIX, the real path keeps going) apart from a complete path followed by
+# ordinary trailing prose, by counting how many further "/" characters the
+# text after the match reaches: zero meant prose, one meant a coincidental
+# word pair ("and/or"), two-or-more meant the path kept going. Spec review
+# round 4 (ledger arrra-hex-pr-12-r4) disproved that in both directions:
 #
-# F7/F16 (round 2) — each token was separated by exactly one literal space
-# (" "), so a run of 2+ consecutive spaces ("Jane  Doe/...") broke the very
-# first hop of the continuation check and the truncated prefix was accepted
-# as a complete path. Match one-or-more spaces between tokens instead of
-# exactly one.
+# - refute-R1: a deep path whose SECOND component ALSO has a space
+#   (".../Jane Doe/acme repo/src/main.py") defeated the counting regex (it
+#   required the segment right after the first "/" to be space-free), so
+#   the truncated "/Users/Jane" prefix was wrongly accepted as complete.
+# - refute-R2 / new-defects-R1: the "second slash" signal fires just as
+#   readily for an UNRELATED second relative path mentioned later in the
+#   same sentence ("... main.py and updated packages/core/src/index.ts" —
+#   a realistic, common shape, not a truncated directory name) as it does
+#   for a genuine continuation. Discarding the correct match and resuming
+#   the scan one character into the rejected prefix then adopted an
+#   arbitrary WRONG suffix as the project ("core", "hooks", "foo", "My",
+#   "projects") instead of refusing to guess.
 #
-# review_b G1 (round 3) — requiring the continuation to eventually reach
-# another "/" missed the case where the space sits inside the FINAL path
-# component with nothing after it ("/tmp/acme repo" — no further "/" at
-# all): the match was accepted as the complete path "/tmp/acme", silently
-# dropping " repo". Free text gives no reliable way to tell a truncated
-# prefix apart from a complete path immediately followed by unrelated
-# prose, so per contract any space-then-word-characters continuation is
-# treated as an incomplete final component and rejected outright — a
-# further "/" is no longer required.
-#
-# B-R1 (spec review round 4) — ADJUDICATED REVERSAL of the round-3 change
-# directly above. Round 3's unconditional rule closed the narrow "bare
-# space-broken final component" case, but real CLI probes showed it breaks
-# the dominant realistic shape instead: a complete, correctly-formed path
-# mentioned in a sentence, followed by ordinary trailing prose that starts
-# with a word ("... /home/x/acme-repo/src/main.py and pushed", "...
-# /Users/sagar/Github/Arrra/hex on branch main"). ABS_PATH_RE already
-# matches such a path in full (there is no truncation to begin with — the
-# match already ends at ".py", or at a bare directory name that really has
-# no space in it); it was the round-3 continuation check itself that
-# wrongly flagged the trailing prose word as evidence of truncation.
-# Free text gives no way to tell "this space starts more of the same
-# directory name" from "this space starts unrelated prose" without some
-# signal, and an eventual further "/" is that signal: trailing prose after
-# a complete path essentially never contains one, while a genuinely
-# space-broken directory name with nothing else following is rare. Restore
-# the pre-round-3 rule (a further "/" is required to count as truncation),
-# accepting as an explicit, documented trade-off that the narrow bare case
-# resolves to the truncated prefix instead of _unmapped. Pinned by
-# StructuredPathConsumedAsCompleteValue.test_bare_final_component_with_no_further_slash_is_accepted_as_the_prefix
-# and FreeTextPathFollowedByOrdinaryProseIsNotTruncated.
-#
-# A-R2 (spec review round 4 re-review) — B-R1's premise ("trailing prose
-# after a complete path essentially never reaches a further /") was still
-# false for the dominant realistic shape: ordinary sentences that name one
-# complete path routinely go on to name a second relative path ("... and
-# updated docs/README.md", "... and src/util.py"), or use an ordinary
-# slash-joined word pair right next to the match ("and/or", "via CI/CD").
-# Each of those reaches exactly ONE "/" past the space — structurally
-# identical to a genuinely truncated single-word directory name ("Jane
-# Doe/repo"), so word-counting alone cannot tell them apart. What DOES
-# tell them apart: a genuinely truncated path continues on past that first
-# "/" into a real deeper path (more segments: ".../acme-repo/src/main.py"),
-# while an English word pair or a lone trailing relative path stops at
-# that first "/" (end of string, or a lone filename with nothing past a
-# second "/"). Require the continuation to reach a SECOND "/" before
-# counting it as truncation. This is a documented trade-off, same spirit
-# as B-R1's: a genuinely truncated single-word directory name mentioned
-# with nothing deeper after it (rare) is no longer caught either, but the
-# realistic sentence shapes above resolve correctly.
-_SPACE_CONTINUATION_RE = re.compile(r"(?: +[\w.\-]+)+/[^/\s]*/")
+# There is no text-only rule that reliably tells these shapes apart by
+# counting slashes, so the contract stops trying: a candidate is trusted
+# only when `_free_text_ambiguity` finds it UNAMBIGUOUS, and an ambiguous
+# candidate is never "resolved" by skipping past it and re-searching — the
+# whole record goes to `_unmapped` with a WARN naming both readings. See
+# ConservativeFreeTextAmbiguityRouting for the reviewer's exact probes.
+_CONTINUATION_TOKEN_RE = re.compile(r"\S+")
 
 
-def _looks_truncated_by_space(text: str, end: int) -> bool:
-    """True if a path match ends right at a space that is followed by more
-    (possibly multi-word, multi-space) path-like text that reaches a
-    SECOND "/" — a strong signal the real path continued past the space(s)
-    into a deeper path and the match is only a truncated prefix (e.g.
-    ".../Jane Doe/acme-repo/src/main.py": the match stops at "Jane" but "
-    Doe/acme-repo/src/main.py" keeps going well past the first "/"). A
-    space followed by prose with no further "/" at all (B-R1, round 4), or
-    by prose that reaches only ONE "/" and no deeper path after it (A-R2,
-    round 4 re-review — "and/or", "via CI/CD", a lone trailing relative
-    path), is trusted as trailing text, not truncation — see the round-4
-    comment on _SPACE_CONTINUATION_RE above."""
-    if end >= len(text) or text[end] != " ":
-        return False
-    return bool(_SPACE_CONTINUATION_RE.match(text, end))
+def _free_text_ambiguity(text: str, match: re.Match) -> str | None:
+    """None if `match` is trusted as a complete path; otherwise a short
+    description of the second (rejected) reading, for the caller's WARN.
+
+    A match already ending in a recognized file extension (FILE_EXT_RE)
+    can never be a truncated directory-name prefix — no filename is ever
+    cut short mid-extension — so it is accepted outright regardless of
+    what prose follows (this alone closes refute-R2/new-defects-R1: every
+    probe there starts with a complete "...main.py"/"...route.ts" match).
+
+    Otherwise walk the run of whitespace-separated tokens right after the
+    match, one hop at a time:
+      - The FIRST hop is the strongest signal: a "/" anywhere in it means
+        the space could just as well sit inside the real (space-
+        containing) directory name as it could start unrelated prose —
+        ambiguous immediately, however many "/" that first hop has. This
+        no longer depends on the segment after the first "/" being
+        space-free, closing refute-R1's second-space-bearing-component
+        case.
+      - A LATER hop (reached only after at least one earlier, slash-free
+        hop already read as ordinary prose) is trusted as a common
+        English word-pair idiom ("and/or", "via CI/CD") unless IT ALONE
+        carries two or more "/" — a real multi-segment relative path
+        ("Smith/acme-repo/src/main.py"), which is still ambiguous.
+    """
+    if FILE_EXT_RE.search(match.group(0)):
+        return None
+    pos = match.end()
+    first_hop = True
+    while True:
+        skip_start = pos
+        while pos < len(text) and text[pos] == " ":
+            pos += 1
+        if pos == skip_start:
+            break  # no (more) whitespace here -- the continuation run ends
+        tm = _CONTINUATION_TOKEN_RE.match(text, pos)
+        if not tm:
+            break
+        token = tm.group(0)
+        slashes = token.count("/")
+        if (first_hop and slashes >= 1) or slashes >= 2:
+            return f"{match.group(0)!r} vs. a continuation through {token!r}"
+        first_hop = False
+        pos = tm.end()
+    return None
 
 
-def _extract_repo_path(text: str) -> str | None:
+def _extract_repo_path(text: str, warnings: list[str] | None = None, label: str = "record") -> str | None:
     """First complete absolute filesystem path in free text (F7/F16): skip
-    anything inside a URL, and reject a match that is really just the
-    truncated prefix of a space-broken path rather than accepting it as-is."""
+    anything inside a URL. A candidate is used only when `_free_text_ambiguity`
+    finds it unambiguous; an ambiguous candidate is never disambiguated by
+    skipping past it and re-searching (see the round-5 comment above) — the
+    record goes to `_unmapped` instead, with a WARN naming both readings."""
     pos = 0
     while pos < len(text):
         um = URL_RE.search(text, pos)
         pm = ABS_PATH_RE.search(text, pos)
         if pm and (not um or pm.start() < um.start()):
-            if _looks_truncated_by_space(text, pm.end()):
-                pos = pm.end() + 1
-                continue
+            ambiguity = _free_text_ambiguity(text, pm)
+            if ambiguity:
+                if warnings is not None:
+                    warnings.append(
+                        f"{label}: ambiguous free-text path ({ambiguity}) -> not routing to a named project"
+                    )
+                return None
             return pm.group(0)
         if um:
             pos = um.end()
@@ -528,26 +529,68 @@ _STRUCTURED_PATH_KEYS = (
 )
 
 
-def _structured_repo_path(result: object) -> str | None:
+# A sentinel `_structured_repo_path` returns when a recognized structured
+# key IS present but its value fails the conservative rule below — distinct
+# from returning None, which means no such key was present at all. The
+# caller (infer_project) must not fall through to another key or down to
+# free text in the sentinel case; it routes straight to `_unmapped` instead
+# (a WARN naming the reason was already appended when the sentinel was
+# returned).
+_INVALID_STRUCTURED_PATH = object()
+
+
+def _invalid_structured_path_reason(value: str) -> str | None:
+    """Why a structured field's (already-stripped) string value is
+    rejected, or None if it is a usable complete path."""
+    if not value.startswith("/"):
+        return "not an absolute path"
+    if any(ord(c) < 0x20 or c == "\x7f" for c in value):
+        return "contains control characters"
+    return None
+
+
+def _structured_repo_path(
+    result: object, warnings: list[str] | None = None, label: str = "record"
+) -> object:
     """An explicit repo/path field from a structured `result` dict, if any.
+    Returns the path string, `_INVALID_STRUCTURED_PATH`, or None (see the
+    sentinel's docstring above).
 
     F7/F16 (round 2) — the value of a field the record itself labeled as a
     repo/path/cwd was still being run through `_extract_repo_path()`, the
     free-text tokenizer built for scanning prose that merely CONTAINS a
-    path. That tokenizer stops at the first space, so a genuine directory
-    name with a space in it ("/tmp/acme repo") was truncated to a prefix
-    ("/tmp/acme"). A structured field carries no surrounding prose to
-    separate from — the whole value IS the path — so it is consumed as a
-    complete value, never tokenized or truncated. Only a value that looks
-    like an absolute path at all (starts with "/") is treated as a match,
-    so an unrelated non-path field still falls through to the next key.
+    path. A structured field carries no surrounding prose to separate from
+    — the whole value IS the path — so it is consumed as a complete value,
+    never tokenized, never accepted as a truncated prefix.
+
+    Round 5 (ledger arrra-hex-pr-12-r4, item 1) — CONSERVATIVE RULE: the
+    first recognized key present with a value is THE structured field for
+    this record, full stop. Its value is either a usable complete absolute
+    path or the record is routed straight to `_unmapped` with a WARN
+    naming the reason — it never silently falls through to try the next
+    key (a `repo` field that turns out to be garbage does not mean "keep
+    guessing at `cwd`") or down to the free-text scanner.
     """
     if not isinstance(result, dict):
         return None
     for key in _STRUCTURED_PATH_KEYS:
         value = result.get(key)
-        if isinstance(value, str) and value.strip().startswith("/"):
-            return value.strip()
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            if warnings is not None:
+                warnings.append(
+                    f"{label}: structured {key!r} field is not a string "
+                    f"(got {type(value).__name__}) -> _unmapped"
+                )
+            return _INVALID_STRUCTURED_PATH
+        value = value.strip()
+        reason = _invalid_structured_path_reason(value)
+        if reason:
+            if warnings is not None:
+                warnings.append(f"{label}: structured {key!r} field {value!r} rejected ({reason}) -> _unmapped")
+            return _INVALID_STRUCTURED_PATH
+        return value
     return None
 
 
@@ -569,9 +612,11 @@ def infer_project(
             counts.sort(key=lambda c: (-c[0], c[1]))
             return counts[0][2]
     result = rec.get("result")
-    found = _structured_repo_path(result)
+    found = _structured_repo_path(result, warnings, label)
+    if found is _INVALID_STRUCTURED_PATH:
+        return None
     if not found:
-        found = _extract_repo_path(json.dumps(result, ensure_ascii=False))
+        found = _extract_repo_path(json.dumps(result, ensure_ascii=False), warnings, label)
     if found:
         return repo_dir_basename(found, warnings, label)
     return None
