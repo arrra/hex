@@ -1765,6 +1765,42 @@ class TestBacktickAnchorOnlyOnOpener(RouterTestCase):
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
+    def test_comment_inside_a_backtick_substitution_is_bounded_by_its_own_closer(self):
+        """A-R2 (round 2 reopen review, generation 3): a real shell treats a
+        `#` inside a backtick substitution as a genuine comment, but bounds
+        it by the substitution's own closing backtick -- unlike `$(...)`,
+        where the shell keeps reading past a `#` on the SAME physical line
+        looking for the substitution's own close, a backtick substitution's
+        lexer stops the comment the instant it hits the matching closing
+        backtick (confirmed: `x=\\`echo hi # c\\`; echo RAN` prints `RAN
+        x=hi` -- `echo RAN` genuinely runs). `executable_mask`'s `#` branch
+        has no such bound: it always blanks to the next real newline, so
+        when it fires while `in_backtick` is still open it swallows the
+        closing backtick itself (and everything after it on the line,
+        including a real trailing `git stash`) as if all of it were inert
+        comment text."""
+        cmd = "x=`echo hi # c`; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-R2)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_comment_inside_a_backtick_substitution_that_runs_past_a_newline_still_abstains(self):
+        """Regression guard: when the `#` comment is NOT followed by the
+        closing backtick on the same line (a real newline comes first),
+        the ordinary end-of-line bound must still apply -- the fix must
+        bound the comment by whichever comes first, not unconditionally
+        by the next backtick regardless of an intervening newline."""
+        cmd = "x=`echo hi # git stash\n`; echo done"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"a comment ending at a real newline inside backticks must abstain (A-R2 regression guard): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
 
 class TestBacktickInsideSingleQuotesIsInert(RouterTestCase):
     """B-R1 (round 2 reopen review): a backtick inside a SINGLE-quoted span

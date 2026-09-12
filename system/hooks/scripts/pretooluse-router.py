@@ -789,6 +789,22 @@ def executable_mask(text):
         if ch == "#" and _is_comment_start(text, i):
             j = text.find("\n", i)
             end = j if j != -1 else n
+            # A-R2 (round 2 reopen review, generation 3): a real shell
+            # bounds a comment INSIDE a backtick substitution by the
+            # substitution's own closing backtick, not by the next real
+            # newline -- confirmed: `x=`echo hi # c`; echo RAN` prints
+            # `RAN x=hi` (`echo RAN` genuinely runs; unlike `$(...)`, the
+            # backtick lexer stops the comment the instant it reaches the
+            # matching closer). Without this bound, a `#` on the SAME
+            # physical line as the closing backtick swallowed that closer
+            # -- and everything genuinely executable after it -- as if it
+            # were still inert comment text. When a real newline occurs
+            # first (the comment's own line ends before the substitution
+            # closes), the ordinary end-of-line bound still applies.
+            if in_backtick:
+                bt = text.find("`", i)
+                if bt != -1 and bt < end:
+                    end = bt
             for k in range(i, end):
                 result[k] = " "
             i = end
