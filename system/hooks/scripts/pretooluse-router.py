@@ -1066,7 +1066,30 @@ def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd, cd
 # (`evaluate`) tells these apart via `_polling_loop_extent` and extends an
 # UNCLOSED candidate to the next `done` in scan_text instead of discarding
 # it; a CROSSED candidate is still rejected outright.
+#
+# G4 (spec-level review, reopen generation 2): a bare `\b(?:do|done)\b`
+# counts EVERY occurrence of those letters, including a QUOTED argument
+# (e.g. `echo 'done'`) -- masking only blanks a single-quoted span's own
+# quote delimiters (G2, review_b round 1: ordinary argument content stays
+# visible so other rules can still see it), so a quoted "done" reads
+# exactly like the bare reserved word once the quotes are gone. Only an
+# UNQUOTED `do`/`done` in actual command position -- the nearest
+# non-whitespace character before it is a real separator, or it is the
+# very first thing in the text -- is ever a genuine loop keyword; real
+# bash never recognizes either as a reserved word anywhere else (an
+# argument, mid-word, right after another word with no separator).
 _LOOP_TOKEN_RE = re.compile(r"\b(?:do|done)\b")
+
+
+def _is_command_position(text, idx):
+    """True when `text[idx]` sits where a new command/reserved word may
+    legitimately start: the very beginning of `text`, or the nearest
+    non-whitespace character before it is a real separator
+    (`_SEPARATOR_CHARS`) -- never an ordinary word/argument character."""
+    j = idx - 1
+    while j >= 0 and text[j] in " \t":
+        j -= 1
+    return j < 0 or text[j] in _SEPARATOR_CHARS
 
 
 def _polling_loop_extent(matched_text):
@@ -1078,8 +1101,14 @@ def _polling_loop_extent(matched_text):
     than this candidate reached; the caller should extend and re-check),
     or "crossed" (depth returns to 0 somewhere in the MIDDLE of the span --
     an earlier, unrelated loop already closed; the caller must reject this
-    span outright, never extend it)."""
-    tokens = list(_LOOP_TOKEN_RE.finditer(matched_text))
+    span outright, never extend it). A quoted or otherwise not-command-
+    position `do`/`done` (G4) is never counted as a token at all -- it
+    never opens or closes anything, real or fake."""
+    tokens = [
+        tok
+        for tok in _LOOP_TOKEN_RE.finditer(matched_text)
+        if _is_command_position(matched_text, tok.start())
+    ]
     if not tokens:
         return "crossed"
     depth = 0
@@ -1262,6 +1291,13 @@ def evaluate(payload):
                     # extended -- it is genuinely the wrong start.
                     while extent == "unclosed":
                         next_done = _LOOP_TOKEN_RE.search(scan_text, end)
+                        # G4: a quoted/mid-word occurrence is never a real
+                        # token (see `_is_command_position`) -- keep
+                        # searching past it instead of extending to it.
+                        while next_done is not None and not _is_command_position(
+                            scan_text, next_done.start()
+                        ):
+                            next_done = _LOOP_TOKEN_RE.search(scan_text, next_done.end())
                         if next_done is None:
                             break
                         end = next_done.end()
