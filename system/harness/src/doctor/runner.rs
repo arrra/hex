@@ -2263,6 +2263,80 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_export_committed_head_ignores_include_str_inside_a_raw_byte_string_fixture_a_r_4() {
+        // A-R-4 round-5 review, F3: the first masking fix's
+        // `is_raw_string_start` only recognized a BARE `r`-prefixed raw
+        // string — it rejected the `r` in `br#"..."#` outright, because
+        // the preceding byte (`b`) is alphanumeric. The masking pass then
+        // fell through to treating the whole raw BYTE string as ordinary
+        // code, leaving its fixture text (which can itself spell out
+        // `include_str!("/tmp/example.txt")` as literal bytes) fully
+        // exposed to the macro-name search. `string_literal_start` now
+        // recognizes all four prefix forms (none, `b`, `r`, `br`).
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const EXAMPLE: &[u8] =\n    \
+             br#\"prefix \" include_str!(\"/tmp/example.txt\") \"#;\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add raw byte-string fixture mentioning include_str!",
+            ],
+        );
+
+        crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path())
+            .expect(
+                "text inside a raw BYTE string literal (`br#\"...\"#`) must \
+                 not be treated as a real include_str! call — only an \
+                 ACTUAL call in code counts",
+            );
+    }
+
+    #[test]
+    fn test_export_committed_head_refuses_an_include_str_target_with_a_trailing_comma() {
+        // A-R-4 round-5 review, F4: `include_str!`/`include_bytes!`/
+        // `include!` accept an optional trailing comma after their sole
+        // argument (ordinary Rust macro-call syntax) — the closing-paren
+        // check added for F3 required `)` immediately (after only
+        // whitespace), so `include_str!("...",)` silently skipped the
+        // absolute literal instead of refusing the export.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str!(\"/tmp/example.txt\",);\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add absolute include_str! target with a trailing comma",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "a trailing comma after the sole include_str! argument must not \
+             hide an otherwise-recognized escaping literal from this guard",
+        );
+        assert!(
+            err.contains("include_str!") && err.contains("outside this export's root"),
+            "error must name the escaping include! call and explain why, got: {err}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_export_committed_head_refuses_an_include_target_escaping_through_a_committed_symlink() {

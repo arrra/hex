@@ -752,39 +752,120 @@ fn validate_manifest_path_dependencies_stay_within_export(
     Ok(())
 }
 
-/// `true` iff `source[i]` begins a raw string literal (`r`, zero-or-more
-/// `#`, then `"`) that is not itself the tail of a longer identifier —
-/// shared by the masking pass below and by `extract_string_literal_argument`.
-fn is_raw_string_start(source: &[u8], i: usize) -> bool {
+/// Recognizes any Rust string-literal-LIKE token beginning at `source[i]`:
+/// an ordinary `"..."`, a byte string `b"..."`, a raw string
+/// `r"..."`/`r#"..."#`/…, or a raw BYTE string `br"..."`/`br#"..."#`/… —
+/// round-5 review, F3: the first masking draft recognized only a bare
+/// `r`-prefixed raw string, so `is_raw_string_start` rejected the `r` in
+/// `br#"..."#` (its preceding byte, `b`, is alphanumeric), leaving the
+/// masking pass to treat that whole literal as ordinary code and expose
+/// its fixture text — which can itself contain the literal characters
+/// `include_str!("...")` — to the macro-name search below. Returns
+/// `(is_raw, quote_pos, hash_count)`: `quote_pos` is the index of the
+/// literal's OPENING `"`, and for a raw form, `hash_count` is how many
+/// `#`s its closing delimiter must match (always 0 for a non-raw form).
+/// `None` if nothing at `i` matches any of these four forms, or the byte
+/// immediately before `i` is itself an identifier character (so this
+/// can't be misread as the tail of some longer identifier).
+fn string_literal_start(source: &[u8], i: usize) -> Option<(bool, usize, usize)> {
+    let n = source.len();
+    if i >= n {
+        return None;
+    }
     if i > 0 {
         let prev = source[i - 1];
         if prev.is_ascii_alphanumeric() || prev == b'_' {
-            return false;
+            return None;
         }
     }
-    let mut j = i + 1;
-    while j < source.len() && source[j] == b'#' {
+    if source[i] == b'"' {
+        return Some((false, i, 0));
+    }
+    if source[i] == b'b' && i + 1 < n && source[i + 1] == b'"' {
+        return Some((false, i + 1, 0));
+    }
+    let r_at = if source[i] == b'r' {
+        i
+    } else if source[i] == b'b' && i + 1 < n && source[i + 1] == b'r' {
+        i + 1
+    } else {
+        return None;
+    };
+    let mut j = r_at + 1;
+    let mut hashes = 0usize;
+    while j < n && source[j] == b'#' {
+        hashes += 1;
         j += 1;
     }
-    j < source.len() && source[j] == b'"'
+    if j < n && source[j] == b'"' {
+        Some((true, j, hashes))
+    } else {
+        None
+    }
+}
+
+/// Advances past an ordinary (non-raw) string literal whose OPENING `"`
+/// sits at `quote_pos`, returning the index one past its closing `"`
+/// (honoring `\"`/`\\` escapes) — or `None` if unterminated (the file
+/// itself will fail to compile for the same reason).
+fn skip_ordinary_string_from_quote(source: &[u8], quote_pos: usize) -> Option<usize> {
+    let n = source.len();
+    let mut i = quote_pos + 1;
+    while i < n {
+        if source[i] == b'\\' && i + 1 < n {
+            i += 2;
+            continue;
+        }
+        if source[i] == b'"' {
+            return Some(i + 1);
+        }
+        i += 1;
+    }
+    None
+}
+
+/// Advances past a raw (or raw byte) string literal whose OPENING `"` sits
+/// at `quote_pos`, closed by `"` followed by exactly `hashes` `#`s —
+/// returning the index one past that closing delimiter, or `None` if
+/// unterminated. Returning `Option` rather than a `source.len()` sentinel
+/// keeps "unterminated" unambiguous even when a well-formed literal
+/// legitimately ends at end-of-file (no trailing newline) — a raw
+/// string's closing run of `#`s could otherwise be mistaken for the
+/// sentinel by any caller trying to infer termination from the returned
+/// offset alone.
+fn skip_raw_string_from_quote(source: &[u8], quote_pos: usize, hashes: usize) -> Option<usize> {
+    let mut i = quote_pos + 1;
+    loop {
+        let rel = source[i..].iter().position(|&b| b == b'"')?;
+        let at = i + rel;
+        let closes = source
+            .get(at + 1..at + 1 + hashes)
+            .map(|s| s.iter().all(|&b| b == b'#'))
+            .unwrap_or(false);
+        if closes {
+            return Some(at + 1 + hashes);
+        }
+        i = at + 1;
+    }
 }
 
 /// Produces a byte-for-byte-same-length "masked" copy of `source` with
 /// every LINE COMMENT, BLOCK COMMENT (correctly nested), and the BODY of
-/// every ordinary/raw STRING LITERAL replaced with ASCII spaces. Used
-/// ONLY to decide WHERE a genuine `include!`-family call sits — an
-/// argument's actual content is always extracted from the UNMASKED
-/// original afterward (`extract_string_literal_argument`). Closes two
-/// distinct false-positive routes a naive byte search over raw source has
-/// (round-4 review, F3, reintroduced by this check's own first draft):
-/// (a) a comment merely MENTIONING `include_str!(...)` as documentation
-/// must not be treated as a real call; (b) the same mechanism applies to
-/// an unrelated string literal that happens to contain that text. This is
-/// a pure LEXICAL pass — comment/string BOUNDARY recognition, not a
-/// parser and not a semantic model of what the code does; it never
-/// evaluates `concat!`/`env!`/any other non-literal path construction
-/// (see `validate_source_include_targets_stay_within_export`'s doc
-/// comment for the still-accepted, deliberate gaps).
+/// every ordinary/byte/raw/raw-byte STRING LITERAL replaced with ASCII
+/// spaces. Used ONLY to decide WHERE a genuine `include!`-family call
+/// sits — an argument's actual content is always extracted from the
+/// UNMASKED original afterward (`extract_string_literal_argument`).
+/// Closes false-positive routes a naive byte search over raw source has
+/// (round-4/round-5 review, F3, reintroduced by this check's own first
+/// draft, then again by its first masking fix): (a) a comment merely
+/// MENTIONING `include_str!(...)` as documentation must not be treated as
+/// a real call; (b) the same mechanism applies to an unrelated string
+/// literal (ordinary OR byte OR raw OR raw-byte) that happens to contain
+/// that text. This is a pure LEXICAL pass — comment/string BOUNDARY
+/// recognition, not a parser and not a semantic model of what the code
+/// does; it never evaluates `concat!`/`env!`/any other non-literal path
+/// construction (see `validate_source_include_targets_stay_within_export`'s
+/// doc comment for the still-accepted, deliberate gaps).
 fn mask_comments_and_strings_for_search(source: &[u8]) -> Vec<u8> {
     let mut out = source.to_vec();
     let n = source.len();
@@ -812,62 +893,20 @@ fn mask_comments_and_strings_for_search(source: &[u8]) -> Vec<u8> {
                 }
             }
             out[start..i].fill(b' ');
-        } else if source[i] == b'"' {
+        } else if let Some((is_raw, quote_pos, hashes)) = string_literal_start(source, i) {
             let start = i;
-            i += 1;
-            while i < n {
-                if source[i] == b'\\' && i + 1 < n {
-                    i += 2;
-                    continue;
-                }
-                if source[i] == b'"' {
-                    i += 1;
-                    break;
-                }
-                i += 1;
+            i = if is_raw {
+                skip_raw_string_from_quote(source, quote_pos, hashes)
+            } else {
+                skip_ordinary_string_from_quote(source, quote_pos)
             }
-            out[start..i].fill(b' ');
-        } else if source[i] == b'r' && is_raw_string_start(source, i) {
-            let start = i;
-            i = skip_raw_string(source, i);
+            .unwrap_or(n); // unterminated: mask to EOF; the file will fail to compile for the same reason
             out[start..i].fill(b' ');
         } else {
             i += 1;
         }
     }
     out
-}
-
-/// Advances past a raw string literal starting at `start` (which must
-/// satisfy `is_raw_string_start`), returning the index one past its
-/// closing delimiter — or `source.len()` if unterminated (the file itself
-/// will fail to compile for the same reason; masking simply stops there).
-fn skip_raw_string(source: &[u8], start: usize) -> usize {
-    let n = source.len();
-    let mut i = start + 1;
-    let mut hashes = 0usize;
-    while i < n && source[i] == b'#' {
-        hashes += 1;
-        i += 1;
-    }
-    if i >= n || source[i] != b'"' {
-        return start + 1; // not actually well-formed; caller's is_raw_string_start already checked, but stay safe
-    }
-    i += 1;
-    loop {
-        let Some(rel) = source[i..].iter().position(|&b| b == b'"') else {
-            return n;
-        };
-        let quote_at = i + rel;
-        let closes = source
-            .get(quote_at + 1..quote_at + 1 + hashes)
-            .map(|s| s.iter().all(|&b| b == b'#'))
-            .unwrap_or(false);
-        if closes {
-            return quote_at + 1 + hashes;
-        }
-        i = quote_at + 1;
-    }
 }
 
 /// Parses a string-literal-or-raw-string-literal argument beginning at
@@ -878,64 +917,47 @@ fn skip_raw_string(source: &[u8], start: usize) -> usize {
 /// `\\`→`\` are undone and every OTHER escape sequence is left as literal
 /// text (enough to correctly see a path's `.`/`..`/`/` structure without a
 /// full escape-sequence implementature) — together with the offset one
-/// past the literal's closing delimiter. `None` if `start` begins neither
-/// literal form, or it is unterminated.
+/// past the literal's closing delimiter. Deliberately does NOT accept a
+/// byte-string prefix (`b"..."`/`br"..."`): none of `include_str!`/
+/// `include_bytes!`/`include!` accept one as their path argument — only
+/// `string_literal_start`'s BYTE-STRING recognition matters here, and only
+/// for correctly skipping one elsewhere in the file during masking.
+/// `None` if `start` begins neither literal form, or it is unterminated.
 fn extract_string_literal_argument(content: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
-    let n = content.len();
-    if start >= n {
+    // Reject a byte-string prefix by its FIRST byte, not by comparing
+    // `quote_pos` to `start`: `string_literal_start` also advances
+    // `quote_pos` past `start` for a bare `r"..."` raw string (no `b`
+    // involved at all), so that comparison alone can't tell the two
+    // apart — an earlier draft of this check used it and rejected every
+    // legitimate raw string as a result.
+    if content.get(start) == Some(&b'b') {
         return None;
     }
-    if content[start] == b'r' && is_raw_string_start(content, start) {
-        let mut i = start + 1;
-        let mut hashes = 0usize;
-        while i < n && content[i] == b'#' {
-            hashes += 1;
+    let (is_raw, quote_pos, hashes) = string_literal_start(content, start)?;
+    if is_raw {
+        let end = skip_raw_string_from_quote(content, quote_pos, hashes)?;
+        return Some((content[quote_pos + 1..end - 1 - hashes].to_vec(), end));
+    }
+    let end = skip_ordinary_string_from_quote(content, quote_pos)?;
+    let mut out = Vec::new();
+    let mut i = quote_pos + 1;
+    while i < end - 1 {
+        if content[i] == b'\\' && i + 1 < end - 1 {
+            match content[i + 1] {
+                b'"' => out.push(b'"'),
+                b'\\' => out.push(b'\\'),
+                other => {
+                    out.push(b'\\');
+                    out.push(other);
+                }
+            }
+            i += 2;
+        } else {
+            out.push(content[i]);
             i += 1;
         }
-        let body_start = i + 1;
-        let mut j = body_start;
-        loop {
-            let rel = content[j..].iter().position(|&b| b == b'"')?;
-            let quote_at = j + rel;
-            let closes = content
-                .get(quote_at + 1..quote_at + 1 + hashes)
-                .map(|s| s.iter().all(|&b| b == b'#'))
-                .unwrap_or(false);
-            if closes {
-                return Some((
-                    content[body_start..quote_at].to_vec(),
-                    quote_at + 1 + hashes,
-                ));
-            }
-            j = quote_at + 1;
-        }
     }
-    if content[start] == b'"' {
-        let mut out = Vec::new();
-        let mut i = start + 1;
-        while i < n {
-            match content[i] {
-                b'\\' if i + 1 < n => {
-                    match content[i + 1] {
-                        b'"' => out.push(b'"'),
-                        b'\\' => out.push(b'\\'),
-                        other => {
-                            out.push(b'\\');
-                            out.push(other);
-                        }
-                    }
-                    i += 2;
-                }
-                b'"' => return Some((out, i + 1)),
-                b => {
-                    out.push(b);
-                    i += 1;
-                }
-            }
-        }
-        return None;
-    }
-    None
+    Some((out, end))
 }
 
 /// A-R-4 (round-2/round-4 review, F4): an `include_str!`/`include_bytes!`/
@@ -1034,10 +1056,20 @@ fn validate_source_include_targets_stay_within_export(
                 while j < content.len() && content[j].is_ascii_whitespace() {
                     j += 1;
                 }
+                if j < content.len() && content[j] == b',' {
+                    // A trailing comma after the sole argument is valid
+                    // Rust for a macro call (round-5 review, F4:
+                    // `include_str!("...",)`) — accept it before requiring
+                    // the closing `)`.
+                    j += 1;
+                    while j < content.len() && content[j].is_ascii_whitespace() {
+                        j += 1;
+                    }
+                }
                 if j >= content.len() || content[j] != b')' {
                     // Not a single bare-literal argument — e.g. a second
-                    // argument follows, or an expression rather than a
-                    // literal closes the call. Out of scope; see the doc
+                    // real argument follows, or an expression rather than
+                    // a literal closes the call. Out of scope; see the doc
                     // comment above.
                     continue;
                 }
