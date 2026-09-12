@@ -1765,6 +1765,57 @@ class NestedAndEscapedCredentialsRedactedBeforeSerialization(unittest.TestCase):
         )
 
 
+class PreExistingEscapedDelimiterStillRedacted(unittest.TestCase):
+    """A-R2 (ledger arrra-hex-pr-12-r4, round 4, major) —
+    NestedAndEscapedCredentialsRedactedBeforeSerialization covers the case
+    where THIS exporter's own json.dumps()/str() introduces the escaped
+    control character. It does not cover a raw string that ALREADY embeds
+    that escaped form before redact() ever sees it — the normal shape of a
+    narrator log quoting a tool's own JSON-encoded output. redact() runs on
+    that raw string leaf too (via _redact_deep), and the same alphanumeric
+    lookbehind sees the literal "n"/"t" from the pre-existing escape and
+    blocks the match identically."""
+
+    def test_raw_string_with_preexisting_escaped_newline_before_token_is_redacted(self):
+        m = load_script()
+        token = "sk-proj-" + "A" * 40
+        raw = 'tool said: {"key": "\\n' + token + '"}'
+        rec = {
+            "runId": "wf_ar2raw1",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": raw,
+            "logs": [raw],
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(token, report, "credential preceded by a pre-existing escaped newline survived")
+
+    def test_raw_string_with_preexisting_escaped_tab_before_token_is_redacted(self):
+        m = load_script()
+        token = "ghp_" + "B" * 36
+        raw = "line\\t" + token
+        rec = {
+            "runId": "wf_ar2raw2",
+            "workflowName": "wf",
+            "status": "completed",
+            "result": raw,
+            "logs": [raw],
+        }
+        report = m.build_report(rec, "/tmp/fake/path.json", [])
+        self.assertNotIn(token, report, "credential preceded by a pre-existing escaped tab survived")
+
+    def test_prose_near_misses_still_untouched(self):
+        # The escape-aware boundary must not widen to plain "n"/"t"/etc.
+        # letters -- only an actual backslash immediately before them.
+        m = load_script()
+        for text in [
+            "task-review-changes-and-summarize",
+            "risk-assessment-and-mitigation-plan",
+            "let's prioritize the risky-migration tasks before Friday",
+        ]:
+            self.assertEqual(m.redact(text), text, f"{text!r} was mangled by redaction")
+
+
 class StructuredPathConsumedAsCompleteValue(unittest.TestCase):
     """F7/F16 (round 2) — an explicit structured path field (repo, path,
     cwd, ...) was still pushed through the free-text extractor, which

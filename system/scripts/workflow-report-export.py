@@ -90,21 +90,38 @@ LOG_CAP = 150
 # complete credential leaked verbatim. Match the sk- lookbehind's boundary
 # on every alternative: block only when glued onto another alnum character,
 # never on "_"/"-".
+#
+# A-R2 (spec review round 4) — _redact_deep() redacts each string leaf
+# before it is ever serialized (round 2's F1 fix), but that only helps when
+# THIS exporter's own json.dumps()/str() is what introduces the escaped
+# control character. A raw string leaf can ALREADY contain that escaped
+# form before redact() ever sees it — the ordinary shape of a narrator log
+# quoting a tool's own JSON-encoded output, e.g. the two literal characters
+# backslash-n sitting directly in front of "sk-proj-..." because the log
+# text itself embeds already-escaped JSON. The plain alphanumeric
+# lookbehind sees the letter "n" (or "t", "r", "f", "b") from that escape
+# and blocks the match identically, regardless of when the escaping
+# happened. Accept the boundary either when nothing alphanumeric precedes
+# (the existing rule) or when the two characters immediately before are a
+# backslash followed by one of the control-character escape letters — a
+# combination that does not occur in ordinary hyphenated prose next to any
+# of these prefixes.
+_BOUNDARY = r"(?:(?<![A-Za-z0-9])|(?<=\\[ntrfb]))"
 SECRET_RE = re.compile(
-    r"(?<![A-Za-z0-9])sk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}"
-    r"|(?<![A-Za-z0-9])github_pat_[A-Za-z0-9_]{20,}"
-    r"|(?<![A-Za-z0-9])gh[pousr]_[A-Za-z0-9]{20,}"
-    r"|(?<![A-Za-z0-9])xox[abps]-[A-Za-z0-9-]{10,}"
-    r"|(?<![A-Za-z0-9])AKIA[A-Z0-9]{12,}"
+    _BOUNDARY + r"sk-(?:ant-|proj-|live-|test-)?[A-Za-z0-9_-]{20,}"
+    r"|" + _BOUNDARY + r"github_pat_[A-Za-z0-9_]{20,}"
+    r"|" + _BOUNDARY + r"gh[pousr]_[A-Za-z0-9]{20,}"
+    r"|" + _BOUNDARY + r"xox[abps]-[A-Za-z0-9-]{10,}"
+    r"|" + _BOUNDARY + r"AKIA[A-Z0-9]{12,}"
     r"|Bearer [A-Za-z0-9._-]{20,}"
-    r"|(?<![A-Za-z0-9])pit-[a-f0-9-]{20,}"
+    r"|" + _BOUNDARY + r"pit-[a-f0-9-]{20,}"
     # F1 (reviewer A) — the lookbehind excluded a preceding "_", and the
     # alternation was case-sensitive, so underscore-compound names
     # (api_key=, client_secret=, access_token=) and uppercase names
     # (API_KEY=) all survived. Allow "_" immediately before the key name
     # (block only a preceding alnum, same boundary as every other
     # alternative above) and match the key name case-insensitively.
-    r"|(?<![A-Za-z0-9])(?i:key|token|password|secret)=\S+"
+    r"|" + _BOUNDARY + r"(?i:key|token|password|secret)=\S+"
     r"|-----BEGIN [A-Z ]*PRIVATE KEY-----[\s\S]*?-----END [A-Z ]*PRIVATE KEY-----"
 )
 
