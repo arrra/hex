@@ -1591,6 +1591,146 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_never_creates_directories_or_symlinks_outside_the_export_root() {
+        // Workflow ledger (final round): pass 2's `create_dir_all(parent)`
+        // FOLLOWS an already-materialized, case-folded symlink at an
+        // intermediate path component — not just a regular file's
+        // `fs::write` (B-R1, the sibling test above) — so `mkdir`/`symlink`
+        // themselves could land a real directory and a real symlink
+        // OUTSIDE the export root before `verify_symlinks_resolve_within_export`'s
+        // batched check ever ran. Exact probe shape from the finding's
+        // evidence: `Link_Identity -> .` (exact case) and
+        // `A -> link_identity/../../../<sibling>` (referencing
+        // `Link_Identity` only via a case-folded lowercase spelling the
+        // lexical exact-byte check misses) sort, in `git ls-tree` order,
+        // before `a/b/link -> ../../Cargo.toml` — whose own parent
+        // directory `a/b` case-folds onto the escaping symlink `A` once
+        // pass 2 has already materialized it. Built with `git update-index
+        // --cacheinfo` so `A`/`a` never have to coexist on the actual
+        // fixture-repo working tree.
+        let sibling = tempfile::tempdir().unwrap();
+        let sibling_name = sibling
+            .path()
+            .file_name()
+            .expect("temp dir has a name")
+            .to_str()
+            .expect("utf8 temp dir name")
+            .to_string();
+
+        let tmp = tempfile::tempdir().unwrap();
+        if !filesystem_is_case_insensitive(tmp.path()) {
+            eprintln!(
+                "skipping test_export_committed_head_never_creates_directories_or_symlinks_outside_the_export_root: \
+                 this fixture's case-folded escape only exists on a case-insensitive filesystem"
+            );
+            return;
+        }
+        run_git(tmp.path(), &["init", "-q"]);
+        std::fs::create_dir_all(tmp.path().join(".hex/harness")).unwrap();
+
+        let hash_object = |content: &[u8]| -> String {
+            let scratch = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(scratch.path(), content).unwrap();
+            let output = std::process::Command::new("git")
+                .args(["hash-object", "-w", scratch.path().to_str().unwrap()])
+                .current_dir(tmp.path())
+                .output()
+                .expect("git hash-object spawns");
+            assert!(output.status.success());
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        let manifest_sha = hash_object(HEX_HARNESS_MANIFEST.as_bytes());
+        let lockfile_sha = hash_object(HEX_HARNESS_LOCKFILE.as_bytes());
+        let identity_sha = hash_object(b".");
+        let escape_target = format!("link_identity/../../../{sibling_name}");
+        let escape_sha = hash_object(escape_target.as_bytes());
+        let nested_link_sha = hash_object(b"../../Cargo.toml");
+        let lib_rs_sha = hash_object(b"pub fn f() -> i32 { 1 }\n");
+
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{manifest_sha},.hex/harness/Cargo.toml"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{lockfile_sha},.hex/harness/Cargo.lock"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("120000,{identity_sha},.hex/harness/Link_Identity"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("120000,{escape_sha},.hex/harness/A"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("120000,{nested_link_sha},.hex/harness/a/b/link"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{lib_rs_sha},.hex/harness/src/lib.rs"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fixture: mkdir/symlink escape via case-folded chained identity hop",
+            ],
+        );
+
+        let _ =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+
+        let escaped_dir = sibling.path().join("b");
+        let escaped_link = escaped_dir.join("link");
+        assert!(
+            !escaped_dir.exists() && std::fs::symlink_metadata(&escaped_link).is_err(),
+            "a case-folded escaping symlink chain must never let \
+             `create_dir_all`/`symlink` materialize a directory or link \
+             OUTSIDE the export root, regardless of whether the export \
+             call itself ultimately returns Ok or Err: dir exists={}, \
+             link exists={}",
+            escaped_dir.exists(),
+            std::fs::symlink_metadata(&escaped_link).is_ok()
+        );
+    }
+
     #[test]
     fn test_harness_buildable_still_fails_when_a_failing_build_script_mentions_offline_wording() {
         // G4 (review_b, round 2): the original G4 fixture above only
