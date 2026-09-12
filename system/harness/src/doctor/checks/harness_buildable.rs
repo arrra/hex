@@ -688,6 +688,58 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
     // `symlink_metadata` never follows the final component, so it reports
     // the collision itself rather than whatever a followed symlink points
     // at.
+    // Creates every directory a committed entry's path needs, one
+    // component at a time, checking the REAL on-disk entry at each level
+    // with `symlink_metadata` (never `metadata`, which follows the final
+    // component, and never `create_dir_all`, which silently traverses
+    // whatever already sits at an intermediate component) before creating
+    // anything past it. This is what stops a directory needed by one
+    // committed path from ever being created THROUGH a symlink already
+    // materialized for a DIFFERENT committed path: on a case- or
+    // Unicode-normalization-insensitive filesystem (macOS APFS by
+    // default), a later entry's parent directory can fold onto an
+    // earlier entry's symlink name even though the two differ in
+    // spelling — `create_dir_all` would follow that symlink to wherever
+    // ITS target resolves and create the remaining components there,
+    // landing a real directory (and, for a symlink entry, the symlink
+    // itself) OUTSIDE the export root before any batched check ever ran
+    // (workflow ledger, final round: pass 2's `create_dir_all` did
+    // exactly this). Walking one level at a time and refusing the moment
+    // a non-directory sits where a directory is needed closes that off:
+    // nothing below can ever hand `create_dir`/`symlink` a path whose
+    // ancestors are anything other than directories already verified, by
+    // this same walk, to be real and inside the export root.
+    let ensure_dir_within_export = |rel_dir: &Path| -> Result<(), String> {
+        let mut current = tempdir.path().to_path_buf();
+        for component in rel_dir.components() {
+            let std::path::Component::Normal(segment) = component else {
+                continue;
+            };
+            current.push(segment);
+            match std::fs::symlink_metadata(&current) {
+                Ok(meta) if meta.is_dir() => {}
+                Ok(_) => {
+                    return Err(format!(
+                        "a directory needed by a committed path collides, \
+                         on this filesystem, with a different committed \
+                         path's entry already materialized at {} (a case- \
+                         or Unicode-normalization-insensitive filesystem \
+                         folding two distinct committed names onto one \
+                         directory entry) — creating anything through it \
+                         could land real files or symlinks outside the \
+                         export root; refusing to export it",
+                        current.display()
+                    ));
+                }
+                Err(_) => {
+                    std::fs::create_dir(&current)
+                        .map_err(|e| format!("failed to create {}: {e}", current.display()))?;
+                }
+            }
+        }
+        Ok(())
+    };
+
     let refuse_if_dest_collides = |dest: &Path, entry_path: &str| -> Result<(), String> {
         if std::fs::symlink_metadata(dest).is_ok() {
             return Err(format!(
@@ -705,29 +757,23 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
     };
 
     // PASS 1: materialize every regular (non-symlink) entry FIRST, in
-    // `git ls-tree` order — before ANY symlink is created. A regular
-    // file's `create_dir_all(parent)`/`fs::write` FOLLOWS an existing
-    // symlink at any intermediate path component (there is no way to make
-    // either syscall refuse to traverse a symlink it did not itself
-    // create); if a committed DIRECTORY symlink already existed on disk
-    // here, a case- or Unicode-normalization-folded intermediate
-    // component could silently redirect this write to a different,
-    // already-materialized location entirely — reading a real file's
-    // bytes into the wrong committed path (round-4 review, A-R1), or
-    // (round-4 review, B-R1) straight through a symlink that itself
-    // escapes the export root, landing real committed bytes OUTSIDE it
-    // before any later check could refuse the export. With no symlink
-    // materialized yet, `create_dir_all`/`fs::write` below can only ever
-    // create REAL directories and REAL files, entirely inside the export
-    // root.
+    // `git ls-tree` order — before ANY symlink is created. `fs::write`
+    // itself still follows an existing symlink at the LEAF (O_TRUNC
+    // through it) — that is what `refuse_if_dest_collides` below guards
+    // against — but `ensure_dir_within_export` above rules out the same
+    // hazard for every INTERMEDIATE path component, on both the real and
+    // (round-4 review, A-R1/B-R1) the case-/Unicode-normalization-folded
+    // filesystem alike: it refuses the moment a non-directory sits where
+    // a directory is needed, rather than traversing through it the way
+    // `create_dir_all` would. With no symlink materialized yet in pass 1,
+    // this can only ever find real directories or nothing at all.
     for (entry, content) in entries.iter().zip(contents.iter()) {
         if entry.mode == "120000" {
             continue;
         }
         let dest = tempdir.path().join(&entry.path);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+        if let Some(parent) = Path::new(&entry.path).parent() {
+            ensure_dir_within_export(parent)?;
         }
         refuse_if_dest_collides(&dest, &entry.path)?;
         std::fs::write(&dest, content.as_slice())
@@ -744,33 +790,34 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
         }
     }
 
-    // PASS 2: materialize every committed symlink. Because pass 1 already
-    // wrote every real file, NOTHING below ever runs `fs::write` again —
-    // `symlink()` only ever creates a link entry, it never copies bytes
-    // through wherever that link's target resolves — so even an entry
-    // that turns out to escape can only ever leave a dangling/escaping
-    // LINK behind (removed wholesale when the caller's `TempDir` guard
-    // drops), never smuggle real committed content outside the root the
-    // way pass 1 running after symlinks did (round-4 review, B-R1). A
-    // per-entry realpath check right here (rather than batched after this
-    // whole pass) would be premature: one committed symlink's chain can
-    // depend on ANOTHER committed symlink that this loop has not reached
-    // yet (`git ls-tree` order is lexical, not dependency order — e.g. a
-    // `link_escape` entry sorting before the `link_identity` entry its own
-    // target chains through), so `verify_symlinks_resolve_within_export`
-    // below still runs once, after every symlink in this pass exists —
-    // but that is still strictly before pass 3 would exist, because there
-    // isn't one: no `fs::write` of real content ever runs again after
-    // this point, so "before any byte lands outside the export" (B-R1) is
-    // already guaranteed by pass 1/pass 2 ordering alone.
+    // PASS 2: materialize every committed symlink. `ensure_dir_within_export`
+    // rules out the mkdir-follows-an-earlier-symlink hazard the same way
+    // it does in pass 1 — an entry whose parent directory case-folds onto
+    // a symlink pass 2 already created this same pass (workflow ledger,
+    // final round: this is exactly how `create_dir_all` used to land a
+    // real directory and a real symlink OUTSIDE the export root, before
+    // `verify_symlinks_resolve_within_export` below ever ran) now refuses
+    // at that intermediate component instead of traversing through it.
+    // `refuse_if_dest_collides` still guards the LEAF the same way it does
+    // for a regular file. `symlink()` itself only ever creates a link
+    // entry — it never copies bytes through wherever the target resolves
+    // — so with both the directory chain and the leaf guarded, nothing
+    // below this point can place any filesystem entry outside the export
+    // root; a symlink whose TARGET (not its own destination) resolves
+    // outside the root can still be materialized here (its chain may
+    // depend on another committed symlink this loop has not reached yet —
+    // `git ls-tree` order is lexical, not dependency order), which is
+    // exactly why `symlink_target_stays_within_export` below still gates
+    // the `symlink()` call itself, and `verify_symlinks_resolve_within_export`
+    // still runs once more after this whole pass as a second, real-
+    // filesystem-canonicalizing check.
     for (entry, content) in entries.iter().zip(contents.iter()) {
         if entry.mode != "120000" {
             continue;
         }
         let dest = tempdir.path().join(&entry.path);
-        if let Some(parent) = dest.parent() {
-            std::fs::create_dir_all(parent)
-                .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
+        if let Some(parent) = Path::new(&entry.path).parent() {
+            ensure_dir_within_export(parent)?;
         }
         refuse_if_dest_collides(&dest, &entry.path)?;
         let target = String::from_utf8_lossy(content).into_owned();
