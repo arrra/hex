@@ -221,12 +221,27 @@ pub fn apply_plan2(conn: &Connection) -> Result<()> {
             Ok(true)
         };
         match migrate() {
-            Ok(did) => {
-                conn.execute_batch("COMMIT")?;
-                if did {
-                    eprintln!("[schema] facts_fts widened to subject+predicate+object and rebuilt");
+            Ok(did) => match conn.execute_batch("COMMIT") {
+                Ok(()) => {
+                    if did {
+                        eprintln!(
+                            "[schema] facts_fts widened to subject+predicate+object and rebuilt"
+                        );
+                    }
                 }
-            }
+                Err(commit_err) => {
+                    // A-F8 (workflow wf_8e8c4033-b9f, PR #9 round-2 review):
+                    // mirrors the ROLLBACK-on-failed-COMMIT pattern
+                    // `rebuild_facts_vec_with_is_live` and consolidate.rs's
+                    // tombstone writers already use — a failed COMMIT here
+                    // left THIS connection sitting inside the widening
+                    // transaction, which `open_db`'s unconditional next call
+                    // to the REQUIRED `apply_plan3` on the SAME connection
+                    // would then hit with no open transaction allowed.
+                    let _ = conn.execute_batch("ROLLBACK");
+                    return Err(commit_err);
+                }
+            },
             Err(e) => {
                 let _ = conn.execute_batch("ROLLBACK");
                 return Err(e);
@@ -637,6 +652,101 @@ mod tests {
         assert_eq!(
             count, n as i64,
             "F8: every original row must survive the rollback + successful retry"
+        );
+    }
+
+    /// A-F8 (workflow wf_8e8c4033-b9f, PR #9 round-2 review, ledger id A-F8):
+    /// the F8 "roll back on a failed COMMIT" pattern was applied to
+    /// `rebuild_facts_vec_with_is_live` but NOT to the structurally
+    /// identical `facts_fts`-widening COMMIT in `apply_plan2`, reachable on
+    /// every `open_db()` call. Same construction as the sibling regression
+    /// above: a blocking reader in rollback-journal mode makes the widening
+    /// transaction's COMMIT fail with SQLITE_BUSY; the connection must roll
+    /// back to autocommit with the OLD object-only `facts_fts` intact, and a
+    /// retry on the same connection must then commit durably.
+    #[test]
+    fn facts_fts_widening_rolls_back_on_failed_commit_and_retry_persists_durably() {
+        crate::memory::vector::register_sqlite_vec();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let conn = Connection::open(&db_path).unwrap();
+        apply_plan1_baseline_for_test(&conn).unwrap();
+        conn.execute_batch(PLAN2_DDL).unwrap();
+        conn.execute_batch(PLAN2_VEC_DDL).unwrap();
+        // Old shape: object-only external-content fts (needs widening).
+        conn.execute_batch(
+            "CREATE VIRTUAL TABLE facts_fts USING fts5(
+                object, content=facts, content_rowid=rowid,
+                tokenize='porter unicode61'
+            );
+            CREATE TRIGGER facts_fts_ai AFTER INSERT ON facts BEGIN
+                INSERT INTO facts_fts(rowid, object) VALUES (new.rowid, new.object);
+            END;",
+        )
+        .unwrap();
+        conn.execute(
+            "INSERT INTO facts (id,subject,predicate,object,created_at,updated_at)
+             VALUES ('f1','Zwerk','is','an agent platform','2026-01-01','2026-01-01')",
+            [],
+        )
+        .unwrap();
+
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mode, "delete",
+            "test setup: must be off WAL to reproduce a commit-time lock-upgrade failure"
+        );
+        conn.busy_timeout(std::time::Duration::from_millis(0))
+            .unwrap();
+
+        // A second connection holding an open read transaction: its SHARED
+        // lock lets `conn`'s BEGIN IMMEDIATE (RESERVED) proceed, then blocks
+        // the widening COMMIT's RESERVED->EXCLUSIVE upgrade.
+        let conn2 = Connection::open(&db_path).unwrap();
+        conn2.execute_batch("BEGIN;").unwrap();
+        let _: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+
+        let result = apply_plan2(&conn);
+        assert!(
+            result.is_err(),
+            "a blocked widening COMMIT must surface as an error, not a silent success"
+        );
+        assert!(
+            conn.is_autocommit(),
+            "A-F8: a failed widening COMMIT must roll back, restoring the              connection's entry (autocommit) state, not leave the              transaction open"
+        );
+        assert!(
+            facts_fts_needs_widening(&conn).unwrap(),
+            "A-F8: a real rollback restores the OLD object-only facts_fts (no `subject` column), so needs_widening must read true again — false here would mean the DROP TABLE landed without its matching CREATE, an even worse half-migrated state"
+        );
+
+        // Let the blocking reader go, then a retry on the SAME connection
+        // must commit durably.
+        conn2.execute_batch("COMMIT;").unwrap();
+        drop(conn2);
+
+        apply_plan2(&conn).unwrap();
+        assert!(
+            !facts_fts_needs_widening(&conn).unwrap(),
+            "A-F8: the retry must actually widen facts_fts"
+        );
+
+        drop(conn);
+        let reopened = Connection::open(&db_path).unwrap();
+        let post: i64 = reopened
+            .query_row(
+                "SELECT COUNT(*) FROM facts_fts WHERE facts_fts MATCH 'zwerk'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            post, 1,
+            "A-F8: the retry must persist durably — a fresh connection must              see the widened, subject-searchable index with the original row"
         );
     }
 
