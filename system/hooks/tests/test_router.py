@@ -3221,6 +3221,66 @@ class TestEffectiveCheckoutAfterReservedWordsAndWrappers(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestQuotedGlobalOptionArgumentWithASpace(RouterTestCase):
+    """F3 (round 2 review, major) — `_GIT_GLOBAL_OPTS`'s argument
+    alternatives (`-C\\s+\\S+`, `-c\\s+\\S+`, `--git-dir=\\S+`,
+    `--work-tree=\\S+`) all consume only up to the first WHITESPACE
+    character. `git -C '/shared/my repo' stash` leaves `repo` (plus the
+    now-blanked closing quote) unconsumed after `\\S+` stops at the space
+    inside the quoted path, so the compiled rule regex can neither loop
+    back for another global option nor reach the `stash` subcommand
+    alternation from there — the WHOLE match fails and the router
+    abstains entirely rather than denying a real invocation.
+
+    Fix: `_widen_quoted_global_opt_args` rewrites `scan_text`, replacing
+    every INTERNAL space of such a quoted argument's value with a `\\S`-
+    matching placeholder byte, using the `quote_spans` `executable_mask`
+    already collected — so `\\S+` consumes the whole quoted value as one
+    token, exactly like a real shell does."""
+
+    def test_dash_capital_c_quoted_path_with_a_space_still_denies_stash(self):
+        cmd = "git -C '/shared/my repo' stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_dash_capital_c_quoted_path_with_a_space_still_asks_force_push(self):
+        cmd = "git -C '/shared/my repo' push --force"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_dash_lowercase_c_quoted_value_with_a_space_still_denies_stash(self):
+        cmd = "git -c 'user.name=A B' stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_git_dir_quoted_value_with_a_space_still_denies_stash(self):
+        cmd = "git --git-dir='/shared/my repo/.git' stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_unquoted_dash_capital_c_path_still_denies(self):
+        # Regression guard: the widening pass must not disturb the
+        # ordinary UNQUOTED case, which `\S+` already handled correctly.
+        cmd = "git -C /shared/checkout stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 class TestReservedWordAnchorIgnoresQuotedMentions(RouterTestCase):
     """F2 (round 2 review, major) — `_RESERVED_LEADIN` ("if|then|elif|
     else|while|until|do") is a plain alternative in `_CMD_PREFIX`, with no

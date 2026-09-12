@@ -315,6 +315,71 @@ _CMD_PREFIX = (
 # `--work-tree=...`, any number of times.
 _GIT_GLOBAL_OPTS = r"(?:(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+)\s+)*"
 
+# F3 (round 2 review, major): the argument alternatives above are all
+# `\S+` -- they consume only up to the first WHITESPACE character. A
+# quoted argument containing a space (`-C '/shared/my repo'`,
+# `-c 'user.name=A B'`) leaves the remainder of the quoted value
+# unconsumed, so the compiled rule regex fails to match AT ALL from that
+# point on (it can neither loop back for another global option, since the
+# leftover text isn't one, nor reach the subcommand alternation, since the
+# leftover text isn't that either) -- the whole invocation abstains rather
+# than denying/asking. `_GIT_OPT_TAKING_ARG` names the flags this applies
+# to; `_widen_quoted_global_opt_args` (below) rewrites `scan_text` so
+# `\S+` can consume past such an argument's internal spaces as one run.
+_GIT_OPT_TAKING_ARG = ("-C", "-c", "--git-dir=", "--work-tree=")
+
+
+def _widen_quoted_global_opt_args(text, scan_text, quote_spans):
+    """Returns a copy of `scan_text` with every INTERNAL space of a
+    QUOTED `-C`/`-c`/`--git-dir=`/`--work-tree=` argument value replaced
+    with `\\x01` -- a byte `\\S` still matches, so `_GIT_GLOBAL_OPTS`'s
+    `\\S+` alternatives can consume the whole quoted value as one token
+    exactly the way a real shell treats it as one argument. Never changes
+    `scan_text`'s length, so every other position-based computation
+    downstream (sep_positions, paren_depths, quote_spans itself) stays
+    valid unchanged.
+
+    Uses `quote_spans` (already collected by `executable_mask`) rather
+    than re-deriving quote boundaries: for each occurrence of one of
+    these flags in the ORIGINAL `text` (found there, not in `scan_text`,
+    since a quote's own delimiter characters are already blanked to
+    spaces by the time `scan_text` exists), checks whether a recorded
+    span starts EXACTLY at the argument's first character — i.e. the
+    argument genuinely opens with a quote, immediately after the flag
+    (and its own `=`, for the two long-option forms) or after `-C`/`-c`
+    plus whitespace. An unquoted argument (no span starts there) is left
+    untouched; `\\S+` already handles it correctly."""
+    out = list(scan_text)
+
+    def _widen_span_if_quoted_at(arg_start):
+        for q_start, q_end in quote_spans:
+            if q_start == arg_start:
+                for k in range(q_start, q_end):
+                    if out[k] == " ":
+                        out[k] = "\x01"
+                return
+
+    for opt in _GIT_OPT_TAKING_ARG:
+        search_from = 0
+        while True:
+            idx = text.find(opt, search_from)
+            if idx == -1:
+                break
+            search_from = idx + len(opt)
+            # Boundary check: `opt` must not be the tail of a longer
+            # token (e.g. the "-C" inside some other flag spelling).
+            if idx > 0 and (text[idx - 1].isalnum() or text[idx - 1] in "-_"):
+                continue
+            j = idx + len(opt)
+            if opt in ("-C", "-c"):
+                # These take a SEPARATE argument after whitespace; the
+                # long `--...=` forms glue the value on with no space.
+                while j < len(text) and text[j] == " ":
+                    j += 1
+            _widen_span_if_quoted_at(j)
+
+    return "".join(out)
+
 
 def _expand_placeholders(pattern):
     return pattern.replace("@PREFIX@", _CMD_PREFIX).replace("@GITOPTS@", _GIT_GLOBAL_OPTS)
@@ -1830,6 +1895,8 @@ def evaluate(payload):
     # (file paths/content) isn't Bash syntax, so it is used as-is.
     quote_spans = []
     scan_text = executable_mask(text, quote_spans) if tool_name == "Bash" else text
+    if tool_name == "Bash":
+        scan_text = _widen_quoted_global_opt_args(text, scan_text, quote_spans)
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
     paren_depths = _paren_depths(scan_text)
     cd_reach_starts, cd_reach_infos = _precompute_cd_reach_info(
