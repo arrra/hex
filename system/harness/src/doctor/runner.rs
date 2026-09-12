@@ -2077,6 +2077,81 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_export_committed_head_refuses_an_absolute_include_str_target() {
+        // A-R-4 (round-2 review, F4): a committed `include_str!` naming an
+        // ABSOLUTE path is resolved by `rustc` directly against the real
+        // filesystem, bypassing this export entirely. If a file happens to
+        // exist at that path on THIS machine, `cargo check` would succeed
+        // against content the commit never actually contains — a false
+        // PASS. This must be refused before compilation ever runs, exactly
+        // like an escaping committed symlink is refused.
+        let (tmp, harness) = init_repo_for_export_tests();
+        // A real, host-local file that exists independently of anything
+        // this commit tracks — the adversarial "coincidentally exists on
+        // this machine" file the finding describes.
+        let external = tmp.path().join("outside-the-repo.txt");
+        std::fs::write(&external, "not part of any commit").unwrap();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            format!(
+                "pub const DATA: &str = include_str!(\"{}\");\n",
+                external.display()
+            ),
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &["commit", "-q", "-m", "add absolute include_str! target"],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "an absolute include_str! target must refuse the export, never \
+             silently succeed by reading the real filesystem",
+        );
+        assert!(
+            err.contains("include_str!") && err.contains("outside this export's root"),
+            "error must name the escaping include! call and explain why, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_refuses_a_cargo_path_dependency_escaping_the_export() {
+        // A-R-4 (round-2 review, F4): a committed `Cargo.toml` path
+        // dependency that climbs, via `..`, above the export root is
+        // resolved by `cargo` directly against the real filesystem — same
+        // hazard, same remedy, for manifests instead of source files.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("Cargo.toml"),
+            "[package]\nname = \"fixture-harness\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [dependencies]\nescaping-dep = { path = \"../../../../outside-the-repo\" }\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &["commit", "-q", "-m", "add escaping path dependency"],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "a Cargo path dependency resolving outside the export root must \
+             refuse the export, never silently succeed by reading the real \
+             filesystem",
+        );
+        assert!(
+            err.contains("escaping-dep") && err.contains("outside this export's root"),
+            "error must name the escaping dependency and explain why, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_export_committed_head_never_runs_filters_so_fabricated_modules_still_fail() {
         // (c) `src/lib.rs` declares `mod missing_dep;` whose file is
         // genuinely untracked. A locally configured filter would, on an
