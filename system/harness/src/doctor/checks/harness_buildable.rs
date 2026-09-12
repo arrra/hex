@@ -569,9 +569,21 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
             .ok_or("malformed `git ls-tree` entry (no sha)")?
             .to_string();
         // Gitlinks (submodule references, mode 160000) name a commit in
-        // another repository, not a blob this export can materialize.
+        // another repository, not a blob this export can materialize —
+        // `git cat-file --batch` against THIS repo's own object database
+        // can never read it, submodule "initialized" or not. Silently
+        // skipping it would leave nothing at that path and let whatever
+        // downstream `cargo check` failure happens to result surface
+        // instead (F11): named up front as its own inconclusive WARN
+        // rather than a confusing generic cargo error, or a false PASS if
+        // the missing path happens to be unreferenced by the build.
         if mode == "160000" {
-            continue;
+            return Err(format!(
+                "committed path {path} is a git submodule reference (a \
+                 gitlink) that is not initialized in this checkout — this \
+                 export cannot materialize its content at all; fix: git \
+                 submodule update --init"
+            ));
         }
         entries.push(TreeEntry {
             mode,
