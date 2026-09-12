@@ -2279,4 +2279,59 @@ mod tests {
         // overriding both settings command-local.
         run_git(tmp.path(), &["commit", "-q", "-m", "fixture commit"]);
     }
+
+    /// F11 (re-added after the scanner deletion): a gitlink (git mode
+    /// `160000`) records a submodule REFERENCE only — its content lives
+    /// in a separate repository this export's `git cat-file --batch`
+    /// (this repo's own object database) can never read, regardless of
+    /// whether the submodule has been `git submodule update --init`'d in
+    /// any checkout. `export_committed_head` used to silently skip past a
+    /// gitlink entry, leaving nothing at that path and letting whatever
+    /// downstream `cargo check` failure happen to result surface instead
+    /// — a confusing generic cargo error rather than the real cause. It
+    /// must instead be named up front as an inconclusive WARN.
+    #[test]
+    fn test_harness_buildable_warns_naming_uninitialized_submodule_not_generic_cargo_error() {
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(harness.join("Cargo.toml"), HEX_HARNESS_MANIFEST).unwrap();
+        std::fs::write(harness.join("Cargo.lock"), HEX_HARNESS_LOCKFILE).unwrap();
+        std::fs::write(harness.join("src/lib.rs"), "pub fn f() -> i32 { 1 }\n").unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,1111111111111111111111111111111111111111,vendor/some-submodule",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fixture with an uninitialized submodule",
+            ],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+        assert_eq!(
+            result.status,
+            Status::Warn,
+            "a committed gitlink (git submodule reference) must WARN, \
+             never FAIL with whatever generic cargo error happens to \
+             result downstream: {result:?}"
+        );
+        let msg = result.message.to_lowercase();
+        assert!(
+            msg.contains("submodule"),
+            "the WARN must name the submodule as the cause, got: {}",
+            result.message
+        );
+    }
 }
