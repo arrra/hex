@@ -109,11 +109,20 @@ fn run_check_impl(
     env_overrides: &[(&str, &str)],
 ) -> CheckResult {
     let start = Instant::now();
+    // A-R-F14-1: the export below (ls-tree + cat-file, see
+    // `export_committed_head`) and the `cargo check` further down share
+    // this SAME deadline — `cargo check` gets whatever the export left
+    // over, never a second fresh `timeout`-sized window on top of it.
+    let deadline = start + timeout;
 
     // Export cleanup (success, failure, or panic-unwind) is handled by
     // `tempfile::TempDir`'s own `Drop` — `export` is the guard, and every
     // return path below simply lets it go out of scope.
-    let export = match export_committed_head(hex_dir, timeout) {
+    let export = match export_committed_head(
+        hex_dir,
+        deadline.saturating_duration_since(Instant::now()),
+        &[],
+    ) {
         Ok(e) => e,
         Err(e) => {
             return CheckResult::warn(format!(
@@ -161,16 +170,21 @@ fn run_check_impl(
         cmd.env(key, value);
     }
 
-    let output = match run_with_timeout(&mut cmd, timeout) {
-        Ok(o) => o,
-        Err(e) => {
-            return CheckResult::warn(format!(
-                "could not run `cargo check -p hex-harness --offline --locked` \
+    // A-R-F14-1: whatever remains of the SAME deadline the export above
+    // drew from — not a fresh `timeout`-sized window, which is exactly
+    // the gap that let a slow-but-successful export plus a
+    // slow-but-successful `cargo check` sum past the advertised cap.
+    let output =
+        match run_with_timeout(&mut cmd, deadline.saturating_duration_since(Instant::now())) {
+            Ok(o) => o,
+            Err(e) => {
+                return CheckResult::warn(format!(
+                    "could not run `cargo check -p hex-harness --offline --locked` \
                  to verify the harness builds from git — this is inconclusive, \
                  not a build failure: {e}"
-            ));
-        }
-    };
+                ));
+            }
+        };
 
     let elapsed = start.elapsed();
     if output.status.success() {
@@ -549,7 +563,19 @@ fn symlink_target_stays_within_export(
 /// working tree, index, and `.git` state are never touched. Returns the
 /// `TempDir` itself — its `Drop` removes the export unconditionally
 /// (success, failure, or panic-unwind), so it doubles as the cleanup guard.
-fn export_committed_head(repo_root: &Path, timeout: Duration) -> Result<tempfile::TempDir, String> {
+fn export_committed_head(
+    repo_root: &Path,
+    timeout: Duration,
+    env_overrides: &[(&str, &str)],
+) -> Result<tempfile::TempDir, String> {
+    // A-R-F14-1: ls-tree, cat-file --batch below share ONE wall-clock
+    // budget instead of each independently re-arming a fresh copy of
+    // `timeout` — three commands that are each individually fast enough
+    // to finish under the cap could otherwise sum to multiples of the
+    // advertised cap before anything is ever killed. Every call below
+    // uses whatever this deadline has left, never `timeout` itself again.
+    let deadline = Instant::now() + timeout;
+
     let tempdir = tempfile::Builder::new()
         .prefix("hex-doctor-harness-buildable-export-")
         .tempdir()
@@ -568,12 +594,21 @@ fn export_committed_head(repo_root: &Path, timeout: Duration) -> Result<tempfile
         // smudge filter would. `GIT_NO_REPLACE_OBJECTS` disables that
         // substitution for this process only.
         .env("GIT_NO_REPLACE_OBJECTS", "1");
-    // F14: bound under the SAME wall-clock cap as the `cargo check` this
-    // whole export feeds — a wedged `git` (lock contention, a hung
-    // globally configured credential helper) must never hang this health
-    // check any more than a wedged `cargo` can.
-    let ls_output = run_with_timeout(&mut ls_tree, timeout)
-        .map_err(|e| format!("git ls-tree -r HEAD failed to run: {e}"))?;
+    for (key, value) in env_overrides {
+        ls_tree.env(key, value);
+    }
+    // F14 / A-R-F14-1: bound by whatever remains of the shared deadline
+    // above, not a fresh `timeout`-sized window — a wedged `git` (lock
+    // contention, a hung globally configured credential helper) must
+    // never hang this health check any more than a wedged `cargo` can,
+    // and a merely-slow-but-successful `git` must not be able to eat into
+    // `cat-file --batch`'s (and, via `run_check_impl`, `cargo check`'s)
+    // own share of the SAME advertised cap.
+    let ls_output = run_with_timeout(
+        &mut ls_tree,
+        deadline.saturating_duration_since(Instant::now()),
+    )
+    .map_err(|e| format!("git ls-tree -r HEAD failed to run: {e}"))?;
     if !ls_output.status.success() {
         return Err(format!(
             "git ls-tree -r HEAD failed: {}",
@@ -639,12 +674,20 @@ fn export_committed_head(repo_root: &Path, timeout: Duration) -> Result<tempfile
         // substituted content instead of what `HEAD`'s tree actually
         // records.
         .env("GIT_NO_REPLACE_OBJECTS", "1");
+    for (key, value) in env_overrides {
+        batch_cmd.env(key, value);
+    }
     let shas: String = entries.iter().map(|e| format!("{}\n", e.sha)).collect();
-    // F14: same wall-clock cap as `ls-tree` above, via the stdin-capable
-    // variant — `run_with_timeout` alone can't feed this command the
-    // object-id stream it reads from stdin.
-    let batch_output = run_with_timeout_and_stdin(&mut batch_cmd, timeout, Some(shas.into_bytes()))
-        .map_err(|e| format!("git cat-file --batch failed to run: {e}"))?;
+    // F14 / A-R-F14-1: whatever remains of the SAME shared deadline
+    // `ls-tree` above drew from — never a fresh `timeout`-sized window —
+    // via the stdin-capable variant (`run_with_timeout` alone can't feed
+    // this command the object-id stream it reads from stdin).
+    let batch_output = run_with_timeout_and_stdin(
+        &mut batch_cmd,
+        deadline.saturating_duration_since(Instant::now()),
+        Some(shas.into_bytes()),
+    )
+    .map_err(|e| format!("git cat-file --batch failed to run: {e}"))?;
     if !batch_output.status.success() {
         return Err(format!(
             "git cat-file --batch exited with failure: {}",
@@ -942,20 +985,24 @@ pub(crate) fn export_committed_head_for_tests(
     // A generous, fixed timeout — every OTHER export test in this module
     // exercises correctness, not the wall-clock cap itself, so a tiny one
     // would just be one more way for those tests to flake on a slow CI
-    // runner. `export_committed_head_for_tests_with_timeout` below is the
-    // dedicated entry point for the F14 cap contract.
-    export_committed_head(repo_root, Duration::from_secs(120))
+    // runner. `export_committed_head_for_tests_with_timeout_and_env_override`
+    // below is the dedicated entry point for the F14/A-R-F14-1 cap
+    // contracts.
+    export_committed_head(repo_root, Duration::from_secs(120), &[])
 }
 
-/// Test-only entry point for the F14 wall-clock-cap contract: same as
-/// `export_committed_head_for_tests`, but lets a test inject a tiny
-/// `timeout` to assert the git ls-tree/cat-file plumbing this export runs
-/// is actually bounded by it (a wedged git process must never hang this
-/// health check any more than a wedged `cargo` can).
+/// Test-only entry point for the F14 / A-R-F14-1 wall-clock-cap contracts:
+/// same as `export_committed_head_for_tests`, but also lets a test
+/// override the environment (e.g. `PATH`, to point `git` at a wrapper
+/// script) for the `git ls-tree`/`git cat-file --batch` child processes
+/// this export runs, as a per-`Command` `cmd.env()` call — never the
+/// process-wide `std::env::set_var`, which would race every other test in
+/// this module that spawns `git` with no override of its own.
 #[cfg(test)]
-pub(crate) fn export_committed_head_for_tests_with_timeout(
+pub(crate) fn export_committed_head_for_tests_with_timeout_and_env_override(
     repo_root: &Path,
     timeout: Duration,
+    env_overrides: &[(&str, &str)],
 ) -> Result<tempfile::TempDir, String> {
-    export_committed_head(repo_root, timeout)
+    export_committed_head(repo_root, timeout, env_overrides)
 }
