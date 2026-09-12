@@ -1416,6 +1416,37 @@ class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
             self.assertEqual(proc.returncode, 0)
             self.assertEqual(proc.stdout.strip(), "")
 
+    def test_thousands_of_immediately_closed_subshell_cds_stays_under_hang_ceiling(self):
+        """F14 (round 2 review, major): `_next_lower_paren_depth` made each
+        `cd`'s OWN `break_pos` O(1), but `_precompute_cd_reach_info` still
+        asked `_base_cwd_before` "what does the closest EARLIER `cd`
+        reach?" for every new `cd` with an unbounded backward walk. For
+        `(cd /tmp); ` repeated thousands of times, each `cd` sits in its
+        own subshell that closes (expiring its `break_pos`) immediately
+        after it, so by the time the next `cd` asks, every prior entry has
+        already expired and the walk runs all the way back to index 0 --
+        n(n-1)/2 visits total (7,998,000 for 4,000 of them, per the
+        reviewer's own count). Empirically: 20000 repeats already exceeds
+        a 5s timeout against the pre-fix implementation. No tighter
+        wall-clock number is asserted here (that would reintroduce F18)."""
+        cmd = "(cd /tmp); " * 20000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on thousands of "
+                    "immediately-closed-subshell `cd`s -- _base_cwd_before's "
+                    "unbounded backward walk in _precompute_cd_reach_info's own "
+                    "self-referential lookup (F14 round 2)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
 
 class TestPipeTailScopedToTestCommandPipeline(RouterTestCase):
     """F20: the masked-test-exit prior must only fire when the

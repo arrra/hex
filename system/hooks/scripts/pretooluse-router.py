@@ -1573,7 +1573,7 @@ def _next_lower_paren_depth(paren_depths):
     return next_lower
 
 
-def _base_cwd_before(position, starts, infos, payload_cwd):
+def _base_cwd_before(position, starts, infos, payload_cwd, min_idx=0):
     """The effective directory just before `position`, found by walking
     backward over `cd` reach data (as built by
     `_precompute_cd_reach_info`) for the nearest one that still reaches
@@ -1593,9 +1593,19 @@ def _base_cwd_before(position, starts, infos, payload_cwd):
     resolves against the shell's real current directory after the first
     `cd` ran), but resolving every `cd` independently against the hook's
     own /worktrees/ payload cwd instead joined the relative target right
-    back onto the exempt path."""
+    back onto the exempt path.
+
+    `min_idx` (F14, round 2 review, major continued): an optional lower
+    bound on how far back this walk is willing to go. `_effective_checkout`
+    (arbitrary candidate positions, in no particular order) always leaves
+    this at its default 0 -- it needs the full, general search.
+    `_precompute_cd_reach_info`'s OWN internal self-lookup (computing each
+    new `cd`'s base against every EARLIER `cd`, strictly left-to-right) is
+    the one caller that passes a real bound, once it has proven those
+    earlier indices are dead not just for the current position but for
+    every later one too -- see that function's `alive_from` watermark."""
     idx = _bisect_left(starts, position) - 1
-    while idx >= 0:
+    while idx >= min_idx:
         resolved, guard_end, break_pos, ceiling = infos[idx]
         if (
             (guard_end is None or position >= guard_end)
@@ -1650,6 +1660,30 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd, sep_po
     infos = []
     operand_windows = []  # [(operand_start, operand_end), ...] -- R2/round 3
     next_lower = None
+    # F14 (round 2 review, major): even with `_next_lower_paren_depth`
+    # making each `cd`'s OWN `break_pos` O(1), `_base_cwd_before`'s
+    # backward walk for THIS SELF-REFERENTIAL lookup (each new `cd` asking
+    # "what does the closest earlier `cd` already reach?") still visited
+    # every earlier entry whenever they'd all already expired -- exactly
+    # what happens for `(cd /tmp); ` repeated thousands of times: each
+    # `cd` sits in its OWN subshell that closes (`break_pos`) immediately
+    # after it, so by the time the NEXT `cd` asks, every prior entry fails
+    # the `break_pos > position` check and the walk runs all the way back
+    # to index 0 -- n(n-1)/2 visits total (7,998,000 for 4,000 of them).
+    #
+    # `alive_from` is a watermark, advanced only forward, past any PREFIX
+    # of entries that are now dead for this position AND -- since
+    # `cd_match.start()` only increases as this loop scans left-to-right --
+    # provably dead for every later position too (`break_pos`/`ceiling`
+    # are fixed once computed; an entry only ever transitions live->dead,
+    # never back). Each index is skipped past at most once across the
+    # whole pass, so the AMORTIZED cost of maintaining it is O(n) total,
+    # turning the self-referential lookup from O(n) per `cd` into O(1)
+    # amortized. `_effective_checkout`'s own calls (arbitrary candidate
+    # positions, not monotonic) never see this -- they always pass
+    # `_base_cwd_before`'s default `min_idx=0` and keep the full, general
+    # search.
+    alive_from = 0
     for cd_match in _CD_LOCATE_RE.finditer(scan_text):
         keyword = cd_match.group(1)
         token_start = cd_match.end()
@@ -1660,7 +1694,16 @@ def _precompute_cd_reach_info(text, scan_text, paren_depths, payload_cwd, sep_po
             # treat it as uncertain (never exempt) rather than resolving
             # whatever stray token happens to follow it as a path.
             value = None
-        base_for_this_cd = _base_cwd_before(cd_match.start(), starts, infos, payload_cwd)
+        position = cd_match.start()
+        while alive_from < len(infos):
+            _, _, watermark_break_pos, watermark_ceiling = infos[alive_from]
+            if (watermark_break_pos is not None and watermark_break_pos <= position) or (
+                watermark_ceiling is not None and watermark_ceiling <= position
+            ):
+                alive_from += 1
+            else:
+                break
+        base_for_this_cd = _base_cwd_before(position, starts, infos, payload_cwd, min_idx=alive_from)
         resolved = _resolve_against_cwd(value, base_for_this_cd) if value is not None else None
         # R2 (round 3): a `cd` that is ITSELF the right-hand operand of an
         # earlier `cd`'s `||` (e.g. the second `cd` in `cd A || cd B;
