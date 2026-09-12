@@ -566,7 +566,6 @@ pub(crate) fn parse_ls_tree_entry(raw: &[u8]) -> Result<TreeEntry, String> {
 /// `None` if the walk climbs above the export root, hits an absolute
 /// target anywhere in the chain, or the chain is implausibly deep (cycle
 /// guard).
-#[cfg(unix)]
 fn resolve_realpath_within_export(
     mut stack: Vec<std::ffi::OsString>,
     remaining: Vec<std::path::Component>,
@@ -644,60 +643,58 @@ fn symlink_target_stays_within_export(
 }
 
 /// `true` iff a path reference named by something committed at `base_dir`
-/// (a manifest's own directory, or a source file's own directory) resolves,
-/// by pure lexical `..`/`.` walking, OUTSIDE the export root — i.e. outside
-/// `base_dir`'s own ancestry within the export. An absolute `target` always
-/// escapes; a `..` that climbs above every `Normal` component already
-/// pushed for `base_dir` also escapes (there is nothing further up within
-/// the export root for it to land on). This mirrors
-/// `resolve_realpath_within_export`'s walk but is deliberately simpler: it
-/// never needs to chain through a COMMITTED SYMLINK the way a materialized
-/// symlink's target does (a Cargo path dependency and an `include!`-family
-/// literal are resolved directly by `cargo`/`rustc` against the manifest's
-/// or source file's own directory, never through an intermediate symlink
-/// hop) — see A-R-4 / F4.
-fn relative_target_escapes_root(base_dir: &Path, target: &str) -> bool {
+/// (a manifest's own directory, or a source file's own directory) resolves
+/// OUTSIDE the export root — either directly (an absolute target, or a
+/// `..` climbing above every `Normal` component of `base_dir`'s own
+/// ancestry) or by chaining through a COMMITTED SYMLINK along the way
+/// (round-4 review: a committed `link -> .` at the export root, referenced
+/// as e.g. `../../../link/../outside.txt`, resolves `link` on the REAL
+/// filesystem BEFORE applying the `..` that follows it — a purely lexical
+/// walk of `..`/`.` components alone, with no symlink awareness, misses
+/// this entirely). Delegates to `resolve_realpath_within_export`, the
+/// SAME symlink-chain-aware walker the materialized-symlink guards above
+/// use — a Cargo path dependency or an `include!`-family literal is just
+/// another path reference resolved against a directory already inside the
+/// export, with exactly the same escape hazard (A-R-4 / F4).
+fn target_escapes_export(
+    base_dir: &Path,
+    target: &str,
+    symlinks: &std::collections::HashMap<std::path::PathBuf, CommittedPath>,
+) -> bool {
     let target_path = Path::new(target);
     if target_path.is_absolute() {
         return true;
     }
-    let mut depth: Vec<&std::ffi::OsStr> = base_dir
+    let stack: Vec<std::ffi::OsString> = base_dir
         .components()
         .filter_map(|c| match c {
-            std::path::Component::Normal(segment) => Some(segment),
+            std::path::Component::Normal(segment) => Some(segment.to_os_string()),
             _ => None,
         })
         .collect();
-    for component in target_path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                if depth.pop().is_none() {
-                    return true;
-                }
-            }
-            std::path::Component::Normal(segment) => depth.push(segment),
-            std::path::Component::CurDir => {}
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => return true,
-        }
-    }
-    false
+    resolve_realpath_within_export(stack, target_path.components().collect(), symlinks, 0).is_none()
 }
 
-/// A-R-4 (round-2 review, F4): a committed `Cargo.toml`'s `path` dependency
-/// (in `[dependencies]`/`[dev-dependencies]`/`[build-dependencies]`, or the
-/// equivalent `[workspace.dependencies]` table) is resolved by `cargo`
-/// directly against the manifest's OWN directory on the real filesystem —
-/// never through this export. A path that resolves outside the export root
-/// lets `cargo check` build against a package this commit never actually
-/// contains, falsely certifying a broken commit as buildable the moment a
-/// package happens to exist at that path on THIS machine. Malformed TOML,
-/// or a manifest this simplified walk doesn't recognize the shape of, is
-/// left alone here — `cargo` itself will fail or succeed on it exactly as
-/// it always would; this is an ADDITIONAL provenance guard on top of
-/// compilation, never a replacement for it.
+/// A-R-4 (round-2/round-4 review, F4): a committed `Cargo.toml`'s `path`
+/// dependency — in `[dependencies]`/`[dev-dependencies]`/
+/// `[build-dependencies]`, the equivalent `[workspace.dependencies]`
+/// table, OR (round-4 review) a per-target
+/// `[target.'cfg(...)'.dependencies]` table (and its dev-/build-
+/// equivalents) — is resolved by `cargo` directly against the manifest's
+/// OWN directory on the real filesystem, never through this export. A path
+/// that resolves outside the export root (directly, or via a committed
+/// symlink hop — see `target_escapes_export`) lets `cargo check` build
+/// against a package this commit never actually contains, falsely
+/// certifying a broken commit as buildable the moment a package happens to
+/// exist at that path on THIS machine. Malformed TOML, or a manifest this
+/// walk doesn't recognize the shape of, is left alone here — `cargo`
+/// itself will fail or succeed on it exactly as it always would; this is
+/// an ADDITIONAL provenance guard on top of compilation, never a
+/// replacement for it.
 fn validate_manifest_path_dependencies_stay_within_export(
     entries: &[TreeEntry],
     contents: &[Vec<u8>],
+    symlinks: &std::collections::HashMap<std::path::PathBuf, CommittedPath>,
 ) -> Result<(), String> {
     for (entry, content) in entries.iter().zip(contents.iter()) {
         let path = Path::new(&entry.path);
@@ -712,10 +709,24 @@ fn validate_manifest_path_dependencies_stay_within_export(
         };
         let manifest_dir = path.parent().unwrap_or_else(|| Path::new(""));
 
-        let dependency_tables = ["dependencies", "dev-dependencies", "build-dependencies"]
-            .into_iter()
-            .filter_map(|name| value.get(name))
-            .chain(value.get("workspace").and_then(|w| w.get("dependencies")));
+        let mut dependency_tables: Vec<&toml::Value> =
+            ["dependencies", "dev-dependencies", "build-dependencies"]
+                .into_iter()
+                .filter_map(|name| value.get(name))
+                .collect();
+        if let Some(ws_deps) = value.get("workspace").and_then(|w| w.get("dependencies")) {
+            dependency_tables.push(ws_deps);
+        }
+        if let Some(target_table) = value.get("target").and_then(|t| t.as_table()) {
+            for target_value in target_table.values() {
+                for name in ["dependencies", "dev-dependencies", "build-dependencies"] {
+                    if let Some(t) = target_value.get(name) {
+                        dependency_tables.push(t);
+                    }
+                }
+            }
+        }
+
         for table in dependency_tables {
             let Some(table) = table.as_table() else {
                 continue;
@@ -724,7 +735,7 @@ fn validate_manifest_path_dependencies_stay_within_export(
                 let Some(dep_path) = dep_value.get("path").and_then(|p| p.as_str()) else {
                     continue;
                 };
-                if relative_target_escapes_root(manifest_dir, dep_path) {
+                if target_escapes_export(manifest_dir, dep_path, symlinks) {
                     return Err(format!(
                         "committed manifest {} declares dependency `{dep_name}` with \
                          path `{dep_path}`, which resolves outside this export's root \
@@ -741,28 +752,226 @@ fn validate_manifest_path_dependencies_stay_within_export(
     Ok(())
 }
 
-/// A-R-4 (round-2 review, F4): an `include_str!`/`include_bytes!`/
+/// `true` iff `source[i]` begins a raw string literal (`r`, zero-or-more
+/// `#`, then `"`) that is not itself the tail of a longer identifier —
+/// shared by the masking pass below and by `extract_string_literal_argument`.
+fn is_raw_string_start(source: &[u8], i: usize) -> bool {
+    if i > 0 {
+        let prev = source[i - 1];
+        if prev.is_ascii_alphanumeric() || prev == b'_' {
+            return false;
+        }
+    }
+    let mut j = i + 1;
+    while j < source.len() && source[j] == b'#' {
+        j += 1;
+    }
+    j < source.len() && source[j] == b'"'
+}
+
+/// Produces a byte-for-byte-same-length "masked" copy of `source` with
+/// every LINE COMMENT, BLOCK COMMENT (correctly nested), and the BODY of
+/// every ordinary/raw STRING LITERAL replaced with ASCII spaces. Used
+/// ONLY to decide WHERE a genuine `include!`-family call sits — an
+/// argument's actual content is always extracted from the UNMASKED
+/// original afterward (`extract_string_literal_argument`). Closes two
+/// distinct false-positive routes a naive byte search over raw source has
+/// (round-4 review, F3, reintroduced by this check's own first draft):
+/// (a) a comment merely MENTIONING `include_str!(...)` as documentation
+/// must not be treated as a real call; (b) the same mechanism applies to
+/// an unrelated string literal that happens to contain that text. This is
+/// a pure LEXICAL pass — comment/string BOUNDARY recognition, not a
+/// parser and not a semantic model of what the code does; it never
+/// evaluates `concat!`/`env!`/any other non-literal path construction
+/// (see `validate_source_include_targets_stay_within_export`'s doc
+/// comment for the still-accepted, deliberate gaps).
+fn mask_comments_and_strings_for_search(source: &[u8]) -> Vec<u8> {
+    let mut out = source.to_vec();
+    let n = source.len();
+    let mut i = 0usize;
+    while i < n {
+        if source[i] == b'/' && i + 1 < n && source[i + 1] == b'/' {
+            let start = i;
+            while i < n && source[i] != b'\n' {
+                i += 1;
+            }
+            out[start..i].fill(b' ');
+        } else if source[i] == b'/' && i + 1 < n && source[i + 1] == b'*' {
+            let start = i;
+            i += 2;
+            let mut depth = 1usize;
+            while i < n && depth > 0 {
+                if i + 1 < n && source[i] == b'/' && source[i + 1] == b'*' {
+                    depth += 1;
+                    i += 2;
+                } else if i + 1 < n && source[i] == b'*' && source[i + 1] == b'/' {
+                    depth -= 1;
+                    i += 2;
+                } else {
+                    i += 1;
+                }
+            }
+            out[start..i].fill(b' ');
+        } else if source[i] == b'"' {
+            let start = i;
+            i += 1;
+            while i < n {
+                if source[i] == b'\\' && i + 1 < n {
+                    i += 2;
+                    continue;
+                }
+                if source[i] == b'"' {
+                    i += 1;
+                    break;
+                }
+                i += 1;
+            }
+            out[start..i].fill(b' ');
+        } else if source[i] == b'r' && is_raw_string_start(source, i) {
+            let start = i;
+            i = skip_raw_string(source, i);
+            out[start..i].fill(b' ');
+        } else {
+            i += 1;
+        }
+    }
+    out
+}
+
+/// Advances past a raw string literal starting at `start` (which must
+/// satisfy `is_raw_string_start`), returning the index one past its
+/// closing delimiter — or `source.len()` if unterminated (the file itself
+/// will fail to compile for the same reason; masking simply stops there).
+fn skip_raw_string(source: &[u8], start: usize) -> usize {
+    let n = source.len();
+    let mut i = start + 1;
+    let mut hashes = 0usize;
+    while i < n && source[i] == b'#' {
+        hashes += 1;
+        i += 1;
+    }
+    if i >= n || source[i] != b'"' {
+        return start + 1; // not actually well-formed; caller's is_raw_string_start already checked, but stay safe
+    }
+    i += 1;
+    loop {
+        let Some(rel) = source[i..].iter().position(|&b| b == b'"') else {
+            return n;
+        };
+        let quote_at = i + rel;
+        let closes = source
+            .get(quote_at + 1..quote_at + 1 + hashes)
+            .map(|s| s.iter().all(|&b| b == b'#'))
+            .unwrap_or(false);
+        if closes {
+            return quote_at + 1 + hashes;
+        }
+        i = quote_at + 1;
+    }
+}
+
+/// Parses a string-literal-or-raw-string-literal argument beginning at
+/// `start` in `content` (the UNMASKED original — see
+/// `mask_comments_and_strings_for_search`'s docs for why extraction always
+/// reads from there, never from the masked copy) and returns its content
+/// bytes — verbatim for a raw string; for an ordinary string, `\"`→`"` and
+/// `\\`→`\` are undone and every OTHER escape sequence is left as literal
+/// text (enough to correctly see a path's `.`/`..`/`/` structure without a
+/// full escape-sequence implementature) — together with the offset one
+/// past the literal's closing delimiter. `None` if `start` begins neither
+/// literal form, or it is unterminated.
+fn extract_string_literal_argument(content: &[u8], start: usize) -> Option<(Vec<u8>, usize)> {
+    let n = content.len();
+    if start >= n {
+        return None;
+    }
+    if content[start] == b'r' && is_raw_string_start(content, start) {
+        let mut i = start + 1;
+        let mut hashes = 0usize;
+        while i < n && content[i] == b'#' {
+            hashes += 1;
+            i += 1;
+        }
+        let body_start = i + 1;
+        let mut j = body_start;
+        loop {
+            let rel = content[j..].iter().position(|&b| b == b'"')?;
+            let quote_at = j + rel;
+            let closes = content
+                .get(quote_at + 1..quote_at + 1 + hashes)
+                .map(|s| s.iter().all(|&b| b == b'#'))
+                .unwrap_or(false);
+            if closes {
+                return Some((
+                    content[body_start..quote_at].to_vec(),
+                    quote_at + 1 + hashes,
+                ));
+            }
+            j = quote_at + 1;
+        }
+    }
+    if content[start] == b'"' {
+        let mut out = Vec::new();
+        let mut i = start + 1;
+        while i < n {
+            match content[i] {
+                b'\\' if i + 1 < n => {
+                    match content[i + 1] {
+                        b'"' => out.push(b'"'),
+                        b'\\' => out.push(b'\\'),
+                        other => {
+                            out.push(b'\\');
+                            out.push(other);
+                        }
+                    }
+                    i += 2;
+                }
+                b'"' => return Some((out, i + 1)),
+                b => {
+                    out.push(b);
+                    i += 1;
+                }
+            }
+        }
+        return None;
+    }
+    None
+}
+
+/// A-R-4 (round-2/round-4 review, F4): an `include_str!`/`include_bytes!`/
 /// `include!` literal in a committed `.rs` file is resolved by `rustc`
-/// directly against the SOURCE file's own directory on the real filesystem
-/// — never through this export. Same hazard and same remedy as the
-/// manifest path-dependency guard above.
+/// directly against the SOURCE file's own directory on the real
+/// filesystem — never through this export. Same hazard and same remedy as
+/// the manifest path-dependency guard above.
 ///
-/// This is a narrow, LITERAL-STRING-ONLY check — it looks for the macro
-/// name immediately followed (after only whitespace) by an opening `(` and
-/// a `"`-delimited string literal, and validates just that literal. A path
-/// built any other way (`concat!(...)`, `env!(...)`, a raw string, a
-/// `#[path]`-relocated module, string escapes inside the literal) is
-/// invisible to it and is silently allowed through, exactly as
-/// compilation itself is blind to where in a file's TEXT a path came from.
-/// This is a deliberate, documented gap, not an attempt to re-build the
-/// unbounded mod/include-graph model this whole redesign replaced (see the
-/// module-level doc comment on `HarnessBuildableFromGit`) — it exists only
-/// to catch the specific adversarial shape the review named: a literal
-/// absolute (or export-escaping relative) path handed straight to one of
-/// these three macros.
+/// Searches a MASKED copy of the source (`mask_comments_and_strings_for_search`)
+/// for the macro name, so a mention inside a comment or an unrelated
+/// string literal is never mistaken for a real call (F3, reintroduced by
+/// this check's own first draft and fixed here). Once a genuine call site
+/// is found — the macro name, then only whitespace, then `(`, then only
+/// whitespace — the argument is extracted from the UNMASKED original via
+/// `extract_string_literal_argument`, which recognizes BOTH an ordinary
+/// `"..."` literal and a raw `r"..."`/`r#"..."#`/… literal (round-4
+/// review: raw strings were an explicit named gap in the first draft;
+/// closed here), and the call must close with only whitespace then `)` —
+/// a second argument or any expression after the literal is out of scope.
+///
+/// This remains a narrow, LITERAL-ONLY check: a path built any other way
+/// (`concat!(...)`, `env!(...)`, a `#[path]`-relocated module, any other
+/// non-literal expression) is invisible to it and is silently allowed
+/// through, exactly as compilation itself is blind to where in a file's
+/// TEXT a path came from. This is a deliberate, documented gap, not an
+/// attempt to re-build the unbounded mod/include-graph model this whole
+/// redesign replaced (see the module-level doc comment on
+/// `HarnessBuildableFromGit`) — evaluating an arbitrary constant
+/// expression to a path IS that same unbounded modeling problem one level
+/// down, and this check exists only to catch the review's own named
+/// adversarial shape: a literal path handed straight to one of these
+/// three macros.
 fn validate_source_include_targets_stay_within_export(
     entries: &[TreeEntry],
     contents: &[Vec<u8>],
+    symlinks: &std::collections::HashMap<std::path::PathBuf, CommittedPath>,
 ) -> Result<(), String> {
     const INCLUDE_MACROS: [&[u8]; 3] = [b"include_str!", b"include_bytes!", b"include!"];
 
@@ -784,43 +993,61 @@ fn validate_source_include_targets_stay_within_export(
             continue;
         }
         let dir = path.parent().unwrap_or_else(|| Path::new(""));
+        let masked = mask_comments_and_strings_for_search(content);
 
         for macro_name in INCLUDE_MACROS {
             let mut search_from = 0usize;
-            while let Some(rel) = find_bytes(&content[search_from..], macro_name) {
+            while let Some(rel) = find_bytes(&masked[search_from..], macro_name) {
                 let call_start = search_from + rel + macro_name.len();
                 // Advance past this occurrence regardless of what follows,
-                // so a call that doesn't match the recognized literal shape
-                // can't loop forever re-finding the same macro name.
+                // so a call that doesn't match the recognized shape can't
+                // loop forever re-finding the same macro name.
                 search_from = call_start;
-                let Some(quote_rel) = content[call_start..].iter().position(|&b| b == b'"') else {
-                    continue;
-                };
-                let between = &content[call_start..call_start + quote_rel];
-                let non_whitespace: Vec<u8> = between
-                    .iter()
-                    .copied()
-                    .filter(|b| !b.is_ascii_whitespace())
-                    .collect();
-                if non_whitespace != b"(" {
-                    // Not `macro!("...")` with only whitespace inside the
-                    // parens before the literal — e.g. `concat!(...)`,
-                    // `env!(...)`, or this `"` belongs to unrelated code
-                    // later in the file. Out of scope; see the doc comment.
+
+                // From here on, parse against the UNMASKED `content`, not
+                // `masked` — `masked` blanks out an ENTIRE string literal
+                // INCLUDING its delimiting quotes (needed so a `//`/`/*`
+                // inside a string body doesn't get mistaken for a comment
+                // start during masking itself), so continuing to walk
+                // `masked` past `(` would skip straight through the very
+                // literal this call is looking for and never see it.
+                // `masked` has already done its ONE job — confirming the
+                // macro NAME occurrence above is real code, not text
+                // inside a comment or an unrelated string — by the time
+                // control reaches here.
+                let mut i = call_start;
+                while i < content.len() && content[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                if i >= content.len() || content[i] != b'(' {
                     continue;
                 }
-                let lit_start = call_start + quote_rel + 1;
-                let Some(end_rel) = content[lit_start..].iter().position(|&b| b == b'"') else {
+                i += 1;
+                while i < content.len() && content[i].is_ascii_whitespace() {
+                    i += 1;
+                }
+                let Some((literal_bytes, after)) = extract_string_literal_argument(content, i)
+                else {
                     continue;
                 };
-                let literal_bytes = &content[lit_start..lit_start + end_rel];
+                let mut j = after;
+                while j < content.len() && content[j].is_ascii_whitespace() {
+                    j += 1;
+                }
+                if j >= content.len() || content[j] != b')' {
+                    // Not a single bare-literal argument — e.g. a second
+                    // argument follows, or an expression rather than a
+                    // literal closes the call. Out of scope; see the doc
+                    // comment above.
+                    continue;
+                }
                 // A non-UTF-8 literal can't name a valid Rust path string in
                 // the first place; compilation itself will reject the
                 // source, so there's nothing for this guard to add here.
-                let Ok(literal) = std::str::from_utf8(literal_bytes) else {
+                let Ok(literal) = std::str::from_utf8(&literal_bytes) else {
                     continue;
                 };
-                if relative_target_escapes_root(dir, literal) {
+                if target_escapes_export(dir, literal, symlinks) {
                     let macro_name = String::from_utf8_lossy(macro_name);
                     return Err(format!(
                         "committed source {} calls {macro_name}(\"{literal}\"), which \
@@ -1015,21 +1242,15 @@ fn export_committed_head(
         contents.push(content.to_vec());
     }
 
-    // A-R-4 (round-2 review, F4): compilation alone establishes that
-    // `rustc`/`cargo` COULD read every input they touched — not that every
-    // input came from this export (i.e. from something the commit actually
-    // contains). An absolute `include_str!`/`include_bytes!`/`include!`
-    // literal, or a Cargo path dependency that resolves outside the export
-    // root, is read straight off the REAL filesystem by `rustc`/`cargo`,
-    // bypassing this export entirely — if a file happens to exist at that
-    // path on THIS machine (even coincidentally), the check certifies PASS
-    // for content the commit never actually contains. Refuse before ever
-    // materializing or compiling anything, the same way an escaping
-    // committed symlink is refused below.
-    validate_manifest_path_dependencies_stay_within_export(&entries, &contents)?;
-    validate_source_include_targets_stay_within_export(&entries, &contents)?;
-
-    #[cfg(unix)]
+    // Built BEFORE the F4 provenance guards below (moved up from its
+    // original position just after symlink materialization) so those
+    // guards can resolve a manifest path-dependency or an `include!`
+    // target through a committed symlink hop the same symlink-aware way
+    // `resolve_realpath_within_export` already does for a MATERIALIZED
+    // symlink's own target (round-4 review). No longer `#[cfg(unix)]`:
+    // this is pure path arithmetic over `CommittedPath`/`OsString`/
+    // `Component`, none of it unix-specific — only actually CREATING a
+    // real filesystem symlink (pass 2, below) is platform-gated.
     let symlinks: std::collections::HashMap<std::path::PathBuf, CommittedPath> = entries
         .iter()
         .zip(contents.iter())
@@ -1044,6 +1265,21 @@ fn export_committed_head(
             ))
         })
         .collect::<Result<std::collections::HashMap<_, _>, String>>()?;
+
+    // A-R-4 (round-2/round-4 review, F4): compilation alone establishes
+    // that `rustc`/`cargo` COULD read every input they touched — not that
+    // every input came from this export (i.e. from something the commit
+    // actually contains). An absolute `include_str!`/`include_bytes!`/
+    // `include!` literal, or a Cargo path dependency that resolves outside
+    // the export root (directly, or by chaining through a committed
+    // symlink), is read straight off the REAL filesystem by
+    // `rustc`/`cargo`, bypassing this export entirely — if a file happens
+    // to exist at that path on THIS machine (even coincidentally), the
+    // check certifies PASS for content the commit never actually
+    // contains. Refuse before ever materializing or compiling anything,
+    // the same way an escaping committed symlink is refused below.
+    validate_manifest_path_dependencies_stay_within_export(&entries, &contents, &symlinks)?;
+    validate_source_include_targets_stay_within_export(&entries, &contents, &symlinks)?;
 
     // `git ls-tree` guarantees every entry's path is a distinct byte
     // string, but on a case- or Unicode-normalization-insensitive

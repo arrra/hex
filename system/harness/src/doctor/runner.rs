@@ -2151,6 +2151,163 @@ mod tests {
         );
     }
 
+    #[test]
+    fn test_export_committed_head_refuses_a_target_specific_path_dependency_escaping_the_export() {
+        // A-R-4 round-4 review: the manifest guard originally checked only
+        // [dependencies]/[dev-dependencies]/[build-dependencies]/
+        // [workspace.dependencies] — Cargo also supports a path dependency
+        // under a per-target `[target.'cfg(...)'.dependencies]` table,
+        // which bypassed the guard entirely.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("Cargo.toml"),
+            "[package]\nname = \"fixture-harness\"\nversion = \"0.1.0\"\nedition = \"2021\"\n\n\
+             [target.'cfg(unix)'.dependencies]\n\
+             escaping-dep = { path = \"../../../../outside-the-repo\" }\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add escaping target-specific path dependency",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "a target-specific Cargo path dependency resolving outside the \
+             export root must refuse the export",
+        );
+        assert!(
+            err.contains("escaping-dep") && err.contains("outside this export's root"),
+            "error must name the escaping dependency and explain why, got: {err}"
+        );
+    }
+
+    #[test]
+    fn test_export_committed_head_ignores_include_str_mentioned_only_in_a_comment_a_r_4() {
+        // A-R-4 round-4 review, F3 reintroduced: the byte-search guard
+        // added for F4 originally scanned raw source text with no
+        // comment/string awareness, so a comment merely MENTIONING
+        // `include_str!(...)` (e.g. as documentation) was treated as a
+        // real call and aborted the export before `cargo` ever ran —
+        // reintroducing the original F3 finding (a scanner
+        // over-interpreting non-code text) one level down, inside code
+        // this same review round added. A comment naming an absolute path
+        // must not abort the export.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "// Example: include_str!(\"/tmp/example.txt\")\n\
+             pub const OK: &str = \"fine\";\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add doc comment mentioning include_str!",
+            ],
+        );
+
+        crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path())
+            .expect(
+                "a comment merely mentioning include_str!(...) must not \
+                 abort the export — only a REAL call in code counts",
+            );
+    }
+
+    #[test]
+    fn test_export_committed_head_refuses_a_raw_string_include_str_target() {
+        // A-R-4 round-4 review: the first draft of the source guard only
+        // recognized an ordinary `"..."` literal, explicitly documenting
+        // raw strings (`r"..."`, `r#"..."#`, …) as an out-of-scope bypass
+        // — the review asked for that closed rather than merely
+        // documented. `extract_string_literal_argument` now recognizes
+        // both forms.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str!(r\"/tmp/example.txt\");\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add raw-string absolute include_str! target",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "an absolute include_str! target spelled as a raw string \
+             literal must refuse the export exactly like an ordinary \
+             string literal does",
+        );
+        assert!(
+            err.contains("include_str!") && err.contains("outside this export's root"),
+            "error must name the escaping include! call and explain why, got: {err}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_refuses_an_include_target_escaping_through_a_committed_symlink() {
+        // A-R-4 round-4 review: a purely lexical `..`/`.` walk of an
+        // include! target, with NO awareness of committed symlinks,
+        // misses an escape that chains through one. A committed
+        // `link -> .` at the repo root, referenced as
+        // `../../../link/../outside.txt` from `.hex/harness/src/lib.rs`,
+        // resolves `link` on the real filesystem BEFORE applying the `..`
+        // that follows it — landing one level above the repo root,
+        // outside the export entirely. The guard must use the SAME
+        // symlink-chain-aware resolver (`resolve_realpath_within_export`)
+        // the materialized-symlink checks already use, not a simpler
+        // lexical-only walk.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::os::unix::fs::symlink(".", tmp.path().join("link")).unwrap();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str!(\"../../../link/../outside.txt\");\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add symlink-mediated escaping include",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "an include! target that escapes the export root by chaining \
+             through a committed symlink must be refused, not silently \
+             allowed through by a symlink-blind lexical check",
+        );
+        assert!(
+            err.contains("include_str!") && err.contains("outside this export's root"),
+            "error must name the escaping include! call and explain why, got: {err}"
+        );
+    }
+
     #[cfg(unix)]
     #[test]
     fn test_export_committed_head_never_runs_filters_so_fabricated_modules_still_fail() {
