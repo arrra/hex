@@ -2674,6 +2674,26 @@ class TestF7RedactionAndLedgerPrivacy(RouterTestCase):
                 self.assertNotIn("hunter two secret", entry.get("preview", ""))
                 self.assertNotIn("two secret", entry.get("preview", ""))
 
+    def test_json_colon_password_is_fully_redacted(self):
+        """F7 (round 2 review, blocker): every pattern above anchors on
+        `key\\s*=\\s*value` (shell-assignment shape) -- a structured JSON
+        credential field uses a COLON, never an `=`, so
+        `{"password":"hunter two secret"}` matched none of them and
+        persisted the complete value in the ledger preview."""
+        payload = make_payload(
+            "Bash",
+            {"command": 'echo \'{"password":"hunter two secret"}\' && git stash'},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("hunter two secret", entry.get("match", ""))
+                self.assertNotIn("hunter two secret", entry.get("preview", ""))
+                self.assertNotIn("two secret", entry.get("preview", ""))
+
     def test_pem_block_survives_a_preceding_secret_assignment(self):
         """G2b: `secret=...` is matched (and its value truncated at the
         first token) BEFORE the PEM-block pattern runs, so a `secret=` (or

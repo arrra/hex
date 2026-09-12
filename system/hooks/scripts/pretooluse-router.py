@@ -175,6 +175,22 @@ _REDACT_PATTERNS = [
         ),
         r"\1=***REDACTED***",
     ),
+    # F7 (round 2 review, blocker): every pattern above anchors on
+    # `key\s*=\s*value` (shell-assignment shape) -- a structured JSON
+    # credential field uses a COLON, never an `=`, so
+    # `{"password":"hunter two secret"}` (a real HTTP error body, or a
+    # tool_input dict with a genuine "password" key -- `args_preview` is
+    # `redact(json.dumps(tool_input))`) matched NONE of them and persisted
+    # the complete value. Same escape-awareness as the quoted assignment
+    # value above (`(?:[^"\\]|\\[\s\S])*`, not a bare `[^"]*`), since a
+    # JSON string value can itself contain an escaped quote or backslash.
+    (
+        re.compile(
+            r"""(?i)"(password|token|secret|api[_-]?key)"\s*:\s*\""""
+            r"""(?:[^"\\]|\\[\s\S])*\""""
+        ),
+        r'"\1":"***REDACTED***"',
+    ),
 ]
 
 

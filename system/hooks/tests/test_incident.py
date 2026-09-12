@@ -396,6 +396,36 @@ class TestF7RedactionAndLedgerPrivacy(IncidentHookTestCase):
         self.assertNotIn("charlie", record["error"])
 
 
+class TestF7JsonColonCredentialRedaction(IncidentHookTestCase):
+    """F7 (round 2 review, blocker): every redaction pattern anchored on
+    `key\\s*=\\s*value` (shell-assignment shape). A structured JSON
+    credential field uses a COLON, never an `=`, so
+    `{"password":"hunter two secret"}` -- a real HTTP error body, or a
+    tool_input dict with a genuine "password" key (args_preview is
+    redact(json.dumps(tool_input))) -- matched none of them and persisted
+    the complete value."""
+
+    def test_json_colon_password_in_error_text_is_fully_redacted(self):
+        proc = self._run(
+            _fixture(error='upstream rejected {"password":"hunter two secret"}')
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn("hunter two secret", record["error"])
+        self.assertNotIn("two secret", record["error"])
+
+    def test_json_colon_password_field_in_tool_input_is_fully_redacted(self):
+        proc = self._run(
+            _fixture(tool_input={"password": "hunter two secret", "user": "alice"})
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn("hunter two secret", record["args_preview"])
+        self.assertNotIn("two secret", record["args_preview"])
+        # Regression guard: an unrelated real field must survive untouched.
+        self.assertIn("alice", record["args_preview"])
+
+
 class TestRound3RedactionParity(IncidentHookTestCase):
     """new-defects R3 (arrra-hex-pr-5-wf-open-ledger.md, minor): the
     router's A-R6 fixtures (quote-wraps-whole-pair, ANSI-C `$'...'`) were
