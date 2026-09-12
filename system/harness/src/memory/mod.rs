@@ -69,10 +69,18 @@ mod tests {
     /// required migration must fail `open_db` loudly instead of handing
     /// back an incompatible connection.
     ///
-    /// Forces a real (non "duplicate column") failure inside
-    /// `apply_plan3`'s `ALTER TABLE` by pre-seeding a Plan 2 (v4) database
-    /// and then making the file read-only: the write hits SQLITE_READONLY,
-    /// not the idempotent duplicate-column path.
+    /// F9 (minor, arrra/hex PR #9 round 2): forces the failure with a
+    /// deterministic, privilege- and platform-independent schema conflict
+    /// instead of a read-only file permission — mode 0444 does not stop a
+    /// write by root or a process with DAC-override, and is a no-op on
+    /// non-Unix platforms, so the original version of this test could pass
+    /// even against a broken production fix in those environments. Pre-adds
+    /// `valid_from` with a CHECK that only allows NULL: `apply_plan3`'s own
+    /// re-`ALTER TABLE` harmlessly hits its already-handled "duplicate
+    /// column" path, but its unconditional backfill
+    /// `UPDATE ... SET valid_from = created_at` then writes a real value and
+    /// trips a genuine SQLITE_CONSTRAINT failure — a real Plan 3 migration
+    /// error on any platform, at any privilege level.
     #[test]
     fn open_db_fails_when_required_plan3_migration_fails() {
         vector::register_sqlite_vec();
@@ -83,22 +91,20 @@ mod tests {
             let conn = Connection::open(&db_path).unwrap();
             schema::apply_plan1_baseline_for_test(&conn).unwrap();
             schema::apply_plan2(&conn).unwrap();
-        }
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o444)).unwrap();
+            conn.execute(
+                "ALTER TABLE facts ADD COLUMN valid_from TEXT CHECK (valid_from IS NULL)",
+                [],
+            )
+            .unwrap();
+            conn.execute(
+                "INSERT INTO facts (id,subject,predicate,object,created_at,updated_at) \
+                 VALUES ('f1','s','p','o','2026-01-01','2026-01-01')",
+                [],
+            )
+            .unwrap();
         }
 
         let result = open_db(&db_path);
-
-        // Restore write perms (owner rw) so the TempDir can clean itself up
-        // regardless of the assertion outcome below.
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&db_path, std::fs::Permissions::from_mode(0o644)).unwrap();
-        }
 
         assert!(
             result.is_err(),
