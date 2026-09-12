@@ -1061,17 +1061,19 @@ fn try_resolve_concat_literal(content: &[u8], start: usize) -> Option<(Vec<u8>, 
 /// review already rejected general `env!()` support for exactly that
 /// reason).
 ///
-/// Returns the offset one past the call's closing `)` on a match. The
-/// literal SUFFIX arguments (if any) are parsed to confirm the whole
-/// call is well-formed, but their bytes are deliberately never validated
-/// against `target_escapes_export`: they are resolved against Cargo's
-/// OWN build-tree layout (relative to `OUT_DIR`/the manifest directory),
-/// not the source file's directory, and reproducing Cargo's OUT_DIR
-/// layout rules here is out of scope. A `..`-laden suffix deliberately
-/// trying to climb out of `OUT_DIR` is a residual, documented gap —
-/// symmetric with every other narrow scope boundary in this file, and
-/// far outside anything a real build-script-generated-file include
-/// would ever spell.
+/// Returns the offset one past the call's closing `)` on a match. Every
+/// literal SUFFIX argument is validated by `suffix_has_no_parent_dir_segment`
+/// (round-8 review: an EARLIER version of this function left the suffix
+/// wholly unchecked, on the reasoning that reproducing Cargo's exact
+/// `OUT_DIR`/manifest-dir layout here is out of scope — true, but
+/// irrelevant: a suffix containing NO `..` segment can only ever land
+/// INSIDE whatever directory it is appended to, regardless of where that
+/// directory actually is or how it's laid out, so this needs no
+/// knowledge of Cargo's layout at all to be a real guarantee). A suffix
+/// containing a `..` segment — the review's own adversarial example,
+/// `concat!(env!("CARGO_MANIFEST_DIR"), "/../../../outside.txt")` — is
+/// refused (this function returns `None`, and the caller's "unresolved"
+/// refusal fires) rather than accepted unchecked.
 fn try_resolve_cargo_safe_concat(content: &[u8], start: usize) -> Option<usize> {
     const CONCAT: &[u8] = b"concat!";
     const ENV: &[u8] = b"env!";
@@ -1135,12 +1137,38 @@ fn try_resolve_cargo_safe_concat(content: &[u8], start: usize) -> Option<usize> 
                 if content.get(i) == Some(&b')') {
                     return Some(i + 1); // trailing comma before concat!'s own close
                 }
-                let (_, after) = extract_string_literal_argument(content, i)?;
+                let (suffix, after) = extract_string_literal_argument(content, i)?;
+                if !suffix_has_no_parent_dir_segment(&suffix) {
+                    return None;
+                }
                 i = after;
             }
             _ => return None,
         }
     }
+}
+
+/// `true` iff `suffix`, split on `/`, contains no `..` segment — i.e. it
+/// can only ever be appended to a directory, never climb above it,
+/// regardless of what that directory's actual location is (round-8
+/// review; see `try_resolve_cargo_safe_concat`'s doc comment). Splits the
+/// raw bytes directly rather than going through `std::path::Path`: a
+/// leading `/` in a suffix like `"/personal_mods.rs"` is the ordinary,
+/// idiomatic separator between `env!("OUT_DIR")` and the filename once
+/// concatenated — NOT an attempt to jump to the filesystem root — but
+/// `Path::new` would parse that same string IN ISOLATION as beginning
+/// with `Component::RootDir`, a false positive `Path`-based component
+/// analysis would need extra handling to avoid; a raw `/`-split sidesteps
+/// the ambiguity entirely by only ever caring about literal `..`
+/// segments, never about a leading separator. Non-UTF-8 bytes are
+/// rejected outright (`false`) — the same posture as everywhere else in
+/// this module's literal handling: an ambiguous byte sequence is treated
+/// as unresolved, not as safe.
+fn suffix_has_no_parent_dir_segment(suffix: &[u8]) -> bool {
+    let Ok(s) = std::str::from_utf8(suffix) else {
+        return false;
+    };
+    s.split('/').all(|segment| segment != "..")
 }
 
 /// A-R-4 (round-2/round-4/round-6 review, F4): an `include_str!`/

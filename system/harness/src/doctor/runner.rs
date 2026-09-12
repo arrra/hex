@@ -2485,6 +2485,48 @@ mod tests {
     }
 
     #[test]
+    fn test_export_committed_head_refuses_a_cargo_safe_concat_suffix_that_climbs_out() {
+        // A-R-4 round-8 review: the OUT_DIR/CARGO_MANIFEST_DIR carve-out's
+        // literal SUFFIX argument was left wholly unvalidated on the
+        // reasoning that reproducing Cargo's exact build-tree layout is
+        // out of scope — true, but irrelevant: a `..`-laden suffix can
+        // still climb ABOVE whatever directory it's appended to,
+        // regardless of that directory's actual location, which is
+        // exactly the review's own adversarial example.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str!(concat!(\n    \
+             env!(\"CARGO_MANIFEST_DIR\"),\n    \
+             \"/../../../outside.txt\"\n\
+             ));\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add CARGO_MANIFEST_DIR-based include with a climbing suffix",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "a `..`-laden suffix appended to env!(\"CARGO_MANIFEST_DIR\") \
+             must still refuse the export — the cargo-safe-concat carve-out \
+             covers the BASE directory only, never an escaping suffix",
+        );
+        assert!(
+            err.contains("include_str!") && err.contains("cannot be verified"),
+            "error must name the unresolved include! call and explain why, got: {err}"
+        );
+    }
+
+    #[test]
     fn test_export_committed_head_refuses_an_include_target_that_cannot_be_resolved_at_all() {
         // A-R-4 round-7 review, F4: an include!-family call whose argument
         // cannot be resolved to a literal, an all-literal concat!, or a
