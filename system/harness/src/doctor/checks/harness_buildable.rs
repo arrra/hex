@@ -245,7 +245,17 @@ fn classify_check_failure(output: &Output, elapsed: Duration) -> CheckResult {
 /// compilation never gets far enough to emit any of these three markers
 /// until at least one translation unit has actually been fed to `rustc`.
 fn looks_like_a_real_compiler_diagnostic(stderr: &str, lower: &str) -> bool {
-    lower.contains("error[") || stderr.contains("-->") || lower.contains("could not compile `")
+    lower.contains("error[")
+        || stderr.contains("-->")
+        || lower.contains("could not compile `")
+        // A failing `build.rs` is just as much a real build failure as a
+        // `rustc` diagnostic, but cargo reports it with its OWN top-level
+        // marker instead — never `error[...]`/`-->` — so a build script
+        // whose own panic/stderr text happens to *quote* the offline or
+        // toolchain wording (this is genuinely the crate's source, already
+        // fed to `rustc`/`cargo` and run) must still gate the classifiers
+        // below rather than fall through to a WARN.
+        || lower.contains("failed to run custom build command")
 }
 
 /// `cargo check --offline` reports an unresolvable dependency with this
@@ -263,8 +273,21 @@ fn is_offline_dependency_failure(lower_stderr: &str) -> bool {
 /// (never executed)` — a cargo-level failure, not a compile error, so it
 /// must WARN rather than FAIL just like the offline case above.
 fn is_toolchain_unavailable_failure(lower_stderr: &str) -> bool {
-    lower_stderr.contains("could not execute process `rustc")
+    if lower_stderr.contains("could not execute process `rustc")
         || lower_stderr.contains("could not execute process 'rustc")
+    {
+        return true;
+    }
+    // An explicit toolchain override (a `RUSTC` env var, or a broken rustup
+    // shim) names its OWN path instead of the bare `rustc` — e.g. `` could
+    // not execute process `/no/such/path -vV` (never executed) `` — so the
+    // bare-name match above misses it. cargo always probes the toolchain
+    // with the same `-vV` flag before it runs anything else, which
+    // uniquely identifies this as a toolchain-unreachable failure (never a
+    // real compile error — no source has been fed to `rustc` yet).
+    lower_stderr.contains("could not execute process `")
+        && lower_stderr.contains("-vv`")
+        && lower_stderr.contains("(never executed)")
 }
 
 /// The first line of cargo's own diagnostic output that names a compile or
@@ -377,37 +400,91 @@ struct TreeEntry {
     path: String,
 }
 
-/// `true` iff a symlink recorded at `dest` (inside `export_root`) with the
-/// given raw `target` (the exact bytes git stored for a mode `120000`
-/// blob) resolves, purely LEXICALLY, to a path still inside `export_root`.
-/// The target is never required to exist — that is exactly the attack this
-/// guards against: a target naming a real but UNCOMMITTED file elsewhere on
-/// this machine (e.g. back in the actual checkout this export was made
-/// from). An absolute target, or a relative one whose `..` segments walk
-/// back out of `export_root`, must never be materialized: `cargo check`
-/// would then silently read content from outside the git-committed export
-/// and this check would falsely certify a broken commit as buildable.
+/// Resolves a symlink chain the way the real filesystem does: `stack` is
+/// the export-relative directory the walk currently sits in (as path
+/// segments, so popping past empty means climbing above the export root),
+/// and `remaining` is the path components still to walk. Any `Normal`
+/// component that names another COMMITTED symlink (looked up in
+/// `symlinks`, repo-relative path -> its raw target) is substituted with
+/// that target and the walk continues from the symlink's OWN parent
+/// directory — never treated as an ordinary directory push — because a
+/// purely lexical push-then-pop assumes every intermediate component
+/// contributes exactly one real directory level, which is false the moment
+/// that component is itself a symlink to `.` (or anywhere else): the real
+/// filesystem resolves it FIRST, and a `..` right after can walk out from
+/// wherever that resolves to rather than cancelling the push. Returns
+/// `None` if the walk climbs above the export root, hits an absolute
+/// target anywhere in the chain, or the chain is implausibly deep (cycle
+/// guard).
 #[cfg(unix)]
-fn symlink_target_stays_within_export(export_root: &Path, dest: &Path, target: &str) -> bool {
+fn resolve_realpath_within_export(
+    mut stack: Vec<std::ffi::OsString>,
+    remaining: Vec<std::path::Component>,
+    symlinks: &std::collections::HashMap<std::path::PathBuf, String>,
+    depth: usize,
+) -> Option<Vec<std::ffi::OsString>> {
+    if depth > 40 {
+        return None;
+    }
+    let mut queue: std::collections::VecDeque<_> = remaining.into();
+    while let Some(component) = queue.pop_front() {
+        match component {
+            std::path::Component::ParentDir => {
+                stack.pop()?;
+            }
+            std::path::Component::CurDir => {}
+            std::path::Component::Normal(segment) => {
+                let candidate: std::path::PathBuf = stack.iter().collect::<std::path::PathBuf>().join(segment);
+                if let Some(target) = symlinks.get(&candidate) {
+                    let target_path = Path::new(target);
+                    if target_path.is_absolute() {
+                        return None;
+                    }
+                    let mut new_remaining: Vec<_> = target_path.components().collect();
+                    new_remaining.extend(queue);
+                    return resolve_realpath_within_export(stack, new_remaining, symlinks, depth + 1);
+                }
+                stack.push(segment.to_os_string());
+            }
+            std::path::Component::RootDir | std::path::Component::Prefix(_) => return None,
+        }
+    }
+    Some(stack)
+}
+
+/// `true` iff a symlink recorded at `dest_rel` (export-relative path of the
+/// symlink itself) with the given raw `target` (the exact bytes git stored
+/// for a mode `120000` blob), resolved through the REAL filesystem
+/// semantics of any other committed symlink it chains through (`symlinks`),
+/// stays inside the export root. The target is never required to exist —
+/// that is exactly the attack this guards against: a target naming a real
+/// but UNCOMMITTED file elsewhere on this machine (e.g. back in the actual
+/// checkout this export was made from). An absolute target, or a relative
+/// one whose real (chain-resolved) location walks back out of the export
+/// root, must never be materialized: `cargo check` would then silently
+/// read content from outside the git-committed export and this check would
+/// falsely certify a broken commit as buildable.
+#[cfg(unix)]
+fn symlink_target_stays_within_export(
+    dest_rel: &Path,
+    target: &str,
+    symlinks: &std::collections::HashMap<std::path::PathBuf, String>,
+) -> bool {
     let target_path = Path::new(target);
     if target_path.is_absolute() {
         return false;
     }
-    let Some(start_dir) = dest.parent() else {
+    let Some(start_dir) = dest_rel.parent() else {
         return false;
     };
-    let mut resolved = start_dir.to_path_buf();
-    for component in target_path.components() {
-        match component {
-            std::path::Component::ParentDir => {
-                resolved.pop();
-            }
-            std::path::Component::CurDir => {}
-            std::path::Component::Normal(segment) => resolved.push(segment),
-            std::path::Component::RootDir | std::path::Component::Prefix(_) => return false,
-        }
-    }
-    resolved.starts_with(export_root)
+    let stack: Vec<std::ffi::OsString> = start_dir
+        .components()
+        .filter_map(|c| match c {
+            std::path::Component::Normal(segment) => Some(segment.to_os_string()),
+            _ => None,
+        })
+        .collect();
+    resolve_realpath_within_export(stack, target_path.components().collect(), symlinks, 0).is_some()
 }
 
 /// Materializes the git-committed tree at `HEAD` of the repository rooted
@@ -532,8 +609,14 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
         ));
     }
 
+    // Parsed as a full pass BEFORE any file is written — a symlink's target
+    // may name a path that appears LATER in `entries` (git ls-tree order is
+    // lexical, not dependency order), so the escape check below needs every
+    // OTHER committed symlink's target known up front rather than only the
+    // ones already materialized.
+    let mut contents: Vec<Vec<u8>> = Vec::with_capacity(entries.len());
     let mut cursor = 0usize;
-    for entry in &entries {
+    for _entry in &entries {
         let header_end = buf[cursor..]
             .iter()
             .position(|&b| b == b'\n')
@@ -556,7 +639,24 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
         if buf.get(cursor) == Some(&b'\n') {
             cursor += 1;
         }
+        contents.push(content.to_vec());
+    }
 
+    #[cfg(unix)]
+    let symlinks: std::collections::HashMap<std::path::PathBuf, String> = entries
+        .iter()
+        .zip(contents.iter())
+        .filter(|(entry, _)| entry.mode == "120000")
+        .map(|(entry, content)| {
+            (
+                std::path::PathBuf::from(&entry.path),
+                String::from_utf8_lossy(content).into_owned(),
+            )
+        })
+        .collect();
+
+    for (entry, content) in entries.iter().zip(contents.iter()) {
+        let content = content.as_slice();
         let dest = tempdir.path().join(&entry.path);
         if let Some(parent) = dest.parent() {
             std::fs::create_dir_all(parent)
@@ -566,7 +666,8 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
             let target = String::from_utf8_lossy(content).into_owned();
             #[cfg(unix)]
             {
-                if !symlink_target_stays_within_export(tempdir.path(), &dest, &target) {
+                if !symlink_target_stays_within_export(Path::new(&entry.path), &target, &symlinks)
+                {
                     return Err(format!(
                         "committed symlink {} -> {target} escapes the \
                          export root — creating it would let `cargo check` \
