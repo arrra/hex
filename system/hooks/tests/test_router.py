@@ -3544,6 +3544,61 @@ class TestReservedWordAnchorIgnoresQuotedMentions(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestReservedWordAnchorIgnoresDoubleQuotedMentionsToo(RouterTestCase):
+    """F2 (round 3 review, major): round 2's fix restricted the quote-span
+    filter to SINGLE-quoted spans only, since a `$(...)`/backtick
+    substitution genuinely stays live inside DOUBLE quotes and a first,
+    over-broad attempt filtered those too. But that meant a
+    double-quoted span's own ORDINARY LITERAL text (just as inert as
+    single-quoted text) was never filtered at all --
+    `printf '%s\\n' "then git stash"` still denied. Fixed by tracking
+    `live_spans` (the inner body of every substitution, at any nesting
+    depth) alongside `quote_spans`: a match is filtered when it starts
+    inside SOME quote span and NOT inside a live span nested in it --
+    single-quoted spans never have one (always filters, same as round 2),
+    double-quoted literal text now filters too, and a substitution
+    genuinely inside double quotes still never does."""
+
+    def test_printf_echoing_a_reserved_word_and_stash_mention_in_double_quotes_abstains(self):
+        cmd = 'printf \'%s\\n\' "then git stash"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2 round 3): {proc.stdout!r}")
+
+    def test_real_stash_substitution_inside_double_quotes_still_denies(self):
+        # Regression guard: a genuine substitution's own executable body,
+        # nested inside double quotes, must still anchor a real
+        # command-position match -- this is exactly the shape live_spans
+        # exists to keep working (echo "$(git stash)" is a REAL invocation).
+        cmd = 'echo "$(git stash)"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F2 round 3): {proc.stdout!r}")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestHeredocBacktickMarkerReachesNestedHeredocs(RouterTestCase):
+    """F23 (round 3 review, minor): the F13 fix decided whether a heredoc
+    body earned the backticks-in-unquoted-heredoc advisory inside
+    `executable_mask`'s OWN top-level loop -- a heredoc nested inside a
+    `$(...)`/backtick substitution (itself possibly inside a double-quoted
+    span) is handled by `_mask_quotes_recursive` instead and never reached
+    that check, so the advisory silently stopped firing for it. Fixed by
+    moving the decision into `_consume_heredoc_body` itself, the one
+    function every caller funnels through."""
+
+    def test_backtick_in_heredoc_nested_inside_a_quoted_substitution_still_fires(self):
+        cmd = 'echo "$(cat <<EOF\n`date`\nEOF\n)"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"nested heredoc backtick must still fire (F23): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "backticks-in-unquoted-heredoc")
+
+
 class TestAssignmentPrefixWithQuotedValue(RouterTestCase):
     """R4 (major): `_ASSIGN`'s value is `\\S*`, which can't span a quoted
     assignment value containing spaces -- the wrapper-skip couldn't reach

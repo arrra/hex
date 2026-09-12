@@ -732,7 +732,7 @@ def _mask_literal_span(text, start, end, result, quote_char, mask_delims=True):
             result[k] = " "
 
 
-def _mask_span_preserving_substitutions(text, start, end, result, quote_spans=None):
+def _mask_span_preserving_substitutions(text, start, end, result, quote_spans=None, live_spans=None):
     """Mask text[start:end) to spaces (newlines untouched), except `$(...)`
     and backtick spans, which stay visible because the shell still executes
     them there (inside double quotes or an unquoted heredoc body).
@@ -756,7 +756,11 @@ def _mask_span_preserving_substitutions(text, start, end, result, quote_spans=No
     top-level quote does -- before this, `evaluate()`'s
     `_extend_end_past_quote` had no span to extend into for a match
     ending mid-value inside one of these substitutions, and a secret
-    fragment reached the persisted ledger in the clear."""
+    fragment reached the persisted ledger in the clear.
+
+    `live_spans` (F2, round 3 review, major): forwarded to
+    `_mask_quotes_recursive` for the same reason -- see that function's
+    docstring."""
     i = start
     while i < end:
         ch = text[i]
@@ -766,7 +770,7 @@ def _mask_span_preserving_substitutions(text, start, end, result, quote_spans=No
                 close, body_end = raw_close, raw_close - 1
             else:
                 close = body_end = min(raw_close, end)
-            _mask_quotes_recursive(text, i + 2, body_end, result, quote_spans)
+            _mask_quotes_recursive(text, i + 2, body_end, result, quote_spans, live_spans)
             i = close
             continue
         if ch == "`":
@@ -781,7 +785,7 @@ def _mask_span_preserving_substitutions(text, start, end, result, quote_spans=No
                 result[j] = " "
             else:
                 close = body_end = end
-            _mask_quotes_recursive(text, i + 1, body_end, result, quote_spans)
+            _mask_quotes_recursive(text, i + 1, body_end, result, quote_spans, live_spans)
             i = close
             continue
         if ch != "\n":
@@ -789,7 +793,7 @@ def _mask_span_preserving_substitutions(text, start, end, result, quote_spans=No
         i += 1
 
 
-def _mask_quotes_recursive(text, start, end, result, quote_spans=None):
+def _mask_quotes_recursive(text, start, end, result, quote_spans=None, live_spans=None):
     """Mask single-/double-quoted literal spans within text[start:end),
     leaving executable text visible, and recurse into any `$(...)`/backtick
     substitution found in that range — so a quoted literal several
@@ -836,7 +840,24 @@ def _mask_quotes_recursive(text, start, end, result, quote_spans=None):
     a substitution, ...) still gets its span recorded. Before this, only
     TOP-LEVEL quotes were ever recorded, so `evaluate()`'s
     `_extend_end_past_quote` had nothing to extend a mid-value match into
-    for a secret quoted anywhere in here, and it leaked into the ledger."""
+    for a secret quoted anywhere in here, and it leaked into the ledger.
+
+    `live_spans` (F2, round 3 review, major): when given a list, the INNER
+    body span of every `$(...)`/backtick substitution this function (or
+    `_mask_double_quoted`) walks past is appended to it -- symmetric to
+    `quote_spans`, but marking the opposite thing: text that is genuinely
+    EXECUTABLE despite sitting inside an enclosing quote. `evaluate()`'s
+    `_match_starts_inside_quoted_literal_text` filter (in `evaluate()`)
+    needs to
+    tell a quote's own ORDINARY LITERAL text (never executable, must be
+    filtered) apart from a substitution's body NESTED inside that same
+    quote (genuinely live, must never be filtered) -- both look identical
+    in scan_text (neither is masked), so positional bookkeeping is the
+    only way to tell them apart. `_mask_span_preserving_substitutions`
+    (an unquoted heredoc body) also forwards this, for the same
+    arbitrarily-deep-nesting reason `quote_spans` does, despite a heredoc
+    body's own top-level substitutions never being inside a quote
+    themselves and so never affecting that filter directly."""
     i = start
     pending_heredoc = None
     while i < end:
@@ -877,7 +898,7 @@ def _mask_quotes_recursive(text, start, end, result, quote_spans=None):
             delim, quoted, strip_tabs = pending_heredoc
             pending_heredoc = None
             close, _terminated = _consume_heredoc_body(
-                text, i + 1, delim, quoted, strip_tabs, result, end, quote_spans
+                text, i + 1, delim, quoted, strip_tabs, result, end, quote_spans, live_spans
             )
             i = min(close, end)
             continue
@@ -894,7 +915,10 @@ def _mask_quotes_recursive(text, start, end, result, quote_spans=None):
             start_q = i
             keep_delims = _is_assignment_value_quote(text, i)
             i = min(
-                _mask_double_quoted(text, i, result, mask_delims=not keep_delims, quote_spans=quote_spans),
+                _mask_double_quoted(
+                    text, i, result, mask_delims=not keep_delims,
+                    quote_spans=quote_spans, live_spans=live_spans,
+                ),
                 end,
             )
             if quote_spans is not None:
@@ -906,7 +930,18 @@ def _mask_quotes_recursive(text, start, end, result, quote_spans=None):
                 close, body_end = raw_close, raw_close - 1
             else:
                 close = body_end = min(raw_close, end)
-            _mask_quotes_recursive(text, i + 2, body_end, result, quote_spans)
+            if live_spans is not None:
+                # F2 (round 3 review, follow-up fix): the span's start is
+                # `i` itself -- the `$` opener -- not `i + 2` (past the
+                # `$(`). `_CMD_PREFIX`'s own `\$\(\s*` alternative anchors
+                # a rule's match AT the `$`, so a real invocation right
+                # after it (e.g. `"$(cd /worktrees/x)"`) has `m.start()`
+                # sitting on the `$`, one character before where a span
+                # starting at `i + 2` would begin -- the filter then saw
+                # it as "not in any live span" and (wrongly) treated it as
+                # inert literal quoted text instead of a live substitution.
+                live_spans.append((i, body_end))
+            _mask_quotes_recursive(text, i + 2, body_end, result, quote_spans, live_spans)
             i = close
             continue
         if ch == "`":
@@ -922,13 +957,18 @@ def _mask_quotes_recursive(text, start, end, result, quote_spans=None):
                 result[j] = " "
             else:
                 close = body_end = min((j + 1) if j != -1 else len(text), end)
-            _mask_quotes_recursive(text, i + 1, body_end, result, quote_spans)
+            if live_spans is not None:
+                # F2 (round 3 review, follow-up fix): same reasoning as
+                # the `$(...)` branch above -- `_CMD_PREFIX`'s bare-
+                # backtick alternative anchors AT the backtick itself.
+                live_spans.append((i, body_end))
+            _mask_quotes_recursive(text, i + 1, body_end, result, quote_spans, live_spans)
             i = close
             continue
         i += 1
 
 
-def _mask_double_quoted(text, start, result, mask_delims=True, quote_spans=None):
+def _mask_double_quoted(text, start, result, mask_delims=True, quote_spans=None, live_spans=None):
     """`text[start]` is the opening '"'; mask the double-quoted span,
     preserving `$(...)`/backtick substitutions' executable structure while
     recursively masking any quoted literal NESTED inside one of them (G1,
@@ -960,7 +1000,12 @@ def _mask_double_quoted(text, start, result, mask_delims=True, quote_spans=None)
     down (that branch never runs here because `continue` skips it) and
     fool `_CMD_PREFIX` the same way a bare embedded newline did before the
     first G4 fix (review_b round 2, re-opened). Blank both characters like
-    any other escape pair — length-preserving, so offsets stay identical."""
+    any other escape pair — length-preserving, so offsets stay identical.
+
+    `live_spans` (F2, round 3 review, major): forwarded to
+    `_mask_quotes_recursive`, and this function also records its OWN
+    top-level `$(...)`/backtick substitution bodies into it -- see
+    `_mask_quotes_recursive`'s docstring for why."""
     n = len(text)
     if mask_delims:
         result[start] = " "
@@ -982,7 +1027,18 @@ def _mask_double_quoted(text, start, result, mask_delims=True, quote_spans=None)
                 close, body_end = raw_close, raw_close - 1
             else:
                 close = body_end = raw_close
-            _mask_quotes_recursive(text, i + 2, body_end, result, quote_spans)
+            if live_spans is not None:
+                # F2 (round 3 review, follow-up fix): the span's start is
+                # `i` itself -- the `$` opener -- not `i + 2` (past the
+                # `$(`). `_CMD_PREFIX`'s own `\$\(\s*` alternative anchors
+                # a rule's match AT the `$`, so a real invocation right
+                # after it (e.g. `"$(cd /worktrees/x)"`) has `m.start()`
+                # sitting on the `$`, one character before where a span
+                # starting at `i + 2` would begin -- the filter then saw
+                # it as "not in any live span" and (wrongly) treated it as
+                # inert literal quoted text instead of a live substitution.
+                live_spans.append((i, body_end))
+            _mask_quotes_recursive(text, i + 2, body_end, result, quote_spans, live_spans)
             i = close
             continue
         if ch == "`":
@@ -1004,7 +1060,12 @@ def _mask_double_quoted(text, start, result, mask_delims=True, quote_spans=None)
                 result[j] = " "
             else:
                 close = body_end = n
-            _mask_quotes_recursive(text, i + 1, body_end, result, quote_spans)
+            if live_spans is not None:
+                # F2 (round 3 review, follow-up fix): same reasoning as
+                # the `$(...)` branch above -- `_CMD_PREFIX`'s bare-
+                # backtick alternative anchors AT the backtick itself.
+                live_spans.append((i, body_end))
+            _mask_quotes_recursive(text, i + 1, body_end, result, quote_spans, live_spans)
             i = close
             continue
         if ch in _SEPARATOR_CHARS:
@@ -1019,7 +1080,9 @@ def _mask_double_quoted(text, start, result, mask_delims=True, quote_spans=None)
     return n
 
 
-def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=None, quote_spans=None):
+def _consume_heredoc_body(
+    text, start, delim, quoted, strip_tabs, result, end=None, quote_spans=None, live_spans=None
+):
     """Mask the heredoc body starting at `start` (just after the opener's
     newline) up to and including the line that is exactly `delim` (F13: the
     ACTUAL delimiter bounds the body, never `[\\s\\S]*` to end-of-string).
@@ -1061,7 +1124,24 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=No
     `quote_spans` (A-REFUTE-2): forwarded to
     `_mask_span_preserving_substitutions` for an UNQUOTED body, so a
     quoted secret inside a substitution embedded in the body gets its
-    span recorded the same way a top-level quote does."""
+    span recorded the same way a top-level quote does. `live_spans` (F2,
+    round 3 review) is forwarded the same way, for the same nested-
+    substitution reason.
+
+    F13/F23 (round 3 review, minor): whether this heredoc's own body
+    qualifies for the `backticks-in-unquoted-heredoc` advisory is decided
+    HERE, once, regardless of which caller reached this heredoc --
+    `executable_mask`'s own top-level loop, or `_mask_quotes_recursive`
+    finding one nested inside a `$(...)`/backtick substitution (itself
+    possibly inside a double-quoted span, e.g. `echo "$(cat <<EOF
+    ...backtick...
+    EOF
+    )"`). Emitting the marker from the single shared function every path
+    already funnels through, instead of duplicating the check in each
+    caller, is what makes the recursive path get it for free -- the round
+    2 fix only added the check to `executable_mask`'s own loop, so a
+    heredoc reached via `_mask_quotes_recursive` never emitted it at
+    all."""
     n = len(text)
     i = start
     while True:
@@ -1084,7 +1164,9 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=No
             if text[k] != "\n":
                 result[k] = " "
     else:
-        _mask_span_preserving_substitutions(text, start, mask_limit, result, quote_spans)
+        _mask_span_preserving_substitutions(text, start, mask_limit, result, quote_spans, live_spans)
+        if "`" in result[start:mask_limit]:
+            result.append(_HEREDOC_BACKTICK_MARKER)
     return end_index, terminated
 
 
@@ -1101,13 +1183,17 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=No
 _HEREDOC_BACKTICK_MARKER = "\x02"
 
 
-def executable_mask(text, quote_spans=None):
+def executable_mask(text, quote_spans=None, live_spans=None):
     """`quote_spans` (R6, round 3): when given a list, every TOP-LEVEL
     single-/double-quoted span this scanner walks past is appended to it
     as `(start, end)` (end just past the closing delimiter, or len(text)
     if unterminated) -- `evaluate()` uses this to extend a rule's match
     span past a quoted secret value it ended in the middle of, before
-    redact() ever sees the slice (see `_extend_end_past_quote`)."""
+    redact() ever sees the slice (see `_extend_end_past_quote`).
+
+    `live_spans` (F2, round 3 review): the same bookkeeping, but for the
+    INNER body of every `$(...)`/backtick substitution nested inside a
+    double-quoted span -- see `_mask_quotes_recursive`'s docstring."""
     n = len(text)
     result = list(text)
     i = 0
@@ -1204,7 +1290,10 @@ def executable_mask(text, quote_spans=None):
         if ch == '"':
             start = i
             keep_delims = _is_assignment_value_quote(text, i)
-            i = _mask_double_quoted(text, i, result, mask_delims=not keep_delims, quote_spans=quote_spans)
+            i = _mask_double_quoted(
+                text, i, result, mask_delims=not keep_delims,
+                quote_spans=quote_spans, live_spans=live_spans,
+            )
             if quote_spans is not None:
                 quote_spans.append((start, i))
             continue
@@ -1227,9 +1316,9 @@ def executable_mask(text, quote_spans=None):
             i += 1
             while pending_heredocs:
                 delim, quoted, strip_tabs = pending_heredocs.pop(0)
-                body_start = i
                 i, terminated = _consume_heredoc_body(
-                    text, i, delim, quoted, strip_tabs, result, quote_spans=quote_spans
+                    text, i, delim, quoted, strip_tabs, result,
+                    quote_spans=quote_spans, live_spans=live_spans,
                 )
                 if not terminated and not quoted:
                     # F8: an unquoted heredoc that never finds its terminator
@@ -1242,45 +1331,18 @@ def executable_mask(text, quote_spans=None):
                     result.append("\n")
                     result.extend(delim)
                     result.append("\n")
-                # F13 (round 2 review, major): the old design left boundary
-                # detection to a `backticks-in-unquoted-heredoc` regex that
-                # re-derived each heredoc's body from a `\1` backreference
-                # over the COMBINED scan_text -- reusing the same delimiter
-                # name for two heredocs let its lazy pre-backtick scan cross
-                # the FIRST heredoc's own terminator, pass across unrelated
-                # real code in between, and land on the SECOND heredoc's
-                # terminator as if it closed the first. A negative-lookahead
-                # fix was rejected (TestNoLookaroundInRules bans `(?!...)` /
-                # `(?=...)` in every rule -- not portable to the Rust regex
-                # crate this router targets); a sentinel byte marking each
-                # body's end was also rejected -- `result` is index-aligned
-                # 1:1 with `text` (masking always OVERWRITES `result[k]`,
-                # never inserts), so `result.append(...)` here always lands
-                # at the very end of the WHOLE array, not "right after this
-                # heredoc," for every heredoc but the last.
-                #
-                # Fixed by moving the decision here, where the scanner
-                # already knows this heredoc's own precise `[body_start, i)`
-                # span -- no backreference, no boundary-crossing possible.
-                # If this body is unquoted (a real shell still runs its
-                # backtick substitutions) and its OWN masked slice contains
-                # a live backtick, append a fixed marker (never overwrite
-                # the backtick itself in place -- a genuine substitution's
-                # OPENING backtick is a real command-position anchor other
-                # rules key off, e.g. `git-stash-shared-checkout` recognizing
-                # `git` right after it; blanking that backtick hid the very
-                # command this router exists to catch). `result` is
-                # index-aligned 1:1 with `text`, so an appended character
-                # sits past `text`'s own end -- evaluate()'s rule loop
-                # slices RAW text using the SAME span the match found in
-                # scan_text, and a span entirely past `text`'s length would
-                # come back empty. The rule's own match pattern (below)
-                # anchors on the heredoc's real, always-present `<<` opener
-                # first, so its span starts inside real text -- only its END
-                # may run past into the appended marker, exactly like F8's
-                # existing synthetic-terminator append above.
-                if not quoted and "`" in result[body_start:i]:
-                    result.append(_HEREDOC_BACKTICK_MARKER)
+                # F13/F23 (round 2 + round 3 review): whether this heredoc's
+                # body earns the backticks-in-unquoted-heredoc advisory is
+                # now decided INSIDE `_consume_heredoc_body` itself, once,
+                # regardless of which caller reached it -- see that
+                # function's own docstring. It used to be decided here
+                # instead, which only covered a heredoc `executable_mask`'s
+                # OWN top-level loop reached directly; one nested inside a
+                # `$(...)`/backtick substitution (itself possibly inside a
+                # double-quoted span) is handled by `_mask_quotes_recursive`
+                # instead and never reached this duplicated check
+                # (F23: `echo "$(cat <<EOF` ... a backtick ... `EOF` ...
+                # `)"` stopped firing the advisory entirely).
             continue
         i += 1
     return "".join(result)
@@ -2043,7 +2105,8 @@ def evaluate(payload):
     # exists to filter exactly that case out. Other tools' canonical text
     # (file paths/content) isn't Bash syntax, so it is used as-is.
     quote_spans = []
-    scan_text = executable_mask(text, quote_spans) if tool_name == "Bash" else text
+    live_spans = []
+    scan_text = executable_mask(text, quote_spans, live_spans) if tool_name == "Bash" else text
     if tool_name == "Bash":
         scan_text = _widen_quoted_global_opt_args(text, scan_text, quote_spans)
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
@@ -2053,35 +2116,43 @@ def evaluate(payload):
     )
     rules = load_rules()
 
-    def _match_starts_inside_a_single_quote(m):
-        # F2 (round 2 review, major): `_RESERVED_LEADIN` recognizes a
-        # reserved word anywhere in scan_text, with no lookbehind
-        # available (Rust `regex` port target) to check whether it sits
-        # in REAL command position. `printf '%s\n' 'then stash-it'`
-        # never runs a real stash invocation at all -- the word `then`
-        # the rule anchored on is a QUOTED MENTION, visible in scan_text
-        # only because ordinary quoted argument content is never blanked
-        # (see the comment on `quote_spans` above).
+    def _match_starts_inside_quoted_literal_text(m):
+        # F2 (round 2 review, major; round 3 review, major): `_RESERVED_
+        # LEADIN` recognizes a reserved word anywhere in scan_text, with
+        # no lookbehind available (Rust `regex` port target) to check
+        # whether it sits in REAL command position. `printf '%s\n' 'then
+        # stash-it'` (single-quoted) and `printf '%s\n' "then a stash of it"`
+        # (double-quoted) never run a real stash invocation at all -- the
+        # word the rule anchored on is a QUOTED MENTION, visible in
+        # scan_text only because ordinary quoted argument content is
+        # never blanked (see the comment on `quote_spans` above).
         #
-        # Restricted to SINGLE-quoted spans only (`text[q_start] == "'"`,
-        # recovered from the ORIGINAL text rather than threading a new
-        # discriminator into every quote_spans.append() call site): a
-        # first regression pass filtered ANY quote_spans containment and
+        # Round 2's fix restricted this to SINGLE-quoted spans only,
+        # since a first attempt that filtered ANY quote_spans containment
         # broke `echo "$(real stash invocation)"` and its siblings -- a
-        # `$(...)`/
-        # backtick substitution genuinely STAYS LIVE inside DOUBLE quotes
-        # (unlike single quotes, which suppress every kind of expansion),
-        # so a substitution-anchored match legitimately starting inside a
-        # double-quoted span must never be discarded. `_RESERVED_LEADIN`'s
-        # bare-word alternatives are the only ones a single-quoted span
-        # can ever spuriously anchor (nothing else survives masking
-        # there), so restricting the filter to single quotes closes F2
-        # without reopening G1/round-2's substitution-in-double-quotes
-        # coverage.
-        return any(
-            q_start < len(text) and text[q_start] == "'" and q_start <= m.start() < q_end
-            for q_start, q_end in quote_spans
-        )
+        # `$(...)`/backtick substitution genuinely STAYS LIVE inside
+        # DOUBLE quotes (unlike single quotes, which suppress every kind
+        # of expansion). But that over-corrected the other way: a
+        # double-quoted span's OWN ORDINARY LITERAL text (never
+        # executable) is just as inert as single-quoted text, and round 2
+        # never filtered it at all -- `"then a stash of it"` still fired.
+        #
+        # The real distinction was never "which quote character," it's
+        # "literal text vs. a live substitution's own body" -- both look
+        # IDENTICAL in scan_text (neither is masked), so `live_spans`
+        # (populated by `_mask_quotes_recursive`/`_mask_double_quoted`
+        # whenever they walk past a `$(...)`/backtick's inner body, at
+        # any nesting depth) is the only way to tell them apart. A match
+        # is filtered when it starts inside SOME quote span (single or
+        # double) and NOT inside a live span nested in it -- a
+        # single-quoted span never has one, so it always filters, exactly
+        # like round 2's fix; a double-quoted span's literal text now
+        # filters too, while a substitution genuinely inside one still
+        # never does.
+        start = m.start()
+        if any(l_start <= start < l_end for l_start, l_end in live_spans):
+            return False
+        return any(q_start <= start < q_end for q_start, q_end in quote_spans)
 
     fires = []
     for rule in rules:
@@ -2090,7 +2161,7 @@ def evaluate(payload):
         all_matches = [
             m
             for m in rule["match_re"].finditer(scan_text)
-            if not _match_starts_inside_a_single_quote(m)
+            if not _match_starts_inside_quoted_literal_text(m)
         ]
         if not all_matches:
             continue
