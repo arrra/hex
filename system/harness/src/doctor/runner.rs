@@ -1015,6 +1015,276 @@ mod tests {
         );
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_refuses_a_symlink_that_escapes_via_a_case_folded_chained_hop() {
+        // A-R1 (round 3 review), export-level: `resolve_realpath_within_export`
+        // substitutes a chained hop only when a path component matches a
+        // committed symlink's path by EXACT byte equality (the HashMap key).
+        // On a case-insensitive filesystem (macOS APFS by default — this
+        // machine included) the REAL filesystem resolves a case-VARIANT
+        // reference to the very same symlink the exact-byte lookup
+        // requires; the lookup misses, the component is treated as an
+        // ordinary directory push, the following `..` cancels it
+        // lexically, and the escaping symlink is materialized. Same
+        // two-symlink shape as the round-2 chained-hop fixture above,
+        // except the committed symlink's name and the reference to it
+        // differ only by case.
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let outside_name = outside
+            .path()
+            .file_name()
+            .expect("named temp file has a name")
+            .to_owned();
+
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(harness.join("Cargo.toml"), HEX_HARNESS_MANIFEST).unwrap();
+        std::fs::write(harness.join("Cargo.lock"), HEX_HARNESS_LOCKFILE).unwrap();
+        std::os::unix::fs::symlink(".", tmp.path().join("Link_Identity")).unwrap();
+        let escape_target = PathBuf::from("link_identity/..").join(&outside_name);
+        std::os::unix::fs::symlink(&escape_target, tmp.path().join("link_escape")).unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fixture with case-folded chained escaping symlink",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        assert!(
+            result.is_err(),
+            "a committed symlink that escapes the export root only once a \
+             case-variant reference to a chained committed symlink is \
+             REALLY resolved by the filesystem (never via an exact-byte \
+             lookup) must still be refused: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_harness_buildable_never_falsely_passes_a_case_folded_escaping_symlink_chain() {
+        // A-R1 (round 3 review), end-to-end: the same case-fold bypass as
+        // the export-level test above, but proven through the full check —
+        // a committed module reachable only via the case-folded escaping
+        // chain must never let `cargo check` silently read real, uncommitted
+        // content from elsewhere on this machine and report PASS.
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(harness.join("Cargo.toml"), HEX_HARNESS_MANIFEST).unwrap();
+        std::fs::write(harness.join("Cargo.lock"), HEX_HARNESS_LOCKFILE).unwrap();
+        std::fs::write(harness.join("src/lib.rs"), "mod data;\npub use data::f;\n").unwrap();
+
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        std::fs::write(outside.path(), "pub fn f() -> i32 { 1 }\n").unwrap();
+        let outside_name = outside
+            .path()
+            .file_name()
+            .expect("named temp file has a name")
+            .to_owned();
+        std::os::unix::fs::symlink(".", tmp.path().join("Link_Identity")).unwrap();
+        let escape_target = PathBuf::from("../../../link_identity/..").join(&outside_name);
+        std::os::unix::fs::symlink(&escape_target, harness.join("src/data.rs")).unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fixture: mod reachable only via case-folded escaping chain",
+            ],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+        assert_ne!(
+            result.status,
+            Status::Pass,
+            "`data.rs` exists nowhere in the committed tree — only via a \
+             case-folded chained symlink escape reading a real file \
+             elsewhere on this machine — so this must never PASS: {result:?}"
+        );
+        assert_eq!(
+            result.status,
+            Status::Warn,
+            "a case-folded escaping symlink chain makes the export itself \
+             untrustworthy — this must WARN (cannot certify), not FAIL: \
+             {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_refuses_a_symlink_that_escapes_via_an_uppercase_variant_hop() {
+        // B-R1 (round 3 review): the identical bug class as A-R1 above,
+        // reported independently against the exact probe shape from that
+        // finding's evidence — a committed `link_identity -> .` referenced
+        // via its UPPERCASE spelling (`LINK_IDENTITY`) from the escaping
+        // symlink's target. Already closed by the same fix as A-R1 (the
+        // exact-byte chain lookup does not distinguish which side of the
+        // case mismatch is upper/lower); pinned here directly so this
+        // finding's own probe shape has a dedicated regression.
+        let outside = tempfile::NamedTempFile::new().unwrap();
+        let outside_name = outside
+            .path()
+            .file_name()
+            .expect("named temp file has a name")
+            .to_owned();
+
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(harness.join("Cargo.toml"), HEX_HARNESS_MANIFEST).unwrap();
+        std::fs::write(harness.join("Cargo.lock"), HEX_HARNESS_LOCKFILE).unwrap();
+        std::os::unix::fs::symlink(".", tmp.path().join("link_identity")).unwrap();
+        let escape_target = PathBuf::from("LINK_IDENTITY/..").join(&outside_name);
+        std::os::unix::fs::symlink(&escape_target, tmp.path().join("link_escape")).unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fixture with uppercase-variant chained escaping symlink",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        assert!(
+            result.is_err(),
+            "an escaping symlink referenced only via an UPPERCASE variant \
+             of a committed lowercase symlink's name must still be \
+             refused: {result:?}"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_refuses_writing_a_committed_file_through_a_name_equivalent_symlink(
+    ) {
+        // A-R2 (round 3 review): entries are written in `git ls-tree`
+        // order (bytewise), and the export writes a regular file with
+        // `std::fs::write`, which FOLLOWS an existing symlink at `dest`
+        // (O_TRUNC through the link) rather than replacing it. On a
+        // case-insensitive filesystem, two committed names that are FS-
+        // equivalent (`M` and `m`) sort in git's bytewise order such that
+        // the symlink `M -> Cargo.toml` is materialized first, and the
+        // regular file `m`'s bytes then get written straight through it
+        // into `Cargo.toml` — a DIFFERENT committed path, already
+        // materialized. `git update-index --add --cacheinfo` builds this
+        // fixture directly in the index/object database, so the
+        // case-insensitive working tree this test runs on never has to
+        // hold `M` and `m` at once.
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        std::fs::create_dir_all(tmp.path().join(".hex/harness/src")).unwrap();
+
+        let hash_object = |content: &[u8]| -> String {
+            let scratch = tempfile::NamedTempFile::new().unwrap();
+            std::fs::write(scratch.path(), content).unwrap();
+            let output = std::process::Command::new("git")
+                .args(["hash-object", "-w", scratch.path().to_str().unwrap()])
+                .current_dir(tmp.path())
+                .output()
+                .expect("git hash-object spawns");
+            assert!(output.status.success());
+            String::from_utf8_lossy(&output.stdout).trim().to_string()
+        };
+
+        // The manifest actually reviewed/committed at `Cargo.toml` points
+        // `[lib]` at a source file that does not exist anywhere in the
+        // repo — built as committed, `cargo check` must FAIL. `m`'s
+        // manifest has no explicit `[lib]` section, so if it ever gets
+        // written straight into `Cargo.toml`'s location it falls back to
+        // the implicit `src/lib.rs` target below, which DOES exist and IS
+        // valid — the fixture only demonstrates a genuine false PASS if
+        // that fallback would actually succeed.
+        let broken_manifest = format!("{HEX_HARNESS_MANIFEST}[lib]\npath = \"src/nope.rs\"\n");
+        let broken_manifest_sha = hash_object(broken_manifest.as_bytes());
+        let good_manifest_sha = hash_object(HEX_HARNESS_MANIFEST.as_bytes());
+        let lockfile_sha = hash_object(HEX_HARNESS_LOCKFILE.as_bytes());
+        let symlink_sha = hash_object(b"Cargo.toml");
+        let lib_rs_sha = hash_object(b"pub fn f() -> i32 { 1 }\n");
+
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{lib_rs_sha},.hex/harness/src/lib.rs"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{lockfile_sha},.hex/harness/Cargo.lock"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{broken_manifest_sha},.hex/harness/Cargo.toml"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("120000,{symlink_sha},.hex/harness/M"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                &format!("100644,{good_manifest_sha},.hex/harness/m"),
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fixture: case-equivalent M/m collide via a symlink",
+            ],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+        assert_ne!(
+            result.status,
+            Status::Pass,
+            "the committed manifest's `[lib]` target does not exist \
+             anywhere in the repo — it must never report PASS just \
+             because a case-equivalent committed symlink name let the \
+             export write straight through it into a different, valid \
+             manifest sharing the same filesystem path: {result:?}"
+        );
+    }
+
     #[test]
     fn test_harness_buildable_still_fails_when_a_failing_build_script_mentions_offline_wording() {
         // G4 (review_b, round 2): the original G4 fixture above only
