@@ -1202,6 +1202,39 @@ class TestHeredocBoundToItsDelimiter(RouterTestCase):
             )
 
 
+class TestReusedHeredocDelimiterDoesNotCrossIntoASecondBlock(RouterTestCase):
+    """F13 (round 2 review, major): reusing the SAME delimiter name for two
+    separate heredocs let the rule's lazy pre-backtick scan cross the
+    first heredoc's own (real) terminator line, run through an unrelated
+    real command in between, and land on the SECOND heredoc's terminator
+    as if it belonged to the first. Neither heredoc body here actually
+    contains a backtick -- the backtick is in a genuinely separate command
+    sitting between the two blocks."""
+
+    def test_backtick_between_two_same_named_heredocs_abstains(self):
+        cmd = "cat <<EOF\nhello\nEOF\necho `date`\ncat <<EOF\nbye\nEOF\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                "the backtick command sits between two heredocs, in neither body "
+                f"(F13 round 2): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_backtick_genuinely_inside_the_first_of_two_same_named_heredocs_still_fires(self):
+        # Regression guard: a real in-body backtick must still be caught
+        # even when a second, same-named heredoc follows later.
+        cmd = "cat <<EOF\nhello `date`\nEOF\ncat <<EOF\nbye\nEOF\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"a genuine in-body backtick must still fire (F13 round 2): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "backticks-in-unquoted-heredoc")
+
+
 class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
     """F14: `_window_bounds` must not rebuild the full separator list for
     every candidate occurrence — a large all-exempt command must still

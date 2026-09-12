@@ -1072,6 +1072,19 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=No
     return end_index, terminated
 
 
+# F13 (round 2 review): a fixed, scanner-emitted marker meaning "some
+# unquoted heredoc body in this command contains a live backtick" -- see
+# the F13 comment inside executable_mask's heredoc-handling loop below for
+# why this replaced a `\1`-backreference regex that re-derived heredoc
+# boundaries from scan_text instead of asking the scanner, which already
+# knows them precisely. A raw byte this rare in real command text is
+# extremely unlikely to occur naturally (a crafted `` in the JSON
+# tool_input could still forge it, but this rule is advisory-only --
+# `"decision": "prior"` -- so the worst case is an extraneous tip, not a
+# bypassed gate).
+_HEREDOC_BACKTICK_MARKER = "\x02"
+
+
 def executable_mask(text, quote_spans=None):
     """`quote_spans` (R6, round 3): when given a list, every TOP-LEVEL
     single-/double-quoted span this scanner walks past is appended to it
@@ -1198,23 +1211,60 @@ def executable_mask(text, quote_spans=None):
             i += 1
             while pending_heredocs:
                 delim, quoted, strip_tabs = pending_heredocs.pop(0)
+                body_start = i
                 i, terminated = _consume_heredoc_body(
                     text, i, delim, quoted, strip_tabs, result, quote_spans=quote_spans
                 )
                 if not terminated and not quoted:
                     # F8: an unquoted heredoc that never finds its terminator
                     # still consumes to EOF in real shells, so its backtick
-                    # substitutions run for the whole body. The
-                    # backticks-in-unquoted-heredoc rule's match regex must
-                    # end at an ACTUAL `\1` terminator line (F8: no bare
-                    # `|\Z` fallback, or it can scan past a REAL terminator
-                    # into unrelated trailing code). Append a synthetic
-                    # terminator line to scan_text only (never to the raw
-                    # command text used elsewhere) so that regex still
-                    # fires for the genuinely-unterminated case.
+                    # substitutions run for the whole body. Append a
+                    # synthetic terminator line to scan_text only (never to
+                    # the raw command text used elsewhere), purely so the
+                    # human-facing preview below still reads like a closed
+                    # heredoc.
                     result.append("\n")
                     result.extend(delim)
                     result.append("\n")
+                # F13 (round 2 review, major): the old design left boundary
+                # detection to a `backticks-in-unquoted-heredoc` regex that
+                # re-derived each heredoc's body from a `\1` backreference
+                # over the COMBINED scan_text -- reusing the same delimiter
+                # name for two heredocs let its lazy pre-backtick scan cross
+                # the FIRST heredoc's own terminator, pass across unrelated
+                # real code in between, and land on the SECOND heredoc's
+                # terminator as if it closed the first. A negative-lookahead
+                # fix was rejected (TestNoLookaroundInRules bans `(?!...)` /
+                # `(?=...)` in every rule -- not portable to the Rust regex
+                # crate this router targets); a sentinel byte marking each
+                # body's end was also rejected -- `result` is index-aligned
+                # 1:1 with `text` (masking always OVERWRITES `result[k]`,
+                # never inserts), so `result.append(...)` here always lands
+                # at the very end of the WHOLE array, not "right after this
+                # heredoc," for every heredoc but the last.
+                #
+                # Fixed by moving the decision here, where the scanner
+                # already knows this heredoc's own precise `[body_start, i)`
+                # span -- no backreference, no boundary-crossing possible.
+                # If this body is unquoted (a real shell still runs its
+                # backtick substitutions) and its OWN masked slice contains
+                # a live backtick, append a fixed marker (never overwrite
+                # the backtick itself in place -- a genuine substitution's
+                # OPENING backtick is a real command-position anchor other
+                # rules key off, e.g. `git-stash-shared-checkout` recognizing
+                # `git` right after it; blanking that backtick hid the very
+                # command this router exists to catch). `result` is
+                # index-aligned 1:1 with `text`, so an appended character
+                # sits past `text`'s own end -- evaluate()'s rule loop
+                # slices RAW text using the SAME span the match found in
+                # scan_text, and a span entirely past `text`'s length would
+                # come back empty. The rule's own match pattern (below)
+                # anchors on the heredoc's real, always-present `<<` opener
+                # first, so its span starts inside real text -- only its END
+                # may run past into the appended marker, exactly like F8's
+                # existing synthetic-terminator append above.
+                if not quoted and "`" in result[body_start:i]:
+                    result.append(_HEREDOC_BACKTICK_MARKER)
             continue
         i += 1
     return "".join(result)

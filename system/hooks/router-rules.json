@@ -113,9 +113,9 @@
   {
     "id": "backticks-in-unquoted-heredoc",
     "tool": "^Bash$",
-    "match": "<<-?\\s*([A-Za-z_][A-Za-z0-9_]*)\\b[^\\n]*\\n(?:[^\\n]*\\n)*?[^\\n]*`[^\\n]*\\n(?:[^\\n]*\\n)*?\\t*\\1(?:\\n|\\Z)",
+    "match": "<<[\\s\\S]*?\\x02",
     "decision": "prior",
-    "message": "Unquoted heredoc delimiter with a backtick in the body: the shell executes the backtick text as a command substitution (twice on 2026-09-06 a note was lost this way). Quote the delimiter (<<'EOF') or pass the text via a variable/file, then verify the artifact was written.",
+    "message": "Unquoted heredoc delimiter with a backtick in the body: the shell executes the backtick text as a command substitution (twice on 2026-09-06 a note was lost this way). Quote the delimiter (<<'EOF') or pass the text via a variable/file, then verify the artifact was written. (F13, round 2 review: the scanner itself now decides this per heredoc body, using its own precise boundaries, and emits `\\x02` into scan_text when a real one qualifies -- this rule just checks for that marker. The old `\\1`-backreference regex re-derived heredoc boundaries from the combined scan_text and could cross a same-named heredoc's own terminator into a second, unrelated block further down; see pretooluse-router.py's executable_mask.)",
     "source": "me/learnings.md Tooling gotchas 2026-09-06"
   }
 ]
