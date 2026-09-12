@@ -3548,6 +3548,105 @@ mod tests {
         );
     }
 
+    // B-F-new1 (major, arrra/hex PR #9 round 2, carried from the prior
+    // round's review_b): the Ok arm's failed-RELEASE cleanup (F1, PR #8
+    // round 2, above) unconditionally runs a full `ROLLBACK` on any RELEASE
+    // failure, unlike the Err arm's cleanup (F7, above) which gates that
+    // full `ROLLBACK` on `owns_transaction` — never blowing away a
+    // transaction a caller already had open. A caller that wraps one or
+    // more `index_file_with_reuse` calls inside its own already-open
+    // transaction (`owns_transaction = false`) whose nested RELEASE fails
+    // for any reason must not have its ENTIRE outer transaction discarded by
+    // this function's own cleanup, even though this call's own indexing
+    // work succeeded (the Ok arm). The blocking-reader/SQLITE_BUSY technique
+    // used by the F1/F7 tests above cannot reach this arm: a nested,
+    // non-outermost SAVEPOINT RELEASE succeeds even under a blocking reader
+    // (verified empirically — no EXCLUSIVE-lock upgrade is needed when not
+    // outermost), so the RELEASE is instead denied deterministically via a
+    // rusqlite authorizer hook — a fault-injection point independent of
+    // timing, locking mode, or platform.
+    #[test]
+    fn index_file_with_reuse_ok_arm_release_failure_preserves_caller_owned_outer_transaction() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let db_path = tmp.path().join("memory.db");
+        let conn = super::super::open_db(&db_path).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("ok-release-fail.md");
+
+        // The caller opens its own outer transaction and writes something
+        // unrelated to this call before delegating to index_file_with_reuse
+        // — `owns_transaction` (captured from `conn.is_autocommit()` right
+        // before the SAVEPOINT below) must come back false.
+        conn.execute_batch("BEGIN").unwrap();
+        conn.execute(
+            "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) \
+             VALUES ('caller-owned.md', 1.0, 'callerhash', '2026-01-01', 0)",
+            [],
+        )
+        .unwrap();
+
+        // Deny only the RELEASE of this function's own savepoint; every
+        // other statement (its own SAVEPOINT/INSERT/SELECT/DELETE work, and
+        // the caller's COMMIT below) is allowed.
+        conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+            AuthAction::Savepoint {
+                operation: TransactionOperation::Release,
+                savepoint_name: "index_file_with_reuse",
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }));
+
+        let content = build_40_chunk_content();
+        let result = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.5f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        );
+
+        assert!(result.is_err(), "a denied RELEASE must surface as an error");
+
+        assert!(
+            !conn.is_autocommit(),
+            "B-F-new1: a failed RELEASE on the Ok arm must not abort a \
+             caller-owned outer transaction — the connection must remain \
+             inside that transaction, not be forced back to autocommit"
+        );
+
+        // Lift the authorizer so the caller's own COMMIT (a `Transaction`
+        // action, never denied above) can proceed, then confirm the
+        // caller's earlier write actually survived: a wrongful full
+        // `ROLLBACK` in the cleanup path above would have discarded it
+        // along with everything else in the outer transaction.
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        conn.execute_batch("COMMIT").unwrap();
+
+        let caller_row_survived: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'caller-owned.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            caller_row_survived, 1,
+            "B-F-new1: the caller's own uncommitted write must survive a \
+             failed nested RELEASE in index_file_with_reuse's Ok-arm cleanup"
+        );
+    }
+
     // F9 (minor, arrra/hex PR #8 round 2): the `chunk_meta.file_id` migration
     // is `ALTER TABLE ... ADD COLUMN file_id ... DEFAULT 0` followed by a
     // SEPARATE `UPDATE ... backfill`, gated only on `if
