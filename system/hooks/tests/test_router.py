@@ -3382,5 +3382,31 @@ class TestHeredocDelimiterBackslashNewlineContinuation(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestQuoteSpansCoverNestedSubstitutionSecrets(RouterTestCase):
+    """A-REFUTE-2 (blocker): R6's quote-span-extension fix (`quote_spans`,
+    `_extend_end_past_quote`) only records TOP-LEVEL quotes that
+    `executable_mask`'s own loop walks past directly. A quoted secret
+    nested inside a `$(...)` substitution within an UNQUOTED heredoc body
+    is masked by the wholly separate `_mask_span_preserving_substitutions`
+    -> `_mask_quotes_recursive` scanner, which had no `quote_spans`
+    parameter at all -- so a rule match ending mid-value there had no span
+    to extend into, `redact()` fell back to its bare-token alternative,
+    and a secret fragment reached the persisted ledger in the clear."""
+
+    def test_secret_inside_a_substitution_in_an_unquoted_heredoc_is_fully_redacted(self):
+        cmd = (
+            "cat <<EOF\n"
+            '$(git push -o password="alpha bravo +charlie delta" origin main)\n'
+            "EOF"
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines, cmd)
+            for entry in lines:
+                for word in ("alpha", "bravo", "charlie", "delta"):
+                    self.assertNotIn(word, entry.get("match", ""), f"{cmd!r}: {entry}")
+
+
 if __name__ == "__main__":
     unittest.main()
