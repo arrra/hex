@@ -2261,6 +2261,70 @@ class StructuredPathDoubleSlashDoesNotHang(unittest.TestCase):
             self.assertEqual(len(acme_repo_reports), 1, "the free-text record must still resolve to acme-repo")
 
 
+class FreeTextPathScanIsBoundedAgainstQuadraticHang(unittest.TestCase):
+    """A-L1 (prior round, blocker) — URL_RE = r"[A-Za-z][A-Za-z0-9+.\\-]*://\\S*"
+    is unanchored and greedy: on a long unbroken run of word-like characters
+    with no "://" anywhere, re.search retries the full remaining run from
+    every starting offset, which is O(n^2). infer_project() feeds
+    json.dumps(result) straight into _extract_repo_path() with NO length
+    cap of its own -- RESULT_CAP only bounds the rendered report body,
+    downstream in build_report(), never the blob scanned for project
+    inference. A workflow result carrying one long unbroken token (a
+    base64 blob, a minified stack trace, a long id, a screenshot data URI
+    -- realistic Workflow output, not an adversarial input) stalls the
+    whole export run. Isolated in a subprocess with a bounded timeout,
+    same rationale as StructuredPathDoubleSlashDoesNotHang: this observes
+    "does not hang", not a wall-clock duration."""
+
+    def test_long_unbroken_run_of_non_url_text_does_not_hang_project_inference(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            _write_record(
+                projects,
+                {
+                    "runId": "hang-2",
+                    "workflowName": "wf",
+                    "status": "completed",
+                    "timestamp": "2026-09-09T12:00:00Z",
+                    "result": {"blob": "A" * 200_000},
+                },
+                session="sess1",
+            )
+            _write_record(
+                projects,
+                {
+                    "runId": "ok-2",
+                    "workflowName": "wf",
+                    "status": "completed",
+                    "timestamp": "2026-09-09T12:00:00Z",
+                    "result": "/tmp/acme-repo/src/main.py",
+                },
+                session="sess2",
+            )
+            try:
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--hex-dir",
+                        hex_dir,
+                        "--claude-projects",
+                        projects,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail("exporter hung inferring a project from a long unbroken non-URL run")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("wrote=2", proc.stdout, proc.stdout)
+            acme_repo_reports = list(Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(acme_repo_reports), 1, "the free-text record must still resolve to acme-repo")
+
+
 class UnsafeRunIdFingerprintPreservesDistinctRecords(unittest.TestCase):
     """F19 (round 2, NEW) — the unsafe-runId branch normalizes via
     slug(run_id) with no fingerprint, so two raw ids that collapse to the
