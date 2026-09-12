@@ -503,13 +503,24 @@ def _mask_quotes_recursive(text, start, end, result):
     the real `;` separator character) fully visible, tripping a false
     deny; a heredoc with a QUOTED delimiter (`<<'H'`) makes its whole body
     inert the same as any other single-quoted literal, but with no
-    heredoc case here at all the body text stayed visible too. Only a
-    SINGLE heredoc immediately following its own `<<DELIM` is handled
-    (no queueing of several heredocs sharing one upcoming newline, unlike
-    `executable_mask`'s `pending_heredocs`) -- multiple heredocs opened on
-    one line INSIDE a substitution nested in double quotes is a
+    heredoc case here at all the body text stayed visible too.
+
+    A-R5 (round 2 reopen review): the heredoc case genuinely QUEUES the
+    opener (via `pending_heredoc`) and keeps scanning the rest of the
+    opener line -- via the normal quote/comment/substitution branches
+    below -- exactly like the top-level `executable_mask` loop's own
+    `pending_heredocs` does, instead of jumping straight from the `<<
+    DELIM` match to consuming the body at the next newline. The previous
+    version's docstring claimed to match that top-level behavior but
+    actually didn't: text between the delimiter and the opener line's own
+    newline (e.g. a real, further quoted argument on the SAME line as
+    `<<EOF`) was never scanned at all. Only a SINGLE pending heredoc is
+    tracked (no queueing of several heredocs sharing one upcoming
+    newline, unlike `executable_mask`'s list) -- multiple heredocs opened
+    on one line INSIDE a substitution nested in double quotes is a
     combination no fixture exercises."""
     i = start
+    pending_heredoc = None
     while i < end:
         ch = text[i]
         if ch == "\\" and i + 1 < end:
@@ -524,8 +535,7 @@ def _mask_quotes_recursive(text, start, end, result):
             continue
         if ch == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
             m = _HEREDOC_START_RE.match(text, i)
-            nl = text.find("\n", m.end()) if m else None
-            if m and nl is not None and nl < end:
+            if m and m.end() <= end:
                 strip_tabs = m.group(1) == "-"
                 if m.group(2) is not None:
                     delim, quoted = m.group(2), True
@@ -533,12 +543,18 @@ def _mask_quotes_recursive(text, start, end, result):
                     delim, quoted = m.group(3), True
                 else:
                     delim, quoted = m.group(4), False
-                close, _terminated = _consume_heredoc_body(
-                    text, nl + 1, delim, quoted, strip_tabs, result
-                )
-                i = min(close, end)
+                pending_heredoc = (delim, quoted, strip_tabs)
+                i = m.end()
                 continue
             i += 1
+            continue
+        if ch == "\n" and pending_heredoc is not None:
+            delim, quoted, strip_tabs = pending_heredoc
+            pending_heredoc = None
+            close, _terminated = _consume_heredoc_body(
+                text, i + 1, delim, quoted, strip_tabs, result
+            )
+            i = min(close, end)
             continue
         if ch == "'":
             j = text.find("'", i + 1)

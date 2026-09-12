@@ -1679,6 +1679,50 @@ class TestSubstitutionScannerStateIsConsistent(RouterTestCase):
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
+    def test_same_line_content_after_a_heredoc_opener_is_still_scanned(self):
+        """A-R5 (round 2 reopen review): `_mask_quotes_recursive`'s heredoc
+        branch jumped straight from the END of the `<<DELIM` match to
+        consuming the body starting at the NEXT newline -- any text on the
+        SAME line, between the delimiter and that newline, was never
+        scanned at all (unlike the top-level `executable_mask` loop, which
+        keeps scanning the rest of the opener line). A single-quoted
+        argument sitting there (`<<EOF 'x; git stash'`, a real filename
+        argument to `cat` -- nothing executed) stayed completely unmasked,
+        so its `;` read as a genuine separator and falsely anchored a new
+        command."""
+        cmd = "x=\"$(cat <<EOF 'x; git stash'\nbody\nEOF\n)\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"a quoted argument on the heredoc opener line must abstain (A-R5): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_heredoc_masking_stays_bounded_to_the_substitutions_own_end(self):
+        """B-R2 (round 2 reopen review): the heredoc branch inside
+        `_mask_quotes_recursive` calls `_consume_heredoc_body` with no
+        `end` bound at all, so it can mask text WELL PAST the enclosing
+        `$(...)`'s own closing paren -- `i` is clamped to `end` afterward,
+        but `result` (the actual masking) is not. `_find_matching_paren`
+        has no heredoc awareness, so it locates the substitution's
+        "close" at the first raw `)` character it sees (here, right after
+        the heredoc opener's own quoted delimiter body) -- a real trailing
+        `; git stash` sitting just past that point was masked away as if
+        it were still inside the (already-closed, from this scanner's
+        point of view) heredoc body, wrongly abstaining on text a real
+        shell still executes."""
+        cases = (
+            "echo \"$(cat <<'H'\nx)\\\"; git stash\nH\n",
+            'echo "$(cat <<H\nx)\\"; git stash\n',
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (B-R2)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
 
 class TestBacktickAnchorOnlyOnOpener(RouterTestCase):
     """A-R1 (round 2 reopen review): `_CMD_PREFIX` anchors command position
