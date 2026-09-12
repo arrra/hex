@@ -361,6 +361,29 @@ def _is_assignment_value_quote(text, quote_idx):
 _HEREDOC_START_RE = re.compile(r"<<(-)?\s*(?:'([^'\n]*)'|\"([^\"\n]*)\"|([A-Za-z_][A-Za-z0-9_]*))")
 
 
+def _heredoc_start_match(text, pos):
+    """Wraps `_HEREDOC_START_RE.match` with the conservative UNPARSEABLE
+    fallback (A-REFUTE-1): an UNQUOTED delimiter word immediately followed
+    by a backslash is not fully resolvable by this scanner -- a
+    `\\<newline>` right there is a real bash line-continuation that FOLDS
+    into the delimiter word (verified against real bash: `cat <<E\\` +
+    newline + `OF` / body / `EOF` terminates on `EOF`, not the truncated
+    `E` this regex alone would capture), and any other backslash there
+    extends the word by escaping the next character into it (the same
+    class of word-extension R7 already had to account for in assignment
+    values). Guessing at the truncated delimiter silently swallowed every
+    real command up to EOF-of-text as fake heredoc body -- the safe
+    direction here is to not recognize this `<<` as a heredoc opener at
+    all, so the rest of the command stays visible to ordinary scanning
+    instead of being hidden as inert body text."""
+    m = _HEREDOC_START_RE.match(text, pos)
+    if m is None:
+        return None
+    if m.group(4) is not None and m.end() < len(text) and text[m.end()] == "\\":
+        return None
+    return m
+
+
 def _is_comment_start(text, i):
     """True when `text[i]` (a `#`) genuinely opens a shell comment: at the
     very start of `text`, or immediately after whitespace or a real
@@ -636,7 +659,7 @@ def _mask_quotes_recursive(text, start, end, result):
             i = comment_end
             continue
         if ch == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
-            m = _HEREDOC_START_RE.match(text, i)
+            m = _heredoc_start_match(text, i)
             if m and m.end() <= end:
                 strip_tabs = m.group(1) == "-"
                 if m.group(2) is not None:
@@ -961,7 +984,7 @@ def executable_mask(text, quote_spans=None):
                 quote_spans.append((start, i))
             continue
         if ch == "<" and text.startswith("<<", i) and not text.startswith("<<<", i):
-            m = _HEREDOC_START_RE.match(text, i)
+            m = _heredoc_start_match(text, i)
             if m:
                 strip_tabs = m.group(1) == "-"
                 if m.group(2) is not None:
