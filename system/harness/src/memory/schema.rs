@@ -524,6 +524,112 @@ mod tests {
         );
     }
 
+    /// RED for F8 (major, arrra/hex PR #9 round 2): `rebuild_facts_vec_with_is_live`
+    /// rolls back a failed `migrate()` (the test above), but its own `COMMIT`
+    /// uses `?` OUTSIDE that rollback path — the exact gap `consolidate.rs`'s
+    /// tombstone writers and `vector.rs`'s `insert_fact_vec` (PR#9 r2
+    /// review_b G2) already closed. A failed COMMIT (SQLITE_BUSY at the
+    /// RESERVED->EXCLUSIVE lock upgrade under a blocking reader in
+    /// rollback-journal mode — same construction as index.rs's F1/F7
+    /// regressions) leaves the connection sitting inside the just-migrated
+    /// transaction: this connection sees the rebuilt 3-column `is_live`
+    /// table as already present (even though it never reached disk), so a
+    /// retried `apply_plan3` on it would see the version-5 marker plus that
+    /// uncommitted column and wrongly report success, while a fresh
+    /// connection still sees the old 2-column table.
+    #[test]
+    fn rebuild_facts_vec_rolls_back_on_failed_commit_and_retry_persists_durably() {
+        crate::memory::vector::register_sqlite_vec();
+        let tmp = tempfile::TempDir::new().unwrap();
+        let db_path = tmp.path().join("memory.db");
+        let conn = Connection::open(&db_path).unwrap();
+        apply_plan1_baseline_for_test(&conn).unwrap();
+        apply_plan2(&conn).unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN valid_from TEXT", [])
+            .unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN invalid_at TEXT", [])
+            .unwrap();
+        conn.execute("ALTER TABLE facts ADD COLUMN superseded_by TEXT", [])
+            .unwrap();
+
+        let n = 3;
+        for i in 0..n {
+            let id = format!("f{i}");
+            conn.execute(
+                "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from) VALUES (?1,'s','p','o',0.5,'2026-01-01','2026-01-01','2026-01-01')",
+                rusqlite::params![id],
+            ).unwrap();
+            let v: Vec<f32> = (0..crate::memory::vector::EMBED_DIM)
+                .map(|d| (i as f32 + d as f32) * 0.0001)
+                .collect();
+            conn.execute(
+                "INSERT INTO facts_vec(fact_id, embedding) VALUES (?1, ?2)",
+                rusqlite::params![id, crate::memory::vector::f32s_to_le_bytes(&v)],
+            )
+            .unwrap();
+        }
+
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mode, "delete",
+            "test setup: must be off WAL to reproduce a commit-time lock-upgrade failure"
+        );
+        conn.busy_timeout(std::time::Duration::from_millis(0))
+            .unwrap();
+
+        // A second connection holding an open read transaction: its SHARED
+        // lock lets `conn`'s BEGIN IMMEDIATE (RESERVED) proceed, then blocks
+        // the COMMIT's RESERVED->EXCLUSIVE upgrade.
+        let conn2 = Connection::open(&db_path).unwrap();
+        conn2.execute_batch("BEGIN;").unwrap();
+        let _: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+
+        let result = rebuild_facts_vec_with_is_live(&conn);
+        assert!(
+            result.is_err(),
+            "a blocked COMMIT must surface as an error, not a silent success"
+        );
+
+        assert!(
+            conn.is_autocommit(),
+            "F8: a failed COMMIT must roll back, restoring the connection's \
+             entry (autocommit) state, not leave the transaction open"
+        );
+        let probe = conn.prepare("SELECT is_live FROM facts_vec LIMIT 0");
+        assert!(
+            probe.is_err(),
+            "F8: a rolled-back COMMIT must leave the OLD 2-column facts_vec \
+             in place, not a table this connection sees as already migrated"
+        );
+        drop(probe);
+
+        // Let the blocking reader go, then a retry on the SAME connection
+        // must commit durably.
+        conn2.execute_batch("COMMIT;").unwrap();
+        drop(conn2);
+
+        rebuild_facts_vec_with_is_live(&conn).unwrap();
+
+        drop(conn);
+        let reopened = Connection::open(&db_path).unwrap();
+        let probe_after = reopened.prepare("SELECT is_live FROM facts_vec LIMIT 0");
+        assert!(
+            probe_after.is_ok(),
+            "F8: the retry must persist durably — a fresh connection must see the migrated table"
+        );
+        let count: i64 = reopened
+            .query_row("SELECT COUNT(*) FROM facts_vec", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            count, n as i64,
+            "F8: every original row must survive the rollback + successful retry"
+        );
+    }
+
     #[test]
     fn migration_creates_all_plan2_tables() {
         crate::memory::vector::register_sqlite_vec();
