@@ -672,6 +672,30 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
             std::fs::create_dir_all(parent)
                 .map_err(|e| format!("failed to create {}: {e}", parent.display()))?;
         }
+        // `git ls-tree` guarantees every entry's path is a distinct byte
+        // string, but on a case- or Unicode-normalization-insensitive
+        // filesystem (macOS APFS by default) two distinct committed paths
+        // can fold onto the SAME directory entry. If an earlier entry in
+        // this loop already materialized something at that real location
+        // (most dangerously: a symlink), writing or linking "through" it
+        // here would silently mix one committed path's bytes into
+        // another's — `std::fs::write` follows an existing symlink
+        // (O_TRUNC) rather than replacing it. `symlink_metadata` never
+        // follows the final component, so it reports the collision itself
+        // rather than whatever a followed symlink points at.
+        if std::fs::symlink_metadata(&dest).is_ok() {
+            return Err(format!(
+                "committed path {} collides, on this filesystem, with a \
+                 different committed path already materialized at the \
+                 same location (a case- or Unicode-normalization- \
+                 insensitive filesystem folding two distinct committed \
+                 names onto one directory entry) — writing or linking \
+                 through it would silently mix one committed path's bytes \
+                 into another's, which could falsely certify a broken \
+                 commit as buildable; refusing to export it",
+                entry.path
+            ));
+        }
         if entry.mode == "120000" {
             let target = String::from_utf8_lossy(content).into_owned();
             #[cfg(unix)]
@@ -714,7 +738,64 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
         }
     }
 
+    #[cfg(unix)]
+    verify_symlinks_resolve_within_export(tempdir.path(), &entries)?;
+
     Ok(tempdir)
+}
+
+/// Second, independent guard on top of `symlink_target_stays_within_export`'s
+/// lexical walk: asks the REAL filesystem to resolve every committed
+/// symlink (`std::fs::canonicalize` follows the full chain exactly the way
+/// `cargo`/`rustc` will) and refuses the export if any of them lands
+/// outside the export root. The lexical walk substitutes a chained hop only
+/// when a path component matches a committed symlink's path by EXACT byte
+/// equality, which a case- or Unicode-normalization-insensitive filesystem
+/// (macOS APFS by default) can bypass: a reference that differs only by
+/// case or normalization from a committed symlink's name still resolves,
+/// on the real filesystem, to that same symlink, even though the lexical
+/// walk never substitutes it and so never flags the escape. Every entry is
+/// already materialized by this point, so a symlink that is simply
+/// dangling (its target committed nowhere) fails to canonicalize with
+/// `NotFound` — that is not an escape, just a broken link `cargo check`
+/// will itself fail to read, so it is left alone here.
+#[cfg(unix)]
+fn verify_symlinks_resolve_within_export(
+    export_root: &Path,
+    entries: &[TreeEntry],
+) -> Result<(), String> {
+    let canonical_root = std::fs::canonicalize(export_root).map_err(|e| {
+        format!(
+            "failed to canonicalize export root {}: {e}",
+            export_root.display()
+        )
+    })?;
+    for entry in entries {
+        if entry.mode != "120000" {
+            continue;
+        }
+        let dest = export_root.join(&entry.path);
+        let resolved = match std::fs::canonicalize(&dest) {
+            Ok(r) => r,
+            Err(_) => continue,
+        };
+        if !resolved.starts_with(&canonical_root) {
+            return Err(format!(
+                "committed symlink {} resolves, on this filesystem, to {} \
+                 — outside the export root — even though a purely lexical \
+                 check did not catch it (a case- or Unicode-normalization- \
+                 insensitive filesystem folding a reference onto a \
+                 differently-spelled committed symlink); creating it would \
+                 let `cargo check` read whatever file (committed or not) \
+                 happens to sit at that real path elsewhere on this \
+                 machine, falsely certifying a broken commit as \
+                 buildable; refusing to export it",
+                entry.path,
+                resolved.display()
+            ));
+        }
+    }
+    Ok(())
 }
 
 /// Test-only entry point into `export_committed_head` — lets
