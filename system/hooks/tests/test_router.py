@@ -1680,6 +1680,77 @@ class TestSubstitutionScannerStateIsConsistent(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestBacktickAnchorOnlyOnOpener(RouterTestCase):
+    """A-R1 (round 2 reopen review): `_CMD_PREFIX` anchors command position
+    on a bare backtick (G3, spec-level review, reopen generation 2) because
+    an OPENING backtick genuinely starts a real substitution's script
+    text. A backtick is the SAME character used to CLOSE that
+    substitution, though, and nothing blanked the closing one -- so
+    `_CMD_PREFIX` anchored there too, treating ordinary text glued to a
+    substitution's output (inside double quotes, or as further arguments
+    to the same unquoted command) as if it started a brand new command.
+    None of these examples run a second command at all -- the backtick
+    substitution's output is just more text/arguments for the SAME
+    command."""
+
+    CASES = (
+        'echo "`date` git stash"',
+        "echo `date` git stash",
+        'git commit -m "`date` git push --force origin main"',
+        "echo `hostname` 'git stash'",
+    )
+
+    def test_text_after_a_closing_backtick_never_anchors_a_new_command(self):
+        for cmd in self.CASES:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"text after a closing backtick must not fire (A-R1): {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_command_substitution_at_an_opening_backtick_still_fires(self):
+        """Regression guard: the fix must blank only the CLOSING backtick --
+        a genuine substitution opened right after a real separator must
+        still anchor and fire normally."""
+        cmd = "echo hi; `git stash`"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestBacktickInsideSingleQuotesIsInert(RouterTestCase):
+    """B-R1 (round 2 reopen review): a backtick inside a SINGLE-quoted span
+    is a plain literal character -- single quotes suppress ALL shell
+    expansion, including backtick command substitution, so it never opens
+    or closes anything real. `_mask_literal_span` only blanked the quote
+    delimiter itself and `_SEPARATOR_CHARS`, leaving backticks fully
+    visible, so `_CMD_PREFIX`'s bare-backtick alternative still anchored a
+    dangerous-looking word right after one -- even though the whole
+    backtick-quoted phrase is one inert, single-quoted argument."""
+
+    CASES = (
+        "git commit -m 'document `git stash` usage'",
+        "gh pr comment 5 --body 'F3 fixed; never use `git push --force` on stacked branches'",
+        "git commit -m 'docs: explain `git reset --hard` recovery'",
+        "printf '%s\\n' 'run `git stash` first'",
+    )
+
+    def test_backticked_mention_inside_single_quotes_abstains(self):
+        for cmd in self.CASES:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"a backtick-quoted mention inside single quotes must "
+                    f"abstain (B-R1): {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+
 class TestStashExemptionEffectiveCheckout(RouterTestCase):
     """F4 (arrra/hex PR #5 round 1): `unless_cwd` on git-stash-shared-checkout
     must track the EFFECTIVE checkout of each invocation, not just the hook's

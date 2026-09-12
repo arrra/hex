@@ -431,9 +431,10 @@ def _skip_double_quoted(text, start):
 
 def _mask_literal_span(text, start, end, result, quote_char):
     """Blank `text[start:end)` to spaces in `result`, but ONLY the quote
-    delimiter itself (`quote_char`) and any `_SEPARATOR_CHARS` character
-    (G2, review_b round 1) — ordinary argument content stays visible. See
-    the executable-region-scanner comment above for why this is safe.
+    delimiter itself (`quote_char`), any `_SEPARATOR_CHARS` character
+    (G2, review_b round 1), and a backtick (B-R1, round 2 reopen review)
+    — ordinary argument content stays visible. See the
+    executable-region-scanner comment above for why this is safe.
 
     A REAL newline inside the span is a `_SEPARATOR_CHARS` member too and
     gets blanked like any other (review R4 regression from G2): leaving it
@@ -444,10 +445,19 @@ def _mask_literal_span(text, start, end, result, quote_char):
     mentioning a force-push flag asked. Length-preserving (a blanked
     newline is still one character), so all offsets stay identical; this
     function is never called on heredoc bodies (see
-    `_consume_heredoc_body`), so they are unaffected."""
+    `_consume_heredoc_body`), so they are unaffected.
+
+    A backtick has no special meaning here at all: this function is only
+    ever called on a SINGLE-quoted span, and single quotes suppress every
+    kind of shell expansion including backtick command substitution — a
+    backtick inside one is a plain literal character, never an opener or
+    closer. Left visible, `_CMD_PREFIX`'s bare-backtick anchor (needed for
+    a REAL substitution elsewhere) mistook it for one anyway, treating a
+    single-quoted mention like `'... `<dangerous command>` ...'` as if a
+    new command started right after the second backtick."""
     for k in range(start, end):
         ch = text[k]
-        if ch == quote_char or ch in _SEPARATOR_CHARS:
+        if ch == quote_char or ch in _SEPARATOR_CHARS or ch == "`":
             result[k] = " "
 
 
@@ -552,6 +562,13 @@ def _mask_quotes_recursive(text, start, end, result):
             j = text.find("`", i + 1)
             if j != -1 and j + 1 <= end:
                 close, body_end = j + 1, j
+                # A-R1 (round 2 reopen review): blank the CLOSING backtick
+                # only -- see `_mask_double_quoted`'s identical branch for
+                # why (a real substitution's own opener must stay visible,
+                # but the character that CLOSES it must not double as a
+                # fresh `_CMD_PREFIX` command-position anchor for whatever
+                # ordinary text/arguments follow it in the same command).
+                result[j] = " "
             else:
                 close = body_end = min((j + 1) if j != -1 else len(text), end)
             _mask_quotes_recursive(text, i + 1, body_end, result)
@@ -615,6 +632,19 @@ def _mask_double_quoted(text, start, result):
             j = text.find("`", i + 1)
             if j != -1:
                 close, body_end = j + 1, j
+                # A-R1 (round 2 reopen review): blank the CLOSING backtick
+                # only. The OPENER genuinely starts real substitution
+                # script text -- `_CMD_PREFIX`'s bare-backtick alternative
+                # must still anchor there. The character that CLOSES the
+                # substitution is a different story: a backtick both opens
+                # AND closes (unlike `$(`/`)`), so a bare `` `date` git
+                # stash `` (or the same thing wrapped in double quotes)
+                # left the CLOSING backtick just as visible/anchor-able as
+                # the opener, and `_CMD_PREFIX` treated ordinary trailing
+                # text/arguments right after it as a brand new command --
+                # despite that -- the shell just keeps reading the SAME
+                # command/string past a substitution's output.
+                result[j] = " "
             else:
                 close = body_end = n
             _mask_quotes_recursive(text, i + 1, body_end, result)
@@ -686,6 +716,7 @@ def executable_mask(text):
     result = list(text)
     i = 0
     pending_heredocs = []
+    in_backtick = False
     while i < n:
         ch = text[i]
         # G3 (spec-level review, reopen generation 2): a backslash outside
@@ -700,6 +731,29 @@ def executable_mask(text):
         # and hid the anchored stash invocation that follows.
         if ch == "\\" and i + 1 < n:
             i += 2
+            continue
+        if ch == "`":
+            # A-R1 (round 2 reopen review): a backtick both opens AND
+            # closes a real substitution (unlike `$(`/`)`, which use
+            # different characters) -- `in_backtick` toggles across
+            # exactly the OPENER/CLOSER pair so only the CLOSING one gets
+            # blanked. The opener stays visible (a genuine substitution
+            # anchors `_CMD_PREFIX` right after it, e.g. a `backticks-in-
+            # unquoted-heredoc`-style invocation), but the closer must not
+            # ALSO anchor a fresh command position for whatever ordinary
+            # text/arguments the shell keeps reading after the
+            # substitution's output in the SAME command. Everything
+            # between the two backticks is still handled by this same
+            # per-character loop (quotes inside a substitution's body are
+            # masked exactly like top-level text), so toggling a flag
+            # here -- rather than jumping straight to the close, the way
+            # the analogous branches elsewhere in this scanner do -- is
+            # the only way to blank just the closer without skipping that
+            # interior scanning.
+            if in_backtick:
+                result[i] = " "
+            in_backtick = not in_backtick
+            i += 1
             continue
         if ch == "#" and _is_comment_start(text, i):
             j = text.find("\n", i)
