@@ -3436,5 +3436,43 @@ class TestAssignmentValueConcatenatedSegments(RouterTestCase):
                 self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
 
 
+class TestAnsiCQuoteEmbeddedEscapedQuoteIsNotAQuoteCloser(RouterTestCase):
+    """A-REFUTE-4 / B-F1 (major/blocker, same root cause): a `$'...'`
+    ANSI-C-quoted string supports a backslash-escaped `\\'` for a literal
+    apostrophe INSIDE the string -- unlike a plain single-quoted string,
+    which has no escape mechanism at all. The scanner's single-quote
+    branches all locate a span's end with an escape-UNAWARE
+    `text.find("'", ...)`, which treats `$'...'`'s opening quote exactly
+    like a plain one and stops at the first literal `'` -- the ESCAPED
+    one -- instead of the real closer. Everything from the true (now
+    orphaned) closing quote onward is then read as a fresh, unterminated
+    single-quoted span extending to end-of-text, so every real separator
+    after it is blanked and no rule can anchor a match again: a silent,
+    total bypass for the rest of the command."""
+
+    def test_ansi_c_quoted_assignment_value_with_an_escaped_quote_still_asks(self):
+        # A-REFUTE-4's exact probe: real bash assigns FOO="a'b c" here,
+        # then genuinely runs `git push --force origin main`.
+        cmd = "FOO=$'a\\'b c' git push --force origin main"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-REFUTE-4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_ansi_c_quoted_literal_apostrophe_before_stash_still_denies(self):
+        # B-F1's exact probe: `$'\''` is the standard bash idiom for
+        # embedding one literal apostrophe via ANSI-C quoting; `git stash`
+        # genuinely runs right after it (verified against real bash).
+        cmd = "echo $'\\'' ; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (B-F1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
