@@ -1713,8 +1713,8 @@ class TestSubstitutionScannerStateIsConsistent(RouterTestCase):
         point of view) heredoc body, wrongly abstaining on text a real
         shell still executes."""
         cases = (
-            "echo \"$(cat <<'H'\nx)\\\"; git stash\nH\n",
-            'echo "$(cat <<H\nx)\\"; git stash\n',
+            "echo \"$(cat <<'H'\nx)\"; git stash\nH\n",
+            'echo "$(cat <<H\nx)"; git stash\n',
         )
         for cmd in cases:
             with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:

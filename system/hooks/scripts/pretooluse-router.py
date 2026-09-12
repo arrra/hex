@@ -552,7 +552,7 @@ def _mask_quotes_recursive(text, start, end, result):
             delim, quoted, strip_tabs = pending_heredoc
             pending_heredoc = None
             close, _terminated = _consume_heredoc_body(
-                text, i + 1, delim, quoted, strip_tabs, result
+                text, i + 1, delim, quoted, strip_tabs, result, end
             )
             i = min(close, end)
             continue
@@ -678,7 +678,7 @@ def _mask_double_quoted(text, start, result):
     return n
 
 
-def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result):
+def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=None):
     """Mask the heredoc body starting at `start` (just after the opener's
     newline) up to and including the line that is exactly `delim` (F13: the
     ACTUAL delimiter bounds the body, never `[\\s\\S]*` to end-of-string).
@@ -689,6 +689,20 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result):
     behavior of consuming to EOF); `terminated` is False only in that
     never-closed case (F8: callers use it to represent the EOF-close in
     scan_text without ever scanning past a REAL terminator).
+
+    `end` (B-R2, round 2 reopen review) optionally caps how far the
+    MASKING itself may write into `result` -- the terminator search below
+    always runs unbounded (it must, to find where the body genuinely
+    ends), but `_mask_quotes_recursive` calls this from inside a bounded
+    `$(...)`/backtick substitution whose own `end` was found by a scanner
+    with no heredoc awareness at all (`_find_matching_paren`), which can
+    locate that substitution's "close" earlier than a heredoc-aware
+    parser would. Masking the full (possibly past-`end`) body in that
+    case blanked real, genuinely-executable text sitting just past the
+    substitution's assumed close -- the caller already clamps its own `i`
+    to `end`, but the actual `result` mutation was unclamped, silently
+    erasing a real trailing command. The top-level `executable_mask`
+    caller has no such bound (`end=None`, its default) and is unaffected.
 
     The terminator search walks line-by-line (delimiter comparison is
     inherently per-line), but the actual masking of an UNQUOTED body is
@@ -718,12 +732,13 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result):
             end_index, terminated = n, False
             break
         i = nl + 1
+    mask_limit = body_end if end is None else min(body_end, end)
     if quoted:
-        for k in range(start, body_end):
+        for k in range(start, mask_limit):
             if text[k] != "\n":
                 result[k] = " "
     else:
-        _mask_span_preserving_substitutions(text, start, body_end, result)
+        _mask_span_preserving_substitutions(text, start, mask_limit, result)
     return end_index, terminated
 
 
