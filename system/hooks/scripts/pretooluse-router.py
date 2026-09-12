@@ -347,6 +347,48 @@ def _is_assignment_value_quote(text, quote_idx):
     return bool(_ASSIGN_QUOTE_PREFIX_RE.search(lookback))
 
 
+def _single_quote_span_end(text, i, limit):
+    """`text[i]` is `'`; return the index just past the matching closing
+    quote, never past `limit` (the caller's own text length or bound --
+    matches each call site's existing "unterminated" convention of
+    falling back to `limit` itself).
+
+    A-REFUTE-4 / B-F1: a `$'...'` ANSI-C-quoted string supports a
+    backslash-escaped `\\'` for a literal apostrophe INSIDE the string --
+    unlike a plain single-quoted string, which has NO escape mechanism at
+    all (a bare `\\` inside `'...'` is a literal backslash character, not
+    an escape, so real bash never lets one `'` close early there). Every
+    call site used to locate a single quote's end with an escape-UNAWARE
+    `text.find("'", ...)`, treating both shapes identically -- for
+    `$'a\\'b c'`, that finds the ESCAPED quote (the one right after `a\\`)
+    as the "close", leaving `b c'` to be read as a fresh, unterminated
+    single-quoted span extending to `limit`. Everything genuinely
+    executable after that point (a real `;`-separated command, say) gets
+    masked away as if it were still inside a quote: a silent, total
+    bypass for the rest of the text.
+
+    Detected by checking whether the character immediately before this
+    opening quote is `$` -- the only way a bare `'` is ever preceded by a
+    literal `$` in bash is the `$'...'` ANSI-C-quoting form itself, so
+    this is an exact test, not a heuristic. A plain single-quoted span
+    (no preceding `$`) keeps the original escape-UNAWARE search: single
+    quotes have no escape mechanism, so treating a `\\` as ordinary
+    content there is correct, not a gap."""
+    if i > 0 and text[i - 1] == "$":
+        j = i + 1
+        while j < limit:
+            ch = text[j]
+            if ch == "\\" and j + 1 < limit:
+                j += 2
+                continue
+            if ch == "'":
+                return j + 1
+            j += 1
+        return limit
+    j = text.find("'", i + 1)
+    return (j + 1) if (j != -1 and j < limit) else limit
+
+
 # --- Executable-region scanner (F2, F13) -----------------------------------
 #
 # Bash rules must only fire on text the shell actually EXECUTES as a command,
@@ -500,8 +542,13 @@ def _find_matching_paren(text, open_idx):
             i += 2
             continue
         if ch == "'":
-            j = text.find("'", i + 1)
-            i = (j + 1) if j != -1 else n
+            # A-REFUTE-4/B-F1: escape-aware for a `$'...'` ANSI-C string
+            # (see `_single_quote_span_end`) -- a plain single-quoted `)`
+            # never matters here anyway (this function only tracks paren
+            # depth), but an escaped-quote-blind search inside a `$'...'`
+            # nested in a `$(...)` mis-located ITS end, throwing off the
+            # depth count for everything after it.
+            i = _single_quote_span_end(text, i, n)
             continue
         if ch == '"':
             i = _skip_double_quoted(text, i)
@@ -736,8 +783,7 @@ def _mask_quotes_recursive(text, start, end, result, quote_spans=None):
             continue
         if ch == "'":
             start_q = i
-            j = text.find("'", i + 1)
-            close = (j + 1) if (j != -1 and j < end) else end
+            close = _single_quote_span_end(text, i, end)
             keep_delims = _is_assignment_value_quote(text, i)
             _mask_literal_span(text, i, close, result, "'", mask_delims=not keep_delims)
             if quote_spans is not None:
@@ -1035,8 +1081,7 @@ def executable_mask(text, quote_spans=None):
             i = end
             continue
         if ch == "'":
-            j = text.find("'", i + 1)
-            end = (j + 1) if j != -1 else n
+            end = _single_quote_span_end(text, i, n)
             keep_delims = _is_assignment_value_quote(text, i)
             _mask_literal_span(text, i, end, result, "'", mask_delims=not keep_delims)
             if quote_spans is not None:
