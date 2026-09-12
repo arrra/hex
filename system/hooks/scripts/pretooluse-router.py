@@ -550,7 +550,7 @@ def _mask_literal_span(text, start, end, result, quote_char, mask_delims=True):
             result[k] = " "
 
 
-def _mask_span_preserving_substitutions(text, start, end, result):
+def _mask_span_preserving_substitutions(text, start, end, result, quote_spans=None):
     """Mask text[start:end) to spaces (newlines untouched), except `$(...)`
     and backtick spans, which stay visible because the shell still executes
     them there (inside double quotes or an unquoted heredoc body).
@@ -566,7 +566,15 @@ def _mask_span_preserving_substitutions(text, start, end, result):
     nesting shape inside double quotes; doing the same here makes this
     scanner agree with that one about what stays inert, while the
     substitution's own ordinary command text (not itself quoted/commented)
-    stays visible exactly as before."""
+    stays visible exactly as before.
+
+    `quote_spans` (A-REFUTE-2): forwarded to `_mask_quotes_recursive` so a
+    quoted secret nested in a substitution HERE (an unquoted heredoc body
+    is this function's only caller) gets its span recorded exactly like a
+    top-level quote does -- before this, `evaluate()`'s
+    `_extend_end_past_quote` had no span to extend into for a match
+    ending mid-value inside one of these substitutions, and a secret
+    fragment reached the persisted ledger in the clear."""
     i = start
     while i < end:
         ch = text[i]
@@ -576,7 +584,7 @@ def _mask_span_preserving_substitutions(text, start, end, result):
                 close, body_end = raw_close, raw_close - 1
             else:
                 close = body_end = min(raw_close, end)
-            _mask_quotes_recursive(text, i + 2, body_end, result)
+            _mask_quotes_recursive(text, i + 2, body_end, result, quote_spans)
             i = close
             continue
         if ch == "`":
@@ -591,7 +599,7 @@ def _mask_span_preserving_substitutions(text, start, end, result):
                 result[j] = " "
             else:
                 close = body_end = end
-            _mask_quotes_recursive(text, i + 1, body_end, result)
+            _mask_quotes_recursive(text, i + 1, body_end, result, quote_spans)
             i = close
             continue
         if ch != "\n":
@@ -599,7 +607,7 @@ def _mask_span_preserving_substitutions(text, start, end, result):
         i += 1
 
 
-def _mask_quotes_recursive(text, start, end, result):
+def _mask_quotes_recursive(text, start, end, result, quote_spans=None):
     """Mask single-/double-quoted literal spans within text[start:end),
     leaving executable text visible, and recurse into any `$(...)`/backtick
     substitution found in that range — so a quoted literal several
@@ -636,7 +644,17 @@ def _mask_quotes_recursive(text, start, end, result):
     tracked (no queueing of several heredocs sharing one upcoming
     newline, unlike `executable_mask`'s list) -- multiple heredocs opened
     on one line INSIDE a substitution nested in double quotes is a
-    combination no fixture exercises."""
+    combination no fixture exercises.
+
+    `quote_spans` (A-REFUTE-2): when given a list, every single-/double-
+    quoted span this function itself walks past is appended to it too --
+    mirroring `executable_mask`'s own top-level bookkeeping -- and the
+    same list is threaded into every recursive/heredoc call so a quote
+    nested arbitrarily deep (a substitution inside a heredoc body inside
+    a substitution, ...) still gets its span recorded. Before this, only
+    TOP-LEVEL quotes were ever recorded, so `evaluate()`'s
+    `_extend_end_past_quote` had nothing to extend a mid-value match into
+    for a secret quoted anywhere in here, and it leaked into the ledger."""
     i = start
     pending_heredoc = None
     while i < end:
@@ -677,20 +695,29 @@ def _mask_quotes_recursive(text, start, end, result):
             delim, quoted, strip_tabs = pending_heredoc
             pending_heredoc = None
             close, _terminated = _consume_heredoc_body(
-                text, i + 1, delim, quoted, strip_tabs, result, end
+                text, i + 1, delim, quoted, strip_tabs, result, end, quote_spans
             )
             i = min(close, end)
             continue
         if ch == "'":
+            start_q = i
             j = text.find("'", i + 1)
             close = (j + 1) if (j != -1 and j < end) else end
             keep_delims = _is_assignment_value_quote(text, i)
             _mask_literal_span(text, i, close, result, "'", mask_delims=not keep_delims)
+            if quote_spans is not None:
+                quote_spans.append((start_q, close))
             i = close
             continue
         if ch == '"':
+            start_q = i
             keep_delims = _is_assignment_value_quote(text, i)
-            i = min(_mask_double_quoted(text, i, result, mask_delims=not keep_delims), end)
+            i = min(
+                _mask_double_quoted(text, i, result, mask_delims=not keep_delims, quote_spans=quote_spans),
+                end,
+            )
+            if quote_spans is not None:
+                quote_spans.append((start_q, i))
             continue
         if ch == "$" and i + 1 < end and text[i + 1] == "(":
             raw_close, terminated = _find_matching_paren(text, i + 1)
@@ -698,7 +725,7 @@ def _mask_quotes_recursive(text, start, end, result):
                 close, body_end = raw_close, raw_close - 1
             else:
                 close = body_end = min(raw_close, end)
-            _mask_quotes_recursive(text, i + 2, body_end, result)
+            _mask_quotes_recursive(text, i + 2, body_end, result, quote_spans)
             i = close
             continue
         if ch == "`":
@@ -714,13 +741,13 @@ def _mask_quotes_recursive(text, start, end, result):
                 result[j] = " "
             else:
                 close = body_end = min((j + 1) if j != -1 else len(text), end)
-            _mask_quotes_recursive(text, i + 1, body_end, result)
+            _mask_quotes_recursive(text, i + 1, body_end, result, quote_spans)
             i = close
             continue
         i += 1
 
 
-def _mask_double_quoted(text, start, result, mask_delims=True):
+def _mask_double_quoted(text, start, result, mask_delims=True, quote_spans=None):
     """`text[start]` is the opening '"'; mask the double-quoted span,
     preserving `$(...)`/backtick substitutions' executable structure while
     recursively masking any quoted literal NESTED inside one of them (G1,
@@ -774,7 +801,7 @@ def _mask_double_quoted(text, start, result, mask_delims=True):
                 close, body_end = raw_close, raw_close - 1
             else:
                 close = body_end = raw_close
-            _mask_quotes_recursive(text, i + 2, body_end, result)
+            _mask_quotes_recursive(text, i + 2, body_end, result, quote_spans)
             i = close
             continue
         if ch == "`":
@@ -796,7 +823,7 @@ def _mask_double_quoted(text, start, result, mask_delims=True):
                 result[j] = " "
             else:
                 close = body_end = n
-            _mask_quotes_recursive(text, i + 1, body_end, result)
+            _mask_quotes_recursive(text, i + 1, body_end, result, quote_spans)
             i = close
             continue
         if ch in _SEPARATOR_CHARS:
@@ -811,7 +838,7 @@ def _mask_double_quoted(text, start, result, mask_delims=True):
     return n
 
 
-def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=None):
+def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=None, quote_spans=None):
     """Mask the heredoc body starting at `start` (just after the opener's
     newline) up to and including the line that is exactly `delim` (F13: the
     ACTUAL delimiter bounds the body, never `[\\s\\S]*` to end-of-string).
@@ -848,7 +875,12 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=No
     the end of one line was treated as closed by the time the NEXT line
     started, so that next line's own content (including a real command
     the still-open substitution was genuinely about to execute) was
-    masked away as ordinary inert body text instead of staying visible."""
+    masked away as ordinary inert body text instead of staying visible.
+
+    `quote_spans` (A-REFUTE-2): forwarded to
+    `_mask_span_preserving_substitutions` for an UNQUOTED body, so a
+    quoted secret inside a substitution embedded in the body gets its
+    span recorded the same way a top-level quote does."""
     n = len(text)
     i = start
     while True:
@@ -871,7 +903,7 @@ def _consume_heredoc_body(text, start, delim, quoted, strip_tabs, result, end=No
             if text[k] != "\n":
                 result[k] = " "
     else:
-        _mask_span_preserving_substitutions(text, start, mask_limit, result)
+        _mask_span_preserving_substitutions(text, start, mask_limit, result, quote_spans)
     return end_index, terminated
 
 
@@ -979,7 +1011,7 @@ def executable_mask(text, quote_spans=None):
         if ch == '"':
             start = i
             keep_delims = _is_assignment_value_quote(text, i)
-            i = _mask_double_quoted(text, i, result, mask_delims=not keep_delims)
+            i = _mask_double_quoted(text, i, result, mask_delims=not keep_delims, quote_spans=quote_spans)
             if quote_spans is not None:
                 quote_spans.append((start, i))
             continue
@@ -1002,7 +1034,9 @@ def executable_mask(text, quote_spans=None):
             i += 1
             while pending_heredocs:
                 delim, quoted, strip_tabs = pending_heredocs.pop(0)
-                i, terminated = _consume_heredoc_body(text, i, delim, quoted, strip_tabs, result)
+                i, terminated = _consume_heredoc_body(
+                    text, i, delim, quoted, strip_tabs, result, quote_spans=quote_spans
+                )
                 if not terminated and not quoted:
                     # F8: an unquoted heredoc that never finds its terminator
                     # still consumes to EOF in real shells, so its backtick
