@@ -2527,6 +2527,49 @@ mod tests {
     }
 
     #[test]
+    fn test_export_committed_head_refuses_a_cargo_safe_concat_suffix_that_climbs_out_via_split_literals(
+    ) {
+        // A-R-4 round-9 review: `concat!` inserts NO separator between its
+        // arguments, so validating each suffix literal SEPARATELY misses
+        // a `..` segment SYNTHESIZED across a literal boundary — no
+        // single fragment below contains one on its own, but
+        // `"/.", "./.", "./.", "./outside.txt"` concatenates to
+        // `/../../../outside.txt`, exactly the round-8 escape, just
+        // spelled across four literals instead of one.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str!(concat!(\n    \
+             env!(\"CARGO_MANIFEST_DIR\"),\n    \
+             \"/.\", \"./.\", \"./.\", \"./outside.txt\"\n\
+             ));\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "add CARGO_MANIFEST_DIR-based include with a split-literal climbing suffix",
+            ],
+        );
+
+        let result =
+            crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path());
+        let err = result.expect_err(
+            "a `..` segment synthesized across a concat! literal boundary \
+             must still refuse the export — each fragment must be checked \
+             AFTER accumulation, never in isolation",
+        );
+        assert!(
+            err.contains("include_str!") && err.contains("cannot be verified"),
+            "error must name the unresolved include! call and explain why, got: {err}"
+        );
+    }
+
+    #[test]
     fn test_export_committed_head_refuses_an_include_target_that_cannot_be_resolved_at_all() {
         // A-R-4 round-7 review, F4: an include!-family call whose argument
         // cannot be resolved to a literal, an all-literal concat!, or a

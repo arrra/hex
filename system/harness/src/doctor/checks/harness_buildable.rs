@@ -1062,18 +1062,29 @@ fn try_resolve_concat_literal(content: &[u8], start: usize) -> Option<(Vec<u8>, 
 /// reason).
 ///
 /// Returns the offset one past the call's closing `)` on a match. Every
-/// literal SUFFIX argument is validated by `suffix_has_no_parent_dir_segment`
-/// (round-8 review: an EARLIER version of this function left the suffix
-/// wholly unchecked, on the reasoning that reproducing Cargo's exact
-/// `OUT_DIR`/manifest-dir layout here is out of scope — true, but
-/// irrelevant: a suffix containing NO `..` segment can only ever land
-/// INSIDE whatever directory it is appended to, regardless of where that
-/// directory actually is or how it's laid out, so this needs no
-/// knowledge of Cargo's layout at all to be a real guarantee). A suffix
-/// containing a `..` segment — the review's own adversarial example,
-/// `concat!(env!("CARGO_MANIFEST_DIR"), "/../../../outside.txt")` — is
-/// refused (this function returns `None`, and the caller's "unresolved"
-/// refusal fires) rather than accepted unchecked.
+/// literal SUFFIX fragment is accumulated into ONE combined buffer, and
+/// `suffix_has_no_parent_dir_segment` runs exactly ONCE against that
+/// fully concatenated result — never per-fragment. Two rounds of review
+/// evidence explain why:
+///
+/// - Round 8: an EARLIER version left the suffix wholly unchecked, on
+///   the reasoning that reproducing Cargo's exact `OUT_DIR`/manifest-dir
+///   layout here is out of scope — true, but irrelevant: a suffix
+///   containing NO `..` segment can only ever land INSIDE whatever
+///   directory it is appended to, regardless of where that directory
+///   actually is, so this needs no knowledge of Cargo's layout at all to
+///   be a real guarantee. Fixed by checking each literal.
+/// - Round 9: checking each literal SEPARATELY missed that `concat!`
+///   inserts NO separator between its arguments — a `..` segment can be
+///   SYNTHESIZED across a literal boundary even when no single literal
+///   contains one on its own, e.g. `"/.", "./.", "./.", "./outside.txt"`
+///   concatenates to `/../../../outside.txt` while every individual
+///   fragment passes the per-literal check. Fixed by accumulating every
+///   fragment first and validating the WHOLE result once.
+///
+/// A combined suffix that fails the check is refused (this function
+/// returns `None`, and the caller's "unresolved" refusal fires) rather
+/// than accepted unchecked.
 fn try_resolve_cargo_safe_concat(content: &[u8], start: usize) -> Option<usize> {
     const CONCAT: &[u8] = b"concat!";
     const ENV: &[u8] = b"env!";
@@ -1123,24 +1134,34 @@ fn try_resolve_cargo_safe_concat(content: &[u8], start: usize) -> Option<usize> 
         return None; // env!(...) itself malformed or has a second argument
     }
     i += 1; // past env!(...)'s own closing paren
+            // Round-9 review: `concat!` inserts NO separator between its
+            // arguments, so a `..` segment can be SYNTHESIZED across a literal
+            // boundary even when no single literal contains one on its own —
+            // e.g. `"/.", "./.", "./.", "./outside.txt"` concatenates to
+            // `/../../../outside.txt`, yet each fragment individually passes
+            // `suffix_has_no_parent_dir_segment`. Every suffix fragment is
+            // therefore accumulated into ONE buffer here, and the check runs
+            // exactly ONCE on the fully concatenated result, never per-fragment.
+    let mut suffix = Vec::new();
     loop {
         while i < content.len() && content[i].is_ascii_whitespace() {
             i += 1;
         }
         match content.get(i) {
-            Some(&b')') => return Some(i + 1),
+            Some(&b')') => {
+                return suffix_has_no_parent_dir_segment(&suffix).then_some(i + 1);
+            }
             Some(&b',') => {
                 i += 1;
                 while i < content.len() && content[i].is_ascii_whitespace() {
                     i += 1;
                 }
                 if content.get(i) == Some(&b')') {
-                    return Some(i + 1); // trailing comma before concat!'s own close
+                    // Trailing comma before concat!'s own close.
+                    return suffix_has_no_parent_dir_segment(&suffix).then_some(i + 1);
                 }
-                let (suffix, after) = extract_string_literal_argument(content, i)?;
-                if !suffix_has_no_parent_dir_segment(&suffix) {
-                    return None;
-                }
+                let (piece, after) = extract_string_literal_argument(content, i)?;
+                suffix.extend_from_slice(&piece);
                 i = after;
             }
             _ => return None,
