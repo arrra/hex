@@ -14,6 +14,7 @@ import json
 import os
 import re
 import shutil
+import subprocess
 import sys
 import tempfile
 import unittest
@@ -1815,6 +1816,69 @@ class StructuredPathConsumedAsCompleteValue(unittest.TestCase):
         m = load_script()
         rec = {"result": "/tmp/acme repo"}
         self.assertIsNone(m.infer_project(rec, []))
+
+
+class StructuredPathDoubleSlashDoesNotHang(unittest.TestCase):
+    """A-R1 (ledger arrra-hex-pr-12-r4, round 4, blocker) — a structured path
+    value is consumed whole (F7/F16) and handed straight to
+    repo_root_of()'s on-disk `.git` walk. POSIX treats exactly two or three
+    leading slashes as fixed points under os.path.dirname (dirname("//") ==
+    "//", dirname("///") == "///"), which the old `while cur != "/"` loop
+    never accounted for -- reached via a `{"result": {"repo": "//srv/..."}}`
+    record, it spins forever. Isolated in a subprocess with a bounded
+    timeout: this is not a wall-clock behavioral assertion, it is the only
+    way to observe "does not hang forever" without hanging the test runner
+    itself when the regression is present."""
+
+    def test_double_leading_slash_structured_path_terminates_and_exports_both_records(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            _write_record(
+                projects,
+                {
+                    "runId": "hang-1",
+                    "workflowName": "wf",
+                    "status": "completed",
+                    "timestamp": "2026-09-09T12:00:00Z",
+                    "result": {"repo": "//srv/share/acme"},
+                },
+                session="sess1",
+            )
+            _write_record(
+                projects,
+                {
+                    "runId": "ok-1",
+                    "workflowName": "wf",
+                    "status": "completed",
+                    "timestamp": "2026-09-09T12:00:00Z",
+                    "result": "/tmp/acme-repo/src/main.py",
+                },
+                session="sess2",
+            )
+            try:
+                proc = subprocess.run(
+                    [
+                        sys.executable,
+                        str(SCRIPT),
+                        "--hex-dir",
+                        hex_dir,
+                        "--claude-projects",
+                        projects,
+                    ],
+                    capture_output=True,
+                    text=True,
+                    timeout=15,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail("exporter hung on a double-leading-slash structured path")
+            self.assertEqual(proc.returncode, 0, proc.stderr)
+            self.assertIn("wrote=2", proc.stdout, proc.stdout)
+            all_reports = list(Path(hex_dir, "projects").glob("*/workflow-reports/*.md"))
+            self.assertEqual(len(all_reports), 2, "both records must be exported, none dropped")
+            acme_repo_reports = list(Path(hex_dir, "projects", "acme-repo", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(acme_repo_reports), 1, "the free-text record must still resolve to acme-repo")
 
 
 class UnsafeRunIdFingerprintPreservesDistinctRecords(unittest.TestCase):

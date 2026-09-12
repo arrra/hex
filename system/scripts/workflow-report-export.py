@@ -232,7 +232,17 @@ def repo_root_of(path: str, warnings: list[str] | None = None, label: str = "rec
         marker = os.path.join(cur, ".git")
         if os.path.isdir(marker) or os.path.isfile(marker):
             return cur
-        cur = os.path.dirname(cur)
+        parent = os.path.dirname(cur)
+        if parent == cur:
+            # A-R1 (spec review round 4) — a structured path value is
+            # consumed whole (F7/F16) and can carry 2+ leading slashes
+            # verbatim (e.g. a "repo" field of "//srv/share/acme"). POSIX
+            # treats exactly two or three leading slashes as fixed points
+            # under os.path.dirname ("//" -> "//", "///" -> "///"), so
+            # without this check the walk above never reaches "/" and loops
+            # forever. Stop once dirname() stops making progress.
+            break
+        cur = parent
     for i, seg in enumerate(parts):
         if seg in CLONE_HOSTS and len(parts) > i + 2:
             return "/".join(parts[: i + 3])
