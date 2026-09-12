@@ -1854,19 +1854,61 @@ class StructuredPathConsumedAsCompleteValue(unittest.TestCase):
         rec = {"result": {"workspace": "/tmp/acme repo"}}
         self.assertEqual(m.infer_project(rec, []), "acme repo")
 
-    def test_incomplete_final_component_with_no_further_slash_is_rejected(self):
-        # review_b G1 (round 3) — the truncation check only fired when the
-        # continuation after the space eventually reached another "/". A
-        # candidate whose final (space-broken) component never reaches a
-        # further "/" — e.g. free text "/tmp/acme repo" with nothing after
-        # "repo" — was wrongly ACCEPTED as the complete path "/tmp/acme",
-        # silently dropping " repo" and resolving to the wrong project
-        # ("acme" instead of rejecting the ambiguous match). Per contract, an
-        # incomplete final component must be rejected outright (-> None /
-        # _unmapped), never accepted as a truncated prefix.
+    def test_bare_final_component_with_no_further_slash_is_accepted_as_the_prefix(self):
+        # B-R1 (ledger arrra-hex-pr-12-r4, round 4) — ADJUDICATED DECISION,
+        # reversing review_b G1 (round 3)'s "reject unconditionally" rule.
+        #
+        # round 3 made ANY space-then-word continuation reject the match,
+        # closing this narrow case (a bare, space-containing final directory
+        # component with nothing else in the text) but breaking the
+        # overwhelmingly more common realistic shape: a real, complete path
+        # mentioned in a sentence with ordinary trailing prose ("...
+        # /home/x/acme-repo/src/main.py and pushed", "... /Users/sagar/
+        # Github/Arrra/hex on branch main"). Free text gives no way to
+        # distinguish "this space starts more of the same directory name"
+        # from "this space starts unrelated prose" without an eventual
+        # further "/" as a signal either way — and trailing prose after a
+        # complete path essentially never contains one, while a genuinely
+        # space-broken directory name is rare on top of that.
+        #
+        # Decision: restore the pre-round-3 rule (continuation must reach a
+        # further "/" to count as truncation) so realistic sentences resolve
+        # correctly; accept, explicitly, that a bare two-word directory name
+        # with no further path text at all (this test) resolves to the
+        # truncated prefix instead of _unmapped. See
+        # FreeTextPathFollowedByOrdinaryProseIsNotTruncated for the fixed
+        # realistic cases this restores.
         m = load_script()
         rec = {"result": "/tmp/acme repo"}
-        self.assertIsNone(m.infer_project(rec, []))
+        self.assertEqual(m.infer_project(rec, []), "acme")
+
+
+class FreeTextPathFollowedByOrdinaryProseIsNotTruncated(unittest.TestCase):
+    """B-R1 (ledger arrra-hex-pr-12-r4, round 4, major) — round 3's
+    unconditional "any space + word continuation is truncated" rule
+    rejected the dominant realistic free-text shape: a complete path
+    mentioned in a sentence, followed by ordinary prose that happens to
+    start with a word (never another path). See the adjudicated trade-off
+    documented on
+    StructuredPathConsumedAsCompleteValue.test_bare_final_component_with_no_further_slash_is_accepted_as_the_prefix."""
+
+    def test_path_followed_by_trailing_prose_resolves_to_the_real_repo(self):
+        m = load_script()
+        rec = {"result": "Fixed the bug in /home/x/acme-repo/src/main.py and pushed"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    def test_bare_repo_dir_followed_by_trailing_prose_resolves_to_its_basename(self):
+        m = load_script()
+        rec = {"result": "Ran tests in /Users/sagar/Github/Arrra/hex on branch main"}
+        self.assertEqual(m.infer_project(rec, []), "hex")
+
+    def test_multi_word_directory_name_followed_by_more_path_is_still_rejected_as_a_prefix(self):
+        # The reach-a-further-"/" signal must still catch the genuine
+        # truncation case: a real multi-word directory name followed by MORE
+        # path, not just prose.
+        m = load_script()
+        rec = {"result": "/Users/Jane  Doe/acme-repo/src/main.py"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
 
 
 class StructuredPathDoubleSlashDoesNotHang(unittest.TestCase):

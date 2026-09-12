@@ -407,17 +407,40 @@ def validate_record(rec: object) -> str | None:
 # prose, so per contract any space-then-word-characters continuation is
 # treated as an incomplete final component and rejected outright — a
 # further "/" is no longer required.
-_SPACE_CONTINUATION_RE = re.compile(r" +[\w.\-]+")
+#
+# B-R1 (spec review round 4) — ADJUDICATED REVERSAL of the round-3 change
+# directly above. Round 3's unconditional rule closed the narrow "bare
+# space-broken final component" case, but real CLI probes showed it breaks
+# the dominant realistic shape instead: a complete, correctly-formed path
+# mentioned in a sentence, followed by ordinary trailing prose that starts
+# with a word ("... /home/x/acme-repo/src/main.py and pushed", "...
+# /Users/sagar/Github/Arrra/hex on branch main"). ABS_PATH_RE already
+# matches such a path in full (there is no truncation to begin with — the
+# match already ends at ".py", or at a bare directory name that really has
+# no space in it); it was the round-3 continuation check itself that
+# wrongly flagged the trailing prose word as evidence of truncation.
+# Free text gives no way to tell "this space starts more of the same
+# directory name" from "this space starts unrelated prose" without some
+# signal, and an eventual further "/" is that signal: trailing prose after
+# a complete path essentially never contains one, while a genuinely
+# space-broken directory name with nothing else following is rare. Restore
+# the pre-round-3 rule (a further "/" is required to count as truncation),
+# accepting as an explicit, documented trade-off that the narrow bare case
+# resolves to the truncated prefix instead of _unmapped. Pinned by
+# StructuredPathConsumedAsCompleteValue.test_bare_final_component_with_no_further_slash_is_accepted_as_the_prefix
+# and FreeTextPathFollowedByOrdinaryProseIsNotTruncated.
+_SPACE_CONTINUATION_RE = re.compile(r"(?: +[\w.\-]+)+/")
 
 
 def _looks_truncated_by_space(text: str, end: int) -> bool:
     """True if a path match ends right at a space that is followed by more
-    (possibly multi-word, multi-space) path-like text — a strong signal the
-    match is either a truncated prefix of a longer, space-containing
-    directory name, or an incomplete final component. Either way it is not
-    safe to accept as-is (e.g. ".../Jane Doe Smith/repo/...": the match
-    stops at "Jane" but " Doe Smith/..." keeps going; "/tmp/acme repo" with
-    nothing further: the match stops at "acme" but " repo" keeps going)."""
+    (possibly multi-word, multi-space) path-like text that eventually
+    reaches another "/" — a strong signal the real path continued past the
+    space(s) and the match is only a truncated prefix (e.g. ".../Jane Doe
+    Smith/repo/...": the match stops at "Jane" but " Doe Smith/..." keeps
+    going to another "/"). A space followed by prose with no further "/"
+    (B-R1, round 4) is trusted as trailing text, not truncation — see the
+    round-4 comment on _SPACE_CONTINUATION_RE above."""
     if end >= len(text) or text[end] != " ":
         return False
     return bool(_SPACE_CONTINUATION_RE.match(text, end))
