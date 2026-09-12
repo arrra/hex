@@ -905,20 +905,42 @@ def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd, cd
     invocation = scan_text[match_start:match_end]
     if _GIT_DIR_LOCATE_RE.search(invocation):
         return None
-    c_locates = list(_DASH_C_LOCATE_RE.finditer(invocation))
-    if c_locates:
-        value, _ = _read_token(text, match_start + c_locates[-1].end())
-        return _resolve_against_cwd(value, payload_cwd) if value is not None else None
+    # G2 (spec-level review, reopen generation 2): find whatever `cd`
+    # already reached this invocation FIRST, before looking at `-C` --
+    # `base_cwd` is the invocation's own effective working directory
+    # absent any `-C` override, and a RELATIVE `-C <path>` (e.g. the
+    # bare `.` in `<cmd> -C . stash`) resolves against THAT, never
+    # unconditionally against the raw hook payload cwd. From a
+    # /worktrees/ payload cwd, `cd /shared/checkout && <cmd> -C . stash`
+    # genuinely targets /shared/checkout (`.` resolves against the
+    # shell's CURRENT directory after the `cd` already ran, not the
+    # hook's payload cwd) -- resolving it against the payload cwd
+    # instead joined straight back to the exempt /worktrees/ path and
+    # wrongly abstained.
+    base_cwd = payload_cwd
     idx = _bisect_left(cd_reach_starts, match_start) - 1
     while idx >= 0:
         resolved, guarded, break_pos = cd_reach_infos[idx]
         if not guarded and (break_pos is None or break_pos > match_start):
-            return resolved
+            base_cwd = resolved
+            break
         # G1: this `cd` never actually took effect by match_start (its
         # subshell closed, or it's guarded by `||`) -- try whatever `cd`
         # came before it instead of falling straight to payload_cwd.
         idx -= 1
-    return payload_cwd
+    c_locates = list(_DASH_C_LOCATE_RE.finditer(invocation))
+    if c_locates:
+        value, _ = _read_token(text, match_start + c_locates[-1].end())
+        if value is None:
+            return None
+        if value.startswith("/"):
+            return value
+        # `base_cwd` itself may be None (the reaching `cd`'s own target
+        # was unresolvable, e.g. `cd $VAR`) -- a relative `-C` then has no
+        # known base to resolve against either, so this stays uncertain
+        # too rather than silently falling back to the payload cwd.
+        return _resolve_against_cwd(value, base_cwd) if base_cwd else None
+    return base_cwd
 
 
 # --- Loop-body bound for gh-fast-polling (F3) --------------------------
