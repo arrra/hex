@@ -937,7 +937,23 @@ def main() -> int:
                     # is not enough (see ProjectCollisionSafety).
                     marker = _source_marker(path)
                     basename = os.path.basename(out)
-                    for stale in glob.glob(os.path.join(projects_root, "*", "workflow-reports", basename)):
+                    # B-R2 (spec review round 4) — `basename` is used as a
+                    # glob PATTERN here, not an escaped literal. A redacted
+                    # run_id's basename embeds the literal text
+                    # "[REDACTED]" — a glob character class — so fnmatch
+                    # silently collapses it to matching exactly one
+                    # character instead of the 11 literal characters
+                    # actually on disk, and the stale copy never matches
+                    # (no WARN, exit 0). The same escaping also stops a
+                    # runId containing "*"/"?" from turning this cleanup
+                    # into an over-broad match against unrelated projects'
+                    # reports. glob.escape() both directory components so
+                    # only real filesystem wildcards (none, here) are ever
+                    # interpreted as such.
+                    stale_pattern = os.path.join(
+                        glob.escape(projects_root), "*", "workflow-reports", glob.escape(basename)
+                    )
+                    for stale in glob.glob(stale_pattern):
                         # review_b G2 (round 3) — abspath() does not resolve
                         # symlinks: a project directory reached through an
                         # internal alias symlink is a different STRING but

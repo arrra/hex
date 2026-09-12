@@ -2054,6 +2054,54 @@ class RemappingRemovesStaleReportCopy(unittest.TestCase):
             )
 
 
+class StaleReportCleanupEscapesGlobMetacharacters(unittest.TestCase):
+    """B-R2 (ledger arrra-hex-pr-12-r4, round 4, major) — the F10 stale-copy
+    cleanup used the just-written report's basename as a glob PATTERN, not
+    an escaped literal. A redacted runId's basename embeds the literal
+    text "[REDACTED]" — a glob character class — so fnmatch collapses it to
+    matching exactly one character instead of the 11 literal characters
+    actually on disk, the stale copy never matches, and the cleanup
+    silently no-ops: no WARN, exit 0 (an S6-class silent failure)."""
+
+    def test_credential_shaped_runid_stale_copy_is_still_removed_on_remap(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            token = "sk-ant-" + "Z" * 40
+            rec = {
+                "runId": token,
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": "nothing path-shaped here",
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            old_reports = list(Path(hex_dir, "projects", "_unmapped", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(old_reports), 1, old_reports)
+            old_report = old_reports[0]
+            self.assertIn(
+                "[REDACTED]", old_report.name, "expected the redacted runId literal in the basename"
+            )
+
+            cfg = Path(hex_dir, ".hex", "config")
+            cfg.mkdir(parents=True)
+            (cfg / "workflow-projects.toml").write_text(
+                '[[map]]\nmatch = "nothing path-shaped"\nproject = "named-project"\n'
+            )
+            rc2, out2, err2 = _run_export(hex_dir, projects)
+            self.assertEqual(rc2, 0, err2)
+            new_reports = list(Path(hex_dir, "projects", "named-project", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(new_reports), 1, "the remapped run must land under the new project")
+            self.assertIn("removed stale report", err2, err2)
+            self.assertFalse(
+                old_report.exists(),
+                "the stale report must be removed even when its basename embeds glob metacharacters",
+            )
+
+
 class StaleReportCleanupNeverDeletesThroughAnInternalSymlink(unittest.TestCase):
     """review_b G2 (round 3) — the F10 stale-copy cleanup compared
     candidate paths with os.path.abspath(), which does not resolve
