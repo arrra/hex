@@ -3356,5 +3356,31 @@ class TestQuotedDoneAfterSeparatorDecisionUnaffected(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
 
 
+class TestHeredocDelimiterBackslashNewlineContinuation(RouterTestCase):
+    """A-REFUTE-1 (blocker): bash line-continuation folding (already applied
+    to the character-loop scanner for R1) was never applied to
+    `_HEREDOC_START_RE`'s unquoted-delimiter alternative, which matches
+    `[A-Za-z_][A-Za-z0-9_]*` against the RAW text with no continuation
+    awareness. A `\\<newline>` pair right after the first run of delimiter
+    characters means the delimiter word is not fully resolvable by this
+    scanner (real bash would fold it into a longer word, e.g. `E\\` +
+    newline + `OF` -> the real terminator is `EOF`, verified against real
+    bash) -- so this is exactly the UNPARSEABLE case: rather than guessing
+    at a truncated delimiter (which swallows every real command up to
+    EOF-of-text as fake heredoc body), the scanner must not treat this `<<`
+    as a heredoc opener at all, leaving the rest of the text visible to
+    ordinary scanning instead of silently abstaining."""
+
+    def test_delimiter_word_split_by_a_line_continuation_still_denies(self):
+        cmd = "cat <<E\\\nOF\nbody\nEOF\ngit stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-REFUTE-1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 if __name__ == "__main__":
     unittest.main()
