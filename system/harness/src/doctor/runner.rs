@@ -2005,6 +2005,78 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
+    fn test_parse_ls_tree_entry_preserves_invalid_utf8_path_bytes_a_r22() {
+        // A-R-22 (round-2 review, F22): `export_committed_head` used to
+        // decode the WHOLE `git ls-tree` line with `String::from_utf8_lossy`
+        // before splitting out the path, silently replacing any invalid
+        // UTF-8 byte in a committed path with U+FFFD's own (valid) 3-byte
+        // encoding. A committed path containing an invalid byte could then
+        // get exported under a DIFFERENT name than git actually recorded —
+        // one that happens to match whatever a source file's
+        // `include_str!`/`mod` reference literally names — letting
+        // `cargo check` succeed against a path this export fabricated
+        // rather than the path the commit actually contains: a false PASS.
+        //
+        // This can't be regression-tested by committing such a file to a
+        // real fixture repo on this machine: macOS APFS refuses to create
+        // a filename containing an invalid UTF-8 byte at all (`EILSEQ`,
+        // confirmed live on this checkout — an environmental limit, not
+        // a code path this fix can exercise end-to-end here). The parsing
+        // step is pure and filesystem-independent, so it is tested
+        // directly instead, with a synthetic `git ls-tree -z` line built
+        // by hand.
+        use std::os::unix::ffi::OsStrExt;
+
+        let raw = b"100644 blob 0123456789abcdef0123456789abcdef01234567\tdata\xffname.txt";
+        let entry = crate::doctor::checks::harness_buildable::parse_ls_tree_entry(raw)
+            .expect("a well-formed ls-tree line must parse even with an invalid-UTF-8 path");
+
+        assert_eq!(
+            entry.path.as_bytes(),
+            b"data\xffname.txt",
+            "the parsed path must carry git's raw committed bytes \
+             (including the invalid byte 0xFF) exactly — never a \
+             UTF-8-lossy substitution of them"
+        );
+        assert_ne!(
+            entry.path.as_bytes(),
+            "data\u{fffd}name.txt".as_bytes(),
+            "the parsed path must NOT be silently renamed to the \
+             U+FFFD-substituted spelling — that renaming is exactly what \
+             let a source reference to a path that was never actually \
+             committed resolve anyway"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn test_raw_path_from_bytes_preserves_invalid_utf8_symlink_target_bytes_a_r22() {
+        // A-R-22 (F22), the symlink-target half: a committed symlink's
+        // target is blob content (git stores it as the raw bytes of the
+        // symlink's destination path), exactly as arbitrary-byte as a
+        // path. `export_committed_head`'s pass-2 symlink loop used
+        // `String::from_utf8_lossy(content)` on it before this fix, which
+        // would rewrite an invalid-byte target the same lossy way a
+        // path could be rewritten. Same environmental note as the path
+        // test above applies to end-to-end symlink-target repro on APFS;
+        // `raw_path_from_bytes` (shared by both the path- and
+        // target-decoding call sites) is tested directly instead.
+        use std::os::unix::ffi::OsStrExt;
+
+        let raw_target: &[u8] = b"../real\xffdata.txt";
+        let target = crate::doctor::checks::harness_buildable::raw_path_from_bytes(raw_target);
+
+        assert_eq!(
+            target.as_bytes(),
+            raw_target,
+            "a symlink target's raw committed bytes (including the \
+             invalid byte 0xFF) must be preserved exactly — never a \
+             UTF-8-lossy substitution of them"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
     fn test_export_committed_head_never_runs_filters_so_fabricated_modules_still_fail() {
         // (c) `src/lib.rs` declares `mod missing_dep;` whose file is
         // genuinely untracked. A locally configured filter would, on an

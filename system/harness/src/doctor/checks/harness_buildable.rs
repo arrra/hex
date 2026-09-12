@@ -451,12 +451,84 @@ pub(crate) fn run_with_timeout_and_stdin(
     })
 }
 
+/// A committed path or symlink target, preserving git's raw bytes exactly.
+/// `git` paths and symlink-target blobs are arbitrary byte strings, not
+/// necessarily valid UTF-8, on any filesystem that allows them — this must
+/// never be a `String` produced by a lossy conversion (A-R-22, round-2
+/// review, F22): `String::from_utf8_lossy` replaces an invalid byte with
+/// U+FFFD's own (valid) 3-byte encoding, which can rename an exported path
+/// to something a source file's `include_str!`/`mod` reference happens to
+/// match even though the commit never actually contained anything there —
+/// a false PASS. `OsString` has no such lossy step on unix; non-unix
+/// platforms keep the previous lossy behavior (git-committed arbitrary
+/// invalid-UTF-8 byte paths are not achievable on those filesystems in the
+/// first place).
+#[cfg(unix)]
+pub(crate) type CommittedPath = std::ffi::OsString;
+#[cfg(not(unix))]
+pub(crate) type CommittedPath = String;
+
+/// Converts one git object's raw path or symlink-target bytes into a
+/// `CommittedPath`, preserving every byte exactly on unix (see
+/// `CommittedPath`'s docs for why this must not be a lossy UTF-8 decode).
+#[cfg(unix)]
+pub(crate) fn raw_path_from_bytes(bytes: &[u8]) -> CommittedPath {
+    use std::os::unix::ffi::OsStrExt;
+    std::ffi::OsStr::from_bytes(bytes).to_os_string()
+}
+#[cfg(not(unix))]
+pub(crate) fn raw_path_from_bytes(bytes: &[u8]) -> CommittedPath {
+    String::from_utf8_lossy(bytes).into_owned()
+}
+
 /// One entry from `git ls-tree -r -z HEAD`: a file mode, its blob sha, and
 /// its repo-relative path.
-struct TreeEntry {
-    mode: String,
-    sha: String,
-    path: String,
+pub(crate) struct TreeEntry {
+    pub(crate) mode: String,
+    pub(crate) sha: String,
+    pub(crate) path: CommittedPath,
+}
+
+/// Parses one `\0`-terminated `git ls-tree -r -z --full-tree HEAD` entry
+/// (`<mode> <type> <sha>\t<path>`) into a `TreeEntry`. Splits on the raw
+/// TAB byte and decodes ONLY the ASCII metadata (mode/type/sha) as UTF-8 —
+/// the path itself goes through `raw_path_from_bytes`, never a lossy
+/// decode of the whole line (A-R-22; see `CommittedPath`'s docs). Pure and
+/// filesystem-independent, so it is unit-testable without needing a
+/// filesystem that actually accepts an invalid-UTF-8 byte in a real
+/// filename (macOS APFS, for one, refuses to create such a file at all —
+/// this is the only way to regression-test the byte-preservation
+/// contract on every platform this suite runs on).
+pub(crate) fn parse_ls_tree_entry(raw: &[u8]) -> Result<TreeEntry, String> {
+    let tab_pos = raw.iter().position(|&b| b == b'\t').ok_or_else(|| {
+        format!(
+            "unexpected `git ls-tree` line: {}",
+            String::from_utf8_lossy(raw)
+        )
+    })?;
+    let (meta_bytes, rest) = raw.split_at(tab_pos);
+    let path_bytes = &rest[1..];
+    let meta = std::str::from_utf8(meta_bytes).map_err(|_| {
+        format!(
+            "malformed `git ls-tree` metadata (non-UTF-8 mode/type/sha): {}",
+            String::from_utf8_lossy(meta_bytes)
+        )
+    })?;
+    let mut parts = meta.split(' ');
+    let mode = parts
+        .next()
+        .ok_or("malformed `git ls-tree` entry (no mode)")?
+        .to_string();
+    let _kind = parts.next();
+    let sha = parts
+        .next()
+        .ok_or("malformed `git ls-tree` entry (no sha)")?
+        .to_string();
+    Ok(TreeEntry {
+        mode,
+        sha,
+        path: raw_path_from_bytes(path_bytes),
+    })
 }
 
 /// Resolves a symlink chain the way the real filesystem does: `stack` is
@@ -479,7 +551,7 @@ struct TreeEntry {
 fn resolve_realpath_within_export(
     mut stack: Vec<std::ffi::OsString>,
     remaining: Vec<std::path::Component>,
-    symlinks: &std::collections::HashMap<std::path::PathBuf, String>,
+    symlinks: &std::collections::HashMap<std::path::PathBuf, CommittedPath>,
     depth: usize,
 ) -> Option<Vec<std::ffi::OsString>> {
     if depth > 40 {
@@ -532,8 +604,8 @@ fn resolve_realpath_within_export(
 #[cfg(unix)]
 fn symlink_target_stays_within_export(
     dest_rel: &Path,
-    target: &str,
-    symlinks: &std::collections::HashMap<std::path::PathBuf, String>,
+    target: &std::ffi::OsStr,
+    symlinks: &std::collections::HashMap<std::path::PathBuf, CommittedPath>,
 ) -> bool {
     let target_path = Path::new(target);
     if target_path.is_absolute() {
@@ -621,20 +693,7 @@ fn export_committed_head(
         if raw.is_empty() {
             continue;
         }
-        let line = String::from_utf8_lossy(raw);
-        let (meta, path) = line
-            .split_once('\t')
-            .ok_or_else(|| format!("unexpected `git ls-tree` line: {line}"))?;
-        let mut parts = meta.split(' ');
-        let mode = parts
-            .next()
-            .ok_or("malformed `git ls-tree` entry (no mode)")?
-            .to_string();
-        let _kind = parts.next();
-        let sha = parts
-            .next()
-            .ok_or("malformed `git ls-tree` entry (no sha)")?
-            .to_string();
+        let entry = parse_ls_tree_entry(raw)?;
         // Gitlinks (submodule references, mode 160000) name a commit in
         // another repository, not a blob this export can materialize —
         // `git cat-file --batch` against THIS repo's own object database
@@ -660,20 +719,17 @@ fn export_committed_head(
         // relies on for every other missing-from-git case. Note the
         // skipped path so an operator reading stderr sees why, without
         // gating PASS/FAIL/WARN on it.
-        if mode == "160000" {
+        if entry.mode == "160000" {
             eprintln!(
                 "[doctor] harness-buildable: skipping uninitialized gitlink at \
-                 {path} (a submodule reference, not content this export can \
+                 {} (a submodule reference, not content this export can \
                  materialize) — the build only fails on this if it actually \
-                 reads that path"
+                 reads that path",
+                Path::new(&entry.path).display()
             );
             continue;
         }
-        entries.push(TreeEntry {
-            mode,
-            sha,
-            path: path.to_string(),
-        });
+        entries.push(entry);
     }
 
     if entries.is_empty() {
@@ -747,14 +803,17 @@ fn export_committed_head(
     }
 
     #[cfg(unix)]
-    let symlinks: std::collections::HashMap<std::path::PathBuf, String> = entries
+    let symlinks: std::collections::HashMap<std::path::PathBuf, CommittedPath> = entries
         .iter()
         .zip(contents.iter())
         .filter(|(entry, _)| entry.mode == "120000")
         .map(|(entry, content)| {
             (
                 std::path::PathBuf::from(&entry.path),
-                String::from_utf8_lossy(content).into_owned(),
+                // A-R-22 (F22): the symlink's TARGET is committed blob
+                // content, exactly as arbitrary-byte as a path — never
+                // lossy-decode it either, for the same reason.
+                raw_path_from_bytes(content),
             )
         })
         .collect();
@@ -822,17 +881,18 @@ fn export_committed_head(
         Ok(())
     };
 
-    let refuse_if_dest_collides = |dest: &Path, entry_path: &str| -> Result<(), String> {
+    let refuse_if_dest_collides = |dest: &Path, entry_path: &Path| -> Result<(), String> {
         if std::fs::symlink_metadata(dest).is_ok() {
             return Err(format!(
-                "committed path {entry_path} collides, on this filesystem, \
+                "committed path {} collides, on this filesystem, \
                  with a different committed path already materialized at \
                  the same location (a case- or Unicode-normalization- \
                  insensitive filesystem folding two distinct committed \
                  names onto one directory entry) — writing or linking \
                  through it would silently mix one committed path's bytes \
                  into another's, which could falsely certify a broken \
-                 commit as buildable; refusing to export it"
+                 commit as buildable; refusing to export it",
+                entry_path.display()
             ));
         }
         Ok(())
@@ -857,7 +917,7 @@ fn export_committed_head(
         if let Some(parent) = Path::new(&entry.path).parent() {
             ensure_dir_within_export(parent)?;
         }
-        refuse_if_dest_collides(&dest, &entry.path)?;
+        refuse_if_dest_collides(&dest, Path::new(&entry.path))?;
         std::fs::write(&dest, content.as_slice())
             .map_err(|e| format!("failed to write {}: {e}", dest.display()))?;
         #[cfg(unix)]
@@ -901,19 +961,23 @@ fn export_committed_head(
         if let Some(parent) = Path::new(&entry.path).parent() {
             ensure_dir_within_export(parent)?;
         }
-        refuse_if_dest_collides(&dest, &entry.path)?;
-        let target = String::from_utf8_lossy(content).into_owned();
+        refuse_if_dest_collides(&dest, Path::new(&entry.path))?;
         #[cfg(unix)]
         {
+            // A-R-22 (F22): the target is committed blob content, exactly
+            // as arbitrary-byte as a path — preserve it raw, never a lossy
+            // UTF-8 decode (see `CommittedPath`'s docs).
+            let target = raw_path_from_bytes(content);
             if !symlink_target_stays_within_export(Path::new(&entry.path), &target, &symlinks) {
                 return Err(format!(
-                    "committed symlink {} -> {target} escapes the export \
+                    "committed symlink {} -> {} escapes the export \
                      root — creating it would let `cargo check` read \
                      whatever file (committed or not) happens to sit at \
                      that path elsewhere on this machine, falsely \
                      certifying a broken commit as buildable; refusing to \
                      export it",
-                    entry.path
+                    Path::new(&entry.path).display(),
+                    Path::new(&target).display()
                 ));
             }
             std::os::unix::fs::symlink(&target, &dest)
@@ -983,7 +1047,7 @@ fn verify_symlinks_resolve_within_export(
                  insensitive filesystem folding a reference onto a \
                  differently-spelled committed symlink); refusing to \
                  continue the export",
-                entry.path,
+                Path::new(&entry.path).display(),
                 resolved.display()
             ));
         }
