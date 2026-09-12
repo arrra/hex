@@ -453,32 +453,51 @@ pub(crate) fn run_with_timeout_and_stdin(
 
 /// A committed path or symlink target, preserving git's raw bytes exactly.
 /// `git` paths and symlink-target blobs are arbitrary byte strings, not
-/// necessarily valid UTF-8, on any filesystem that allows them — this must
-/// never be a `String` produced by a lossy conversion (A-R-22, round-2
-/// review, F22): `String::from_utf8_lossy` replaces an invalid byte with
-/// U+FFFD's own (valid) 3-byte encoding, which can rename an exported path
-/// to something a source file's `include_str!`/`mod` reference happens to
-/// match even though the commit never actually contained anything there —
-/// a false PASS. `OsString` has no such lossy step on unix; non-unix
-/// platforms keep the previous lossy behavior (git-committed arbitrary
-/// invalid-UTF-8 byte paths are not achievable on those filesystems in the
-/// first place).
+/// necessarily valid UTF-8 — `git ls-tree` returns a tree object's
+/// filenames verbatim regardless of what platform is reading them, so a
+/// tree that originated on a filesystem allowing arbitrary bytes can still
+/// be exported by a build running on a platform that cannot represent
+/// those bytes in a real filename. This must never be a `String` produced
+/// by a lossy conversion (A-R-22, round-2/round-3 review, F22):
+/// `String::from_utf8_lossy` replaces an invalid byte with U+FFFD's own
+/// (valid) 3-byte encoding, which can rename an exported path to something
+/// a source file's `include_str!`/`mod` reference happens to match even
+/// though the commit never actually contained anything there — a false
+/// PASS. `OsString` has no such lossy step on unix, so it preserves every
+/// byte exactly there; on a platform whose filesystem cannot represent an
+/// arbitrary byte sequence (`CommittedPath = String`), silently
+/// lossy-renaming would reproduce the exact same false-PASS mechanism one
+/// level up — so `raw_path_from_bytes` there REFUSES instead (returns
+/// `Err`), and the whole export becomes inconclusive rather than silently
+/// wrong.
 #[cfg(unix)]
 pub(crate) type CommittedPath = std::ffi::OsString;
 #[cfg(not(unix))]
 pub(crate) type CommittedPath = String;
 
 /// Converts one git object's raw path or symlink-target bytes into a
-/// `CommittedPath`, preserving every byte exactly on unix (see
-/// `CommittedPath`'s docs for why this must not be a lossy UTF-8 decode).
+/// `CommittedPath`, preserving every byte exactly on unix, or refusing
+/// (`Err`) on a platform that cannot represent them at all (see
+/// `CommittedPath`'s docs for why silently lossy-renaming there would be
+/// exactly as wrong as never preserving the bytes in the first place).
 #[cfg(unix)]
-pub(crate) fn raw_path_from_bytes(bytes: &[u8]) -> CommittedPath {
+pub(crate) fn raw_path_from_bytes(bytes: &[u8]) -> Result<CommittedPath, String> {
     use std::os::unix::ffi::OsStrExt;
-    std::ffi::OsStr::from_bytes(bytes).to_os_string()
+    Ok(std::ffi::OsStr::from_bytes(bytes).to_os_string())
 }
 #[cfg(not(unix))]
-pub(crate) fn raw_path_from_bytes(bytes: &[u8]) -> CommittedPath {
-    String::from_utf8_lossy(bytes).into_owned()
+pub(crate) fn raw_path_from_bytes(bytes: &[u8]) -> Result<CommittedPath, String> {
+    std::str::from_utf8(bytes).map(str::to_string).map_err(|_| {
+        format!(
+            "a committed path or symlink target contains bytes that are \
+             not valid UTF-8 ({bytes:?}) — this platform's filesystem \
+             cannot represent the committed name exactly, and silently \
+             substituting a lossy rendering would let the export diverge \
+             from what the commit actually recorded (A-R-22); refusing \
+             the export as inconclusive rather than falsely certifying a \
+             renamed path as the committed one"
+        )
+    })
 }
 
 /// One entry from `git ls-tree -r -z HEAD`: a file mode, its blob sha, and
@@ -527,7 +546,7 @@ pub(crate) fn parse_ls_tree_entry(raw: &[u8]) -> Result<TreeEntry, String> {
     Ok(TreeEntry {
         mode,
         sha,
-        path: raw_path_from_bytes(path_bytes),
+        path: raw_path_from_bytes(path_bytes)?,
     })
 }
 
@@ -1016,15 +1035,15 @@ fn export_committed_head(
         .zip(contents.iter())
         .filter(|(entry, _)| entry.mode == "120000")
         .map(|(entry, content)| {
-            (
+            Ok((
                 std::path::PathBuf::from(&entry.path),
                 // A-R-22 (F22): the symlink's TARGET is committed blob
                 // content, exactly as arbitrary-byte as a path — never
                 // lossy-decode it either, for the same reason.
-                raw_path_from_bytes(content),
-            )
+                raw_path_from_bytes(content)?,
+            ))
         })
-        .collect();
+        .collect::<Result<std::collections::HashMap<_, _>, String>>()?;
 
     // `git ls-tree` guarantees every entry's path is a distinct byte
     // string, but on a case- or Unicode-normalization-insensitive
@@ -1175,7 +1194,7 @@ fn export_committed_head(
             // A-R-22 (F22): the target is committed blob content, exactly
             // as arbitrary-byte as a path — preserve it raw, never a lossy
             // UTF-8 decode (see `CommittedPath`'s docs).
-            let target = raw_path_from_bytes(content);
+            let target = raw_path_from_bytes(content)?;
             if !symlink_target_stays_within_export(Path::new(&entry.path), &target, &symlinks) {
                 return Err(format!(
                     "committed symlink {} -> {} escapes the export \

@@ -2064,7 +2064,8 @@ mod tests {
         use std::os::unix::ffi::OsStrExt;
 
         let raw_target: &[u8] = b"../real\xffdata.txt";
-        let target = crate::doctor::checks::harness_buildable::raw_path_from_bytes(raw_target);
+        let target = crate::doctor::checks::harness_buildable::raw_path_from_bytes(raw_target)
+            .expect("an invalid-UTF-8 byte must still preserve exactly on unix (never Err)");
 
         assert_eq!(
             target.as_bytes(),
