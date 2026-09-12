@@ -1080,11 +1080,39 @@ where
                         );
                     }
                 } else {
-                    eprintln!(
-                        "  ERROR: failed to release index_file_with_reuse savepoint after a \
-                         failed RELEASE ({release_err}); leaving the caller-owned outer \
-                         transaction in place"
-                    );
+                    // F10 (major, arrra/hex PR #9 round 3): logging alone
+                    // left this call's own successful writes sitting inside
+                    // the still-open (never released, never rolled back)
+                    // savepoint — the caller's later COMMIT of its outer
+                    // transaction would then include them anyway, even
+                    // though this function is returning Err to say the call
+                    // failed. `Err` must mean "as if this call never
+                    // happened": roll back to this call's own savepoint
+                    // (discarding only its writes, not the caller's), then
+                    // attempt to RELEASE the now-empty savepoint so it does
+                    // not linger nested inside the caller's transaction —
+                    // same idiom as the Err-arm's combined `ROLLBACK TO
+                    // ...; RELEASE ...` below, applied here to the Ok arm's
+                    // cleanup failure.
+                    if let Err(rollback_to_err) =
+                        conn.execute_batch("ROLLBACK TO index_file_with_reuse")
+                    {
+                        eprintln!(
+                            "  ERROR: failed to roll back index_file_with_reuse's own writes \
+                             after a failed RELEASE ({release_err}): {rollback_to_err}; the \
+                             caller-owned outer transaction remains open, but this call's own \
+                             writes may still be present in it"
+                        );
+                    } else if let Err(release_err2) =
+                        conn.execute_batch("RELEASE index_file_with_reuse")
+                    {
+                        eprintln!(
+                            "  ERROR: rolled back index_file_with_reuse's own writes after a \
+                             failed RELEASE ({release_err}), but releasing the now-empty \
+                             savepoint also failed ({release_err2}); leaving the caller-owned \
+                             outer transaction in place"
+                        );
+                    }
                 }
                 Err(release_err.into())
             }
@@ -3661,6 +3689,28 @@ mod tests {
             caller_row_survived, 1,
             "B-F-new1: the caller's own uncommitted write must survive a \
              failed nested RELEASE in index_file_with_reuse's Ok-arm cleanup"
+        );
+
+        // F10 (major, arrra/hex PR #9 round 3): an `Err` return from
+        // `index_file_with_reuse` must mean "as if this call never
+        // happened" — the caller's earlier write surviving (checked above)
+        // is necessary but not sufficient. This call's OWN work must also
+        // be gone, not merely left uncommitted-but-present inside the still
+        // -open outer savepoint for the caller's subsequent COMMIT to sweep
+        // up anyway.
+        let failed_calls_own_row_absent: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'ok-release-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            failed_calls_own_row_absent, 0,
+            "F10: a failed nested RELEASE must roll back to this call's own \
+             savepoint before returning Err, so the caller's later commit \
+             cannot resurrect the failed call's own writes — index_file_with_reuse \
+             reported failure for this file and it must not exist afterward"
         );
     }
 
