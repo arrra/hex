@@ -3221,6 +3221,55 @@ class TestEffectiveCheckoutAfterReservedWordsAndWrappers(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestReservedWordAnchorIgnoresQuotedMentions(RouterTestCase):
+    """F2 (round 2 review, major) — `_RESERVED_LEADIN` ("if|then|elif|
+    else|while|until|do") is a plain alternative in `_CMD_PREFIX`, with no
+    lookbehind available (Rust `regex` port target) to check whether the
+    reserved word sits in REAL command position or is merely quoted text
+    `executable_mask` leaves visible (masking only blanks quote
+    delimiters/separators/backticks -- see `_mask_literal_span` -- ordinary
+    letters inside a quote stay in scan_text verbatim by design). So
+    `printf '%s\\n' 'then git stash'` -- a command that only ever prints
+    the literal string `then git stash`, never runs `git stash` at all --
+    matched the stash rule's `_CMD_PREFIX` anchor on the quoted word
+    `then` and denied.
+
+    Fix: `executable_mask` already collects `quote_spans` -- the (start,
+    end) of every top-level quoted span it walks past, used elsewhere
+    (`_extend_end_past_quote`) to extend a truncated match past a quoted
+    secret. Every `_CMD_PREFIX` alternative OTHER than the reserved-word
+    one anchors on a character `_mask_literal_span`/`_mask_double_quoted`
+    already blank inside a quote (a real separator, or the `$(`/backtick
+    pair a genuine substitution needs) -- so a match whose OWN START
+    position falls strictly inside a recorded quote span can only ever be
+    the reserved-word alternative firing on a quoted mention. `evaluate()`
+    now discards any such match before evaluating the rule further."""
+
+    def test_printf_echoing_a_reserved_word_and_stash_mention_abstains(self):
+        cmd = "printf '%s\\n' 'then git stash'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2): {proc.stdout!r}")
+
+    def test_echo_of_an_if_then_shell_snippet_abstains(self):
+        cmd = "echo 'if true; then git push --force; fi'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2): {proc.stdout!r}")
+
+    def test_a_real_reserved_word_command_position_still_denies(self):
+        # Regression guard: the quote-span filter must not blind the
+        # reserved-word anchor to a GENUINE invocation right after `then`.
+        cmd = "if true; then git stash; fi"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/tmp/shared-repo"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 class TestAssignmentPrefixWithQuotedValue(RouterTestCase):
     """R4 (major): `_ASSIGN`'s value is `\\S*`, which can't span a quoted
     assignment value containing spaces -- the wrapper-skip couldn't reach

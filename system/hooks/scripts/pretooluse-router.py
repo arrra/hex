@@ -1816,10 +1816,18 @@ def evaluate(payload):
     session_id = payload.get("session_id", "")
 
     text = canonical_text(tool_name, tool_input)
-    # F2/F13: Bash command rules only ever see EXECUTABLE text — literal
-    # quoted/commented/heredoc-body text is masked to spaces first (real
-    # `$(...)`/backtick substitutions stay visible). Other tools' canonical
-    # text (file paths/content) isn't Bash syntax, so it is used as-is.
+    # F2/F13: Bash command rules only ever see EXECUTABLE text — a real
+    # command-position anchor (a separator, or the opener of a live
+    # `$(...)`/backtick substitution) is masked to a space wherever it
+    # sits inside quoted text first, so it can never anchor a rule from
+    # there. ORDINARY argument content (plain letters/digits) inside a
+    # quote is left visible in scan_text by design (see
+    # `_mask_literal_span`'s doc comment) — only `_RESERVED_LEADIN`'s
+    # bare-word alternatives (if/then/elif/else/while/until/do) can ever
+    # anchor on that visible-but-quoted text, since no OTHER `_CMD_PREFIX`
+    # alternative survives masking inside a quote. `quote_spans` (below)
+    # exists to filter exactly that case out. Other tools' canonical text
+    # (file paths/content) isn't Bash syntax, so it is used as-is.
     quote_spans = []
     scan_text = executable_mask(text, quote_spans) if tool_name == "Bash" else text
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
@@ -1829,11 +1837,45 @@ def evaluate(payload):
     )
     rules = load_rules()
 
+    def _match_starts_inside_a_single_quote(m):
+        # F2 (round 2 review, major): `_RESERVED_LEADIN` recognizes a
+        # reserved word anywhere in scan_text, with no lookbehind
+        # available (Rust `regex` port target) to check whether it sits
+        # in REAL command position. `printf '%s\n' 'then stash-it'`
+        # never runs a real stash invocation at all -- the word `then`
+        # the rule anchored on is a QUOTED MENTION, visible in scan_text
+        # only because ordinary quoted argument content is never blanked
+        # (see the comment on `quote_spans` above).
+        #
+        # Restricted to SINGLE-quoted spans only (`text[q_start] == "'"`,
+        # recovered from the ORIGINAL text rather than threading a new
+        # discriminator into every quote_spans.append() call site): a
+        # first regression pass filtered ANY quote_spans containment and
+        # broke `echo "$(real stash invocation)"` and its siblings -- a
+        # `$(...)`/
+        # backtick substitution genuinely STAYS LIVE inside DOUBLE quotes
+        # (unlike single quotes, which suppress every kind of expansion),
+        # so a substitution-anchored match legitimately starting inside a
+        # double-quoted span must never be discarded. `_RESERVED_LEADIN`'s
+        # bare-word alternatives are the only ones a single-quoted span
+        # can ever spuriously anchor (nothing else survives masking
+        # there), so restricting the filter to single quotes closes F2
+        # without reopening G1/round-2's substitution-in-double-quotes
+        # coverage.
+        return any(
+            q_start < len(text) and text[q_start] == "'" and q_start <= m.start() < q_end
+            for q_start, q_end in quote_spans
+        )
+
     fires = []
     for rule in rules:
         if not rule["tool_re"].search(tool_name):
             continue
-        all_matches = list(rule["match_re"].finditer(scan_text))
+        all_matches = [
+            m
+            for m in rule["match_re"].finditer(scan_text)
+            if not _match_starts_inside_a_single_quote(m)
+        ]
         if not all_matches:
             continue
 
