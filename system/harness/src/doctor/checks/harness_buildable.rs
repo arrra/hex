@@ -113,7 +113,7 @@ fn run_check_impl(
     // Export cleanup (success, failure, or panic-unwind) is handled by
     // `tempfile::TempDir`'s own `Drop` — `export` is the guard, and every
     // return path below simply lets it go out of scope.
-    let export = match export_committed_head(hex_dir) {
+    let export = match export_committed_head(hex_dir, timeout) {
         Ok(e) => e,
         Err(e) => {
             return CheckResult::warn(format!(
@@ -323,12 +323,41 @@ fn first_cargo_error_line(stderr: &str) -> Option<&str> {
 /// drained on background threads so a chatty child can't deadlock on a
 /// full pipe buffer while we poll.
 pub(crate) fn run_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<Output, String> {
+    run_with_timeout_and_stdin(cmd, timeout, None)
+}
+
+/// Same as `run_with_timeout`, but optionally feeds `stdin_data` to the
+/// child on a background writer thread before draining stdout/stderr —
+/// lets `git cat-file --batch` (which reads a stream of object ids from
+/// stdin) share the exact same wall-clock cap as every other external
+/// command this check runs (F14) instead of blocking unboundedly on
+/// `Child::wait`/`read_to_end` the way a plain `.output()` call would.
+pub(crate) fn run_with_timeout_and_stdin(
+    cmd: &mut Command,
+    timeout: Duration,
+    stdin_data: Option<Vec<u8>>,
+) -> Result<Output, String> {
     let mut child = cmd
-        .stdin(Stdio::null())
+        .stdin(if stdin_data.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn command: {e}"))?;
+
+    if let Some(data) = stdin_data {
+        let mut stdin_pipe = child.stdin.take().expect("stdin was piped");
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin_pipe.write_all(&data);
+            // Dropping `stdin_pipe` here (end of closure) closes the pipe,
+            // which is what tells a command like `git cat-file --batch`
+            // there is no more input to expect.
+        });
+    }
 
     let mut stdout_pipe = child.stdout.take().expect("stdout was piped");
     let mut stderr_pipe = child.stderr.take().expect("stderr was piped");
@@ -520,7 +549,7 @@ fn symlink_target_stays_within_export(
 /// working tree, index, and `.git` state are never touched. Returns the
 /// `TempDir` itself — its `Drop` removes the export unconditionally
 /// (success, failure, or panic-unwind), so it doubles as the cleanup guard.
-fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> {
+fn export_committed_head(repo_root: &Path, timeout: Duration) -> Result<tempfile::TempDir, String> {
     let tempdir = tempfile::Builder::new()
         .prefix("hex-doctor-harness-buildable-export-")
         .tempdir()
@@ -539,9 +568,12 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
         // smudge filter would. `GIT_NO_REPLACE_OBJECTS` disables that
         // substitution for this process only.
         .env("GIT_NO_REPLACE_OBJECTS", "1");
-    let ls_output = ls_tree
-        .output()
-        .map_err(|e| format!("git ls-tree failed to spawn: {e}"))?;
+    // F14: bound under the SAME wall-clock cap as the `cargo check` this
+    // whole export feeds — a wedged `git` (lock contention, a hung
+    // globally configured credential helper) must never hang this health
+    // check any more than a wedged `cargo` can.
+    let ls_output = run_with_timeout(&mut ls_tree, timeout)
+        .map_err(|e| format!("git ls-tree -r HEAD failed to run: {e}"))?;
     if !ls_output.status.success() {
         return Err(format!(
             "git ls-tree -r HEAD failed: {}",
@@ -606,42 +638,20 @@ fn export_committed_head(repo_root: &Path) -> Result<tempfile::TempDir, String> 
         // resolved through a local replace ref would hand this export
         // substituted content instead of what `HEAD`'s tree actually
         // records.
-        .env("GIT_NO_REPLACE_OBJECTS", "1")
-        .stdin(Stdio::piped())
-        .stdout(Stdio::piped())
-        .stderr(Stdio::piped());
-    let mut child = batch_cmd
-        .spawn()
-        .map_err(|e| format!("git cat-file --batch failed to spawn: {e}"))?;
-    let mut stdin = child.stdin.take().expect("stdin was piped");
-    let mut stdout = child.stdout.take().expect("stdout was piped");
-    let mut stderr = child.stderr.take().expect("stderr was piped");
+        .env("GIT_NO_REPLACE_OBJECTS", "1");
     let shas: String = entries.iter().map(|e| format!("{}\n", e.sha)).collect();
-    let writer = std::thread::spawn(move || {
-        use std::io::Write;
-        let _ = stdin.write_all(shas.as_bytes());
-        // Dropping `stdin` here (end of closure) closes the pipe, which is
-        // what tells `git cat-file --batch` there are no more objects to
-        // look up.
-    });
-    let mut buf = Vec::new();
-    stdout
-        .read_to_end(&mut buf)
-        .map_err(|e| format!("failed reading `git cat-file --batch` output: {e}"))?;
-    let mut err_buf = Vec::new();
-    let _ = stderr.read_to_end(&mut err_buf);
-    writer
-        .join()
-        .map_err(|_| "git cat-file --batch stdin writer thread panicked".to_string())?;
-    let status = child
-        .wait()
-        .map_err(|e| format!("git cat-file --batch did not exit: {e}"))?;
-    if !status.success() {
+    // F14: same wall-clock cap as `ls-tree` above, via the stdin-capable
+    // variant — `run_with_timeout` alone can't feed this command the
+    // object-id stream it reads from stdin.
+    let batch_output = run_with_timeout_and_stdin(&mut batch_cmd, timeout, Some(shas.into_bytes()))
+        .map_err(|e| format!("git cat-file --batch failed to run: {e}"))?;
+    if !batch_output.status.success() {
         return Err(format!(
             "git cat-file --batch exited with failure: {}",
-            String::from_utf8_lossy(&err_buf).trim()
+            String::from_utf8_lossy(&batch_output.stderr).trim()
         ));
     }
+    let buf = batch_output.stdout;
 
     // Parsed as a full pass BEFORE any file is written — a symlink's target
     // may name a path that appears LATER in `entries` (git ls-tree order is
@@ -929,7 +939,12 @@ fn verify_symlinks_resolve_within_export(
 pub(crate) fn export_committed_head_for_tests(
     repo_root: &Path,
 ) -> Result<tempfile::TempDir, String> {
-    export_committed_head(repo_root)
+    // A generous, fixed timeout — every OTHER export test in this module
+    // exercises correctness, not the wall-clock cap itself, so a tiny one
+    // would just be one more way for those tests to flake on a slow CI
+    // runner. `export_committed_head_for_tests_with_timeout` below is the
+    // dedicated entry point for the F14 cap contract.
+    export_committed_head(repo_root, Duration::from_secs(120))
 }
 
 /// Test-only entry point for the F14 wall-clock-cap contract: same as
@@ -942,8 +957,5 @@ pub(crate) fn export_committed_head_for_tests_with_timeout(
     repo_root: &Path,
     timeout: Duration,
 ) -> Result<tempfile::TempDir, String> {
-    // NOTE: `timeout` is not yet threaded into the git plumbing below —
-    // this is the RED state for the F14 regression test.
-    let _ = timeout;
-    export_committed_head(repo_root)
+    export_committed_head(repo_root, timeout)
 }
