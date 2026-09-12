@@ -1897,10 +1897,18 @@ class StructuredPathConsumedAsCompleteValue(unittest.TestCase):
         rec = {"result": "/Users/Jane  Doe/acme-repo/src/main.py"}
         # The single-space continuation regex missed a run of 2+ spaces, so
         # the truncated "/Users/Jane" prefix was accepted as a complete path
-        # and resolved to project "Jane". Once the truncation is recognized
-        # (same as the already-fixed single-space case), the scan continues
-        # past it and finds the real repository boundary.
-        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+        # and resolved to project "Jane".
+        #
+        # Round 5 (ledger arrra-hex-pr-12-r4) — CONSERVATIVE REWRITE
+        # supersedes the "skip past it and resume mid-path" resolution this
+        # test used to pin: that mechanism is exactly what let an unrelated
+        # rescan adopt a wrong suffix elsewhere (see
+        # ConservativeFreeTextAmbiguityRouting). The truncation is still
+        # recognized (whitespace-run handling is unchanged), but an
+        # ambiguous match is never disambiguated by guessing at a deeper
+        # candidate — the whole record goes to `_unmapped`, matching the
+        # spec's original F7/F16 RED expectation for this exact input.
+        self.assertIsNone(m.infer_project(rec, []))
 
     def test_workspace_field_is_consumed_whole_like_repo_path_and_cwd(self):
         # review_b G1 (round 3) — the structured-key list named "repo",
@@ -1961,13 +1969,19 @@ class FreeTextPathFollowedByOrdinaryProseIsNotTruncated(unittest.TestCase):
         rec = {"result": "Ran tests in /Users/sagar/Github/Arrra/hex on branch main"}
         self.assertEqual(m.infer_project(rec, []), "hex")
 
-    def test_multi_word_directory_name_followed_by_more_path_is_still_rejected_as_a_prefix(self):
-        # The reach-a-further-"/" signal must still catch the genuine
-        # truncation case: a real multi-word directory name followed by MORE
-        # path, not just prose.
+    def test_multi_word_directory_name_followed_by_more_path_is_rejected_as_ambiguous(self):
+        # Round 5 (ledger arrra-hex-pr-12-r4) — this used to assert that the
+        # rejected "/Users/Jane" prefix let the scan resume mid-path and land
+        # on "acme-repo". That resume-mid-path mechanism is deleted (see
+        # ConservativeFreeTextAmbiguityRouting): it happened to land right
+        # here, but it is the identical mechanism the reviewer's R2/R4
+        # probes show landing on an arbitrary WRONG suffix elsewhere. A real
+        # multi-word directory name followed by more path is still
+        # recognized as ambiguous, but the record now goes to `_unmapped`
+        # rather than guessing at a deeper candidate.
         m = load_script()
         rec = {"result": "/Users/Jane  Doe/acme-repo/src/main.py"}
-        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+        self.assertIsNone(m.infer_project(rec, []))
 
 
 class TrailingProseWithASlashDoesNotTruncateACompletePath(unittest.TestCase):
@@ -2002,6 +2016,186 @@ class TrailingProseWithASlashDoesNotTruncateACompletePath(unittest.TestCase):
         m = load_script()
         rec = {"result": "Edited /home/x/acme-repo/src/main.py and src/util.py"}
         self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+
+class ConservativeFreeTextAmbiguityRouting(unittest.TestCase):
+    """Round 5 (ledger arrra-hex-pr-12-r4, open items — reviewer(refute) R1,
+    R2 and reviewer(new-defects) R1, the 3 must-fix findings) — A-R2's
+    "truncation only counts once the continuation reaches a SECOND slash"
+    premise is disproven in both directions and is deleted, not patched
+    again:
+
+    - refute-R1: a deep path whose SECOND component ALSO has a space
+      ("Jane Doe/acme repo/src/main.py") defeats the counting regex (it
+      requires the segment right after the first "/" to be space-free), so
+      the truncated "/Users/Jane" prefix was wrongly accepted as complete
+      and resolved to project "Jane".
+    - refute-R2 / new-defects-R1: a COMPLETE, correctly-formed path
+      followed by an unrelated second relative path 2+ levels deep
+      ("... main.py and updated packages/core/src/index.ts") reaches the
+      same "second slash" the rule treats as truncation evidence, so the
+      correct match was discarded and an arbitrary WRONG suffix of the
+      unrelated second path ("core", "hooks", "foo") was adopted as the
+      project instead of `_unmapped`.
+
+    The fix (see _free_text_ambiguity): a match already ending in a
+    recognized file extension can never be a truncated directory-name
+    prefix, full stop, regardless of what prose follows — closing refute-R2
+    / new-defects-R1 outright, since every probe below starts with a
+    complete "...main.py" match. For a match with no extension (a bare
+    directory name), the FIRST continuation token is trusted immediately:
+    any "/" in it is ambiguous (closing refute-R1's space-in-the-second-
+    component case, which no longer depends on that segment being
+    space-free). Either way, an ambiguous candidate is never disambiguated
+    by skipping past it and re-searching — the record goes straight to
+    `_unmapped` with a WARN naming both readings.
+    """
+
+    # refute-R1 probes: a genuinely truncated directory name whose SECOND
+    # (space-broken) component defeated the old counting regex.
+    def test_refute_r1_probe_acme_repo_with_second_space_bearing_component(self):
+        m = load_script()
+        rec = {"result": "Fixed the bug in /Users/Jane Doe/acme repo/src/main.py and pushed"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_refute_r1_probe_my_app_with_second_space_bearing_component(self):
+        m = load_script()
+        rec = {"result": "Fixed the bug in /Users/Jane Doe/my app/src/main.py"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_refute_r1_probe_no_deeper_path_still_ambiguous(self):
+        m = load_script()
+        rec = {"result": "Fixed /Users/Jane Doe/acme-repo and pushed"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    # refute-R2 / new-defects-R1 probes: a COMPLETE path followed by an
+    # unrelated, 2+-level relative path elsewhere in the sentence must
+    # resolve to the complete path's own project, never a suffix of the
+    # unrelated second path.
+    def test_refute_r2_probe_second_path_packages_core(self):
+        m = load_script()
+        rec = {"result": "Fixed /home/x/acme-repo/src/main.py and updated packages/core/src/index.ts"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    def test_refute_r2_probe_second_path_src_util_helpers(self):
+        m = load_script()
+        rec = {"result": "Fixed /home/x/acme-repo/src/main.py and updated src/util/helpers.py"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    def test_refute_r2_probe_second_path_app_api_route(self):
+        m = load_script()
+        rec = {"result": "Fixed /home/x/acme-repo/src/main.py and app/api/route.ts"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    def test_refute_r2_probe_second_path_docs_api_foo(self):
+        m = load_script()
+        rec = {"result": "Ran in /home/x/acme-repo/src/main.py then edited docs/api/foo.md"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    def test_new_defects_r1_probe_second_path_hooks_tests(self):
+        m = load_script()
+        rec = {"result": "Edited /home/x/acme-repo/src/main.py and system/hooks/tests/test_x.py"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    def test_new_defects_r1_probe_second_path_packages_foo(self):
+        m = load_script()
+        rec = {"result": "Edited /home/x/acme-repo/src/main.py and packages/foo/src/index.ts"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    def test_new_defects_r1_probe_second_path_src_util_helpers(self):
+        m = load_script()
+        rec = {"result": "Edited /home/x/acme-repo/src/main.py and src/util/helpers.py"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    def test_new_defects_r1_probe_second_path_docs_guide_setup(self):
+        m = load_script()
+        rec = {"result": "Edited /home/x/acme-repo/src/main.py and updated docs/guide/setup.md"}
+        self.assertEqual(m.infer_project(rec, []), "acme-repo")
+
+    # new-defects-R2 probes: the B-R1/A-R2 "accept a bare truncated prefix"
+    # trade-off silently routed space-broken repo paths to a WRONG named
+    # project (the prefix itself) with no WARN. These are now ambiguous
+    # (the immediate continuation token reaches a "/") rather than silently
+    # named.
+    def test_new_defects_r2_probe_jane_doe_hex(self):
+        m = load_script()
+        rec = {"result": "/Users/Jane Doe/hex on branch main"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_new_defects_r2_probe_my_drive_acme_repo(self):
+        m = load_script()
+        rec = {"result": "/Volumes/My Drive/acme-repo"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_new_defects_r2_probe_repo_at_jane_doe_acme_repo(self):
+        m = load_script()
+        rec = {"result": "Repo at /Users/Jane Doe/acme-repo and pushed"}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_ambiguous_candidate_emits_a_warn_naming_both_readings(self):
+        m = load_script()
+        rec = {"result": "Fixed the bug in /Users/Jane Doe/acme repo/src/main.py and pushed"}
+        warnings: list[str] = []
+        self.assertIsNone(m.infer_project(rec, [], warnings, "rec"))
+        self.assertTrue(
+            any("ambiguous free-text path" in w and "/Users/Jane" in w for w in warnings), warnings
+        )
+
+
+class StructuredFieldInvalidValueRoutesToUnmappedNoFallback(unittest.TestCase):
+    """Round 5 (ledger arrra-hex-pr-12-r4, item 1) — a structured path-typed
+    field (repo, path, cwd, workspace, ...) IS the record's declared repo
+    location. If its value isn't usable as a complete absolute path, the
+    record is `_unmapped` with a counted WARN — it must never silently fall
+    through to try the next structured key, and never down to the free-text
+    scanner (which exists for prose that merely CONTAINS a path, not for a
+    field the record itself typed as one)."""
+
+    def test_non_absolute_structured_value_does_not_fall_through_to_a_later_valid_key(self):
+        m = load_script()
+        rec = {"result": {"repo": "relative/not/absolute", "cwd": "/tmp/acme-repo/src/main.py"}}
+        warnings: list[str] = []
+        self.assertIsNone(m.infer_project(rec, [], warnings, "rec"))
+        self.assertTrue(any("not an absolute path" in w for w in warnings), warnings)
+
+    def test_control_character_in_structured_value_is_rejected(self):
+        m = load_script()
+        rec = {"result": {"repo": "/tmp/acme\x01repo"}}
+        warnings: list[str] = []
+        self.assertIsNone(m.infer_project(rec, [], warnings, "rec"))
+        self.assertTrue(any("control characters" in w for w in warnings), warnings)
+
+    def test_non_string_structured_value_is_rejected_not_skipped(self):
+        m = load_script()
+        rec = {"result": {"repo": 12345, "cwd": "/tmp/acme-repo/src/main.py"}}
+        warnings: list[str] = []
+        self.assertIsNone(m.infer_project(rec, [], warnings, "rec"))
+        self.assertTrue(any("not a string" in w for w in warnings), warnings)
+
+    def test_invalid_structured_value_does_not_fall_through_to_free_text_either(self):
+        m = load_script()
+        rec = {"result": {"repo": "not-a-path", "summary": "see /tmp/acme-repo/src/main.py"}}
+        self.assertIsNone(m.infer_project(rec, []))
+
+    def test_end_to_end_invalid_structured_field_lands_in_unmapped_with_warn(self):
+        with tempfile.TemporaryDirectory() as td:
+            hex_dir = os.path.join(td, "hex")
+            projects = os.path.join(td, "claude-projects")
+            os.makedirs(hex_dir)
+            rec = {
+                "runId": "wf_badrepo",
+                "workflowName": "wf",
+                "status": "completed",
+                "timestamp": "2026-09-09T12:00:00Z",
+                "result": {"repo": "relative/path"},
+            }
+            _write_record(projects, rec)
+            rc, out, err = _run_export(hex_dir, projects)
+            self.assertEqual(rc, 0, err)
+            self.assertIn("unmapped=1", out, out)
+            self.assertIn("not an absolute path", err, err)
+            reports = list(Path(hex_dir, "projects", "_unmapped", "workflow-reports").glob("*.md"))
+            self.assertEqual(len(reports), 1, reports)
 
 
 class StructuredPathDoubleSlashDoesNotHang(unittest.TestCase):
