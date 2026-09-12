@@ -2280,18 +2280,25 @@ mod tests {
         run_git(tmp.path(), &["commit", "-q", "-m", "fixture commit"]);
     }
 
-    /// F11 (re-added after the scanner deletion): a gitlink (git mode
-    /// `160000`) records a submodule REFERENCE only — its content lives
-    /// in a separate repository this export's `git cat-file --batch`
-    /// (this repo's own object database) can never read, regardless of
-    /// whether the submodule has been `git submodule update --init`'d in
-    /// any checkout. `export_committed_head` used to silently skip past a
-    /// gitlink entry, leaving nothing at that path and letting whatever
-    /// downstream `cargo check` failure happen to result surface instead
-    /// — a confusing generic cargo error rather than the real cause. It
-    /// must instead be named up front as an inconclusive WARN.
+    /// A-R-1 (arrra/hex PR #7, workflow wf_c16ed20d-1bb final round): F11's
+    /// original fix made this check permanently non-functional on the real
+    /// `~/hex` repository it exists to protect. `export_committed_head`
+    /// walked the WHOLE committed tree and hard-aborted with WARN the
+    /// moment ANY gitlink appeared anywhere in it — but a gitlink wholly
+    /// unrelated to `.hex/harness`'s own build (exactly the shape of
+    /// `~/hex`'s own accidental `.hex/.upgrade-cache` nested-repo entry,
+    /// confirmed live and reproducible) must not prevent the crate from
+    /// being verified at all. A gitlink this build never reads is no
+    /// different from any other file this build never reads: skip
+    /// materializing it (nothing this export can put there is real content
+    /// anyway — a gitlink names a commit in another repository, not a blob
+    /// this repo's own object database holds) and let `cargo check` decide
+    /// whether its absence matters. An unreferenced gitlink therefore PASSes;
+    /// a REFERENCED one still surfaces as a FAIL naming the missing path
+    /// (see the sibling test below) — by compilation, not a blanket WARN
+    /// that can never distinguish the two cases.
     #[test]
-    fn test_harness_buildable_warns_naming_uninitialized_submodule_not_generic_cargo_error() {
+    fn test_harness_buildable_passes_with_an_unreferenced_gitlink_elsewhere_in_the_tree() {
         let tmp = tempfile::tempdir().unwrap();
         run_git(tmp.path(), &["init", "-q"]);
         let harness = tmp.path().join(".hex/harness");
@@ -2300,13 +2307,16 @@ mod tests {
         std::fs::write(harness.join("Cargo.lock"), HEX_HARNESS_LOCKFILE).unwrap();
         std::fs::write(harness.join("src/lib.rs"), "pub fn f() -> i32 { 1 }\n").unwrap();
         run_git(tmp.path(), &["add", "-A"]);
+        // A gitlink OUTSIDE .hex/harness entirely — e.g. an accidentally
+        // nested repo elsewhere in the checkout, like ~/hex's own
+        // `.hex/.upgrade-cache` — that the crate under test never reads.
         run_git(
             tmp.path(),
             &[
                 "update-index",
                 "--add",
                 "--cacheinfo",
-                "160000,1111111111111111111111111111111111111111,vendor/some-submodule",
+                "160000,1111111111111111111111111111111111111111,unrelated-nested-repo",
             ],
         );
         run_git(
@@ -2315,22 +2325,72 @@ mod tests {
                 "commit",
                 "-q",
                 "-m",
-                "fixture with an uninitialized submodule",
+                "fixture with an unrelated, unreferenced gitlink",
             ],
         );
 
         let result = run_harness_buildable(tmp.path());
         assert_eq!(
             result.status,
-            Status::Warn,
-            "a committed gitlink (git submodule reference) must WARN, \
-             never FAIL with whatever generic cargo error happens to \
-             result downstream: {result:?}"
+            Status::Pass,
+            "A-R-1: a gitlink this build never reads must not block \
+             verifying the build that the check actually exists to \
+             protect: {result:?}"
+        );
+    }
+
+    /// A-R-1 sibling: a gitlink the build DOES reference (via
+    /// `include_str!`) must still surface as a FAIL naming the missing
+    /// path, by compilation — proving A-R-1's fix did not also silently
+    /// swallow the case F11 originally existed to catch.
+    #[test]
+    fn test_harness_buildable_fails_naming_a_referenced_uninitialized_gitlink_path() {
+        let tmp = tempfile::tempdir().unwrap();
+        run_git(tmp.path(), &["init", "-q"]);
+        let harness = tmp.path().join(".hex/harness");
+        std::fs::create_dir_all(harness.join("src")).unwrap();
+        std::fs::write(harness.join("Cargo.toml"), HEX_HARNESS_MANIFEST).unwrap();
+        std::fs::write(harness.join("Cargo.lock"), HEX_HARNESS_LOCKFILE).unwrap();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str!(\"vendor/data.txt\");\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        // The gitlink sits exactly where the crate's own include_str! target
+        // would be — its content is genuinely required by the build.
+        run_git(
+            tmp.path(),
+            &[
+                "update-index",
+                "--add",
+                "--cacheinfo",
+                "160000,1111111111111111111111111111111111111111,.hex/harness/src/vendor/data.txt",
+            ],
+        );
+        run_git(
+            tmp.path(),
+            &[
+                "commit",
+                "-q",
+                "-m",
+                "fixture whose include_str! target is an uninitialized gitlink",
+            ],
+        );
+
+        let result = run_harness_buildable(tmp.path());
+        assert_eq!(
+            result.status,
+            Status::Fail,
+            "A-R-1: a gitlink the build actually reads must still FAIL by \
+             compilation, naming the missing path — the check must not lose \
+             this real detection because it stopped treating every gitlink \
+             as an automatic WARN: {result:?}"
         );
         let msg = result.message.to_lowercase();
         assert!(
-            msg.contains("submodule"),
-            "the WARN must name the submodule as the cause, got: {}",
+            msg.contains("data.txt"),
+            "the FAIL must name the missing include_str! target, got: {}",
             result.message
         );
     }

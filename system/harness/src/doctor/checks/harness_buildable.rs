@@ -638,19 +638,36 @@ fn export_committed_head(
         // Gitlinks (submodule references, mode 160000) name a commit in
         // another repository, not a blob this export can materialize —
         // `git cat-file --batch` against THIS repo's own object database
-        // can never read it, submodule "initialized" or not. Silently
-        // skipping it would leave nothing at that path and let whatever
-        // downstream `cargo check` failure happens to result surface
-        // instead (F11): named up front as its own inconclusive WARN
-        // rather than a confusing generic cargo error, or a false PASS if
-        // the missing path happens to be unreferenced by the build.
+        // can never read it, submodule "initialized" or not.
+        //
+        // A-R-1 (arrra/hex PR #7, workflow wf_c16ed20d-1bb final round):
+        // F11's original fix aborted the WHOLE export the moment ANY
+        // gitlink appeared ANYWHERE in the committed tree — not just under
+        // this crate's own dependency closure. On the real repository this
+        // check exists to protect (`~/hex`), an accidentally nested repo
+        // wholly unrelated to `.hex/harness` (`.hex/.upgrade-cache`, no
+        // `.gitmodules`, confirmed live) made the check permanently WARN,
+        // never able to certify PASS or FAIL at all — worse in practice
+        // than the pre-redesign scanner, which walked only source files a
+        // crate actually references. Skip materializing a gitlink's path
+        // instead: nothing this export could put there would be real
+        // content anyway, so this is no different from any other file the
+        // build never reads. An unreferenced gitlink then PASSes (correct:
+        // the crate builds without it); a gitlink the build DOES read
+        // surfaces as a normal FAIL by compilation, naming the missing
+        // path by construction (rustc's own "file not found" / "unresolved
+        // module" error) — the exact mechanism this whole redesign already
+        // relies on for every other missing-from-git case. Note the
+        // skipped path so an operator reading stderr sees why, without
+        // gating PASS/FAIL/WARN on it.
         if mode == "160000" {
-            return Err(format!(
-                "committed path {path} is a git submodule reference (a \
-                 gitlink) that is not initialized in this checkout — this \
-                 export cannot materialize its content at all; fix: git \
-                 submodule update --init"
-            ));
+            eprintln!(
+                "[doctor] harness-buildable: skipping uninitialized gitlink at \
+                 {path} (a submodule reference, not content this export can \
+                 materialize) — the build only fails on this if it actually \
+                 reads that path"
+            );
+            continue;
         }
         entries.push(TreeEntry {
             mode,
