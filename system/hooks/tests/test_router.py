@@ -3221,6 +3221,54 @@ class TestEffectiveCheckoutAfterReservedWordsAndWrappers(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestAbsoluteCheckoutTargetIsNormalizedBeforeExemption(RouterTestCase):
+    """F4 (round 2 review, major) — an ABSOLUTE `-C`/`cd` target was
+    compared against the `/worktrees/` exemption as a LITERAL string,
+    never lexically resolved first. `-C /worktrees/x/../../shared/checkout`
+    starts with the literal text "/worktrees/" and so matched the
+    exemption, even though the path actually resolves to
+    `/shared/checkout` — a real shared checkout that should stay
+    protected. Two separate spots did this: `_resolve_against_cwd`
+    returned an absolute path verbatim (its relative-path branch was
+    already correctly normalized), and `_effective_checkout`'s own `-C`
+    loop assigned an absolute value straight to `base_cwd` without ever
+    calling `_resolve_against_cwd` at all. Both now run every absolute
+    literal through `os.path.normpath` (purely lexical -- never touches
+    the real filesystem or follows a symlink), the same treatment the
+    relative case already got."""
+
+    def test_dash_capital_c_absolute_path_climbing_out_of_worktrees_still_denies(self):
+        cmd = "git -C /worktrees/x/../../shared/checkout stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_cd_absolute_path_climbing_out_of_worktrees_still_denies(self):
+        cmd = "cd /worktrees/x/../../shared/checkout && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_dash_capital_c_absolute_path_genuinely_inside_worktrees_still_abstains(self):
+        # Regression guard: normalizing must not break the ordinary case
+        # where the absolute target genuinely IS inside /worktrees/, with
+        # no .. segments to climb out with.
+        cmd = "git -C /worktrees/x/shared stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must still abstain: {proc.stdout!r}")
+
+
 class TestStashExemptionDoesNotCrossARealNewline(RouterTestCase):
     """F1 (round 2 review, major) — the stash exemption's `unless_match`
     pattern, `stash\\s+(list|show|pop|apply|drop|branch)\\b`, used `\\s+`

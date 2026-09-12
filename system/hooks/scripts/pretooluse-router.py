@@ -1371,8 +1371,22 @@ def _resolve_against_cwd(path, payload_cwd):
     """A relative literal path (no leading `/`) is resolvable against the
     hook payload's own cwd -- it isn't "uncertain", it just needs joining
     (F4: a bare `cd sub` from a /worktrees/ cwd stays inside that same
-    worktree checkout and must not be treated as an unresolvable target)."""
-    if path.startswith("/") or not payload_cwd:
+    worktree checkout and must not be treated as an unresolvable target).
+
+    F4 (round 2 review, major): an ABSOLUTE literal path was returned
+    VERBATIM, un-normalized -- `-C /worktrees/x/../../shared/checkout`
+    was compared against the `/worktrees/` exemption as that literal
+    string, which starts with "/worktrees/" and so matched, even though
+    the path actually resolves to `/shared/checkout`. `os.path.normpath`
+    is purely lexical (never touches the real filesystem, never follows
+    a symlink) -- exactly the same kind of resolution this router
+    already relies on for the RELATIVE case below, just also applied to
+    an absolute literal now."""
+    if path.startswith("/"):
+        # Self-contained -- normalizable regardless of whether the
+        # payload's own cwd is even known.
+        return os.path.normpath(path)
+    if not payload_cwd:
         return path
     return os.path.normpath(os.path.join(payload_cwd, path))
 
@@ -1673,7 +1687,14 @@ def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd, cd
         if value is None:
             return None
         if value.startswith("/"):
-            base_cwd = value
+            # F4 (round 2 review, major): was assigned VERBATIM here,
+            # bypassing `_resolve_against_cwd` entirely -- `-C
+            # /worktrees/x/../../shared/checkout` kept the literal
+            # `/worktrees/...` string (matching the `/worktrees/`
+            # exemption as text) despite resolving lexically to
+            # `/shared/checkout`. Same `os.path.normpath` treatment as
+            # every other absolute literal this router resolves.
+            base_cwd = os.path.normpath(value)
         elif base_cwd is not None:
             base_cwd = _resolve_against_cwd(value, base_cwd)
         else:
