@@ -344,10 +344,20 @@ fn rebuild_facts_vec_with_is_live(conn: &Connection) -> Result<()> {
         Ok(())
     };
     match migrate() {
-        Ok(()) => {
-            conn.execute_batch("COMMIT")?;
-            Ok(())
-        }
+        Ok(()) => match conn.execute_batch("COMMIT") {
+            Ok(()) => Ok(()),
+            Err(commit_err) => {
+                // F8 (major, arrra/hex PR #9 round 2): a failed COMMIT still
+                // leaves the connection inside the transaction (same gap as
+                // consolidate.rs's tombstone writers and vector.rs's
+                // insert_fact_vec, PR#9 r2 review_b G2) — roll back so the
+                // rebuilt-but-uncommitted table never lingers as something
+                // this connection (and a retried apply_plan3 on it) would
+                // wrongly treat as already migrated.
+                let _ = conn.execute_batch("ROLLBACK");
+                Err(commit_err)
+            }
+        },
         Err(e) => {
             let _ = conn.execute_batch("ROLLBACK");
             Err(e)
