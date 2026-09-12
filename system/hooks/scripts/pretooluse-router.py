@@ -246,7 +246,36 @@ _SEPARATOR_CHARS = ";&|(){}\n"
 # pattern's quoted-value alternatives have real quote characters to match
 # against; ordinary argument content stays visible either way, so the
 # interior of the value is unaffected.
-_ASSIGN_VALUE = r"""(?:[^\s'"]*|'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\$'(?:[^'\\]|\\.)*')"""
+#
+# A-REFUTE-3: real bash concatenates adjacent unquoted/quoted fragments
+# with no separating whitespace into ONE word (`FOO=bar"baz qux"` assigns
+# `barbaz qux`), but R4's alternation could only ever match a SINGLE
+# segment -- a value built from more than one fragment left a trailing
+# unmatched remainder right after the assignment, which broke
+# `_WRAPPER_SKIP`'s own `(?:_ASSIGN\s+)*` iteration (no whitespace follows
+# an assignment that didn't consume its own full word) and left the real
+# subcommand short of command position.
+#
+# The value is structured as an optional leading unquoted run, then zero
+# or more (quoted/ANSI-C-quoted segment, optional trailing unquoted run)
+# pairs -- NOT a star wrapped directly around an alternation that
+# includes the unquoted-run branch itself (`(?:[^\s'"]*|'...'|...)*`,
+# tried first and reverted after the ReDoS regression below). Each
+# iteration of the outer star is forced to open on an actual quote
+# character, so there is exactly one way to parse any given input: an
+# unquoted run can only ever be matched by the ONE `[^\s'"]*` slot
+# immediately before it (the leading one, or the one right after the
+# preceding quoted segment) -- unlike the reverted version, where a long
+# unquoted run could be split across an arbitrary number of star
+# iterations in exponentially many ways, hanging the router on adversarial
+# input (F9 all over again, this time inside the value rather than the
+# name -- confirmed via TestAssignmentPrefixReDoS's own adversarial
+# fixture, `env ` + `A=B=C ` * 24 + `true`, which has no quotes in it at
+# all and so exercises only the leading `[^\s'"]*`, matched once).
+_ASSIGN_VALUE = (
+    r"""[^\s'"]*"""
+    r"""(?:(?:'[^']*'|"(?:[^"\\]|\\[\s\S])*"|\$'(?:[^'\\]|\\.)*')[^\s'"]*)*"""
+)
 _ASSIGN = r"[A-Za-z_][A-Za-z0-9_]*=" + _ASSIGN_VALUE
 _WRAPPER_SKIP = (
     r"(?:(?:" + _ASSIGN + r"\s+)*(?:time|env|command|exec|sudo|builtin)\s+)*"
@@ -303,7 +332,13 @@ def _expand_placeholders(pattern):
 # `_ASSIGN` is itself only ever consulted at a `_CMD_PREFIX`/`_WRAPPER_SKIP`
 # anchor point, so an over-permissive match here can't smuggle anything past
 # that separate, still-enforced check.
-_ASSIGN_QUOTE_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\$?\Z")
+#
+# A-REFUTE-3: the quote need not sit DIRECTLY after `NAME=`(`$`?) -- an
+# earlier unquoted fragment of the SAME concatenated value (`FOO=bar"baz
+# qux"`) can sit between them, exactly the shape `_ASSIGN_VALUE`'s own
+# repeated `_ASSIGN_SEGMENT` now matches. The trailing `(?:[^\s'"]*)`
+# mirrors that segment's unquoted alternative so the two stay in sync.
+_ASSIGN_QUOTE_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\$?(?:[^\s'\"]*)\Z")
 _ASSIGN_QUOTE_LOOKBACK = 64  # assignment names are short; bounds the check to O(1)
 
 
