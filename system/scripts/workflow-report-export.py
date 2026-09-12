@@ -64,6 +64,11 @@ from datetime import datetime, timezone
 TERMINAL = {"completed", "failed", "killed"}
 RESULT_CAP = 60_000  # chars of rendered result before an explicit truncation marker
 LOG_CAP = 150
+# A-L1 (prior round, blocker) — chars of free text scanned for a repo path.
+# See the comment on _extract_repo_path for why this exists: it bounds
+# URL_RE's O(n^2) worst case, independent of RESULT_CAP (which bounds the
+# rendered report body downstream, not the text project inference scans).
+PROJECT_SCAN_CAP = 4_000
 
 # F1 — current credential shapes: sk-* (with or without a provider infix, over
 # a mixed alphabet), github_pat_*, the gh[pousr]_ classic token family,
@@ -486,7 +491,21 @@ def _extract_repo_path(text: str, warnings: list[str] | None = None, label: str 
     anything inside a URL. A candidate is used only when `_free_text_ambiguity`
     finds it unambiguous; an ambiguous candidate is never disambiguated by
     skipping past it and re-searching (see the round-5 comment above) — the
-    record goes to `_unmapped` instead, with a WARN naming both readings."""
+    record goes to `_unmapped` instead, with a WARN naming both readings.
+
+    A-L1 (prior round, blocker) — URL_RE's scheme match
+    (`[A-Za-z0-9+.\\-]*://`) is unanchored and greedy: on a long unbroken
+    run of word-like characters with no "://" anywhere, re.search retries
+    the full remaining run from every starting offset, which is O(n^2).
+    infer_project() has no reason to hand this function more than a small
+    prefix of `result` — a real repo path is essentially always named near
+    the front of a workflow's narration, not buried after tens of
+    thousands of characters of an unrelated blob (base64 data, a minified
+    stack trace, a screenshot data URI) — so the scan window is capped to
+    PROJECT_SCAN_CAP up front, before URL_RE/ABS_PATH_RE ever run. This is
+    independent of RESULT_CAP, which bounds the rendered report body in
+    build_report(), a separate, later stage."""
+    text = text[:PROJECT_SCAN_CAP]
     pos = 0
     while pos < len(text):
         um = URL_RE.search(text, pos)

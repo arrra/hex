@@ -78,3 +78,5 @@ When no mapping rule matches, the project is inferred from the run's `result` un
 - Otherwise, the first absolute path mentioned in free text is used only when it is **unambiguous**: a match already ending in a recognized file extension (e.g. `.py`, `.ts`) is trusted regardless of what follows it, since no filename is ever truncated mid-extension; a bare directory name with no extension is trusted unless the text immediately after it could plausibly be more of the same (space-broken) path name, in which case the record goes to `_unmapped` with a WARN naming both readings rather than guessing.
 
 The exporter never resolves an ambiguous path by skipping past it and searching further into the text — that used to be able to land on an unrelated, wrong project.
+
+The free-text scan only looks at the first 4,000 characters of the `result` (independent of the 60,000-character cap on the rendered report body): a real repo path is essentially always named near the front of a workflow's narration, and without this cap a `result` carrying one long unbroken token (a base64 blob, a minified stack trace, a screenshot data URI) could stall the scan.
