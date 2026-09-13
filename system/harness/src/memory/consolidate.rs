@@ -1,6 +1,21 @@
 use rusqlite::{Connection, OptionalExtension};
 use std::path::Path;
 
+/// Per-op timing/RSS sample recorded by the `iso!` wrapper in `run`. B3
+/// (evolution/observations.md, 2026-09-06): `hex memory consolidate quick`
+/// was observed at 1.5-1.7 GB RSS / 140-270% CPU for 2+ minutes every 15
+/// minutes with no per-op breakdown to say which op dominates. This gives
+/// each op a wall-clock + RSS-delta sample so the dominant op can be named
+/// from real measurements instead of guessed.
+#[derive(Default, serde::Serialize)]
+pub struct OpTiming {
+    pub name: String,
+    pub wall_ms: u128,
+    /// `None` when `embed::rss_mb()` is unavailable (non-Linux, e.g. macOS
+    /// dev boxes) rather than a measured zero delta.
+    pub rss_delta_mb: Option<i64>,
+}
+
 #[derive(Default, serde::Serialize)]
 pub struct ConsolidateReport {
     pub ok: Vec<String>,
@@ -9,21 +24,44 @@ pub struct ConsolidateReport {
     /// stdout by the orchestrator — NOT on stderr per op, where they read as
     /// errors and led every failure digest for months (2026-06 → 2026-09).
     pub skipped: Vec<String>,
+    pub op_timings: Vec<OpTiming>,
 }
 
 pub fn run(conn: &mut Connection) -> anyhow::Result<ConsolidateReport> {
     let mut r = ConsolidateReport::default();
 
     macro_rules! iso {
-        ($name:expr, $expr:expr) => {
-            match $expr {
+        ($name:expr, $expr:expr) => {{
+            let rss_before = super::embed::rss_mb();
+            let start = std::time::Instant::now();
+            let outcome = $expr;
+            let wall_ms = start.elapsed().as_millis();
+            let rss_after = super::embed::rss_mb();
+            let rss_delta_mb = match (rss_before, rss_after) {
+                (Some(before), Some(after)) => Some(after as i64 - before as i64),
+                _ => None,
+            };
+            println!(
+                "consolidate op={} wall_ms={} rss_delta_mb={}",
+                $name,
+                wall_ms,
+                rss_delta_mb
+                    .map(|v| v.to_string())
+                    .unwrap_or_else(|| "none".to_string())
+            );
+            r.op_timings.push(OpTiming {
+                name: $name.to_string(),
+                wall_ms,
+                rss_delta_mb,
+            });
+            match outcome {
                 Ok(()) => r.ok.push($name.to_string()),
                 Err(e) => {
                     eprintln!("consolidate op '{}' FAILED: {e}", $name);
                     r.failed.push(($name.to_string(), e.to_string()));
                 }
             }
-        };
+        }};
     }
 
     iso!("orientation-snapshot", op_orientation_snapshot(conn));
@@ -622,6 +660,59 @@ mod tests {
             after.is_some(),
             "consolidate must stamp last_consolidated into metadata"
         );
+    }
+
+    /// RED (B3, task Ts7m52zms): B3 observed `hex memory consolidate quick`
+    /// running 2+ minutes at high RSS/CPU every 15 minutes, and no per-op
+    /// breakdown exists to tell which op dominates. Pin the contract: every
+    /// executed op (paused ops like `prune` excluded) reports a timing entry
+    /// in `ConsolidateReport`. Per PRIORS (wall-clock timing assertions never
+    /// go in unit tests on a shared box), this checks structure/counts/types
+    /// only — never asserts a wall_ms or rss_delta_mb *value*.
+    #[test]
+    fn consolidate_report_includes_per_op_timing() {
+        let tmp = tempfile::tempdir().unwrap();
+        let db = tmp.path().join("memory.db");
+        let mut conn = memory::open_db(&db).unwrap();
+
+        let report = run(&mut conn).unwrap();
+
+        // On this line dedup / contradiction-sweep / topic-rollup are not yet
+        // implemented and are reported once as `skipped` instead of running as
+        // stub ops (692a95d) — so they get no timing entry, by design.
+        let expected_ops = [
+            "orientation-snapshot",
+            "catchup-distill",
+            "fact-canonicalize",
+        ];
+        let skipped_ops = ["dedup", "contradiction-sweep", "topic-rollup"];
+        assert_eq!(
+            report.op_timings.len(),
+            expected_ops.len(),
+            "every executed op must report exactly one timing entry (paused and skipped ops excluded)"
+        );
+        for name in expected_ops {
+            assert!(
+                report.op_timings.iter().any(|t| t.name == name),
+                "missing timing entry for op '{name}'"
+            );
+        }
+        for name in skipped_ops {
+            assert!(
+                report.skipped.iter().any(|s| s == name),
+                "skipped op '{name}' must be reported in `skipped`"
+            );
+            assert!(
+                !report.op_timings.iter().any(|t| t.name == name),
+                "skipped op '{name}' must not carry a timing entry"
+            );
+        }
+        // rss_delta_mb is best-effort (None on platforms without /proc, e.g.
+        // macOS dev boxes per embed::rss_mb) — only shape is pinned here.
+        for t in &report.op_timings {
+            let _: Option<i64> = t.rss_delta_mb;
+            let _: u128 = t.wall_ms;
+        }
     }
 
     /// Pin the prune pause (Mike, 2026-06-11): until recall/search increment

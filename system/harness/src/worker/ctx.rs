@@ -72,40 +72,59 @@ impl Ctx {
     }
 
     /// Run a shell command from within a handler.
-    pub fn run(&self, argv: &[String]) -> Result<std::process::Output, Error> {
+    /// Run `argv` and return the captured `Output` REGARDLESS of exit status —
+    /// only a spawn failure is an `Err`. Job runners use this so a FAILING
+    /// child's stdout/stderr can still be forwarded to the harness log before
+    /// the exit is judged (spec-review finding G1: `run` swallowed the captured
+    /// `Output` on non-zero exit, so failed jobs logged nothing but the error);
+    /// they then apply `exit_error` themselves. Everyone else uses `run`.
+    pub fn run_output(&self, argv: &[String]) -> Result<std::process::Output, Error> {
         let (program, args) = argv
             .split_first()
             .ok_or_else(|| anyhow!("Ctx::run called with empty argv"))?;
-        let out = std::process::Command::new(program)
+        std::process::Command::new(program)
             .args(args)
             .output()
-            .map_err(|e| anyhow!("Ctx::run spawn failed for `{program}`: {e}"))?;
-        // A non-zero exit is a FAILURE — surface it (with the command, exit code,
-        // and a stderr/stdout tail) so the harness records WHY in telemetry. The
-        // old behavior returned Ok regardless of exit code, which made every
-        // failing cron log as `status=ok` with empty `detail` (regression after
-        // the bake-in dropped iii_worker::run_command's exit-code check).
-        if !out.status.success() {
-            let code = out
-                .status
-                .code()
-                .map(|c| c.to_string())
-                .unwrap_or_else(|| "signal".to_string());
-            let tail = |bytes: &[u8]| {
-                let s = String::from_utf8_lossy(bytes);
-                let t = s.trim();
-                head_tail(t, 600, 400)
-            };
-            let stderr_tail = tail(&out.stderr);
-            let detail = if stderr_tail.is_empty() {
-                tail(&out.stdout)
-            } else {
-                stderr_tail
-            };
-            return Err(anyhow!("`{program}` exited {code}: {detail}"));
-        }
-        Ok(out)
+            .map_err(|e| anyhow!("Ctx::run spawn failed for `{program}`: {e}"))
     }
+
+    pub fn run(&self, argv: &[String]) -> Result<std::process::Output, Error> {
+        let out = self.run_output(argv)?;
+        let program = argv.first().map(String::as_str).unwrap_or("");
+        match exit_error(program, &out) {
+            Some(e) => Err(e),
+            None => Ok(out),
+        }
+    }
+}
+
+/// A non-zero exit is a FAILURE — surface it (with the command, exit code,
+/// and a stderr/stdout tail) so the harness records WHY in telemetry. The
+/// old behavior returned Ok regardless of exit code, which made every
+/// failing cron log as `status=ok` with empty `detail` (regression after
+/// the bake-in dropped iii_worker::run_command's exit-code check).
+/// `None` when the child exited 0.
+pub fn exit_error(program: &str, out: &std::process::Output) -> Option<Error> {
+    if out.status.success() {
+        return None;
+    }
+    let code = out
+        .status
+        .code()
+        .map(|c| c.to_string())
+        .unwrap_or_else(|| "signal".to_string());
+    let tail = |bytes: &[u8]| {
+        let s = String::from_utf8_lossy(bytes);
+        let t = s.trim();
+        head_tail(t, 600, 400)
+    };
+    let stderr_tail = tail(&out.stderr);
+    let detail = if stderr_tail.is_empty() {
+        tail(&out.stdout)
+    } else {
+        stderr_tail
+    };
+    Some(anyhow!("`{program}` exited {code}: {detail}"))
 }
 
 impl Default for Ctx {
