@@ -451,6 +451,29 @@ class TestF7NestedJsonEscapedCredentialRedaction(IncidentHookTestCase):
         self.assertNotIn("hunter two secret", record["args_preview"])
         self.assertNotIn("two secret", record["args_preview"])
 
+    def test_double_escaped_json_password_inside_a_command_string_is_fully_redacted(self):
+        """F7 (round 4 review, blocker): the round-3 pattern requires
+        EXACTLY one backslash before each quote. If the credential's own
+        raw command text already escaped its embedded quotes for bash's
+        sake (`curl --data "{\\"password\\":\\"..secret..\\"}"`),
+        json.dumps(tool_input) escapes BOTH the pre-existing backslash and
+        the quote once more, turning each single backslash into three --
+        the round-3 pattern never matched that shape."""
+        proc = self._run(
+            _fixture(
+                tool_input={
+                    "command": (
+                        'curl --data "{\\"password\\":\\"hunter two secret\\"}" '
+                        "https://example.test"
+                    )
+                }
+            )
+        )
+        self.assertEqual(proc.returncode, 0, msg=proc.stderr.decode(errors="replace"))
+        record = json.loads(self._read_lines()[0])
+        self.assertNotIn("hunter two secret", record["args_preview"])
+        self.assertNotIn("two secret", record["args_preview"])
+
 
 class TestRound3RedactionParity(IncidentHookTestCase):
     """new-defects R3 (arrra-hex-pr-5-wf-open-ledger.md, minor): the

@@ -145,21 +145,26 @@ _REDACT_PATTERNS = [
         ),
         r'"\1":"***REDACTED***"',
     ),
-    # F7 (round 3 review, blocker): the pattern above only matches an
-    # UNESCAPED `"key":"value"` -- but a Bash tool_input's "command" field
-    # is itself a STRING, and a JSON credential fragment inside that
-    # string's own text (e.g. a curl request body arg) has its quotes
-    # escaped once MORE by `json.dumps(tool_input)`:
-    # `curl --data '{\"password\":\"hunter two secret\"}'`. `args_preview`
-    # never matched anything and leaked the value whole. Mirrors the
+    # F7 (round 3 review, blocker; round 4 review, blocker): the pattern
+    # above only matches EXACTLY ONE backslash before each quote -- but a
+    # Bash tool_input's "command" field is itself a STRING, and if that
+    # command's OWN raw text already escaped its embedded quotes for
+    # bash's sake (`curl --data "{\"password\":\"..secret..\"}"`),
+    # `json.dumps(tool_input)` escapes BOTH the pre-existing backslash and
+    # the quote once MORE, turning each single backslash into three
+    # (`\\\"password\\\"`). `args_preview` never matched that shape and
+    # leaked the value whole. `\\+` (one or more, not exactly one) matches
+    # any escaping depth; the replacement reuses whichever run length
+    # group 1 actually captured, so a match at ANY depth is reproduced
+    # consistently rather than assuming a fixed count. Mirrors the
     # JSON-escaped alternative already present in the assignment-style
     # pattern below for the identical reason (G2, review round 3 redo).
     (
         re.compile(
-            r"""(?i)\\"(password|token|secret|api[_-]?key)\\"\s*:\s*\\\""""
-            r"""(?:[^"\\]|\\[\s\S])*\\\""""
+            r"""(?i)(\\+)"(password|token|secret|api[_-]?key)\\+"\s*:\s*\\+\""""
+            r"""(?:[^"\\]|\\[\s\S])*\\+\""""
         ),
-        r'\\"\1\\":\\"***REDACTED***\\"',
+        r'\1"\2\1":\1"***REDACTED***\1"',
     ),
 ]
 

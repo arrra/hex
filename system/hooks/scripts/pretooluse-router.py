@@ -191,21 +191,26 @@ _REDACT_PATTERNS = [
         ),
         r'"\1":"***REDACTED***"',
     ),
-    # F7 (round 3 review, blocker): the pattern above only matches an
-    # UNESCAPED `"key":"value"` -- but a Bash tool_input's "command" field
-    # is itself a STRING, and a JSON credential fragment inside that
-    # string's own text (e.g. a curl request body arg) has its quotes
-    # escaped once MORE by `json.dumps(tool_input)`:
-    # `curl --data '{\"password\":\"hunter two secret\"}'`. `args_preview`
-    # never matched anything and leaked the value whole. Mirrors the
+    # F7 (round 3 review, blocker; round 4 review, blocker): the pattern
+    # above only matches EXACTLY ONE backslash before each quote -- but a
+    # Bash tool_input's "command" field is itself a STRING, and if that
+    # command's OWN raw text already escaped its embedded quotes for
+    # bash's sake (`curl --data "{\"password\":\"..secret..\"}"`),
+    # `json.dumps(tool_input)` escapes BOTH the pre-existing backslash and
+    # the quote once MORE, turning each single backslash into three
+    # (`\\\"password\\\"`). `args_preview` never matched that shape and
+    # leaked the value whole. `\\+` (one or more, not exactly one) matches
+    # any escaping depth; the replacement reuses whichever run length
+    # group 1 actually captured, so a match at ANY depth is reproduced
+    # consistently rather than assuming a fixed count. Mirrors the
     # JSON-escaped alternative already present in the assignment-style
     # pattern below for the identical reason (G2, review round 3 redo).
     (
         re.compile(
-            r"""(?i)\\"(password|token|secret|api[_-]?key)\\"\s*:\s*\\\""""
-            r"""(?:[^"\\]|\\[\s\S])*\\\""""
+            r"""(?i)(\\+)"(password|token|secret|api[_-]?key)\\+"\s*:\s*\\+\""""
+            r"""(?:[^"\\]|\\[\s\S])*\\+\""""
         ),
-        r'\\"\1\\":\\"***REDACTED***\\"',
+        r'\1"\2\1":\1"***REDACTED***\1"',
     ),
 ]
 
@@ -396,7 +401,7 @@ _GIT_GLOBAL_OPTS = r"(?:(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+)\s+)*
 _GIT_OPT_TAKING_ARG = ("-C", "-c", "--git-dir=", "--work-tree=")
 
 
-def _widen_quoted_global_opt_args(text, scan_text, quote_spans, live_spans=None):
+def _widen_quoted_global_opt_args(text, scan_text, quote_spans):
     """Returns a copy of `scan_text` with every INTERNAL space of a
     QUOTED `-C`/`-c`/`--git-dir=`/`--work-tree=` argument value replaced
     with `\\x01` -- a byte `\\S` still matches, so `_GIT_GLOBAL_OPTS`'s
@@ -417,30 +422,33 @@ def _widen_quoted_global_opt_args(text, scan_text, quote_spans, live_spans=None)
     plus whitespace. An unquoted argument (no span starts there) is left
     untouched; `\\S+` already handles it correctly.
 
-    `live_spans` (F3, round 3 review, blocker): a quoted global-option
-    value can itself contain a genuinely LIVE substitution -- a `-c
-    "user.name=..."` value whose `...` embeds a real invocation via
-    `$(...)` -- and widening used to rewrite EVERY space in the whole
-    quoted span unconditionally, including ones INSIDE that
-    substitution's own executable body, joining two real words into one
-    with `\\x01`. That substitution's own rule no longer has the
-    whitespace its own `\\s+` needs,
-    silently hiding a real invocation. Positions inside a recorded live
-    span are left untouched -- widening only ever needs to touch the
-    quoted value's own literal characters, never a live substitution
-    nested in it."""
+    F3 (round 3 review, blocker; skipping live_spans here was round 3's
+    OWN fix, since reverted): a quoted global-option value can itself
+    contain a genuinely LIVE substitution -- `-c "user.name=$(...)"`.
+    Skipping widening inside that substitution's body avoided corrupting
+    it, but broke the OUTER value's own `\\S+`-consumability instead
+    (`-c "user.name=$(printf x)" stash` and an inner `-C '/shared/my
+    repo' stash` invocation nested in a substitution both lost their
+    match) -- a genuine structural
+    conflict, not a bug in either direction alone: the SAME characters
+    need to look like "one \\S+ token" to the outer rule and "real \\s+-
+    separated words" to a rule matching the nested substitution's own
+    body, and one `scan_text` cannot be both at once. `evaluate()` now
+    resolves this by keeping TWO scan_text variants -- this one (widened
+    unconditionally, ignoring nesting entirely) and the original
+    unwidened one -- and searching both for any rule whose pattern
+    references `@GITOPTS@`, so the outer skip is found in the widened
+    copy while a nested dangerous command survives, fully intact, in the
+    unwidened one (its own `\\$\\(\\s*`/backtick anchor gives it command
+    position independent of whatever encloses it)."""
     out = list(scan_text)
-    live_spans = live_spans or ()
 
     def _widen_span_if_quoted_at(arg_start):
         for q_start, q_end in quote_spans:
             if q_start == arg_start:
                 for k in range(q_start, q_end):
-                    if out[k] != " ":
-                        continue
-                    if any(l_start <= k < l_end for l_start, l_end in live_spans):
-                        continue
-                    out[k] = "\x01"
+                    if out[k] == " ":
+                        out[k] = "\x01"
                 return
 
     for opt in _GIT_OPT_TAKING_ARG:
@@ -2138,6 +2146,14 @@ def load_rules():
                 "id": rule["id"],
                 "tool_re": re.compile(rule["tool"], re.MULTILINE),
                 "match_re": re.compile(match_pattern, re.MULTILINE),
+                # F3 (round 3 review, blocker): whether this rule needs the
+                # SEPARATE widened scan_text pass too -- see evaluate()'s
+                # own comment on `scan_text_widened` for why one shared
+                # scan_text can't serve both this and a nested live
+                # substitution's own match at once. Checked on the RAW
+                # (pre-placeholder-expansion) pattern, since `@GITOPTS@`
+                # itself is a placeholder token, not literal regex text.
+                "uses_gitopts": "@GITOPTS@" in rule["match"],
                 "unless_cwd_re": re.compile(unless_cwd, re.MULTILINE) if unless_cwd else None,
                 "unless_match_re": re.compile(unless_match_pattern, re.MULTILINE) if unless_match_pattern else None,
                 # F1/F10: per-rule exemption scope. "invocation" = unless_match
@@ -2201,8 +2217,19 @@ def evaluate(payload):
     quote_spans = []
     live_spans = []
     scan_text = executable_mask(text, quote_spans, live_spans) if tool_name == "Bash" else text
-    if tool_name == "Bash":
-        scan_text = _widen_quoted_global_opt_args(text, scan_text, quote_spans, live_spans)
+    # F3 (round 3 review, blocker): a quoted `-C`/`-c`/`--git-dir=`/
+    # `--work-tree=` value must look like ONE token to `_GIT_GLOBAL_OPTS`'s
+    # `\S+`, but a genuinely live substitution nested in that SAME value
+    # needs its own real whitespace intact for its own rule to match --
+    # one shared scan_text cannot be both at once (see
+    # `_widen_quoted_global_opt_args`'s docstring for the two concrete
+    # commands this broke either way). `scan_text_widened` is consulted
+    # ADDITIONALLY, only for rules whose pattern references `@GITOPTS@`
+    # (see `uses_gitopts` in `load_rules`) -- every other rule keeps using
+    # plain `scan_text` exactly as before.
+    scan_text_widened = (
+        _widen_quoted_global_opt_args(text, scan_text, quote_spans) if tool_name == "Bash" else scan_text
+    )
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
     paren_depths = _paren_depths(scan_text)
     cd_reach_starts, cd_reach_infos = _precompute_cd_reach_info(
@@ -2243,19 +2270,48 @@ def evaluate(payload):
         # like round 2's fix; a double-quoted span's literal text now
         # filters too, while a substitution genuinely inside one still
         # never does.
+        #
+        # F2 (round 4 review, major): round 3's check treated "inside ANY
+        # live span" as always live, with no regard for NESTING -- so
+        # `echo "$(printf '%s\n' 'then a stash of it')"` (a single-quoted,
+        # genuinely non-executable printf ARGUMENT sitting INSIDE the
+        # substitution's own live body) was wrongly treated as live and
+        # never filtered. A single quote suppresses expansion regardless
+        # of what encloses it; the right question is which span most
+        # immediately encloses the match -- spans nest properly (each
+        # live_span sits strictly inside some quote_span, and a
+        # quote_span can itself sit inside an outer live_span), so the
+        # INNERMOST one is whichever CONTAINING span has the LARGEST
+        # start. Filter only when that innermost span is a quote_span.
         start = m.start()
-        if any(l_start <= start < l_end for l_start, l_end in live_spans):
-            return False
-        return any(q_start <= start < q_end for q_start, q_end in quote_spans)
+        innermost_start = -1
+        innermost_is_live = False
+        for q_start, q_end in quote_spans:
+            if q_start <= start < q_end and q_start > innermost_start:
+                innermost_start, innermost_is_live = q_start, False
+        for l_start, l_end in live_spans:
+            if l_start <= start < l_end and l_start > innermost_start:
+                innermost_start, innermost_is_live = l_start, True
+        return innermost_start >= 0 and not innermost_is_live
 
     fires = []
     for rule in rules:
         if not rule["tool_re"].search(tool_name):
             continue
+        candidates = list(rule["match_re"].finditer(scan_text))
+        if rule.get("uses_gitopts") and scan_text_widened is not scan_text:
+            # F3 (round 3 review, blocker): this rule's pattern references
+            # `@GITOPTS@` -- also search the widened copy for an outer
+            # `-C`/`-c`/... argument's own skip, and union in any match not
+            # already found (by span) in the plain copy. The common case
+            # (no quoted global option at all) matches identically in both
+            # and contributes nothing new here.
+            seen_spans = {(m.start(), m.end()) for m in candidates}
+            for m in rule["match_re"].finditer(scan_text_widened):
+                if (m.start(), m.end()) not in seen_spans:
+                    candidates.append(m)
         all_matches = [
-            m
-            for m in rule["match_re"].finditer(scan_text)
-            if not _match_starts_inside_quoted_literal_text(m)
+            m for m in candidates if not _match_starts_inside_quoted_literal_text(m)
         ]
         if not all_matches:
             continue

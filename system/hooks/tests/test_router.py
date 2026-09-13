@@ -2752,6 +2752,33 @@ class TestF7RedactionAndLedgerPrivacy(RouterTestCase):
                 self.assertNotIn("hunter two secret", entry.get("preview", ""))
                 self.assertNotIn("two secret", entry.get("preview", ""))
 
+    def test_multi_level_escaped_json_colon_password_is_fully_redacted(self):
+        """F7 (round 4 review, blocker): the round-3 pattern requires
+        EXACTLY one backslash before each quote. If the credential's own
+        raw text already had escaped quotes (bash: `\\"` inside a
+        double-quoted string), a second layer of escaping (e.g.
+        `json.dumps` re-serializing that string) turns each single
+        backslash into three (`\\\\\\"password\\\\\\"`) -- the round-3
+        pattern never matched that shape."""
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    'curl --data "{\\\\\\"password\\\\\\":\\\\\\"hunter two secret\\\\\\"}" '
+                    "&& git stash"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("hunter two secret", entry.get("match", ""))
+                self.assertNotIn("hunter two secret", entry.get("preview", ""))
+                self.assertNotIn("two secret", entry.get("preview", ""))
+
     def test_pem_block_survives_a_preceding_secret_assignment(self):
         """G2b: `secret=...` is matched (and its value truncated at the
         first token) BEFORE the PEM-block pattern runs, so a `secret=` (or
@@ -3590,6 +3617,48 @@ class TestQuotedGlobalOptionArgumentRoundThreeGaps(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestGitOptsWideningDualScan(RouterTestCase):
+    """F3 (round 4 review, blocker) — round 3's fix (skip widening inside
+    a live_span) avoided corrupting a nested dangerous command, but
+    created the OPPOSITE bug: an outer `-C`/`-c` value that merely
+    CONTAINS a live substitution (dangerous or not) no longer widens at
+    all, so `_GIT_GLOBAL_OPTS`'s own `\\S+` can't consume it as one token
+    and the real invocation right after it goes undetected. A genuine
+    structural conflict -- the same characters must look like one token
+    to the outer rule and real \\s-separated words to the nested
+    substitution's own rule -- resolved by keeping TWO scan_text variants
+    (plain and unconditionally-widened) and searching both for any rule
+    referencing `@GITOPTS@`, unioning matches by span."""
+
+    def test_outer_value_containing_a_harmless_live_substitution_still_denies(self):
+        cmd = 'git -c "user.name=$(printf x)" stash'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_nested_dash_capital_c_quoted_value_inside_a_substitution_still_denies(self):
+        cmd = "echo \"$(git -C '/shared/my repo' stash)\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_nested_dangerous_command_inside_a_quoted_value_still_denies(self):
+        # Regression guard: round 3's own fixed case (a dangerous
+        # invocation genuinely nested in the -c value) must not regress
+        # now that widening is unconditional again in the widened copy --
+        # this is caught via the UNWIDENED copy's own substitution anchor.
+        cmd = 'git -c "user.name=$(git stash)" status'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 class TestReservedWordAnchorIgnoresQuotedMentions(RouterTestCase):
     """F2 (round 2 review, major) — `_RESERVED_LEADIN` ("if|then|elif|
     else|while|until|do") is a plain alternative in `_CMD_PREFIX`, with no
@@ -3669,6 +3738,36 @@ class TestReservedWordAnchorIgnoresDoubleQuotedMentionsToo(RouterTestCase):
         with tempfile.TemporaryDirectory() as ledger_dir:
             proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
             self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F2 round 3): {proc.stdout!r}")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestQuotedLiteralFilterRespectsNesting(RouterTestCase):
+    """F2 (round 4 review, major): round 3's filter treated "starts inside
+    ANY live span" as always-live, with no regard for NESTING -- so a
+    genuinely non-executable single-quoted printf ARGUMENT sitting INSIDE
+    a live substitution's own body (`echo "$(printf '%s\\n' 'then git
+    stash')"`) was wrongly treated as live and never filtered, even though
+    a single quote suppresses expansion regardless of what encloses it.
+    Fixed by finding the INNERMOST span (quote or live) containing the
+    match -- spans nest properly, so it's whichever containing span has
+    the LARGEST start -- and filtering only when THAT one is a quote
+    span."""
+
+    def test_single_quoted_mention_nested_inside_a_live_substitution_abstains(self):
+        cmd = "echo \"$(printf '%s\\n' 'then git stash')\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2 round 4): {proc.stdout!r}")
+
+    def test_real_invocation_directly_in_a_live_substitution_still_denies(self):
+        # Regression guard: the innermost-span check must not un-fix
+        # round 3's own case -- a substitution's own body, with nothing
+        # more deeply nested inside it, is still the innermost span.
+        cmd = 'echo "$(git stash)"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F2 round 4): {proc.stdout!r}")
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
