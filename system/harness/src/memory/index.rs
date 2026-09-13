@@ -401,7 +401,8 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
 
         CREATE TABLE IF NOT EXISTS chunk_meta (
             chunk_rowid INTEGER PRIMARY KEY,
-            source_weight REAL NOT NULL DEFAULT 1.0
+            source_weight REAL NOT NULL DEFAULT 1.0,
+            file_id INTEGER NOT NULL DEFAULT 0
         );
         ",
     )?;
@@ -480,6 +481,57 @@ pub fn init_db(conn: &Connection) -> rusqlite::Result<()> {
             [],
         )?;
     }
+
+    // F5 (minor, arrra/hex PR #8 round 1): the reuse-pool lookup in
+    // `index_file_with_reuse` joined `chunks` (FTS5) to `vec_chunks` (vec0) on
+    // `WHERE c.file_id = ?` — a plain-column equality filter FTS5 cannot index,
+    // so it degraded to a full scan of every chunk row for every changed file
+    // (confirmed by `EXPLAIN QUERY PLAN` — `SCAN c VIRTUAL TABLE INDEX 0:`).
+    // `chunk_meta` is a normal (non-virtual) table, so it CAN carry a real
+    // b-tree index on `file_id`; the reuse lookup now finds a file's chunk
+    // rowids there first, then fetches from `chunks`/`vec_chunks` by rowid —
+    // both virtual tables serve rowid lookups natively (`SEARCH`, not `SCAN`).
+    // Migration: add file_id to chunk_meta if missing (old DBs), backfilled
+    // from `chunks.file_id` (already present on every chunk row).
+    let chunk_meta_has_file_id: bool = {
+        let mut stmt = conn.prepare("PRAGMA table_info(chunk_meta)")?;
+        let cols: Vec<String> = stmt
+            .query_map([], |r| r.get::<_, String>(1))?
+            .flatten()
+            .collect();
+        cols.iter().any(|c| c == "file_id")
+    };
+    if !chunk_meta_has_file_id {
+        conn.execute(
+            "ALTER TABLE chunk_meta ADD COLUMN file_id INTEGER NOT NULL DEFAULT 0",
+            [],
+        )?;
+    }
+    conn.execute(
+        "CREATE INDEX IF NOT EXISTS idx_chunk_meta_file_id ON chunk_meta(file_id)",
+        [],
+    )?;
+    // F9 (minor, arrra/hex PR #8 round 2): previously the backfill UPDATE
+    // ran only inside the `if !chunk_meta_has_file_id` branch above, as a
+    // separate statement after the ALTER — an interruption between the two
+    // (or a failed UPDATE) left the column present with every row stuck at
+    // the default 0, and the next run's `chunk_meta_has_file_id` check saw
+    // the column already exists and skipped the backfill forever. The reuse
+    // lookup (`WHERE cm.file_id = ?`) then never matches those rows again,
+    // so the file is fully re-embedded on every run instead of reusing
+    // vectors. Run the backfill unconditionally instead — idempotent (it
+    // only ever touches rows still at the default 0) and cheap on repeat
+    // runs thanks to idx_chunk_meta_file_id just above — so a DB left in
+    // that interrupted state self-heals on the next init_db instead of
+    // staying broken until manually rebuilt.
+    conn.execute(
+        "UPDATE chunk_meta SET file_id = (
+            SELECT CAST(c.file_id AS INTEGER) FROM chunks c WHERE c.rowid = chunk_meta.chunk_rowid
+         )
+         WHERE file_id = 0
+           AND EXISTS (SELECT 1 FROM chunks c WHERE c.rowid = chunk_meta.chunk_rowid)",
+        [],
+    )?;
 
     super::vector::init_vec_table(conn)?;
 
@@ -617,8 +669,8 @@ pub fn index_file(
         let chunk_rowid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
         chunk_rowids.push(chunk_rowid);
         conn.execute(
-            "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, ?)",
-            params![chunk_rowid, weight],
+            "INSERT INTO chunk_meta (chunk_rowid, source_weight, file_id) VALUES (?, ?, ?)",
+            params![chunk_rowid, weight, file_id],
         )?;
     }
 
@@ -634,9 +686,15 @@ pub fn index_file(
         rel_path,
         contents.len()
     ));
+    // `index_file` is intentionally untouched by F2 (existing direct callers/
+    // tests keep today's re-embed-everything, non-fatal-on-error contract):
+    // `embed_and_store` now returns `Err` for an incomplete store, but this
+    // caller already logged the specific failure via `embed_and_store`'s own
+    // eprintln and only ever used the count for the post-embed log line below.
     let stored = embed_and_store(conn, &rel_path, &chunk_rowids, &contents, |batch| {
         embedder.embed_documents(batch)
-    });
+    })
+    .unwrap_or(0);
     super::embed::log_rss(&format!(
         "post-embed {} ({}/{} vectors)",
         rel_path,
@@ -649,7 +707,13 @@ pub fn index_file(
 
 /// Embed `contents` (aligned 1:1 with `chunk_rowids`, same order) in
 /// `EMBED_BATCH`-sized batches, persisting each batch's vectors *before* the
-/// next batch is embedded. Returns the number of vectors actually stored.
+/// next batch is embedded. Returns the number of vectors actually stored on
+/// success; returns an error — without truncating the loud per-batch
+/// diagnostics below — when fewer vectors were stored than requested (F2,
+/// arrra/hex PR #8 round 1: embed error, short batch result, or a per-vector
+/// storage failure), so a caller that must not finalize an incomplete result
+/// (`index_file_with_reuse`) can detect that and roll back instead of
+/// discarding the count and always returning success.
 ///
 /// Two reasons for per-batch persistence:
 ///   * **Peak working set (OBS-019).** A single `embed_documents(N)` call
@@ -662,18 +726,21 @@ pub fn index_file(
 ///     un-vectored batch are repaired by `backfill_missing_vectors` on a later
 ///     tick. Previously the whole file's vectors were accumulated and inserted
 ///     only after the last batch, so a mid-file SIGTERM left every chunk of the
-///     file vector-less — the 2026-06-12 wedge-kill signature.
+///     file vector-less — the 2026-06-12 wedge-kill signature. (`index_file_
+///     with_reuse` now wraps its whole call in a savepoint for atomicity, but
+///     `index_file` still relies on this per-batch durability directly.)
 ///
-/// Failures are loud but non-fatal (S6): an embed error stops the loop (the
-/// remaining chunks stay FTS5-only, repaired later); a per-batch count mismatch
-/// is logged and skips only that batch.
+/// Failures are loud (S6): an embed error stops the loop (the remaining
+/// chunks stay FTS5-only, repaired later); a per-batch count mismatch is
+/// logged and skips only that batch. Either way, if the final stored count is
+/// short of `chunk_rowids.len()`, that shortfall is reported as an `Err` too.
 fn embed_and_store<F>(
     conn: &Connection,
     rel_path: &str,
     chunk_rowids: &[i64],
     contents: &[String],
     mut embed_batch: F,
-) -> usize
+) -> anyhow::Result<usize>
 where
     F: FnMut(&[String]) -> anyhow::Result<Vec<Vec<f32>>>,
 {
@@ -711,7 +778,14 @@ where
             }
         }
     }
-    stored
+    if stored == chunk_rowids.len() {
+        Ok(stored)
+    } else {
+        anyhow::bail!(
+            "{rel_path}: only {stored}/{} chunk vectors stored",
+            chunk_rowids.len()
+        )
+    }
 }
 
 // ── Chunk-level vector reuse (spec S8c8rkzp9/T8gvpqh4g) ────────────────────────
@@ -764,7 +838,7 @@ pub fn index_file_with_reuse<F>(
     strategy: &str,
     full: bool,
     embed_batch: F,
-) -> rusqlite::Result<IndexOutcome>
+) -> anyhow::Result<IndexOutcome>
 where
     F: FnMut(&[String]) -> anyhow::Result<Vec<Vec<f32>>>,
 {
@@ -777,150 +851,307 @@ where
 
     let is_old_tr = strategy == "summary";
 
-    let effective_content = if strategy == "summary" {
-        let s = extract_summaries(content);
-        if s.trim().is_empty() {
-            let existing_id: Option<i64> = conn
-                .query_row(
-                    "SELECT id FROM files WHERE path = ?",
-                    params![rel_path],
-                    |r| r.get(0),
-                )
-                .ok();
+    // F1 (blocker, arrra/hex PR #8 round 1): the existing-file lookup, reuse
+    // snapshot, chunk delete/insert, vector writes, and the mtime/hash update
+    // — including the empty-summary early-return branch below — must commit
+    // as ONE unit. Without this, `delete_chunks_for_file` + the new `files`
+    // row landed unconditionally before the miss chunks were embedded, so a
+    // downstream embed/storage failure permanently destroyed the previous
+    // file's chunks and vectors instead of leaving them in place. A SAVEPOINT
+    // works with the plain `&Connection` this function already takes (no
+    // `&mut` needed) and RELEASEs (commits) only when the closure below
+    // returns `Ok`; any `Err` — including one propagated by `?` from the
+    // embed/storage step — rolls back to the pre-call state first.
+    //
+    // F7 (major, arrra/hex PR #9 round 2): whether this call is the one
+    // opening the transaction (`conn` was in autocommit mode right before
+    // the SAVEPOINT below) is captured up front so the Err-arm cleanup
+    // further down can fully abort ONLY the transaction this function
+    // itself owns, never a transaction a caller already had open.
+    let owns_transaction = conn.is_autocommit();
+    conn.execute_batch("SAVEPOINT index_file_with_reuse")?;
+
+    let result = (|| -> anyhow::Result<IndexOutcome> {
+        let effective_content = if strategy == "summary" {
+            let s = extract_summaries(content);
+            if s.trim().is_empty() {
+                let existing_id: Option<i64> = conn
+                    .query_row(
+                        "SELECT id FROM files WHERE path = ?",
+                        params![rel_path],
+                        |r| r.get(0),
+                    )
+                    .ok();
+                if let Some(fid) = existing_id {
+                    delete_chunks_for_file(conn, fid)?;
+                    conn.execute("DELETE FROM files WHERE id = ?", params![fid])?;
+                }
+                conn.execute(
+                    "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) VALUES (?, ?, ?, ?, 0)",
+                    params![rel_path, mtime, chash, Local::now().to_rfc3339()],
+                )?;
+                return Ok(IndexOutcome {
+                    chunks: 0,
+                    reused: 0,
+                    embedded: 0,
+                });
+            }
+            s
+        } else {
+            content.to_string()
+        };
+
+        let chunks = chunk_by_heading(&effective_content, true);
+
+        let existing_id: Option<i64> = conn
+            .query_row(
+                "SELECT id FROM files WHERE path = ?",
+                params![rel_path],
+                |r| r.get(0),
+            )
+            .ok();
+
+        // Chunk-level vector reuse: BEFORE dropping the old file's chunk rows,
+        // key each one by (heading.lowercase(), content_hash(content)) — the same
+        // key `chunk_by_heading`'s intra-file dedup uses (~line 371) — and capture
+        // the raw `vec_chunks.embedding` blob for any old chunk that already has a
+        // vector. `full=true` bypasses this entirely (empty pool), matching
+        // `--full`'s re-embed-everything contract.
+        let mut reuse_pool: std::collections::HashMap<(String, String), Vec<u8>> =
+            std::collections::HashMap::new();
+        if !full {
             if let Some(fid) = existing_id {
-                delete_chunks_for_file(conn, fid)?;
-                conn.execute("DELETE FROM files WHERE id = ?", params![fid])?;
+                // F5 (minor, arrra/hex PR #8 round 1): route the lookup
+                // through `chunk_meta.file_id`, which carries a real b-tree
+                // index (`idx_chunk_meta_file_id`, see `init_db`), instead of
+                // filtering the FTS5 `chunks` virtual table directly — FTS5
+                // has no secondary index for plain column equality, so
+                // `WHERE c.file_id = ?` degraded to a full scan of every
+                // chunk row in the index for every changed file. `chunks`
+                // and `vec_chunks` are then hit by rowid, which both virtual
+                // tables serve natively.
+                let mut stmt = conn.prepare(
+                    "SELECT c.heading, c.content, v.embedding \
+                     FROM chunk_meta cm \
+                     JOIN chunks c ON c.rowid = cm.chunk_rowid \
+                     JOIN vec_chunks v ON v.rowid = cm.chunk_rowid \
+                     WHERE cm.file_id = ?",
+                )?;
+                let rows = stmt.query_map(params![fid], |r| {
+                    Ok((
+                        r.get::<_, String>(0)?,
+                        r.get::<_, String>(1)?,
+                        r.get::<_, Vec<u8>>(2)?,
+                    ))
+                })?;
+                for row in rows {
+                    let (heading, chunk_content, embedding) = row?;
+                    let key = (heading.to_lowercase(), content_hash(&chunk_content));
+                    reuse_pool.insert(key, embedding);
+                }
             }
-            conn.execute(
-                "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) VALUES (?, ?, ?, ?, 0)",
-                params![rel_path, mtime, chash, Local::now().to_rfc3339()],
-            )?;
-            return Ok(IndexOutcome {
-                chunks: 0,
-                reused: 0,
-                embedded: 0,
-            });
         }
-        s
-    } else {
-        content.to_string()
-    };
 
-    let chunks = chunk_by_heading(&effective_content, true);
-
-    let existing_id: Option<i64> = conn
-        .query_row(
-            "SELECT id FROM files WHERE path = ?",
-            params![rel_path],
-            |r| r.get(0),
-        )
-        .ok();
-
-    // Chunk-level vector reuse: BEFORE dropping the old file's chunk rows,
-    // key each one by (heading.lowercase(), content_hash(content)) — the same
-    // key `chunk_by_heading`'s intra-file dedup uses (~line 371) — and capture
-    // the raw `vec_chunks.embedding` blob for any old chunk that already has a
-    // vector. `full=true` bypasses this entirely (empty pool), matching
-    // `--full`'s re-embed-everything contract.
-    let mut reuse_pool: std::collections::HashMap<(String, String), Vec<u8>> =
-        std::collections::HashMap::new();
-    if !full {
         if let Some(fid) = existing_id {
-            let mut stmt = conn.prepare(
-                "SELECT c.heading, c.content, v.embedding \
-                 FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
-                 WHERE c.file_id = ?",
-            )?;
-            let rows = stmt.query_map(params![fid.to_string()], |r| {
-                Ok((
-                    r.get::<_, String>(0)?,
-                    r.get::<_, String>(1)?,
-                    r.get::<_, Vec<u8>>(2)?,
-                ))
-            })?;
-            for row in rows {
-                let (heading, chunk_content, embedding) = row?;
-                let key = (heading.to_lowercase(), content_hash(&chunk_content));
-                reuse_pool.insert(key, embedding);
-            }
+            delete_chunks_for_file(conn, fid)?;
+            conn.execute("DELETE FROM files WHERE id = ?", params![fid])?;
         }
-    }
 
-    if let Some(fid) = existing_id {
-        delete_chunks_for_file(conn, fid)?;
-        conn.execute("DELETE FROM files WHERE id = ?", params![fid])?;
-    }
-
-    conn.execute(
-        "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) VALUES (?, ?, ?, ?, ?)",
-        params![rel_path, mtime, chash, Local::now().to_rfc3339(), chunks.len() as i64],
-    )?;
-    let file_id: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
-
-    let weight = get_source_weight(&rel_path, is_old_tr);
-
-    let mut miss_rowids: Vec<i64> = Vec::new();
-    let mut miss_contents: Vec<String> = Vec::new();
-    let mut reused = 0usize;
-
-    for (i, chunk) in chunks.iter().enumerate() {
         conn.execute(
-            "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
-             VALUES (?, ?, ?, ?, ?, ?)",
-            params![
-                file_id.to_string(),
-                rel_path,
-                chunk.heading,
-                i.to_string(),
-                chunk.content,
-                private_flag
-            ],
+            "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) VALUES (?, ?, ?, ?, ?)",
+            params![rel_path, mtime, chash, Local::now().to_rfc3339(), chunks.len() as i64],
         )?;
-        let chunk_rowid: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
-        conn.execute(
-            "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, ?)",
-            params![chunk_rowid, weight],
-        )?;
+        let file_id: i64 = conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
 
-        let key = (chunk.heading.to_lowercase(), content_hash(&chunk.content));
-        if let Some(embedding) = reuse_pool.remove(&key) {
-            // `chunks` is a plain-rowid FTS5 table (no AUTOINCREMENT), so a
-            // freshly-inserted chunk_rowid is not guaranteed unused in
-            // `vec_chunks` — ~1834 legacy orphan vec_chunks rows (rows with no
-            // matching `chunks` row, V1's 74k-orphan era, see the "Orphan-vector
-            // invariant lock" tests below) already live in production and a
-            // vec0 INSERT on an existing rowid ERRORs instead of replacing.
-            // Mirror `insert_vec`'s self-heal DELETE-before-INSERT (vector.rs
-            // ~65-72, "Orphan-collision guard") so a collision overwrites the
-            // stale orphan instead of propagating an error via `?` — which
-            // would abort mid-loop *after* the new `files` row is already
-            // committed, permanently stranding the file behind the mtime fast
-            // path with a partial index.
+        let weight = get_source_weight(&rel_path, is_old_tr);
+
+        let mut miss_rowids: Vec<i64> = Vec::new();
+        let mut miss_contents: Vec<String> = Vec::new();
+        let mut reused = 0usize;
+
+        for (i, chunk) in chunks.iter().enumerate() {
+            conn.execute(
+                "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) \
+                 VALUES (?, ?, ?, ?, ?, ?)",
+                params![
+                    file_id.to_string(),
+                    rel_path,
+                    chunk.heading,
+                    i.to_string(),
+                    chunk.content,
+                    private_flag
+                ],
+            )?;
+            let chunk_rowid: i64 =
+                conn.query_row("SELECT last_insert_rowid()", [], |r| r.get(0))?;
+            conn.execute(
+                "INSERT INTO chunk_meta (chunk_rowid, source_weight, file_id) VALUES (?, ?, ?)",
+                params![chunk_rowid, weight, file_id],
+            )?;
+
+            // F3 (blocker): `chunks` is a plain-rowid FTS5 table (no
+            // AUTOINCREMENT), so a freshly-inserted chunk_rowid is not
+            // guaranteed unused in `vec_chunks` — ~1834 legacy orphan
+            // vec_chunks rows (rows with no matching `chunks` row, V1's
+            // 74k-orphan era, see the "Orphan-vector invariant lock" tests
+            // below) already live in production. Clear any existing
+            // vec_chunks row for this rowid unconditionally, BEFORE branching
+            // into reuse-or-embed — previously this DELETE ran only on the
+            // reuse-hit branch, so a MISS whose rowid collided with a legacy
+            // orphan silently inherited that orphan's unrelated vector if
+            // embedding then failed.
             conn.execute(
                 "DELETE FROM vec_chunks WHERE rowid = ?1",
                 params![chunk_rowid],
             )?;
-            conn.execute(
-                "INSERT INTO vec_chunks(rowid, embedding) VALUES (?1, ?2)",
-                params![chunk_rowid, embedding],
-            )?;
-            reused += 1;
-        } else {
-            miss_rowids.push(chunk_rowid);
-            miss_contents.push(chunk.content.clone());
+
+            let key = (chunk.heading.to_lowercase(), content_hash(&chunk.content));
+            if let Some(embedding) = reuse_pool.remove(&key) {
+                conn.execute(
+                    "INSERT INTO vec_chunks(rowid, embedding) VALUES (?1, ?2)",
+                    params![chunk_rowid, embedding],
+                )?;
+                reused += 1;
+            } else {
+                miss_rowids.push(chunk_rowid);
+                miss_contents.push(chunk.content.clone());
+            }
+        }
+
+        let embedded = miss_rowids.len();
+        if !miss_rowids.is_empty() {
+            // F2 (blocker): `embed_and_store` now returns an error for failed
+            // or incomplete storage (embed error, short batch result, or a
+            // per-vector storage failure) instead of a bare count the caller
+            // discarded. Propagating it here — inside the closure, via `?` —
+            // means the file is committed as current (the SAVEPOINT below
+            // RELEASEs) only when every required vector was actually stored;
+            // an incomplete embed rolls the whole per-file replacement back
+            // to the previous file and vectors instead of advancing mtime/hash
+            // past a partially-vectored index.
+            embed_and_store(conn, &rel_path, &miss_rowids, &miss_contents, embed_batch)?;
+        }
+
+        Ok(IndexOutcome {
+            chunks: chunks.len(),
+            reused,
+            embedded,
+        })
+    })();
+
+    match result {
+        Ok(outcome) => match conn.execute_batch("RELEASE index_file_with_reuse") {
+            Ok(()) => Ok(outcome),
+            Err(release_err) => {
+                // F1 (major, arrra/hex PR #8 round 2): if the outermost
+                // RELEASE itself fails (e.g. SQLITE_BUSY at commit-time lock
+                // upgrade while another connection holds a read transaction
+                // in rollback-journal mode), `?` would have returned Err with
+                // the SAVEPOINT still open — later calls then nest a new
+                // savepoint under this still-open one and can return Ok
+                // without ever reaching disk, and dropping the connection
+                // discards it all. Unwind explicitly back to the connection's
+                // entry (autocommit) state before surfacing the error.
+                //
+                // A plain `ROLLBACK` — not `ROLLBACK TO ...; RELEASE ...` —
+                // is required here: `RELEASE` of the outermost savepoint is a
+                // COMMIT, which (like the RELEASE that just failed) needs the
+                // same EXCLUSIVE lock upgrade to finalize the rollback
+                // journal, so retrying it fails again for the identical
+                // reason. A full `ROLLBACK` aborts the whole top-level
+                // transaction and drops the reservation without that
+                // finalization step, so it succeeds even while the blocking
+                // reader is still active. A secondary failure to unwind is
+                // logged loudly (S6) but does not shadow the original error.
+                //
+                // B-F-new1 (major, arrra/hex PR #9 round 2, prior-round
+                // carry): that full `ROLLBACK` must only run when this call
+                // owns the transaction (see `owns_transaction` above) — the
+                // same gate F7 (below) already applies on the Err arm. A
+                // caller that wraps one or more `index_file_with_reuse`
+                // calls inside its own already-open transaction must not
+                // have that ENTIRE outer transaction discarded just because
+                // this call's own nested RELEASE failed to finalize.
+                if owns_transaction {
+                    if let Err(unwind_err) = conn.execute_batch("ROLLBACK") {
+                        eprintln!(
+                            "  ERROR: failed to unwind index_file_with_reuse savepoint after a \
+                             failed RELEASE ({release_err}): {unwind_err}"
+                        );
+                    }
+                } else {
+                    // F10 (major, arrra/hex PR #9 round 3): logging alone
+                    // left this call's own successful writes sitting inside
+                    // the still-open (never released, never rolled back)
+                    // savepoint — the caller's later COMMIT of its outer
+                    // transaction would then include them anyway, even
+                    // though this function is returning Err to say the call
+                    // failed. `Err` must mean "as if this call never
+                    // happened": roll back to this call's own savepoint
+                    // (discarding only its writes, not the caller's), then
+                    // attempt to RELEASE the now-empty savepoint so it does
+                    // not linger nested inside the caller's transaction —
+                    // same idiom as the Err-arm's combined `ROLLBACK TO
+                    // ...; RELEASE ...` below, applied here to the Ok arm's
+                    // cleanup failure.
+                    if let Err(rollback_to_err) =
+                        conn.execute_batch("ROLLBACK TO index_file_with_reuse")
+                    {
+                        eprintln!(
+                            "  ERROR: failed to roll back index_file_with_reuse's own writes \
+                             after a failed RELEASE ({release_err}): {rollback_to_err}; the \
+                             caller-owned outer transaction remains open, but this call's own \
+                             writes may still be present in it"
+                        );
+                    } else if let Err(release_err2) =
+                        conn.execute_batch("RELEASE index_file_with_reuse")
+                    {
+                        eprintln!(
+                            "  ERROR: rolled back index_file_with_reuse's own writes after a \
+                             failed RELEASE ({release_err}), but releasing the now-empty \
+                             savepoint also failed ({release_err2}); leaving the caller-owned \
+                             outer transaction in place"
+                        );
+                    }
+                }
+                Err(release_err.into())
+            }
+        },
+        Err(e) => {
+            // F7 (major, arrra/hex PR #9 round 2): as with the Ok-arm's
+            // failed RELEASE above, `ROLLBACK TO` undoes this call's own
+            // writes, but the `RELEASE` half of this combined statement is
+            // still a COMMIT of the (now effectively empty) outermost
+            // savepoint — needing the identical RESERVED->EXCLUSIVE lock
+            // upgrade — and can fail with SQLITE_BUSY under the same
+            // blocking-reader condition. Propagating that failure via `?`
+            // used to leave the SAVEPOINT open: later calls then nest under
+            // it and can report success without ever reaching disk. Fall
+            // back to a full `ROLLBACK` only when this call owns the
+            // transaction (see `owns_transaction` above) — a caller-owned
+            // outer transaction already survived the `ROLLBACK TO` and must
+            // not be blown away by a plain `ROLLBACK` here.
+            if let Err(cleanup_err) = conn
+                .execute_batch("ROLLBACK TO index_file_with_reuse; RELEASE index_file_with_reuse")
+            {
+                if owns_transaction {
+                    if let Err(unwind_err) = conn.execute_batch("ROLLBACK") {
+                        eprintln!(
+                            "  ERROR: failed to unwind index_file_with_reuse savepoint after a \
+                             failed error-path cleanup ({cleanup_err}): {unwind_err}"
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "  ERROR: failed to release index_file_with_reuse savepoint after a \
+                         failed error-path cleanup ({cleanup_err}); leaving the caller-owned \
+                         outer transaction in place"
+                    );
+                }
+            }
+            Err(e)
         }
     }
-
-    let embedded = miss_rowids.len();
-    if !miss_rowids.is_empty() {
-        embed_and_store(conn, &rel_path, &miss_rowids, &miss_contents, embed_batch);
-    }
-
-    Ok(IndexOutcome {
-        chunks: chunks.len(),
-        reused,
-        embedded,
-    })
 }
 
 // ── File discovery ────────────────────────────────────────────────────────────
@@ -1660,7 +1891,7 @@ mod tests {
         let rowids: Vec<i64> = (1..=20).collect();
         let contents: Vec<String> = (0..20).map(|i| format!("chunk {i}")).collect();
         let mut calls = 0;
-        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+        let result = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
             calls += 1;
             if calls == 2 {
                 anyhow::bail!("simulated interruption on batch 2");
@@ -1671,9 +1902,13 @@ mod tests {
                 .collect())
         });
 
-        // Batch 1 (8 chunks) committed before batch 2 failed. The pre-fix code
+        // F2: an incomplete store (only batch 1 of 3) is now reported as an
+        // error, but batch 1's vectors are still durable — the pre-fix code
         // stored 0 here (insert ran only after the whole file embedded).
-        assert_eq!(stored, 8, "only the first batch should be stored");
+        assert!(
+            result.is_err(),
+            "an incomplete store (12 missing of 20) must be reported as an error"
+        );
         assert_eq!(
             vec_count(&conn),
             8,
@@ -1696,7 +1931,7 @@ mod tests {
                 .collect())
         });
 
-        assert_eq!(stored, 20);
+        assert_eq!(stored.unwrap(), 20);
         assert_eq!(vec_count(&conn), 20);
     }
 
@@ -1711,7 +1946,7 @@ mod tests {
         let rowids: Vec<i64> = (1..=20).collect();
         let contents: Vec<String> = (0..20).map(|i| format!("chunk {i}")).collect();
         let mut calls = 0;
-        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+        let result = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
             calls += 1;
             let n = if calls == 2 {
                 batch.len() - 1
@@ -1723,10 +1958,11 @@ mod tests {
                 .collect())
         });
 
-        // Batches 1 (8) and 3 (4) stored; batch 2 skipped loudly → 12 total.
-        assert_eq!(
-            stored, 12,
-            "mismatched batch 2 skipped; batches 1 and 3 stored"
+        // Batches 1 (8) and 3 (4) stored; batch 2 skipped loudly → 12 of 20,
+        // an incomplete store (F2) reported as an error.
+        assert!(
+            result.is_err(),
+            "mismatched batch 2 leaves the store incomplete (12 of 20)"
         );
         assert_eq!(vec_count(&conn), 12);
     }
@@ -1741,13 +1977,16 @@ mod tests {
 
         let rowids: Vec<i64> = (1..=8).collect();
         let contents: Vec<String> = (0..8).map(|i| format!("chunk {i}")).collect();
-        let stored = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
+        let result = embed_and_store(&conn, "test.md", &rowids, &contents, |batch| {
             Ok((0..batch.len() + 1) // one too many
                 .map(|_| vec![0.4f32; super::super::vector::EMBED_DIM])
                 .collect())
         });
 
-        assert_eq!(stored, 0, "over-count batch must be skipped, not truncated");
+        assert!(
+            result.is_err(),
+            "over-count batch must be skipped, not truncated, leaving the store incomplete"
+        );
         assert_eq!(vec_count(&conn), 0);
     }
 
@@ -1764,7 +2003,7 @@ mod tests {
                 .map(|_| vec![0.5f32; super::super::vector::EMBED_DIM])
                 .collect())
         });
-        assert_eq!(s0, 0);
+        assert_eq!(s0.unwrap(), 0);
 
         // Exact multiple of 8 (16 → two full batches, no trailing partial).
         let rowids: Vec<i64> = (1..=16).collect();
@@ -1775,7 +2014,7 @@ mod tests {
                 .map(|_| vec![0.5f32; super::super::vector::EMBED_DIM])
                 .collect())
         });
-        assert_eq!(s16, 16);
+        assert_eq!(s16.unwrap(), 16);
         assert_eq!(vec_count(&conn), 16);
     }
 
@@ -1795,6 +2034,20 @@ mod tests {
         s
     }
 
+    /// Deterministic, content-derived, DISTINCT vector: fills the embedding
+    /// with a value derived from the SHA256 content hash (the same
+    /// `content_hash` the production reuse-matching key uses), so two chunks
+    /// with different content get provably different vectors. A constant
+    /// fill (e.g. `vec![0.1; DIM]` for every chunk in a pass) cannot catch a
+    /// bug that copies chunk A's vector onto chunk B — both would look
+    /// identical regardless (F6, arrra/hex PR #8 round 1).
+    fn content_derived_vec(content: &str) -> Vec<f32> {
+        let hash = content_hash(content);
+        let prefix = u32::from_str_radix(hash.get(0..8).unwrap(), 16).unwrap();
+        let v = 0.01 + (prefix as f32 / u32::MAX as f32) * 0.98;
+        vec![v; super::super::vector::EMBED_DIM]
+    }
+
     #[test]
     fn index_file_with_reuse_reembeds_only_the_changed_chunk() {
         // Pre-fix baseline (MEASURED 2026-09-06, see comment above
@@ -1802,6 +2055,15 @@ mod tests {
         // dedup — `delete_chunks_for_file` drops every vec_chunks row for the
         // file and `embed_and_store` re-embeds the FULL chunk set on any
         // content change, even a one-line edit touching 1 of 40 chunks.
+        //
+        // F6/F7 (major, arrra/hex PR #8 round 1): the old version of this
+        // test used a CONSTANT fill vector per pass, so it could not detect
+        // copying one unchanged chunk's vector onto another, and used
+        // `calls2 <= 2` / `reused >= 38`, which permitted over-invalidation
+        // (or even the changed chunk never being embedded at all). Vectors
+        // are now content-derived and distinct, counts are exact, and the
+        // COMPLETE chunk -> vector mapping is checked after reindexing,
+        // including the edited chunk's new vector.
         let tmp = TempDir::new().unwrap();
         let hex_root = tmp.path();
         let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
@@ -1820,10 +2082,7 @@ mod tests {
             false,
             |batch| {
                 calls1 += batch.len();
-                Ok(batch
-                    .iter()
-                    .map(|_| vec![0.1f32; super::super::vector::EMBED_DIM])
-                    .collect())
+                Ok(batch.iter().map(|c| content_derived_vec(c)).collect())
             },
         )
         .unwrap();
@@ -1852,25 +2111,158 @@ mod tests {
             false,
             |batch| {
                 calls2 += batch.len();
-                Ok(batch
-                    .iter()
-                    .map(|_| vec![0.2f32; super::super::vector::EMBED_DIM])
-                    .collect())
+                Ok(batch.iter().map(|c| content_derived_vec(c)).collect())
             },
         )
         .unwrap();
 
         assert_eq!(outcome2.chunks, 40);
-        assert!(
-            calls2 <= 2,
-            "embedder should be invoked for at most 2 chunks, got {calls2}"
+        assert_eq!(
+            calls2, 1,
+            "exactly the one edited chunk should reach the embedder, got {calls2} calls"
         );
-        assert!(
-            outcome2.reused >= 38,
-            "at least 38 chunks should be reused, got {}",
+        assert_eq!(
+            outcome2.embedded, 1,
+            "exactly 1 chunk should be embedded, got {}",
+            outcome2.embedded
+        );
+        assert_eq!(
+            outcome2.reused, 39,
+            "exactly 39 chunks should be reused, got {}",
             outcome2.reused
         );
         assert_eq!(outcome2.reused + outcome2.embedded, 40);
+
+        // Full chunk -> vector mapping: every one of the 40 headings must
+        // carry the vector for ITS OWN current (stored) content, not some
+        // other chunk's, and the edited chunk (heading 17) must carry a
+        // FRESH vector derived from its new content, not the stale one from
+        // pass 1 — a swap or a stale-copy bug is invisible to aggregate
+        // counts alone.
+        for i in 0..40 {
+            let heading = format!("Heading {i}");
+            let (stored_content, stored_bytes): (String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT c.content, v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                     WHERE c.heading = ?",
+                    params![heading],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            let expected_bytes =
+                super::super::vector::f32s_to_le_bytes(&content_derived_vec(&stored_content));
+            assert_eq!(
+                stored_bytes, expected_bytes,
+                "{heading}'s vector must match its own content-derived vector, \
+                 not a copy from a different chunk or a stale pass-1 vector"
+            );
+        }
+        let heading17_content: String = conn
+            .query_row(
+                "SELECT content FROM chunks WHERE heading = 'Heading 17'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert!(
+            heading17_content.contains("EDITED"),
+            "heading 17's stored content must be the edited text, got {heading17_content:?}"
+        );
+    }
+
+    #[test]
+    fn index_file_with_reuse_preserves_associations_across_rowid_shifting_insertion() {
+        // F6/F7 (major): every reindex fully deletes and re-inserts a file's
+        // `chunks` rows (`delete_chunks_for_file` + fresh INSERTs in the loop
+        // above), so chunk rowids are NEVER stable across passes even for
+        // untouched chunks. Inserting a brand-new heading at the FRONT of the
+        // file shifts every existing chunk's `chunk_index` and rowid; this
+        // pins that the shift alone must not break any of the 40
+        // pre-existing associations — the reuse match must key purely on
+        // (heading, content_hash), never on rowid or insertion position.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("shift.md");
+
+        let content_v1 = build_40_chunk_content();
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| Ok(batch.iter().map(|c| content_derived_vec(c)).collect()),
+        )
+        .unwrap();
+
+        let mut content_v2 =
+            String::from("## Heading Inserted\nBrand-new leading chunk, never seen before.\n\n");
+        content_v2.push_str(&content_v1);
+
+        let mut calls2 = 0usize;
+        let outcome2 = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |batch| {
+                calls2 += batch.len();
+                Ok(batch.iter().map(|c| content_derived_vec(c)).collect())
+            },
+        )
+        .unwrap();
+
+        assert_eq!(outcome2.chunks, 41);
+        assert_eq!(
+            calls2, 1,
+            "only the brand-new leading chunk should be embedded, got {calls2}"
+        );
+        assert_eq!(outcome2.embedded, 1);
+        assert_eq!(
+            outcome2.reused, 40,
+            "all 40 pre-existing chunks must survive the rowid-shifting insertion, got {}",
+            outcome2.reused
+        );
+
+        for i in 0..40 {
+            let heading = format!("Heading {i}");
+            let (stored_content, stored_bytes): (String, Vec<u8>) = conn
+                .query_row(
+                    "SELECT c.content, v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                     WHERE c.heading = ?",
+                    params![heading],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            let expected_bytes =
+                super::super::vector::f32s_to_le_bytes(&content_derived_vec(&stored_content));
+            assert_eq!(
+                stored_bytes, expected_bytes,
+                "{heading}'s vector must survive the rowid-shifting insertion unchanged"
+            );
+        }
+
+        let (new_content, new_bytes): (String, Vec<u8>) = conn
+            .query_row(
+                "SELECT c.content, v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.heading = 'Heading Inserted'",
+                [],
+                |r| Ok((r.get(0)?, r.get(1)?)),
+            )
+            .unwrap();
+        let expected_new_bytes =
+            super::super::vector::f32s_to_le_bytes(&content_derived_vec(&new_content));
+        assert_eq!(
+            new_bytes, expected_new_bytes,
+            "the newly-inserted chunk must get its own freshly-embedded vector"
+        );
     }
 
     #[test]
@@ -2117,6 +2509,350 @@ mod tests {
         assert!(outcome.reused >= 38);
     }
 
+    // ── F1/F2/F3 regressions (arrra/hex PR #8 round 1, blockers) ────────────
+    // review-rounds/arrra-hex-pr-8-r1.md
+
+    #[test]
+    fn index_file_with_reuse_failed_embed_rolls_back_previous_file_and_vectors() {
+        // F1 (blocker): the existing-file lookup, reuse snapshot, chunk
+        // delete/insert, vector writes, and mtime/hash update must be ONE
+        // transaction that commits only on success. Today `delete_chunks_
+        // for_file` + the new `files` row commit unconditionally BEFORE the
+        // miss chunk is embedded, so a downstream failure permanently
+        // destroys the previous file's chunks and vectors instead of
+        // rolling back to them.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("rollback.md");
+
+        let content_v1 = build_40_chunk_content();
+        let old_chash = content_hash(&content_v1);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.21f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let old_heading17_content: String = conn
+            .query_row(
+                "SELECT content FROM chunks WHERE heading = 'Heading 17'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let old_heading17_vec: Vec<u8> = conn
+            .query_row(
+                "SELECT v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.heading = 'Heading 17'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // Edit chunk 17 (the other 39 are untouched), then reindex with an
+        // embedder that fails outright — the single miss chunk can never be
+        // stored.
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        let _ = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |_batch| anyhow::bail!("simulated embedder outage"),
+        );
+
+        let current_chash: String = conn
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'rollback.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            current_chash, old_chash,
+            "a failed reindex must leave the previous file's content_hash in place, not the new one"
+        );
+
+        let heading17_content: String = conn
+            .query_row(
+                "SELECT content FROM chunks WHERE heading = 'Heading 17'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            heading17_content, old_heading17_content,
+            "the previous chunk content must survive a rolled-back reindex"
+        );
+
+        let heading17_vec: Vec<u8> = conn
+            .query_row(
+                "SELECT v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.heading = 'Heading 17'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            heading17_vec, old_heading17_vec,
+            "the previous chunk's vector must survive a rolled-back reindex"
+        );
+    }
+
+    #[test]
+    fn index_file_with_reuse_embedding_error_leaves_file_not_current() {
+        // F2 (blocker): embed_and_store's stored count is discarded at the
+        // call site and index_file_with_reuse always returns Ok — an
+        // embedding failure for the one miss chunk must not let the file's
+        // mtime advance to the new, incompletely-embedded version.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("embederr.md");
+
+        let content_v1 = build_40_chunk_content();
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.31f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        let _ = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |_batch| anyhow::bail!("embedding service unavailable"),
+        );
+
+        let mtime: f64 = conn
+            .query_row(
+                "SELECT mtime FROM files WHERE path = 'embederr.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mtime, 1.0,
+            "an embedding error must leave the file at its previous mtime, not marked current at the new mtime"
+        );
+    }
+
+    #[test]
+    fn index_file_with_reuse_short_embed_result_leaves_file_not_current() {
+        // F2 (blocker): a batch that returns fewer vectors than requested is
+        // logged and skipped by `embed_and_store` (S6), but the skip must
+        // also stop the file from being marked current — not just avoid a
+        // silent drop.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("shortresult.md");
+
+        let content_v1 = build_40_chunk_content();
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.41f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        let _ = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |_batch| Ok(Vec::new()), // fewer vectors than the 1 requested
+        );
+
+        let mtime: f64 = conn
+            .query_row(
+                "SELECT mtime FROM files WHERE path = 'shortresult.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mtime, 1.0,
+            "a short embedding result must leave the file at its previous mtime, not marked current"
+        );
+    }
+
+    #[test]
+    fn index_file_with_reuse_storage_failure_leaves_file_not_current() {
+        // F2 (blocker): a correctly-counted batch can still fail to persist
+        // (vec0 rejects a dimension mismatch — see `insert_vec`, vector.rs).
+        // `embed_and_store` swallows that Err and index_file_with_reuse
+        // returns Ok regardless; the file must not be marked current on an
+        // incomplete store.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("storagefail.md");
+
+        let content_v1 = build_40_chunk_content();
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.51f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        let _ = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |batch| Ok(batch.iter().map(|_| vec![0.61f32; 4]).collect()), // wrong dimension
+        );
+
+        let mtime: f64 = conn
+            .query_row(
+                "SELECT mtime FROM files WHERE path = 'storagefail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            mtime, 1.0,
+            "a vector storage failure must leave the file at its previous mtime, not marked current"
+        );
+    }
+
+    #[test]
+    fn index_file_with_reuse_miss_clears_orphan_vector_before_embedding() {
+        // F3 (blocker): the reuse-hit path already DELETEs any existing
+        // vec_chunks row before writing (line ~899, the "Orphan-collision
+        // guard" comment), but a MISS never clears its newly-allocated
+        // rowid first. If that rowid happens to collide with a legacy
+        // orphan vec_chunks row and the embedder then fails, the chunk
+        // silently joins to the stale, unrelated orphan vector instead of
+        // correctly having none.
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+
+        // `chunks` is empty, so its next auto-assigned rowid is 1. Seed an
+        // orphan vec_chunks row at rowid 1 — a legacy vector with no
+        // matching chunks row, exactly the residue V1's 74k-orphan bug left
+        // behind.
+        let orphan_bytes =
+            super::super::vector::f32s_to_le_bytes(&vec![0.77f32; super::super::vector::EMBED_DIM]);
+        conn.execute(
+            "INSERT INTO vec_chunks(rowid, embedding) VALUES (1, ?1)",
+            params![orphan_bytes],
+        )
+        .unwrap();
+
+        let filepath = hex_root.join("orphanmiss.md");
+        // A brand-new file has no existing_id, so its single chunk is
+        // unconditionally a miss — and (being the first chunk ever
+        // inserted into the empty `chunks` table) lands on rowid 1,
+        // colliding with the seeded orphan.
+        let content = "## Only Heading\nSome fresh content, never indexed before.\n";
+        let _ = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            content,
+            1.0,
+            "full",
+            false,
+            |_batch| anyhow::bail!("simulated embedder outage"),
+        );
+
+        use rusqlite::OptionalExtension;
+        let joined: Option<Vec<u8>> = conn
+            .query_row(
+                "SELECT v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.rowid = 1",
+                [],
+                |r| r.get(0),
+            )
+            .optional()
+            .unwrap();
+        assert_eq!(
+            joined, None,
+            "a miss whose rowid collides with a legacy orphan must not silently inherit that \
+             orphan's vector when embedding fails — it must have no vector, not a stale one"
+        );
+    }
+
     #[test]
     fn test_is_private_paths() {
         assert!(is_private("me/decisions/foo.md"));
@@ -2196,8 +2932,8 @@ mod tests {
                 .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
                 .unwrap();
             conn.execute(
-                "INSERT INTO chunk_meta (chunk_rowid, source_weight) VALUES (?, 1.0)",
-                params![rowid],
+                "INSERT INTO chunk_meta (chunk_rowid, source_weight, file_id) VALUES (?, 1.0, ?)",
+                params![rowid, fid],
             )
             .unwrap();
             super::super::vector::insert_vec(
@@ -2455,5 +3191,628 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM chunk_meta", [], |r| r.get(0))
             .unwrap();
         assert_eq!(meta_count, n as i64);
+    }
+
+    // F5 (minor, arrra/hex PR #8 round 1): the reuse-pool lookup at
+    // `index_file_with_reuse` (~line 903) used to filter the FTS5 `chunks`
+    // virtual table on a plain column equality (`WHERE c.file_id = ?`). FTS5
+    // has no secondary index on non-MATCH column filters, so that degraded to
+    // a linear scan of every chunk row in the whole index for every changed
+    // file — the "whole-index work even when almost every vector is reused"
+    // the finding calls out (confirmed on the deployed schema: SQLite
+    // reported `SCAN c VIRTUAL TABLE INDEX 0:`, an unfiltered scan of the `c`
+    // (chunks) side, not a `SEARCH`). The fix routes the file->chunk lookup
+    // through `chunk_meta`, a normal table that (unlike `chunks`/`vec_chunks`,
+    // both virtual) can carry a real b-tree index on `file_id`
+    // (`idx_chunk_meta_file_id`, added in `init_db`); `chunks`/`vec_chunks`
+    // are then hit by rowid, which both virtual tables serve natively. This
+    // pins the contract (no full scan of the chunks table for a per-file
+    // lookup), not any particular fix shape.
+    #[test]
+    fn index_file_with_reuse_lookup_avoids_full_chunk_table_scan() {
+        let tmp = TempDir::new().unwrap();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        // Multiple files with many chunks each, so a full scan of `chunks`
+        // is distinguishable from a lookup scoped to one file's rows.
+        for f in 0..5 {
+            conn.execute(
+                "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) VALUES (?, ?, ?, ?, ?)",
+                params![format!("file{f}.md"), 0.0, "h", Local::now().to_rfc3339(), 10],
+            )
+            .unwrap();
+            let file_id: i64 = conn
+                .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
+                .unwrap();
+            for c in 0..10 {
+                conn.execute(
+                    "INSERT INTO chunks (file_id, source_path, heading, chunk_index, content, private) VALUES (?, ?, ?, ?, ?, ?)",
+                    params![file_id.to_string(), format!("file{f}.md"), format!("h{c}"), c.to_string(), "content", 0],
+                )
+                .unwrap();
+                let chunk_rowid: i64 = conn
+                    .query_row("SELECT last_insert_rowid()", [], |r| r.get(0))
+                    .unwrap();
+                conn.execute(
+                    "INSERT INTO chunk_meta (chunk_rowid, source_weight, file_id) VALUES (?, 1.0, ?)",
+                    params![chunk_rowid, file_id],
+                )
+                .unwrap();
+            }
+        }
+        // Identical to the reuse-pool query in `index_file_with_reuse`
+        // (~line 903-907): `SELECT c.heading, c.content, v.embedding FROM
+        // chunk_meta cm JOIN chunks c ON c.rowid = cm.chunk_rowid JOIN
+        // vec_chunks v ON v.rowid = cm.chunk_rowid WHERE cm.file_id = ?`.
+        let mut stmt = conn
+            .prepare(
+                "EXPLAIN QUERY PLAN SELECT c.heading, c.content, v.embedding \
+                 FROM chunk_meta cm \
+                 JOIN chunks c ON c.rowid = cm.chunk_rowid \
+                 JOIN vec_chunks v ON v.rowid = cm.chunk_rowid \
+                 WHERE cm.file_id = ?",
+            )
+            .unwrap();
+        let plan: Vec<String> = stmt
+            .query_map(params![1i64], |r| r.get::<_, String>(3))
+            .unwrap()
+            .map(|r| r.unwrap())
+            .collect();
+        // FTS5/vec0 virtual tables report EVERY access as "SCAN <alias>
+        // VIRTUAL TABLE INDEX N:<ops>" — even a fast rowid `=` lookup says
+        // "SCAN", never "SEARCH" (confirmed against sqlite3 3.43.2, the
+        // version this workspace builds against: `EXPLAIN QUERY PLAN SELECT
+        // ... FROM chunks WHERE rowid = 1` also prints "SCAN chunks VIRTUAL
+        // TABLE INDEX 0:="). The distinguishing signal is the operator
+        // suffix after the colon: a genuine unconstrained per-row scan ends
+        // with a bare colon (no operator characters); a pushed-down
+        // constraint (rowid equality, or `idx_chunk_meta_file_id` on the
+        // `cm` side) appends one or more operator characters after it.
+        let is_unconstrained_scan = |step: &str| -> bool {
+            const MARKER: &str = "VIRTUAL TABLE INDEX ";
+            step.split_once(MARKER)
+                .and_then(|(_, rest)| rest.split_once(':'))
+                .map(|(_, ops)| ops.is_empty())
+                .unwrap_or(false)
+        };
+        assert!(
+            !plan.iter().any(|step| is_unconstrained_scan(step)),
+            "F5: reuse lookup does a full unindexed scan of the chunks/vector \
+             tables instead of a per-file indexed lookup: {plan:?}"
+        );
+    }
+
+    // F1 (major, arrra/hex PR #8 round 2): the `Ok(outcome)` arm does
+    // `conn.execute_batch("RELEASE index_file_with_reuse")?` — if that
+    // RELEASE itself fails, `?` returns Err immediately with the SAVEPOINT
+    // still open. The connection is left mid-transaction: the previous
+    // file's row/chunks/vectors sit inside the still-open savepoint instead
+    // of being rolled back to, and the NEXT `index_file_with_reuse` call
+    // nests a new savepoint under the still-open one — it can return Ok
+    // without ever reaching disk, and dropping the connection discards it
+    // all. Force a real RELEASE failure the way the finding describes: put
+    // the connection in rollback-journal mode and hold a second connection's
+    // read transaction open — conn's SAVEPOINT can acquire the RESERVED lock
+    // and perform every write, but its RELEASE (a commit) needs to upgrade
+    // to EXCLUSIVE, which SQLite refuses (SQLITE_BUSY) while the second
+    // connection's SHARED lock is still held. `busy_timeout(0)` makes the
+    // failure immediate instead of retrying for the default 5s.
+    #[test]
+    fn index_file_with_reuse_release_failure_unwinds_and_next_call_persists() {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let db_path = tmp.path().join("memory.db");
+        let conn = super::super::open_db(&db_path).unwrap();
+        init_db(&conn).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mode, "delete",
+            "test setup: must be off WAL to reproduce a commit-time lock-upgrade failure"
+        );
+        conn.busy_timeout(std::time::Duration::from_millis(0))
+            .unwrap();
+        let filepath = hex_root.join("release-fail.md");
+
+        let content_v1 = build_40_chunk_content();
+        let old_chash = content_hash(&content_v1);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.21f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let old_heading17_vec: Vec<u8> = conn
+            .query_row(
+                "SELECT v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.heading = 'Heading 17'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // A second connection holding an open read transaction: its SHARED
+        // lock blocks `conn`'s RESERVED->EXCLUSIVE upgrade at commit time.
+        let conn2 = Connection::open(&db_path).unwrap();
+        conn2.execute_batch("BEGIN;").unwrap();
+        let _: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        let result = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.99f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        );
+        assert!(
+            result.is_err(),
+            "a failed RELEASE must surface as an error, not a silent success"
+        );
+
+        assert!(
+            conn.is_autocommit(),
+            "F1: a failed RELEASE must unwind (ROLLBACK TO + RELEASE) back to \
+             the connection's entry (autocommit) state, not leave the \
+             savepoint open"
+        );
+
+        let chash_after_failed_release: String = conn
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'release-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            chash_after_failed_release, old_chash,
+            "F1: the previous file's content_hash must survive a failed RELEASE"
+        );
+        let heading17_vec: Vec<u8> = conn
+            .query_row(
+                "SELECT v.embedding FROM chunks c JOIN vec_chunks v ON v.rowid = c.rowid \
+                 WHERE c.heading = 'Heading 17'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            heading17_vec, old_heading17_vec,
+            "F1: the previous chunk's vector must survive a failed RELEASE"
+        );
+
+        // Let the blocking reader go, then a subsequent unimpeded call must
+        // commit durably — not nest under a still-open outer savepoint left
+        // behind by the failed RELEASE.
+        conn2.execute_batch("COMMIT;").unwrap();
+        drop(conn2);
+
+        let content_v3 = content_v1.replace(
+            "Content for chunk number 3, unique text here.",
+            "Content for chunk number 3, EDITED again.",
+        );
+        let new_chash = content_hash(&content_v3);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v3,
+            3.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.42f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        drop(conn);
+        let reopened = super::super::open_db(&db_path).unwrap();
+        let durable_chash: String = reopened
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'release-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            durable_chash, new_chash,
+            "F1: a subsequent successful call must persist durably to disk — \
+             not be discarded when the connection is dropped"
+        );
+    }
+
+    // F7 (major, arrra/hex PR #9 round 2): the `Err(e)` arm executes
+    // `ROLLBACK TO index_file_with_reuse; RELEASE index_file_with_reuse` and
+    // propagates any cleanup failure straight through `?`. `ROLLBACK TO`
+    // undoes this call's own writes, but the finalizing `RELEASE` of the
+    // OUTERMOST savepoint is still a COMMIT — needing the identical
+    // RESERVED->EXCLUSIVE lock upgrade as the Ok-arm's RELEASE above — and
+    // can fail with SQLITE_BUSY under the same blocking-reader condition
+    // even though there is nothing left to write. Left unhandled, the
+    // SAVEPOINT stays open: the next call nests a new savepoint under it and
+    // can report success without ever reaching disk. Same construction as
+    // `index_file_with_reuse_release_failure_unwinds_and_next_call_persists`
+    // above, but the failure this time comes from the embedder (the Err arm)
+    // instead of a successful commit (the Ok arm).
+    #[test]
+    fn index_file_with_reuse_embedding_failure_under_blocking_reader_unwinds_and_next_call_persists(
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let db_path = tmp.path().join("memory.db");
+        let conn = super::super::open_db(&db_path).unwrap();
+        init_db(&conn).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mode, "delete",
+            "test setup: must be off WAL to reproduce a commit-time lock-upgrade failure"
+        );
+        conn.busy_timeout(std::time::Duration::from_millis(0))
+            .unwrap();
+        let filepath = hex_root.join("embed-fail.md");
+
+        let content_v1 = build_40_chunk_content();
+        let old_chash = content_hash(&content_v1);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.21f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        // A second connection holding an open read transaction: its SHARED
+        // lock blocks `conn`'s RESERVED->EXCLUSIVE upgrade at commit time —
+        // reached here via the Err(e) arm's `ROLLBACK TO ...; RELEASE ...`
+        // once the embedder fails below.
+        let conn2 = Connection::open(&db_path).unwrap();
+        conn2.execute_batch("BEGIN;").unwrap();
+        let _: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        let result = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |_batch| anyhow::bail!("embedding service unavailable"),
+        );
+        assert!(
+            result.is_err(),
+            "a simulated embedding failure must surface as an error"
+        );
+
+        assert!(
+            conn.is_autocommit(),
+            "F7: a failed error-path cleanup (ROLLBACK TO + RELEASE) must \
+             still unwind to the connection's entry (autocommit) state, not \
+             leave the savepoint open"
+        );
+
+        let chash_after_failed_cleanup: String = conn
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'embed-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            chash_after_failed_cleanup, old_chash,
+            "F7: the previous file's content_hash must survive a failed error-path cleanup"
+        );
+
+        // Let the blocking reader go, then a subsequent unimpeded call must
+        // commit durably — not nest under a still-open outer savepoint left
+        // behind by the failed cleanup.
+        conn2.execute_batch("COMMIT;").unwrap();
+        drop(conn2);
+
+        let content_v3 = content_v1.replace(
+            "Content for chunk number 3, unique text here.",
+            "Content for chunk number 3, EDITED again.",
+        );
+        let new_chash = content_hash(&content_v3);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v3,
+            3.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.42f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        drop(conn);
+        let reopened = super::super::open_db(&db_path).unwrap();
+        let durable_chash: String = reopened
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'embed-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            durable_chash, new_chash,
+            "F7: a subsequent successful call must persist durably to disk — \
+             not be discarded when the connection is dropped"
+        );
+    }
+
+    // B-F-new1 (major, arrra/hex PR #9 round 2, carried from the prior
+    // round's review_b): the Ok arm's failed-RELEASE cleanup (F1, PR #8
+    // round 2, above) unconditionally runs a full `ROLLBACK` on any RELEASE
+    // failure, unlike the Err arm's cleanup (F7, above) which gates that
+    // full `ROLLBACK` on `owns_transaction` — never blowing away a
+    // transaction a caller already had open. A caller that wraps one or
+    // more `index_file_with_reuse` calls inside its own already-open
+    // transaction (`owns_transaction = false`) whose nested RELEASE fails
+    // for any reason must not have its ENTIRE outer transaction discarded by
+    // this function's own cleanup, even though this call's own indexing
+    // work succeeded (the Ok arm). The blocking-reader/SQLITE_BUSY technique
+    // used by the F1/F7 tests above cannot reach this arm: a nested,
+    // non-outermost SAVEPOINT RELEASE succeeds even under a blocking reader
+    // (verified empirically — no EXCLUSIVE-lock upgrade is needed when not
+    // outermost), so the RELEASE is instead denied deterministically via a
+    // rusqlite authorizer hook — a fault-injection point independent of
+    // timing, locking mode, or platform.
+    #[test]
+    fn index_file_with_reuse_ok_arm_release_failure_preserves_caller_owned_outer_transaction() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let db_path = tmp.path().join("memory.db");
+        let conn = super::super::open_db(&db_path).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("ok-release-fail.md");
+
+        // The caller opens its own outer transaction and writes something
+        // unrelated to this call before delegating to index_file_with_reuse
+        // — `owns_transaction` (captured from `conn.is_autocommit()` right
+        // before the SAVEPOINT below) must come back false.
+        conn.execute_batch("BEGIN").unwrap();
+        conn.execute(
+            "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) \
+             VALUES ('caller-owned.md', 1.0, 'callerhash', '2026-01-01', 0)",
+            [],
+        )
+        .unwrap();
+
+        // Deny only the RELEASE of this function's own savepoint; every
+        // other statement (its own SAVEPOINT/INSERT/SELECT/DELETE work, and
+        // the caller's COMMIT below) is allowed.
+        conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+            AuthAction::Savepoint {
+                operation: TransactionOperation::Release,
+                savepoint_name: "index_file_with_reuse",
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }));
+
+        let content = build_40_chunk_content();
+        let result = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.5f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        );
+
+        assert!(result.is_err(), "a denied RELEASE must surface as an error");
+
+        assert!(
+            !conn.is_autocommit(),
+            "B-F-new1: a failed RELEASE on the Ok arm must not abort a \
+             caller-owned outer transaction — the connection must remain \
+             inside that transaction, not be forced back to autocommit"
+        );
+
+        // Lift the authorizer so the caller's own COMMIT (a `Transaction`
+        // action, never denied above) can proceed, then confirm the
+        // caller's earlier write actually survived: a wrongful full
+        // `ROLLBACK` in the cleanup path above would have discarded it
+        // along with everything else in the outer transaction.
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        conn.execute_batch("COMMIT").unwrap();
+
+        let caller_row_survived: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'caller-owned.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            caller_row_survived, 1,
+            "B-F-new1: the caller's own uncommitted write must survive a \
+             failed nested RELEASE in index_file_with_reuse's Ok-arm cleanup"
+        );
+
+        // F10 (major, arrra/hex PR #9 round 3): an `Err` return from
+        // `index_file_with_reuse` must mean "as if this call never
+        // happened" — the caller's earlier write surviving (checked above)
+        // is necessary but not sufficient. This call's OWN work must also
+        // be gone, not merely left uncommitted-but-present inside the still
+        // -open outer savepoint for the caller's subsequent COMMIT to sweep
+        // up anyway.
+        let failed_calls_own_row_absent: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'ok-release-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            failed_calls_own_row_absent, 0,
+            "F10: a failed nested RELEASE must roll back to this call's own \
+             savepoint before returning Err, so the caller's later commit \
+             cannot resurrect the failed call's own writes — index_file_with_reuse \
+             reported failure for this file and it must not exist afterward"
+        );
+    }
+
+    // F9 (minor, arrra/hex PR #8 round 2): the `chunk_meta.file_id` migration
+    // is `ALTER TABLE ... ADD COLUMN file_id ... DEFAULT 0` followed by a
+    // SEPARATE `UPDATE ... backfill`, gated only on `if
+    // !chunk_meta_has_file_id`. An interruption between the two statements
+    // (or a failed UPDATE) leaves the column present with every row at the
+    // default 0 — and the next run's migration sees the column already
+    // exists and skips both statements forever, so the reuse lookup (`WHERE
+    // cm.file_id = ?`) never matches a row for that file again and the file
+    // is fully re-embedded on every run.
+    #[test]
+    fn init_db_backfills_file_id_from_interrupted_state() {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let conn = super::super::open_db(&tmp.path().join("memory.db")).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("interrupted.md");
+
+        let content = build_40_chunk_content();
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.33f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        let file_id: i64 = conn
+            .query_row(
+                "SELECT id FROM files WHERE path = 'interrupted.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+
+        // Simulate the interrupted state: the ALTER already ran (the column
+        // exists, as it does here since init_db already added it) but the
+        // UPDATE backfill never completed — every chunk_meta row is stuck at
+        // the default 0 despite `chunks.file_id`/`files.id` holding the real
+        // value.
+        conn.execute("UPDATE chunk_meta SET file_id = 0", [])
+            .unwrap();
+        let non_zero: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunk_meta WHERE file_id != 0",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            non_zero, 0,
+            "test setup: all chunk_meta rows must start at 0"
+        );
+
+        // The next run re-invokes init_db against this already-migrated (but
+        // never-backfilled) database — exactly what happens on restart.
+        init_db(&conn).unwrap();
+
+        let backfilled: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM chunk_meta WHERE file_id = ?",
+                params![file_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            backfilled, 40,
+            "F9: init_db must repair file_id = 0 rows that have a matching \
+             chunk instead of skipping the backfill because the column \
+             already exists"
+        );
+
+        // The reuse lookup must now actually find the vectors: reindexing
+        // the SAME content should reuse every chunk, not re-embed any of
+        // them.
+        let outcome = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            2.0,
+            "full",
+            false,
+            |_batch| anyhow::bail!("must not need to embed anything — everything should reuse"),
+        )
+        .unwrap();
+        assert_eq!(
+            outcome.reused, 40,
+            "F9: a self-healed file_id backfill must make the reuse lookup \
+             find the existing vectors instead of re-embedding the whole file"
+        );
+        assert_eq!(outcome.embedded, 0);
     }
 }
