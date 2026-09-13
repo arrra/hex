@@ -1,0 +1,4169 @@
+"""RED-first tests for the PreToolUse router (deliverables 1, 2, 4).
+
+Pins the contract for:
+  - system/hooks/router-rules.json  (13 seed rules)
+  - system/hooks/scripts/pretooluse-router.py
+
+Neither file exists yet at authoring time — every test below is expected to
+FAIL against the current worktree. The write_code phase must create both so
+that this suite goes green without loosening any assertion here.
+
+Contract summary (see spec_contract for the authoritative text):
+  - stdin: PreToolUse JSON {session_id, transcript_path, cwd, permission_mode,
+    hook_event_name, tool_name, tool_input}.
+  - stdout (only on non-abstain): one JSON object
+    {"hookSpecificOutput": {"hookEventName": "PreToolUse",
+      "permissionDecision": "deny"|"ask" (absent for "prior"),
+      "permissionDecisionReason": "..." (deny/ask),
+      "additionalContext": "..." (prior only)}}.
+  - Empty stdout + exit 0 = abstain.
+  - Combining rule: any deny -> deny; else any ask -> ask; else first prior
+    (in router-rules.json array order) -> additionalContext, never
+    concatenated.
+  - Every rule that MATCHES (fires) appends one ledger line to
+    ${HEX_LEDGER_DIR}/router-fires.jsonl, regardless of whether it "won" the
+    combined decision. Abstain (no rule matches) writes nothing.
+  - Ledger line has exactly these keys: ts, session_id, rule_id, tool,
+    decision, match, cwd.
+  - Malformed/empty stdin, or any internal error: exit 0, empty stdout,
+    exactly one stderr line "[router] error: ...". Never blocks a tool.
+"""
+
+import ast
+import importlib.util
+import json
+import os
+import re
+import shutil
+import stat
+import statistics
+import subprocess
+import sys
+import tempfile
+import time
+import unittest
+from pathlib import Path
+
+REPO_ROOT = Path(__file__).resolve().parents[3]
+ROUTER_SCRIPT = REPO_ROOT / "system" / "hooks" / "scripts" / "pretooluse-router.py"
+LEDGER_FILENAME = "router-fires.jsonl"
+
+DEFAULT_CWD = "/tmp/hex-home/hex"
+
+
+def make_payload(tool_name, tool_input, cwd=DEFAULT_CWD, session_id="sess-1"):
+    return {
+        "session_id": session_id,
+        "transcript_path": "/tmp/transcript.jsonl",
+        "cwd": cwd,
+        "permission_mode": "default",
+        "hook_event_name": "PreToolUse",
+        "tool_name": tool_name,
+        "tool_input": tool_input,
+    }
+
+
+
+# Production invocation (required-hooks.json / router-probe.sh): isolated mode,
+# no site-packages, so cold-start cost is paid once and consistently in every
+# measurement below (operator amendment, 2026-09-06).
+PYTHON_ISOLATED_FLAGS = ["-I", "-S"]
+
+
+def run_router(stdin_text, ledger_dir, extra_env=None, timeout=5):
+    env = dict(os.environ)
+    env["HEX_LEDGER_DIR"] = str(ledger_dir)
+    if extra_env:
+        env.update(extra_env)
+    proc = subprocess.run(
+        [sys.executable, *PYTHON_ISOLATED_FLAGS, str(ROUTER_SCRIPT)],
+        input=stdin_text,
+        capture_output=True,
+        text=True,
+        env=env,
+        timeout=timeout,
+    )
+    return proc
+
+
+def run_router_payload(payload, ledger_dir, **kw):
+    return run_router(json.dumps(payload), ledger_dir, **kw)
+
+
+def read_ledger(ledger_dir):
+    path = Path(ledger_dir) / LEDGER_FILENAME
+    if not path.exists():
+        return []
+    lines = [l for l in path.read_text().splitlines() if l.strip()]
+    return [json.loads(l) for l in lines]
+
+
+# Full ledger-row schema (matches the `entry` dict `evaluate()` writes, not
+# just the two fields a precedence test cares about winning) -- used by
+# `assert_complete_ledger` below so a "complete ledger" assertion actually
+# checks completeness (row count AND full row shape), not just a
+# rule_id -> decision dict comprehension that silently collapses a
+# duplicate row and can't see whether the other fields were stripped
+# (G4, review_b round 3).
+LEDGER_ROW_KEYS = {
+    "ts", "session_id", "rule_id", "tool", "decision", "match", "preview", "cwd",
+}
+
+
+def assert_complete_ledger(testcase, lines, expected_rule_decisions):
+    """G4: assert the ledger has EXACTLY the expected rows -- right count
+    (catches an appended duplicate), right rule_id->decision mapping, and
+    every row carries the full schema (catches rows reduced to a subset of
+    fields)."""
+    testcase.assertEqual(
+        len(lines), len(expected_rule_decisions),
+        f"expected exactly {len(expected_rule_decisions)} ledger row(s), "
+        f"got {len(lines)}: {lines!r}",
+    )
+    for line in lines:
+        testcase.assertEqual(set(line.keys()), LEDGER_ROW_KEYS)
+    testcase.assertEqual(
+        {l["rule_id"]: l["decision"] for l in lines}, expected_rule_decisions
+    )
+
+
+# Seed rules in the order the spec lists them (deliverable 4). The router's
+# "first prior wins" behavior is pinned against this order.
+SEED_RULE_ORDER = [
+    "gh-pr-merge-ci-green",
+    "vitest-spawnsync",
+    "git-stash-shared-checkout",
+    "git-push-force",
+    "git-push-force-with-lease",
+    "git-destructive-ask",
+    "boi-dispatch-spec-priors",
+    "gh-fast-polling",
+    "pipe-tail-masks-exit",
+    "hex-events-flat-policy",
+    "hex-memory-index-full",
+    "builtin-scheduler-tools",
+    "builtin-websearch",
+    "backticks-in-unquoted-heredoc",
+]
+
+# Each entry: (rule_id, decision, tool_name, positive tool_input, near-miss
+# tool_input, optional cwd override for the positive fixture).
+RULE_FIXTURES = [
+    dict(
+        id="gh-pr-merge-ci-green",
+        decision="prior",
+        tool_name="Bash",
+        positive={"command": "gh pr merge 123 --squash"},
+        near_miss={"command": "gh pr checks 123 --watch"},
+    ),
+    dict(
+        id="vitest-spawnsync",
+        decision="prior",
+        tool_name="Edit",
+        positive={
+            "file_path": "src/components/foo.test.ts",
+            "old_string": "x",
+            "new_string": "const r = spawnSync('ls', []);",
+        },
+        near_miss={
+            "file_path": "src/components/foo.ts",
+            "old_string": "x",
+            "new_string": "const r = spawnSync('ls', []);",
+        },
+    ),
+    dict(
+        id="git-stash-shared-checkout",
+        decision="deny",
+        tool_name="Bash",
+        positive={"command": "git stash"},
+        near_miss={"command": "git stash list"},
+    ),
+    dict(
+        id="git-push-force",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git push origin main --force"},
+        near_miss={"command": "git push origin main"},
+    ),
+    dict(
+        id="git-push-force-with-lease",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git push origin main --force-with-lease"},
+        near_miss={"command": "git push origin main"},
+    ),
+    dict(
+        id="git-destructive-ask",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "git reset --hard HEAD~1"},
+        near_miss={"command": "git reset --soft HEAD~1"},
+    ),
+    dict(
+        id="boi-dispatch-spec-priors",
+        decision="prior",
+        tool_name="Bash",
+        positive={"command": "boi dispatch spec.toml"},
+        near_miss={"command": "boi dashboard"},
+    ),
+    dict(
+        id="gh-fast-polling",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "while true; do gh pr checks 123; sleep 5; done"},
+        near_miss={"command": "while true; do gh pr checks 123; sleep 90; done"},
+    ),
+    dict(
+        id="pipe-tail-masks-exit",
+        decision="prior",
+        tool_name="Bash",
+        positive={"command": "pytest -q | tail -20"},
+        near_miss={"command": "pytest -q"},
+    ),
+    dict(
+        id="hex-events-flat-policy",
+        decision="prior",
+        tool_name="Write",
+        positive={
+            "file_path": "/tmp/hex-home/.hex-events/policies/my-policy.yaml",
+            "content": "name: my-policy\ntrigger:\n  event: foo\naction:\n  type: shell\n  command: echo hi\n",
+        },
+        near_miss={
+            "file_path": "/tmp/hex-home/.hex-events/policies/my-policy.yaml",
+            "content": "name: my-policy\nrules:\n  - name: r1\n    trigger:\n      event: foo\n",
+        },
+    ),
+    dict(
+        id="hex-memory-index-full",
+        decision="ask",
+        tool_name="Bash",
+        positive={"command": "hex memory index --full"},
+        near_miss={"command": "hex memory index"},
+    ),
+    dict(
+        id="builtin-scheduler-tools",
+        decision="ask",
+        tool_name="CronCreate",
+        positive={"schedule": "* * * * *", "command": "echo hi"},
+        near_miss=None,  # near-miss uses a different tool_name; see below
+        near_miss_tool_name="CronList",
+        near_miss_input={"filter": "*"},
+    ),
+    dict(
+        id="builtin-websearch",
+        decision="ask",
+        tool_name="WebSearch",
+        positive={"query": "test"},
+        near_miss=None,
+        near_miss_tool_name="WebFetch",
+        near_miss_input={"url": "https://example.com"},
+    ),
+    dict(
+        id="backticks-in-unquoted-heredoc",
+        decision="prior",
+        tool_name="Bash",
+        positive={"command": "python3 - <<PYEOF\nprint('run `boi start` now')\nPYEOF"},
+        near_miss={"command": "python3 - <<'PYEOF'\nprint('run `boi start` now')\nPYEOF"},
+    ),
+]
+
+assert {f["id"] for f in RULE_FIXTURES} == set(SEED_RULE_ORDER), "fixture/order drift"
+assert len(RULE_FIXTURES) == 14, "expected exactly 14 seed rules"
+
+
+class RouterTestCase(unittest.TestCase):
+    def setUp(self):
+        self.assertTrue(
+            ROUTER_SCRIPT.exists(),
+            f"pretooluse-router.py must exist at {ROUTER_SCRIPT} (deliverable 2)",
+        )
+
+
+class TestSeedRulePositiveFixtures(RouterTestCase):
+    def test_each_rule_fires_with_expected_decision(self):
+        for fx in RULE_FIXTURES:
+            with self.subTest(rule=fx["id"]):
+                with tempfile.TemporaryDirectory() as ledger_dir:
+                    payload = make_payload(fx["tool_name"], fx["positive"])
+                    proc = run_router_payload(payload, ledger_dir)
+
+                    self.assertEqual(
+                        proc.returncode, 0,
+                        f"{fx['id']}: router must exit 0; stderr={proc.stderr!r}",
+                    )
+                    self.assertEqual(
+                        proc.stderr.strip(), "",
+                        f"{fx['id']}: abstain/fire must produce no stderr, got {proc.stderr!r}",
+                    )
+                    stdout = proc.stdout.strip()
+                    self.assertTrue(
+                        stdout,
+                        f"{fx['id']}: expected non-empty stdout for a firing rule",
+                    )
+                    out = json.loads(stdout)
+                    hso = out["hookSpecificOutput"]
+                    self.assertEqual(hso["hookEventName"], "PreToolUse")
+
+                    if fx["decision"] == "deny":
+                        self.assertEqual(hso.get("permissionDecision"), "deny")
+                        self.assertTrue(hso.get("permissionDecisionReason"))
+                    elif fx["decision"] == "ask":
+                        self.assertEqual(hso.get("permissionDecision"), "ask")
+                        self.assertTrue(hso.get("permissionDecisionReason"))
+                    else:  # prior
+                        self.assertNotIn(hso.get("permissionDecision"), ("deny", "ask"))
+                        self.assertTrue(hso.get("additionalContext"))
+
+                    lines = read_ledger(ledger_dir)
+                    self.assertEqual(
+                        len(lines), 1,
+                        f"{fx['id']}: expected exactly one ledger line, got {lines}",
+                    )
+                    entry = lines[0]
+                    self.assertEqual(
+                        set(entry.keys()),
+                        {"ts", "session_id", "rule_id", "tool", "decision", "match", "preview", "cwd"},
+                    )
+                    self.assertEqual(entry["rule_id"], fx["id"])
+                    self.assertEqual(entry["tool"], fx["tool_name"])
+                    self.assertEqual(entry["decision"], fx["decision"])
+                    self.assertEqual(entry["cwd"], DEFAULT_CWD)
+                    self.assertEqual(entry["session_id"], "sess-1")
+                    self.assertIsInstance(entry["match"], str)
+                    self.assertTrue(0 < len(entry["match"]) <= 200)
+                    self.assertIsInstance(entry["ts"], str)
+                    self.assertTrue(entry["ts"])
+
+
+class TestSeedRuleNearMisses(RouterTestCase):
+    def test_each_rule_abstains_on_near_miss(self):
+        for fx in RULE_FIXTURES:
+            with self.subTest(rule=fx["id"]):
+                tool_name = fx.get("near_miss_tool_name", fx["tool_name"])
+                tool_input = fx.get("near_miss_input", fx["near_miss"])
+                with tempfile.TemporaryDirectory() as ledger_dir:
+                    payload = make_payload(tool_name, tool_input)
+                    proc = run_router_payload(payload, ledger_dir)
+
+                    self.assertEqual(proc.returncode, 0, f"{fx['id']}: near-miss must exit 0")
+                    self.assertEqual(
+                        proc.stdout.strip(), "",
+                        f"{fx['id']}: near-miss fixture must abstain (empty stdout), "
+                        f"got {proc.stdout!r}",
+                    )
+                    self.assertEqual(
+                        proc.stderr.strip(), "",
+                        f"{fx['id']}: abstain/fire must produce no stderr, got {proc.stderr!r}",
+                    )
+                    lines = read_ledger(ledger_dir)
+                    self.assertEqual(
+                        lines, [],
+                        f"{fx['id']}: abstain must write nothing to the ledger",
+                    )
+
+    def test_git_stash_unless_cwd_skips_inside_worktrees(self):
+        """git-stash-shared-checkout's unless_cwd exempts /worktrees/ checkouts
+        even though the command itself matches — a distinct abstain path from
+        the plain near-miss (git stash list) covered above."""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            payload = make_payload(
+                "Bash",
+                {"command": "git stash"},
+                cwd="/tmp/hex-home/.boi/v2/worktrees/Scnfz8k1f/T7w2t3bzf",
+            )
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+            self.assertEqual(
+                proc.stderr.strip(), "",
+                f"abstain/fire must produce no stderr, got {proc.stderr!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestGhFastPollingScope(RouterTestCase):
+    """Regression (2026-09-06 03:10Z, live false positive in another session): a bounded
+    `for` loop over a fixed PR list with a short sleep is a one-shot batch, not polling.
+    Only open-ended loops (`while` / `until`) are the rate-limit risk the rule exists for."""
+
+    def test_bounded_for_loop_over_pr_list_abstains(self):
+        cmd = ('for n in 293 294 295 296 297; do t=$(gh pr view $n -R owner/repo --json title --jq .title); '
+               'python3 hex_emit.py github.pr.opened "$t"; sleep 2; done')
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "", f"bounded for-loop must abstain, got {proc.stdout!r}")
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_until_loop_polling_still_asks(self):
+        cmd = 'until gh run view 123 --json status --jq .status | grep -q completed; do sleep 10; done'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            out = json.loads(proc.stdout)
+            self.assertEqual(out["hookSpecificOutput"]["permissionDecision"], "ask")
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "gh-fast-polling")
+
+
+class TestCommandPositionAnchoring(RouterTestCase):
+    """Live false positive 2026-09-06 03:20Z: a heredoc whose Python source mentioned the stash
+    command was denied. Bash rules match a command only at command position (start / after a
+    separator), never a mention inside quotes, messages, heredocs, echo, or grep arguments."""
+
+    MENTIONS = (
+        'echo "please do not run git stash here"',
+        'git commit -m "router: no git stash in shared checkouts"',
+        "grep -rn 'git stash' docs/",
+        "python3 - <<'EOF'\nrule = r'git stash'\nprint(rule)\nEOF",
+        'echo "git push --force is bad"',
+        "cat notes.txt | grep 'gh pr merge'",
+    )
+
+    def test_mentions_inside_text_abstain(self):
+        for cmd in self.MENTIONS:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(proc.stdout.strip(), "", f"mention must abstain: {cmd!r}")
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_invocations_still_fire(self):
+        cases = {
+            "git stash": "deny",
+            "cd /tmp/x && git stash -u": "deny",
+            "git add -A; git stash push -m wip": "deny",
+            "time git push origin feat -f": "ask",
+            "git push --force-with-lease origin feat": "ask",
+            "gh pr merge 12 --squash": "prior",
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                out = json.loads(proc.stdout)["hookSpecificOutput"]
+                got = out.get("permissionDecision") or ("prior" if out.get("additionalContext") else None)
+                self.assertEqual(got, expected, cmd)
+
+
+class TestGitStashRecoveryOpsAllowed(RouterTestCase):
+    def test_stash_pop_apply_drop_abstain(self):
+        for cmd in ("git stash pop", "git stash apply stash@{0}", "git stash drop", "git -C /tmp/r stash pop"):
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain")
+
+
+class TestUnlessMatchScopedPerOccurrence(RouterTestCase):
+    """Review finding G1: a global `unless_match` (searching the WHOLE
+    canonical text) lets a single safe sub-invocation blanket-suppress a
+    dangerous sibling chained in the same command string. A single-command
+    canonical text must keep the original whole-text behavior unchanged
+    (some rules, e.g. pipe-tail-masks-exit, intentionally rely on a safety
+    marker appearing anywhere in the text) — only a text with MORE THAN ONE
+    occurrence of the rule's `match` pattern gets the narrower per-occurrence
+    window check.
+    """
+
+    def test_safe_subcommand_does_not_shield_a_chained_dangerous_one(self):
+        cmd = "git stash pop; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso["permissionDecision"], "deny", cmd)
+            self.assertEqual(read_ledger(ledger_dir)[-1]["rule_id"], "git-stash-shared-checkout")
+
+    def test_force_with_lease_does_not_shield_a_chained_bare_force(self):
+        cmd = "git push origin main --force-with-lease; git push origin main --force"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso["permissionDecision"], "ask", cmd)
+            rule_ids = {entry["rule_id"] for entry in read_ledger(ledger_dir)}
+            self.assertIn("git-push-force", rule_ids)
+
+    def test_single_occurrence_pipefail_check_is_unaffected(self):
+        """Regression guard: the multi-occurrence path must never fire for a
+        text where the rule's `match` pattern has only ONE occurrence — this
+        is exactly the existing pipe-tail-masks-exit contract
+        (TestPipeTailAbstainsWhenStatusCaptured) and must stay untouched."""
+        for cmd in (
+            "set -o pipefail; cargo test --locked | tail -20",
+            "pytest -q | tail -5; echo exit=${PIPESTATUS[0]}",
+        ):
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(proc.stdout.strip(), "", cmd)
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestCanonicalJsonMatchesPythonEnsureAscii(RouterTestCase):
+    """Review finding G2 (Rust side): the Rust port's canonical-text branch
+    for tool_input compact-JSON must escape non-ASCII exactly like Python's
+    `json.dumps(..., sort_keys=True)` default (`ensure_ascii=True`). This
+    test pins the PYTHON reference's own byte output (ground truth) so a
+    future change to canonical_text on either side can be diffed against it
+    directly."""
+
+    def test_non_ascii_tool_input_escapes_to_uXXXX(self):
+        spec = importlib.util.spec_from_file_location(
+            "pretooluse_router_under_test_ascii", ROUTER_SCRIPT
+        )
+        assert spec and spec.loader
+        router_mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(router_mod)
+
+        text = router_mod.canonical_text(
+            "CronCreate", {"schedule": "* * * * *", "command": "echo héllo"}
+        )
+        self.assertEqual(
+            text,
+            '{"command":"echo h\\u00e9llo","schedule":"* * * * *"}',
+        )
+        self.assertTrue(text.isascii(), "canonical text for non-Bash/text tools must be ASCII-only")
+
+
+class TestFlatPolicyRuleOnlyOnFullWrites(RouterTestCase):
+    def test_edit_of_policy_yaml_abstains(self):
+        payload = make_payload("Edit", {"file_path": "/tmp/hex-home/x/.hex-events/policies/foo.yaml",
+                                        "old_string": "timeout: 60", "new_string": "timeout: 120"})
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "")
+
+
+class TestPipeTailAbstainsWhenStatusCaptured(RouterTestCase):
+    """The prior is about a MASKED exit status. A command that already uses pipefail or reads
+    PIPESTATUS has not masked anything - the prior would be noise."""
+
+    def test_pipefail_or_pipestatus_abstains(self):
+        for cmd in (
+            "set -o pipefail; cargo test --locked | tail -20",
+            "pytest -q | tail -5; echo exit=${PIPESTATUS[0]}",
+        ):
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(proc.stdout.strip(), "", cmd)
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_plain_pipe_to_tail_still_fires(self):
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": "pnpm test | tail -20"}), ledger_dir)
+            self.assertIn("additionalContext", json.loads(proc.stdout)["hookSpecificOutput"])
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "pipe-tail-masks-exit")
+
+
+class TestPipeFilterVariants(RouterTestCase):
+    """2026-09-06 04:10Z: two commits landed on a RED suite because `unittest ... | grep -E
+    '^(Ran|OK|FAILED)'` returned grep's status and colored output hid the FAILED line.
+    grep/head mask exit status exactly like tail."""
+
+    def test_grep_and_head_fire_like_tail(self):
+        for cmd in ("python3 -m unittest discover -s tests | grep -E '^(Ran|OK|FAILED)'",
+                    "cargo test --locked | head -40"):
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertIn("additionalContext", json.loads(proc.stdout)["hookSpecificOutput"], cmd)
+                self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "pipe-tail-masks-exit")
+
+    def test_redirect_attached_ampersand_still_fires(self):
+        """F1 (round-2 redo): `2>&1` before the pipe is a stderr-to-stdout
+        redirect, not a `&` separator that should end the "same command"
+        scan — the F20 fix must not regress this to abstain."""
+        cmd = "cargo test 2>&1 | tail -20"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"2>&1 before the pipe must not be treated as a command separator: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "pipe-tail-masks-exit")
+
+
+class TestCombinedOutcomeSemantics(RouterTestCase):
+    def test_deny_beats_prior_when_both_match(self):
+        """A single command matches gh-pr-merge-ci-green (prior) AND
+        git-stash-shared-checkout (deny). The combined stdout decision must be deny,
+        exactly once — but both rules still each get a ledger line, since
+        every match is a FIRE regardless of who wins the combined verdict.
+        (Was git-push-force until 2026-09-06, when that rule became `ask`.)"""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            payload = make_payload(
+                "Bash",
+                {"command": "gh pr merge 42 --squash; git stash"},
+            )
+            proc = run_router_payload(payload, ledger_dir)
+
+            self.assertEqual(proc.returncode, 0)
+            stdout = proc.stdout.strip()
+            self.assertTrue(stdout)
+            # Exactly one JSON document on stdout.
+            out = json.loads(stdout)
+            hso = out["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny")
+            # F17: pin the EXACT winning message, not just the decision type --
+            # returning the wrong rule's text (or a concatenation) would still
+            # satisfy a bare `== "deny"` check.
+            self.assertEqual(
+                hso.get("permissionDecisionReason"),
+                "Standing Order 7: no stash save/push in a shared checkout - it "
+                "sweeps sibling agents' uncommitted work (2026-08-19/20, 23 files "
+                "lost). Work in a git worktree. Recovery ops (pop/apply/drop/list/"
+                "show) are allowed.",
+            )
+            self.assertNotIn("additionalContext", hso)
+
+            lines = read_ledger(ledger_dir)
+            rule_ids = sorted(l["rule_id"] for l in lines)
+            self.assertEqual(rule_ids, sorted(["gh-pr-merge-ci-green", "git-stash-shared-checkout"]))
+            decisions = {l["rule_id"]: l["decision"] for l in lines}
+            self.assertEqual(decisions["gh-pr-merge-ci-green"], "prior")
+            self.assertEqual(decisions["git-stash-shared-checkout"], "deny")
+
+    def test_only_one_additional_context_when_multiple_priors_match(self):
+        """Two prior-only rules match the same command (pipe-tail-masks-exit
+        and gh-pr-merge-ci-green). Only ONE additionalContext may ever reach
+        stdout — never concatenated — and per the documented seed order
+        (deliverable 4), gh-pr-merge-ci-green is listed first, so it wins."""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            payload = make_payload(
+                "Bash",
+                {"command": "pytest -q | tail -20 && gh pr merge 7 --squash"},
+            )
+            proc = run_router_payload(payload, ledger_dir)
+
+            self.assertEqual(proc.returncode, 0)
+            stdout = proc.stdout.strip()
+            self.assertTrue(stdout)
+            out = json.loads(stdout)
+            hso = out["hookSpecificOutput"]
+            self.assertNotIn(hso.get("permissionDecision"), ("deny", "ask"))
+            self.assertIn("additionalContext", hso)
+            # F17: pin the EXACT winning message text (first prior in file
+            # order), not just that some string is present.
+            self.assertEqual(
+                hso["additionalContext"],
+                "Never merge while checks are pending; run `gh pr checks <n> "
+                "--watch` first.",
+            )
+
+            lines = read_ledger(ledger_dir)
+            rule_ids = sorted(l["rule_id"] for l in lines)
+            self.assertEqual(
+                rule_ids, sorted(["gh-pr-merge-ci-green", "pipe-tail-masks-exit"])
+            )
+            # Exactly one line is the "winner" carried into additionalContext;
+            # the contract requires the FIRST prior in file order to win.
+            self.assertEqual(
+                {l["rule_id"]: l["decision"] for l in lines},
+                {"gh-pr-merge-ci-green": "prior", "pipe-tail-masks-exit": "prior"},
+            )
+
+    def test_ask_beats_prior_exact_message_and_complete_ledger(self):
+        """F17: the missing ask-vs-prior precedence pair. git-push-force
+        (ask, fires on the leading `+` refspec) and gh-pr-merge-ci-green
+        (prior) both match; ask must win with its exact message, and both
+        rules must still each get a ledger line."""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            payload = make_payload(
+                "Bash",
+                {"command": "git push origin +HEAD:main; gh pr merge 42 --squash"},
+            )
+            proc = run_router_payload(payload, ledger_dir)
+
+            self.assertEqual(proc.returncode, 0)
+            stdout = proc.stdout.strip()
+            self.assertTrue(stdout)
+            out = json.loads(stdout)
+            hso = out["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask")
+            self.assertEqual(
+                hso.get("permissionDecisionReason"),
+                "Force-push is ASK-FIRST (operator policy). NEVER on a "
+                "stacked-PR branch (false-MERGED class) - use gh stack sync / "
+                "gh stack push. Personal single branch after a rebase: "
+                "confirm. (F5: a leading `+` on a refspec forces the update "
+                "the same as --force.)",
+            )
+            self.assertNotIn("additionalContext", hso)
+
+            lines = read_ledger(ledger_dir)
+            assert_complete_ledger(
+                self, lines,
+                {"gh-pr-merge-ci-green": "prior", "git-push-force": "ask"},
+            )
+
+    def test_deny_beats_ask_exact_message_and_complete_ledger(self):
+        """F17: the missing deny-vs-ask precedence pair. git-push-force (ask)
+        and git-stash-shared-checkout (deny) both match; deny must win with
+        its exact message, and both rules must still each get a ledger
+        line."""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            payload = make_payload(
+                "Bash",
+                {"command": "git push --force origin main; git stash"},
+            )
+            proc = run_router_payload(payload, ledger_dir)
+
+            self.assertEqual(proc.returncode, 0)
+            stdout = proc.stdout.strip()
+            self.assertTrue(stdout)
+            out = json.loads(stdout)
+            hso = out["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny")
+            self.assertEqual(
+                hso.get("permissionDecisionReason"),
+                "Standing Order 7: no stash save/push in a shared checkout - it "
+                "sweeps sibling agents' uncommitted work (2026-08-19/20, 23 files "
+                "lost). Work in a git worktree. Recovery ops (pop/apply/drop/list/"
+                "show) are allowed.",
+            )
+            self.assertNotIn("additionalContext", hso)
+
+            lines = read_ledger(ledger_dir)
+            assert_complete_ledger(
+                self, lines,
+                {"git-push-force": "ask", "git-stash-shared-checkout": "deny"},
+            )
+
+
+class TestMalformedInput(RouterTestCase):
+    def _assert_fails_open(self, stdin_text):
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router(stdin_text, ledger_dir)
+            self.assertEqual(proc.returncode, 0, "must never block a tool on our own bug")
+            self.assertEqual(proc.stdout.strip(), "")
+            stderr_lines = [l for l in proc.stderr.splitlines() if l.strip()]
+            self.assertEqual(
+                len(stderr_lines), 1,
+                f"expected exactly one stderr line, got {stderr_lines!r}",
+            )
+            self.assertTrue(stderr_lines[0].startswith("[router] error:"))
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_malformed_json_stdin(self):
+        self._assert_fails_open("{not valid json")
+
+    def test_empty_stdin(self):
+        self._assert_fails_open("")
+
+
+class TestScriptSafety(RouterTestCase):
+    """Operator decision #2 (2026-09-06 02:40Z): timing budgets (absolute AND
+    relative) are load-sensitive on this shared worker and were dropped
+    entirely. In their place: a STRUCTURAL guarantee that the router is
+    mechanically incapable of being slow in the ways that matter (no
+    subprocess/network/git/gh calls, only cheap stdlib imports) — that is
+    the real content behind "fast, no LLM, no network, no git".
+    """
+
+    ALLOWED_IMPORTS = {"sys", "os", "re", "json", "hashlib", "time", "datetime", "pathlib"}
+    FORBIDDEN_TOKENS = ("subprocess", "socket", "urllib", "http", "requests", "git ", "gh ")
+
+    def _assert_safe_script(self, path):
+        self.assertTrue(path.exists(), f"{path} must exist")
+        text = path.read_text()
+        tree = ast.parse(text, filename=str(path))
+        imported = set()
+        for node in ast.walk(tree):
+            if isinstance(node, ast.Import):
+                for alias in node.names:
+                    imported.add(alias.name.split(".")[0])
+            elif isinstance(node, ast.ImportFrom):
+                if node.module:
+                    imported.add(node.module.split(".")[0])
+        disallowed = imported - self.ALLOWED_IMPORTS
+        self.assertEqual(
+            disallowed, set(),
+            f"{path.name} imports disallowed modules: {sorted(disallowed)} "
+            f"(allowlist: {sorted(self.ALLOWED_IMPORTS)})",
+        )
+        for token in self.FORBIDDEN_TOKENS:
+            self.assertNotIn(
+                token, text,
+                f"{path.name} contains forbidden token {token!r} — hooks must "
+                "stay pure-stdlib with no subprocess/network/git/gh calls",
+            )
+
+    def test_router_script_is_pure_stdlib_no_subprocess_no_network(self):
+        self._assert_safe_script(ROUTER_SCRIPT)
+
+
+class TestLatencySanityCeiling(RouterTestCase):
+    """No absolute or relative millisecond budget is asserted (operator
+    decision #2 — both proved load-sensitive on this shared worker). This
+    only catches a genuine hang; medians are printed for a human to
+    sanity-check, never asserted on.
+    """
+
+    def test_router_invocation_never_exceeds_hang_ceiling(self):
+        payload = make_payload("Bash", {"command": "echo hello world"})
+        stdin_text = json.dumps(payload)
+
+        router_durations = []
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            for _ in range(20):
+                start = time.perf_counter()
+                proc = run_router(stdin_text, ledger_dir, timeout=5)
+                router_durations.append(time.perf_counter() - start)
+                self.assertEqual(proc.returncode, 0)
+                self.assertEqual(proc.stdout.strip(), "")
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+        baseline_durations = []
+        for _ in range(20):
+            start = time.perf_counter()
+            proc = subprocess.run(
+                [sys.executable, *PYTHON_ISOLATED_FLAGS, "-c", "pass"],
+                capture_output=True,
+                text=True,
+                timeout=5,
+            )
+            baseline_durations.append(time.perf_counter() - start)
+            self.assertEqual(proc.returncode, 0)
+
+        router_median_s = statistics.median(router_durations)
+        baseline_median_s = statistics.median(baseline_durations)
+        delta_s = router_median_s - baseline_median_s
+
+        print(f"\n[latency] router median (python3 -I -S pretooluse-router.py): "
+              f"{router_median_s * 1000:.2f} ms")
+        print(f"[latency] interpreter cold-start baseline (python3 -I -S -c pass): "
+              f"{baseline_median_s * 1000:.2f} ms")
+        print(f"[latency] delta: {delta_s * 1000:.2f} ms")
+
+        # F18: the tight per-invocation ceiling is load-sensitive on a
+        # shared worker (scheduler delays, filesystem stalls) and produced
+        # correctness-suite failures with no router regression. It moves
+        # behind an opt-in ROUTER_BENCH=1 gate; the structural guarantee --
+        # the 5s subprocess `timeout=` passed to every `run_router*` call
+        # above -- stays mandatory and unconditional.
+        if os.environ.get("ROUTER_BENCH") == "1":
+            for d in router_durations:
+                self.assertLess(
+                    d, 1.0,
+                    f"one router invocation took {d * 1000:.2f}ms — exceeds the "
+                    "1000ms sanity ceiling meant only to catch a genuine hang "
+                    "(never load noise)",
+                )
+
+
+class TestNoLookaroundInRules(RouterTestCase):
+    """Rust's `regex` crate has no lookaround support (spec ground truth,
+    2026-09-07 closed-loop harness plan). The Python router is the reference
+    a future Rust port must mirror, so every rule's `match`/`unless_match`
+    must be expressible without `(?!...)` / `(?=...)` / `(?<...)`. The four
+    rules that currently rely on lookaround (git-stash-shared-checkout,
+    git-push-force, pipe-tail-masks-exit, hex-events-flat-policy) must be
+    rewritten to use the new `unless_match` field instead. This test is RED
+    until that rewrite lands.
+    """
+
+    LOOKAROUND_RE = re.compile(r"\(\?[=!<]")
+
+    def test_no_rule_field_uses_lookaround(self):
+        rules_path = REPO_ROOT / "system" / "hooks" / "router-rules.json"
+        rules = json.loads(rules_path.read_text())
+        offenders = []
+        for rule in rules:
+            for field in ("match", "unless_match"):
+                value = rule.get(field)
+                if value and self.LOOKAROUND_RE.search(value):
+                    offenders.append(f"{rule['id']}.{field}")
+        self.assertEqual(
+            offenders, [],
+            f"rules still use lookaround (unsupported by Rust's `regex` crate): {offenders}",
+        )
+
+
+class TestUnlessMatchField(RouterTestCase):
+    """Pins the contract for the new optional `unless_match` rule field
+    (spec: regex on the SAME canonical text; when it matches, the rule does
+    not fire). Exercises the router's `evaluate()`/`load_rules()` directly,
+    with an isolated one-rule fixture file, so the mechanism itself is
+    pinned independently of which of the four seed rules ends up using it.
+
+    RED now: `load_rules()` does not read `unless_match` at all, so the
+    rule below fires unconditionally on any text containing "foo" and both
+    assertions fail.
+    """
+
+    def _load_router_module(self):
+        spec = importlib.util.spec_from_file_location(
+            "pretooluse_router_under_test", ROUTER_SCRIPT
+        )
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+        return module
+
+    def test_unless_match_suppresses_fire_and_is_absent_from_ledger(self):
+        router_mod = self._load_router_module()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            rules_path = Path(tmp) / "router-rules.json"
+            rules_path.write_text(json.dumps([
+                {
+                    "id": "test-unless-match-suppression",
+                    "tool": "^Bash$",
+                    "match": "foo",
+                    "unless_match": "foo-safe",
+                    "decision": "ask",
+                    "message": "should never surface when unless_match matches",
+                }
+            ]))
+            ledger_dir = Path(tmp) / "ledger"
+            ledger_dir.mkdir()
+
+            router_mod.RULES_PATH = str(rules_path)
+            old_ledger_env = os.environ.get("HEX_LEDGER_DIR")
+            os.environ["HEX_LEDGER_DIR"] = str(ledger_dir)
+            try:
+                payload = make_payload("Bash", {"command": "run foo-safe now"})
+                winner = router_mod.evaluate(payload)
+            finally:
+                if old_ledger_env is None:
+                    os.environ.pop("HEX_LEDGER_DIR", None)
+                else:
+                    os.environ["HEX_LEDGER_DIR"] = old_ledger_env
+
+            self.assertIsNone(
+                winner,
+                "unless_match matching the canonical text must suppress the fire entirely",
+            )
+            self.assertEqual(
+                read_ledger(ledger_dir), [],
+                "a rule suppressed by unless_match must not be recorded anywhere in the ledger",
+            )
+
+
+class TestInvocationLocalStashExemption(RouterTestCase):
+    """F1 (arrra/hex PR #5 round 1): `unless_match` for the stash rule must
+    be decided from the actual stash subcommand of EACH `git stash`
+    invocation, never from arbitrary safe-looking text elsewhere in the
+    canonical text (e.g. an echoed string or a commit message argument)."""
+
+    def test_misleading_safe_text_elsewhere_does_not_suppress_denial(self):
+        cases = (
+            "echo 'stash list'; git stash",
+            "git stash push -m 'stash pop'",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F1)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestShellPrefixNormalization(RouterTestCase):
+    """F3: leading whitespace, `NAME=value` assignment prefixes, and
+    wrappers such as `command` must be skipped before the subcommand is
+    matched; `git`'s global options (e.g. `-C <path>`) must be skipped
+    before the git subcommand is matched."""
+
+    def test_normalized_prefixes_still_trip_git_rules(self):
+        cases = {
+            " git stash": "deny",
+            "FOO=1 git stash": "deny",
+            "command git stash": "deny",
+            "git -C /shared push --force": "ask",
+        }
+        for cmd, expected in cases.items():
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), expected, cmd)
+
+
+class TestAssignmentPrefixReDoS(RouterTestCase):
+    """F9: `(?:\\S+=\\S*\\s+)*` lets `\\S+` and `\\S*` both absorb `=`
+    characters, so a token like `A=B=C` has more than one way to split
+    across the pattern. When the text never supplies the literal command the
+    rule expects, the regex engine explores every combination — exponential
+    in the number of repeated tokens. Restricting the assignment name to
+    `[A-Za-z_][A-Za-z0-9_]*` (F9's fix) removes the ambiguity."""
+
+    def test_env_repeated_ambiguous_assignments_does_not_hang(self):
+        # Empirically: this exact input makes the current (vulnerable) router
+        # exceed a 5s timeout (measured ~5s+ wall clock before this fix).
+        cmd = "env " + "A=B=C " * 24 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir, timeout=5)
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router hung (>5s) on adversarial env-assignment input — "
+                    "exponential backtracking in the assignment-prefix regex (F9)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "", "not a real git/gh invocation, must abstain")
+
+
+class TestAssignmentValueDollarQuoteReDoS(RouterTestCase):
+    """F9 (round 2 review, blocker): `_ASSIGN_VALUE`'s old `[^\\s'\"]*` run
+    didn't exclude `$`, so a value like `$'x'` had two equal-length parses
+    (run eats `$` then the plain single-quote alt eats `'x'`, OR the ANSI-C
+    alt eats `$'x'` whole) -- ambiguity that multiplies 2**N across N
+    repeated assignments once the surrounding match ultimately fails. The
+    reviewer's exact reproduction: `env ` + 24x `A=$'x' ` + `true`."""
+
+    def test_env_repeated_dollar_quoted_assignments_does_not_hang(self):
+        cmd = "env " + "A=$'x' " * 24 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir, timeout=5)
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router hung (>5s) on adversarial $'...' assignment input — "
+                    "exponential backtracking in the assignment-value regex (F9 round 2)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "", "not a real git/gh invocation, must abstain")
+
+    def test_single_dollar_quoted_assignment_still_skips_to_the_real_command(self):
+        # Regression guard: the fix must not stop `$'...'` values from
+        # being recognized as a benign leading assignment at all.
+        cmd = "A=$'x' git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F9 round 2)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestPipefailIsShellWideAcrossPipelines(RouterTestCase):
+    """F10: the pipefail exemption is SHELL-wide for subsequent pipelines in
+    the same command, unlike the stash rule's invocation-local exemption
+    (F1/F3). Once `set -o pipefail` has been set, every later pipeline in
+    the same shell is protected, not just the first one the per-occurrence
+    window happens to cover."""
+
+    def test_multiple_pipelines_after_set_pipefail_abstain(self):
+        cmd = "set -o pipefail; pytest -q | tail -5; npm test | tail -5"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"pipefail must exempt both subsequent pipelines (F10): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestExecutableRegionScanner(RouterTestCase):
+    """F2: single/double-quoted text and QUOTED heredoc bodies are
+    non-executable and must not trip command rules; a real `$(...)`
+    command substitution must still be treated as executable."""
+
+    def test_quoted_text_and_quoted_heredoc_abstain(self):
+        cases = (
+            "printf '%s\\n' 'example; git stash'",
+            "cat <<'EOF2'\ngit stash\nEOF2\n",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"quoted/heredoc text must abstain (F2): {cmd!r} -> {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_command_substitution_still_denies(self):
+        cmd = "x=$(git stash)"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must still deny (F2)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_real_newline_inside_quoted_literal_stays_inert(self):
+        """Review R4 regression from G2 (review_b round 1): G2 stopped
+        blanking _SEPARATOR_CHARS content inside a quoted literal so the
+        shell's actual argument text (e.g. a quoted leading `+` refspec)
+        stayed visible to rules -- but `_mask_literal_span` also excluded
+        the REAL newline inside that quoted span from blanking, so a
+        multi-line quoted string's second line stayed at a fresh line-start
+        and `_CMD_PREFIX`'s `\\n\\s*` alternative anchored it as if it were
+        a brand new command. A multi-line `-m` message that merely
+        mentions `git stash`, or a multi-line quoted `echo` argument that
+        mentions `git push --force`, must both stay inert -- same as their
+        single-line equivalents already do."""
+        cases = (
+            ("git commit -m 'fix\n\ngit stash was wrong'", DEFAULT_CWD),
+            ("echo 'x\ngit push --force'", DEFAULT_CWD),
+            ('git commit -m "fix\n\ngit stash was wrong"', DEFAULT_CWD),
+            ('echo "x\ngit push --force"', DEFAULT_CWD),
+        )
+        for cmd, cwd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd=cwd), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"multi-line quoted literal must abstain: {cmd!r} -> {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestHeredocBoundToItsDelimiter(RouterTestCase):
+    """F13: heredoc detection must stop at the ACTUAL terminator instead of
+    scanning `[\\s\\S]*` into whatever trailing commands follow it."""
+
+    def test_backtick_after_heredoc_terminator_abstains(self):
+        cmd = "cat <<EOF\nhello\nEOF\nprintf '%s\\n' '`literal`'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                "the backtick text is after the heredoc terminator and is safely "
+                f"single-quoted, not part of the heredoc body (F13): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_unquoted_backtick_after_real_terminator_abstains(self):
+        """F8 (round-3 redo): a regression from F13's own fix (1d4ae36) — the
+        `backticks-in-unquoted-heredoc` rule's lazy pre-backtick scan must
+        not be able to cross a REAL terminator line via a bare `|\\Z`
+        fallback. An UNQUOTED backtick that appears in real code AFTER the
+        heredoc has already closed must abstain, exactly like F13's original
+        quoted case above, not fire `prior`."""
+        cases = (
+            "cat <<EOF\nhello\nEOF\necho `date`\n",
+            "cat <<EOF\nhello\nEOF\n\nls\nX=`pwd`\n",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    "the backtick is real code after the heredoc's actual terminator, "
+                    f"not part of the (already-closed) heredoc body (F8): {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_tab_indented_dash_terminator_still_fires(self):
+        """F2 (round-2 redo): `<<-` allows the terminator line to be
+        tab-indented — the canonical use of `<<-`. The rule must not
+        require an EXACT (unindented) terminator line to match."""
+        cmd = "cat <<-EOF\n\t`cmd`\n\tEOF\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"tab-indented <<- terminator must still be recognized: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "backticks-in-unquoted-heredoc")
+
+    def test_missing_terminator_still_fires(self):
+        """F2 (round-2 redo): a heredoc with no terminator at all runs to
+        end of script — the body (and its backtick) must still be caught,
+        not silently ignored because there is no closing delimiter line."""
+        cmd = "cat <<EOF\n`cmd`\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"missing-terminator heredoc body must still be scanned: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "backticks-in-unquoted-heredoc")
+
+    def test_sequential_heredocs_each_bounded_to_own_delimiter(self):
+        """F13 (round-2 redo): two sequential single-quoted heredocs must
+        each stay bounded to their own delimiter — neither body's `git
+        stash` line is executable, so the command abstains."""
+        cmd = "cat <<'A'\ngit stash\nA\ncat <<'B'\ngit stash\nB\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"both heredoc bodies are quoted and non-executable: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_same_line_multiple_heredocs_each_bounded_to_own_delimiter(self):
+        """F13 (round-2 redo): `<<'A' <<'B'` on one line attaches the first
+        body to A and the second to B — both are quoted/non-executable."""
+        cmd = "cat <<'A' <<'B'\ngit stash\nA\ngit stash\nB\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"both heredoc bodies (same-line delimiters) are non-executable: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_command_after_heredoc_terminator_still_denies(self):
+        """F13 (round-2 redo): a real command placed AFTER the heredoc's
+        own terminator is not part of the (quoted, non-executable) body
+        and must still be evaluated normally."""
+        cmd = "cat <<'A'\nhello\nA\ngit stash\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            out = json.loads(proc.stdout)
+            self.assertEqual(
+                out["hookSpecificOutput"].get("permissionDecision"), "deny",
+                f"the trailing `git stash` is a real command outside the heredoc body: {proc.stdout!r}",
+            )
+
+
+class TestReusedHeredocDelimiterDoesNotCrossIntoASecondBlock(RouterTestCase):
+    """F13 (round 2 review, major): reusing the SAME delimiter name for two
+    separate heredocs let the rule's lazy pre-backtick scan cross the
+    first heredoc's own (real) terminator line, run through an unrelated
+    real command in between, and land on the SECOND heredoc's terminator
+    as if it belonged to the first. Neither heredoc body here actually
+    contains a backtick -- the backtick is in a genuinely separate command
+    sitting between the two blocks."""
+
+    def test_backtick_between_two_same_named_heredocs_abstains(self):
+        cmd = "cat <<EOF\nhello\nEOF\necho `date`\ncat <<EOF\nbye\nEOF\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                "the backtick command sits between two heredocs, in neither body "
+                f"(F13 round 2): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_backtick_genuinely_inside_the_first_of_two_same_named_heredocs_still_fires(self):
+        # Regression guard: a real in-body backtick must still be caught
+        # even when a second, same-named heredoc follows later.
+        cmd = "cat <<EOF\nhello `date`\nEOF\ncat <<EOF\nbye\nEOF\n"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"a genuine in-body backtick must still fire (F13 round 2): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "backticks-in-unquoted-heredoc")
+
+
+class TestNoQuadraticRescanOnLargeAllExemptInput(RouterTestCase):
+    """F14: `_window_bounds` must not rebuild the full separator list for
+    every candidate occurrence — a large all-exempt command must still
+    finish inside the existing 5s hang ceiling shared with
+    TestLatencySanityCeiling; no tighter wall-clock number is asserted
+    here (that would reintroduce F18)."""
+
+    def test_thousands_of_exempt_stash_list_invocations_stays_under_hang_ceiling(self):
+        # Empirically: 5000 repeats already exceeds a 5s timeout against the
+        # current (quadratic) implementation.
+        cmd = "git stash list; " * 5000
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir, timeout=5)
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on a large all-exempt "
+                    "input — quadratic rescanning in _window_bounds (F14)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+    def test_thousands_of_exempt_stash_list_invocations_with_leading_cd_stays_under_hang_ceiling(self):
+        """F14 (review round redo): `_window_bounds` was fixed, but
+        `_effective_checkout` -- called once per candidate occurrence for
+        any rule with `unless_cwd` (git-stash-shared-checkout) -- still
+        rescans `scan_text[:match_start]` with `_CD_LOCATE_RE` from
+        scratch on EVERY candidate, and once a `cd` is found,
+        `_cd_reaches` slices `paren_depths[token_end:target_pos+1]` and
+        calls `min()` over it, again per candidate. A single leading `cd`
+        followed by thousands of exempt `git stash list` invocations (the
+        cwd is a `/worktrees/` checkout, matching the real F4 scenario)
+        makes both of those per-candidate scans quadratic in the number of
+        invocations. Empirically: 6000 repeats already exceeds a 5s
+        timeout against the current implementation. No tighter wall-clock
+        number is asserted here (that would reintroduce F18)."""
+        cmd = "cd /shared && " + "git stash list; " * 6000
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on a large all-exempt "
+                    "input with a leading `cd` — quadratic rescanning in "
+                    "_effective_checkout/_cd_reaches (F14)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+    def test_thousands_of_leading_cds_stays_under_hang_ceiling(self):
+        """F14 (redo 2): the previous fix (19821fc) precomputes each `cd`'s
+        own reach data once, but `_precompute_cd_reach_info` still walks
+        forward from `token_end` to the end of `paren_depths` looking for
+        where the enclosing depth first drops, for EVERY `cd` it finds. At
+        depth 0 with no real parens anywhere, that walk never terminates
+        early, so thousands of `cd`s (not just thousands of candidates
+        after one `cd`) are themselves quadratic. Empirically: 12000
+        repeats already exceeds a 5s timeout against the 19821fc
+        implementation. No tighter wall-clock number is asserted here
+        (that would reintroduce F18)."""
+        cmd = "cd /shared; " * 12000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on thousands of leading "
+                    "`cd`s — quadratic per-cd forward scan in "
+                    "_precompute_cd_reach_info (F14 redo 2)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+    def test_thousands_of_cds_with_command_substitution_argument_stays_under_hang_ceiling(self):
+        """Review_b G7 (round 5): `_read_token`'s unquoted-word scanner stops
+        at the FIRST unescaped `)` it sees, so a `cd $(pwd)` argument's own
+        token boundary lands one character INSIDE the substitution (at its
+        closing paren) instead of past it. `_precompute_cd_reach_info` then
+        sees `paren_depths[token_end] != enclosing` for every such `cd`
+        (the ')' hasn't been processed yet at that index) and falls back to
+        the linear `break_pos` walk for EVERY one of them -- and since the
+        net depth after a balanced `$(...)` never actually drops below
+        `enclosing` anywhere later in the text, that walk runs all the way
+        to the end of `paren_depths` each time, making thousands of `cd
+        $(...)` invocations quadratic again despite the F14 redo-2 fix.
+        Empirically: 12000 repeats already exceeds a 5s timeout at HEAD (a
+        single leading `cd $(pwd)` is not even required -- every repeat
+        re-triggers the bug on its own). No tighter wall-clock number is
+        asserted here (that would reintroduce F18)."""
+        cmd = "cd $(pwd); " * 12000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on thousands of `cd "
+                    "$(...)` invocations -- _read_token's unquoted-word scan "
+                    "stops mid-substitution at the first ')', forcing the "
+                    "_precompute_cd_reach_info linear fallback walk (G7)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+    def test_thousands_of_comment_obscured_parens_in_substitution_stays_under_hang_ceiling(self):
+        """Review_b G8 (round 6): `_find_matching_paren` (the scanner G7
+        made `_read_token` rely on for every `cd $(...)` occurrence) has no
+        `#`-comment awareness of its own. A `(` that only ever appears
+        inside a real shell comment -- entirely valid, executable shell,
+        since a real shell comments to end-of-line the same way inside a
+        `$(...)` body as at top level -- was counted as a real unmatched
+        paren. That kept this scanner's LOCAL depth above zero for the rest
+        of the substitution's own real close, forcing it to keep scanning
+        character-by-character all the way to the end of the text looking
+        for one more `)`. `_precompute_cd_reach_info` calls this once per
+        `cd $(...)` occurrence, so that full-remaining-text scan repeated
+        for every occurrence made thousands of them quadratic again despite
+        the G7 fix. Empirically: 6000 repeats already exceeds a 5s timeout
+        at HEAD before the G8 fix. No tighter wall-clock number is asserted
+        here (that would reintroduce F18)."""
+        cmd = "cd $(pwd # comment (unbalanced\n); " * 6000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on thousands of "
+                    "comment-obscured-paren `cd $(...)` invocations -- "
+                    "_find_matching_paren has no #-comment awareness (G8)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+    def test_thousands_of_parameter_length_expansions_in_substitution_stays_under_hang_ceiling(self):
+        """Review round 9, F11: the comment predicate shared by
+        `executable_mask` and `_find_matching_paren` treats a `#` preceded by
+        `{` as a comment start. Bash's parameter-LENGTH expansion opens with
+        a dollar sign, then an open brace, then a hash mark, then a name,
+        then a close brace (giving the length of the named variable) -- and
+        that hash mark sits directly after the open brace, so the predicate
+        misreads it as a comment opener. Inside a `cd $(...)` argument this
+        means `_find_matching_paren` thinks everything from that hash mark
+        onward (including the substitution's own real closing paren) is
+        commented out, so it never finds a local close and keeps scanning
+        character-by-character to the end of the text -- and since
+        `_read_token`/`_precompute_cd_reach_info` calls this once per such
+        `cd`, thousands of them go quadratic again despite the F14/G7/G8
+        fixes. No tighter wall-clock number is asserted here (F18)."""
+        cmd = "cd $(echo ${#HOME}); " * 6000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on thousands of "
+                    "parameter-length-expansion `cd $(...)` invocations -- "
+                    "the shared comment predicate misreads a hash mark right "
+                    "after an open brace as a comment start (F11)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+    def test_thousands_of_immediately_closed_subshell_cds_stays_under_hang_ceiling(self):
+        """F14 (round 2 review, major): `_next_lower_paren_depth` made each
+        `cd`'s OWN `break_pos` O(1), but `_precompute_cd_reach_info` still
+        asked `_base_cwd_before` "what does the closest EARLIER `cd`
+        reach?" for every new `cd` with an unbounded backward walk. For
+        `(cd /tmp); ` repeated thousands of times, each `cd` sits in its
+        own subshell that closes (expiring its `break_pos`) immediately
+        after it, so by the time the next `cd` asks, every prior entry has
+        already expired and the walk runs all the way back to index 0 --
+        n(n-1)/2 visits total (7,998,000 for 4,000 of them, per the
+        reviewer's own count). Empirically: 20000 repeats already exceeds
+        a 5s timeout against the pre-fix implementation. No tighter
+        wall-clock number is asserted here (that would reintroduce F18)."""
+        cmd = "(cd /tmp); " * 20000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=5,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 5s hang ceiling on thousands of "
+                    "immediately-closed-subshell `cd`s -- _base_cwd_before's "
+                    "unbounded backward walk in _precompute_cd_reach_info's own "
+                    "self-referential lookup (F14 round 2)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+    def test_thousands_of_closed_subshells_after_one_persistent_leading_cd_stays_under_hang_ceiling(self):
+        """F14 (round 3 review, blocker): the round-2 `alive_from`
+        watermark only ever advances past a dead PREFIX -- amortized O(1)
+        when entries die in creation order, but a leading UNGUARDED `cd`
+        (no `break_pos`/`ceiling` at all, so it is alive forever) sitting
+        before thousands of immediately-closed-subshell `cd`s blocks the
+        watermark from ever advancing past index 0, no matter how many
+        later entries are dead: every self-lookup still walks backward
+        through all of them to confirm they're dead before reaching the
+        one entry that was never going anywhere. A focused count: 8,002,000
+        visits for 4,000 repetitions, per the reviewer's own reproduction.
+        Empirically: 30000 repeats already exceeds an 8s timeout against
+        the round-2 (`alive_from`-only) implementation. No tighter
+        wall-clock number is asserted here (that would reintroduce F18)."""
+        cmd = "cd /tmp; " + "(cd /tmp); " * 30000 + "true"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            try:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"),
+                    ledger_dir,
+                    timeout=8,
+                )
+            except subprocess.TimeoutExpired:
+                self.fail(
+                    "router exceeded the 8s hang ceiling on thousands of "
+                    "immediately-closed-subshell `cd`s following one persistent "
+                    "leading `cd` -- the alive_from watermark can never advance "
+                    "past a permanently-alive leading entry (F14 round 3)"
+                )
+            self.assertEqual(proc.returncode, 0)
+            self.assertEqual(proc.stdout.strip(), "")
+
+
+class TestPipeTailScopedToTestCommandPipeline(RouterTestCase):
+    """F20: the masked-test-exit prior must only fire when the
+    `| tail/grep/head` pipeline belongs to the test command's OWN pipeline,
+    not an unrelated command chained after it with `;` or `&&`."""
+
+    def test_unrelated_piped_command_after_test_command_abstains(self):
+        cases = (
+            "pytest -q; printf 'finished\\n' | tail -5",
+            "pytest -q && printf 'finished\\n' | tail -5",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"the tail pipeline belongs to printf, not the test command (F20): {cmd!r} -> {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestCommandSubstitutionParenMatchingIsQuoteAware(RouterTestCase):
+    """Review G1 (review_b round 1): `_find_matching_paren`'s flat depth
+    counter treated ANY `)` character as closing a `$(...)` span, including
+    one that only appears inside a quoted literal INSIDE the substitution.
+    A real shell tracks nested quoting when it looks for the substitution's
+    true closing paren, so a `)` inside `'...'`/`"..."` never ends it early."""
+
+    def test_quoted_paren_inside_substitution_does_not_end_it_early(self):
+        """The quoted `)` at the start of `$(echo ")")` is NOT the real
+        closing paren; a real shell keeps the substitution open through the
+        actual final `)`. Everything after that real close is still
+        literal text inside the OUTER double quotes, so `git stash` here
+        never executes and the command must abstain. The buggy flat
+        counter mistook the quoted `)` for the real close, which spilled
+        `git stash` out into unquoted (executable) territory -> false deny."""
+        cmd = 'echo "$(echo ")") ; git stash"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"git stash here is literal text inside the still-open outer quotes (G1): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_quoted_paren_inside_substitution_does_not_hide_a_real_stash(self):
+        """`$(echo ')' ; git stash)` is ONE substitution (a real shell
+        tracks the quoted `)` as part of the single-quoted literal, not a
+        closer) that genuinely runs `git stash` as its second command. The
+        buggy flat counter closed the substitution early at the quoted `)`,
+        which caused the real `git stash` text to be masked as ordinary
+        double-quoted literal content -> stash bypass (abstain instead of
+        deny)."""
+        cmd = "echo \"$(echo ')' ; git stash)\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must still deny (G1): a real substitution runs git stash")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestPipefailExemptionRespectsOrdering(RouterTestCase):
+    """Review G2 (review_b round 1): the shell-wide pipefail exemption for
+    `pipe-tail-masks-exit` checked `unless_match` anywhere in the whole
+    text, ignoring order. `set -o pipefail` only protects pipelines that
+    run AFTER it -- a pipefail enabled AFTER an already-unsafe pipeline
+    must never retroactively suppress that pipeline's prior. (Reading
+    PIPESTATUS is a different, position-agnostic idiom and must keep
+    working regardless of order -- TestPipeTailAbstainsWhenStatusCaptured.)
+    """
+
+    def test_pipefail_set_after_the_risky_pipeline_does_not_suppress_it(self):
+        cmd = "pytest -q | tail -5; set -o pipefail"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"pipefail enabled AFTER the pipe must not suppress its prior (G2): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "pipe-tail-masks-exit")
+
+    def test_pipefail_set_before_still_abstains(self):
+        """Regression guard: the existing forward case (F10) must not break."""
+        cmd = "set -o pipefail; cargo test --locked | tail -20"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", cmd)
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestInvocationExemptionAnchoredNotSearched(RouterTestCase):
+    """Review G3 (review_b round 1): the invocation-local stash exemption
+    searched the WHOLE "same command" window for `unless_match`, so an
+    arbitrary UNQUOTED argument elsewhere in the invocation (e.g. an
+    unquoted `-m` message) could contain safe-looking text and wrongly
+    exempt a genuinely dangerous `git stash push`. The exemption must be
+    checked CONTIGUOUSLY from the match's own subcommand position, never
+    searched across unrelated trailing arguments."""
+
+    def test_unquoted_trailing_argument_does_not_shield_a_dangerous_push(self):
+        cmd = "git stash push -m stash pop"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestSubstitutionMaskingIsRecursive(RouterTestCase):
+    """Review G1 (review_b round 2): `_mask_double_quoted` skips over a
+    `$(...)`/backtick substitution's ENTIRE body via `_find_matching_paren`
+    without recursively masking quoted literals NESTED inside it. A
+    single-quoted STRING ARGUMENT inside the substitution that merely
+    CONTAINS `; git stash` text -- never executed as a command -- was
+    therefore left fully visible to the stash rule, firing a false deny.
+    The fix must recursively scan executable regions inside `$(...)`/
+    backtick spans (nested quoting stays masked, nested `$(...)`/backticks
+    stay executable) instead of leaving the whole span untouched."""
+
+    def test_quoted_literal_inside_substitution_does_not_false_deny(self):
+        """`printf '%s' '; git stash'` never runs `git stash` -- the text is
+        a single-quoted string argument to printf. The buggy flat skip over
+        the substitution left that quoted literal fully visible to the
+        stash rule, firing a false deny."""
+        cmd = "echo \"$(printf '%s' '; git stash')\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"quoted literal text inside the substitution is never executed (G1): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_stash_inside_substitution_still_denies(self):
+        """Regression guard: an ACTUAL `git stash` invocation inside a
+        `$(...)` substitution (not inside a nested quoted literal) must
+        keep denying once the masking is made recursive."""
+        cmd = 'echo "$(git stash)"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must still deny (G1 regression guard)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestFindMatchingParenIsCommentAware(RouterTestCase):
+    """Review_b G8 (round 6): `_find_matching_paren` had no `#`-comment
+    awareness, so a quote or paren character that only ever appears inside
+    a real shell comment inside a `$(...)` body was treated as real syntax
+    -- see `TestNoQuadraticRescanOnLargeAllExemptInput` for the quadratic
+    half of this finding; this class pins the correctness half."""
+
+    def test_quote_in_comment_inside_substitution_does_not_extend_cd_reach(self):
+        """`(cd $(pwd # it's fine\\n) ); git stash` is valid shell: the `cd`
+        runs inside a subshell that closes (the outer `)`) before `git
+        stash` runs, so it can never affect the outer shell's cwd, which
+        stays the payload's own `/worktrees/` cwd -- exempt, must abstain.
+        The buggy scanner treated the comment's apostrophe as opening a
+        real quoted span, silently pairing it with an unrelated apostrophe
+        it doesn't have here at all (so it consumed to end-of-text
+        instead), which threw off the reach data enough to make this `cd`
+        look like it still reached the later `git stash` -- an incorrect
+        deny on an exempt worktree cwd."""
+        cmd = "(cd $(pwd # it's fine\n) ); git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"the cd is subshell-scoped and the cwd is a worktree -- must abstain (G8): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_shared_checkout_cd_still_denies_alongside_a_commented_substitution(self):
+        """Regression guard: a genuine `cd` into a shared checkout earlier
+        in the same command must still deny, even with an unrelated
+        comment-bearing `$(...)` substitution elsewhere in the text."""
+        cmd = "cd $(pwd # it's fine\n); cd /shared/checkout; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/test-repo"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must still deny (G8 regression guard)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestCommentPredicateExcludesParameterLengthExpansion(RouterTestCase):
+    """Review round 9, F11: the shared comment predicate (used by both
+    `executable_mask` and `_find_matching_paren`) treats a `#` preceded by
+    `{` as a comment start. Bash's parameter-LENGTH expansion (dollar sign,
+    open brace, hash mark, name, close brace -- the length of the named
+    variable) puts a hash mark directly after an open brace with no real
+    comment involved, so the predicate wrongly blanks the rest of the line
+    -- including a real `git stash` that follows on the same line -- as if
+    it were commented out. A real shell comment still needs the hash mark
+    preceded by whitespace/start-of-line/a real separator; `{` immediately
+    before `#` is never that on its own (a bare `{` only reserves as the
+    command-grouping keyword when followed by whitespace, and here it is
+    immediately followed by `#`)."""
+
+    def test_parameter_length_expansion_does_not_mask_a_later_stash(self):
+        cmd = "echo ${#HOME}; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(
+                proc.stdout.strip(),
+                f"{cmd!r} must deny (F11): the hash mark is a length "
+                f"expansion, not a comment opener, so the trailing "
+                f"`git stash` is real executable text",
+            )
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_positional_parameter_count_expansion_does_not_mask_a_later_stash(self):
+        cmd = "[ ${#@} -gt 0 ] && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must deny (F11)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_plain_variable_reference_control_still_denies(self):
+        """Regression guard: the unaffected control case from the ledger."""
+        cmd = "echo $HOME; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must deny")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestSubstitutionScannerStateIsConsistent(RouterTestCase):
+    """G3 (spec-level review, reopen generation 2, contract T8706x0j0):
+    `_mask_quotes_recursive` -- the scanner used for text found INSIDE a
+    `$(...)`/backtick substitution that is itself nested inside a
+    double-quoted span -- tracks single/double quotes and further nested
+    substitutions, but has no `#`-comment awareness (unlike the top-level
+    `executable_mask` loop and `_find_matching_paren`, both of which share
+    `_is_comment_start`) and no heredoc awareness at all. That inconsistency
+    cuts both ways: text that should stay inert (a comment, a QUOTED
+    heredoc body) leaks through as visible/executable and trips a false
+    deny, while a genuinely executable multi-line backtick substitution
+    inside a heredoc body gets its second line masked away by
+    `_consume_heredoc_body`'s per-line, non-continuing treatment of an
+    still-open backtick span, hiding a real invocation."""
+
+    def test_comment_inside_double_quoted_substitution_abstains(self):
+        """A `#` inside `$(...)` nested in double quotes opens a real shell
+        comment that runs to the end of the line -- the `; git stash` text
+        after it is never executed. `_mask_quotes_recursive` has no
+        `#`-comment case, so that text (including the real `;` separator
+        character) stays fully visible, and the router mistakes it for a
+        genuinely anchored `git stash` invocation."""
+        cmd = 'x="$(true # ; git stash\n)"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"commented-out text inside a dq substitution must abstain (G3): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_quoted_heredoc_inside_double_quoted_substitution_abstains(self):
+        """A heredoc with a QUOTED delimiter (`<<'H'`) makes its whole body
+        inert, same as any other single-quoted literal -- but
+        `_mask_quotes_recursive` has no heredoc case at all, so the body
+        text `git stash` is left fully visible/executable when the heredoc
+        sits inside a `$(...)` nested in double quotes."""
+        cmd = "x=\"$(cat <<'H'\ngit stash\nH\n)\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"a quoted heredoc body inside a dq substitution must abstain (G3): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_multiline_backtick_substitution_in_heredoc_body_still_denies(self):
+        """A real shell treats a backtick command substitution as spanning
+        multiple lines -- the embedded real newline is just whitespace
+        inside the substitution, so `` `git\\nstash` `` genuinely executes
+        `git stash`. `_consume_heredoc_body` masks an unquoted heredoc body
+        one LINE at a time via `_mask_span_preserving_substitutions`, which
+        has no memory of an still-open backtick span carried over from the
+        previous line -- so the second line's `stash` text (no visible
+        opening backtick on ITS line) gets masked away as ordinary literal
+        text, and the stash-specific deny rule never sees a complete `git
+        stash` to match against."""
+        cmd = "x=$(cat <<H\n`git\nstash`\nH\n)"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(
+                proc.stdout.strip(),
+                f"{cmd!r} must not abstain (G3): the backtick substitution "
+                f"genuinely executes `git stash` across the line break",
+            )
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_escaped_single_quote_prefix_before_stash_still_denies(self):
+        """`\\'` outside any quoting is bash for a LITERAL apostrophe
+        character, not the start of a single-quoted span -- the shell still
+        runs the `;`-separated `git stash` that follows as a normal second
+        command. The top-level `executable_mask` loop has no backslash-
+        escape awareness before deciding a bare `'` opens a quoted span, so
+        it treats this `'` as a real (unterminated) single-quoted literal
+        and masks the real `;` separator that follows to a space --
+        breaking `_CMD_PREFIX`'s anchor requirement for the genuine `git
+        stash` invocation and hiding it."""
+        cmd = "echo \\'; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(
+                proc.stdout.strip(),
+                f"{cmd!r} must not abstain (G3): the escaped quote is a "
+                f"literal apostrophe, not a real quote opener",
+            )
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_same_line_content_after_a_heredoc_opener_is_still_scanned(self):
+        """A-R5 (round 2 reopen review): `_mask_quotes_recursive`'s heredoc
+        branch jumped straight from the END of the `<<DELIM` match to
+        consuming the body starting at the NEXT newline -- any text on the
+        SAME line, between the delimiter and that newline, was never
+        scanned at all (unlike the top-level `executable_mask` loop, which
+        keeps scanning the rest of the opener line). A single-quoted
+        argument sitting there (`<<EOF 'x; git stash'`, a real filename
+        argument to `cat` -- nothing executed) stayed completely unmasked,
+        so its `;` read as a genuine separator and falsely anchored a new
+        command."""
+        cmd = "x=\"$(cat <<EOF 'x; git stash'\nbody\nEOF\n)\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"a quoted argument on the heredoc opener line must abstain (A-R5): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_heredoc_masking_stays_bounded_to_the_substitutions_own_end(self):
+        """B-R2 (round 2 reopen review): the heredoc branch inside
+        `_mask_quotes_recursive` calls `_consume_heredoc_body` with no
+        `end` bound at all, so it can mask text WELL PAST the enclosing
+        `$(...)`'s own closing paren -- `i` is clamped to `end` afterward,
+        but `result` (the actual masking) is not. `_find_matching_paren`
+        has no heredoc awareness, so it locates the substitution's
+        "close" at the first raw `)` character it sees (here, right after
+        the heredoc opener's own quoted delimiter body) -- a real trailing
+        `; git stash` sitting just past that point was masked away as if
+        it were still inside the (already-closed, from this scanner's
+        point of view) heredoc body, wrongly abstaining on text a real
+        shell still executes."""
+        cases = (
+            "echo \"$(cat <<'H'\nx)\"; git stash\nH\n",
+            'echo "$(cat <<H\nx)"; git stash\n',
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (B-R2)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestBacktickAnchorOnlyOnOpener(RouterTestCase):
+    """A-R1 (round 2 reopen review): `_CMD_PREFIX` anchors command position
+    on a bare backtick (G3, spec-level review, reopen generation 2) because
+    an OPENING backtick genuinely starts a real substitution's script
+    text. A backtick is the SAME character used to CLOSE that
+    substitution, though, and nothing blanked the closing one -- so
+    `_CMD_PREFIX` anchored there too, treating ordinary text glued to a
+    substitution's output (inside double quotes, or as further arguments
+    to the same unquoted command) as if it started a brand new command.
+    None of these examples run a second command at all -- the backtick
+    substitution's output is just more text/arguments for the SAME
+    command."""
+
+    CASES = (
+        'echo "`date` git stash"',
+        "echo `date` git stash",
+        'git commit -m "`date` git push --force origin main"',
+        "echo `hostname` 'git stash'",
+    )
+
+    def test_text_after_a_closing_backtick_never_anchors_a_new_command(self):
+        for cmd in self.CASES:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"text after a closing backtick must not fire (A-R1): {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_real_command_substitution_at_an_opening_backtick_still_fires(self):
+        """Regression guard: the fix must blank only the CLOSING backtick --
+        a genuine substitution opened right after a real separator must
+        still anchor and fire normally."""
+        cmd = "echo hi; `git stash`"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_comment_inside_a_backtick_substitution_is_bounded_by_its_own_closer(self):
+        """A-R2 (round 2 reopen review, generation 3): a real shell treats a
+        `#` inside a backtick substitution as a genuine comment, but bounds
+        it by the substitution's own closing backtick -- unlike `$(...)`,
+        where the shell keeps reading past a `#` on the SAME physical line
+        looking for the substitution's own close, a backtick substitution's
+        lexer stops the comment the instant it hits the matching closing
+        backtick (confirmed: `x=\\`echo hi # c\\`; echo RAN` prints `RAN
+        x=hi` -- `echo RAN` genuinely runs). `executable_mask`'s `#` branch
+        has no such bound: it always blanks to the next real newline, so
+        when it fires while `in_backtick` is still open it swallows the
+        closing backtick itself (and everything after it on the line,
+        including a real trailing `git stash`) as if all of it were inert
+        comment text."""
+        cmd = "x=`echo hi # c`; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-R2)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_comment_inside_a_backtick_substitution_that_runs_past_a_newline_still_abstains(self):
+        """Regression guard: when the `#` comment is NOT followed by the
+        closing backtick on the same line (a real newline comes first),
+        the ordinary end-of-line bound must still apply -- the fix must
+        bound the comment by whichever comes first, not unconditionally
+        by the next backtick regardless of an intervening newline."""
+        cmd = "x=`echo hi # git stash\n`; echo done"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"a comment ending at a real newline inside backticks must abstain (A-R2 regression guard): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestBacktickInsideSingleQuotesIsInert(RouterTestCase):
+    """B-R1 (round 2 reopen review): a backtick inside a SINGLE-quoted span
+    is a plain literal character -- single quotes suppress ALL shell
+    expansion, including backtick command substitution, so it never opens
+    or closes anything real. `_mask_literal_span` only blanked the quote
+    delimiter itself and `_SEPARATOR_CHARS`, leaving backticks fully
+    visible, so `_CMD_PREFIX`'s bare-backtick alternative still anchored a
+    dangerous-looking word right after one -- even though the whole
+    backtick-quoted phrase is one inert, single-quoted argument."""
+
+    CASES = (
+        "git commit -m 'document `git stash` usage'",
+        "gh pr comment 5 --body 'F3 fixed; never use `git push --force` on stacked branches'",
+        "git commit -m 'docs: explain `git reset --hard` recovery'",
+        "printf '%s\\n' 'run `git stash` first'",
+    )
+
+    def test_backticked_mention_inside_single_quotes_abstains(self):
+        for cmd in self.CASES:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"a backtick-quoted mention inside single quotes must "
+                    f"abstain (B-R1): {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestStashExemptionEffectiveCheckout(RouterTestCase):
+    """F4 (arrra/hex PR #5 round 1): `unless_cwd` on git-stash-shared-checkout
+    must track the EFFECTIVE checkout of each invocation, not just the hook's
+    payload cwd. Running from a /worktrees/ cwd must not exempt a stash that
+    actually targets a different (shared) checkout via `-C` or a preceding
+    `cd`; conversely a stash that genuinely resolves to a /worktrees/
+    checkout must still abstain even when the hook's own cwd is not itself a
+    worktree. A cwd substring alone must never exempt another target."""
+
+    WORKTREE_CWD = "/tmp/hex-home/.boi/v2/worktrees/Scnfz8k1f/T7w2t3bzf"
+
+    def test_dash_c_to_shared_checkout_denies_even_from_worktree_cwd(self):
+        cmd = "git -C /shared/checkout stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_cd_to_shared_checkout_denies_even_from_worktree_cwd(self):
+        cmd = "cd /shared/checkout && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_genuine_worktree_local_checkout_still_abstains(self):
+        cmd = f"git -C {self.WORKTREE_CWD} stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=DEFAULT_CWD), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"genuine worktree-local stash must abstain (F4): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_unresolvable_target_keeps_protection(self):
+        cmd = "git -C $SHARED_CHECKOUT stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F4, unresolved target)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_semicolon_separated_cd_chain_to_shared_checkout_denies(self):
+        """F1 (review round 1 redo): _CD_RE captured `(\\S+)` which swallows a
+        trailing `;`, so `cd /worktrees/x; cd /shared/checkout && git stash`
+        had its second `cd` invisible (no leading separator left to match)
+        and the stale first `cd` exempted the stash. The capture must stop
+        at `;`/`&`/`|`/`)` so every `cd` in the chain is seen."""
+        cmd = "cd /worktrees/x; cd /shared/checkout && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_semicolon_separated_cd_chain_to_worktree_still_abstains(self):
+        """Same capture fix as above, but the near miss: the chain's last
+        `cd` genuinely resolves to a /worktrees/ checkout, so it must keep
+        abstaining even though the fix changes what the regex captures."""
+        cmd = f"cd /worktrees/x; cd {self.WORKTREE_CWD} && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=DEFAULT_CWD), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"genuine worktree-local chained cd must abstain: {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_quoted_cd_to_shared_checkout_denies_even_from_worktree_cwd(self):
+        """F8 (review round 2 redo): `executable_mask` blanks quoted
+        argument content to spaces BEFORE `_effective_checkout` ever sees
+        it, so a quoted `cd` target found no resolvable path, fell back to
+        the hook's own /worktrees/ payload cwd, and wrongly exempted. A
+        single- or double-quoted literal must resolve to its real
+        (masked-away) content and still deny.
+
+        NOTE: `git -C "<quoted>" stash` is a SEPARATE, pre-existing gap, not
+        part of this regression -- verified by running this exact command
+        against commit ac89538 (the commit the review cites as "denied
+        before"): it abstains there too, because `_GIT_GLOBAL_OPTS`'s
+        `-C\\s+\\S+` can never match through a masked (spaced-out) quoted
+        argument in the rule's own top-level `match` regex, independent of
+        `_effective_checkout`. Fixing that needs a new mechanism (a
+        quote-preserving splice for @GITOPTS@ matching) beyond this
+        finding's scope -- see the adjudication."""
+        cases = (
+            "cd '/shared/checkout' && git stash",
+            'cd "/shared/checkout" && git stash',
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F8)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_quoted_variable_cd_keeps_protection(self):
+        """F8: a double-quoted variable still expands at runtime, so it
+        can't be resolved to a literal path -- uncertain must keep
+        protection (deny), the same as the unquoted `$VAR` case."""
+        cases = ('cd "$DIR" && git stash',)
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F8, unresolved target)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_quoted_worktree_local_near_miss_still_abstains(self):
+        """F8 near miss: a quoted `cd` target that genuinely resolves to a
+        /worktrees/ checkout must keep abstaining -- the fix must recover
+        the real literal, not just always deny once quotes are involved."""
+        cmd = "cd '/worktrees/x/sub' && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd=DEFAULT_CWD), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"genuine quoted worktree-local stash must abstain (F8): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_relative_cd_within_worktree_cwd_still_abstains(self):
+        """F4 (review round 1 redo): a relative `cd sub` from a /worktrees/
+        payload cwd is resolvable against that cwd (not uncertain) and stays
+        inside the same worktree checkout, so it must abstain -- the prior
+        fix over-denied this by treating the unresolved relative literal as
+        a non-worktree target."""
+        cmd = "cd sub && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd=self.WORKTREE_CWD), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"relative cd within a worktree checkout must abstain (F4): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_subshell_local_cd_does_not_leak_to_a_later_invocation(self):
+        """G1 (review_b round 1): `_effective_checkout` picked up the LAST
+        `cd` anywhere earlier in the text, even one scoped to a `(...)`
+        subshell that already closed. A subshell-local `cd` must not
+        exempt a stash that runs OUTSIDE that subshell, back in the real
+        (shared) checkout."""
+        cmd = "(cd /worktrees/x); git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_or_guarded_cd_does_not_leak_to_its_failure_branch(self):
+        """G1: `cd X || match` only reaches `match` when the `cd` FAILED --
+        meaning the directory never actually changed. The pre-`cd` cwd (the
+        real, shared checkout) must still govern, not the attempted target."""
+        cmd = "cd /worktrees/x || git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_genuine_worktree_local_subshell_still_abstains(self):
+        """G1 near miss: when the `cd` AND the stash both run inside the
+        SAME subshell, the subshell-local checkout genuinely governs the
+        stash too -- must keep abstaining, not over-deny once subshell
+        scoping is enforced."""
+        cmd = "(cd /worktrees/x; git stash)"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"cd and stash inside the same subshell must abstain (G1): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_double_quoted_newline_does_not_fake_a_cd(self):
+        """G4 (review_b round 2): `_mask_double_quoted` excluded the REAL
+        newline inside a double-quoted span from blanking (only
+        `_mask_literal_span`, used for single quotes, was fixed for R4), so
+        a double-quoted string's second line stayed at a fresh line-start
+        and `_CMD_PREFIX`'s `\\n\\s*` alternative anchored `cd
+        /worktrees/x` inside the quotes as a brand new command --
+        `_effective_checkout` then picked up that FAKE `cd` and wrongly
+        exempted a real `git stash` that runs from an actual shared
+        checkout with no real `cd` at all."""
+        cmd = 'echo "x\ncd /worktrees/x"; git stash'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_double_quoted_backslash_newline_does_not_fake_a_cd(self):
+        """G4 (review_b round 2, re-opened): `_mask_double_quoted`'s
+        backslash-escape branch special-cased `\\<newline>` (a real shell
+        line continuation -- the shell deletes both characters and joins
+        the two source lines into one logical line) by leaving BOTH the
+        backslash and the newline unmasked, so the general `_SEPARATOR_CHARS`
+        branch (which blanks a bare embedded newline, fixed for the first
+        G4) never got a chance to run on this one. The unmasked real
+        newline still puts a fresh line-start inside the quoted span, so
+        `_CMD_PREFIX`'s `\\n\\s*` alternative anchors `cd /worktrees/x` as
+        a brand new command and `_effective_checkout` wrongly treats it as
+        a real `cd`, exempting a `git stash` that actually runs from a
+        real shared checkout with no real `cd` at all. A harmless shell
+        mock confirms the quoted `cd` line never actually executes -- the
+        echo just prints `xcd /worktrees/x` as one line."""
+        cmd = 'echo "x\\\ncd /worktrees/x"; git stash'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_dash_c_dot_after_cd_resolves_against_effective_checkout(self):
+        """G2 (spec-level review, reopen generation 2): `_effective_checkout`
+        resolves a `-C <path>` global option by calling
+        `_resolve_against_cwd(value, payload_cwd)` -- always against the raw
+        hook PAYLOAD cwd, never against whatever effective directory an
+        earlier `cd` in the same command already established. From a
+        /worktrees/ payload cwd, `cd /shared/checkout && git -C . stash`
+        genuinely targets `/shared/checkout` (`.` resolves relative to the
+        shell's CURRENT directory after the `cd`, not the hook's payload
+        cwd) and must deny -- but the relative `.` gets joined against the
+        payload cwd instead, resolving back to the exempt /worktrees/ path
+        and wrongly abstaining."""
+        cmd = "cd /shared/checkout && git -C . stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G2)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_chained_relative_cd_resolves_against_the_prior_cd_not_payload_cwd(self):
+        """A-R2 (round 2 reopen review): `_precompute_cd_reach_info` always
+        resolved a relative `cd` target against the raw hook PAYLOAD cwd
+        (`_resolve_against_cwd(value, payload_cwd)`), never against
+        whatever effective directory an EARLIER `cd` in the same command
+        already established. From a /worktrees/ payload cwd, a relative
+        `cd` chained after a `cd /shared/checkout` genuinely stays inside
+        /shared/... (the shell's real current directory after the first
+        `cd`, not the hook's payload cwd) -- but resolving each `cd`
+        independently against payload_cwd instead joined the relative
+        target back onto /worktrees/ and wrongly exempted."""
+        cases = (
+            "cd /shared/checkout && cd . && git stash",
+            "cd /shared && cd checkout && git stash",
+            "cd /shared/checkout; cd ../other; git stash",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-R2)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_dash_c_folds_left_to_right_like_real_git(self):
+        """A-R3/B-R3 (round 2 reopen review): git(1) interprets each
+        subsequent non-absolute `-C <path>` relative to the PRECEDING `-C
+        <path>`, not the shell's cwd. `_effective_checkout` read only the
+        LAST `-C` occurrence (`c_locates[-1]`), so a leading absolute `-C`
+        followed by a relative one (`-C /shared/checkout -C .`) lost the
+        absolute anchor entirely and the relative `.` resolved against the
+        hook's payload/cd cwd instead -- from a /worktrees/ cwd, that
+        wrongly abstained a stash that git(1) genuinely runs in
+        /shared/checkout."""
+        cases = (
+            ("git -C /shared/checkout -C . stash", "/worktrees/review"),
+            ("git -C /shared -C . stash", "/Users/x/worktrees/a"),
+        )
+        for cmd, cwd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd=cwd), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-R3/B-R3)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_cd_reaches_past_its_own_or_guards_failure_branch(self):
+        """A-R4 (round 2 reopen review): `_precompute_cd_reach_info` marked
+        a `cd` immediately followed by `||` as permanently `guarded` --
+        excluded from reaching ANYTHING later, even a real command well
+        past the `||`'s own right-hand operand. A real shell only skips the
+        `cd`'s effect for that operand itself (`cd X || <fallback>`); once
+        a `;`/newline ends the OR-compound, the `cd`'s effect (when it
+        succeeded) governs every later command normally -- so `cd
+        /shared/checkout || exit 1; git stash` genuinely runs the stash in
+        /shared/checkout, but the old code fell through to the payload cwd
+        as if the `cd` never happened at all, wrongly abstaining."""
+        cases = (
+            "cd /shared/checkout || exit 1; git stash",
+            "cd /shared/checkout || { echo no; exit 1; }; git stash",
+            "cd /shared/checkout || return 1\ngit stash",
+            "cd /shared/checkout || exit 1; git -C . stash",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-R4)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_cd_or_guard_inverse_still_abstains_when_the_reached_target_is_a_worktree(self):
+        """A-R4 near miss: same shape, but the `cd`'s real target IS a
+        /worktrees/ checkout and the payload cwd is the shared one -- once
+        the guard is scoped to only its own right-hand operand, the `cd`
+        must still reach the trailing `git stash` and correctly abstain,
+        not over-deny by keeping the guard permanent."""
+        cmd = "cd /worktrees/review || exit 1; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"cd reaching a real worktree checkout must abstain (A-R4): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_or_guard_end_extends_past_a_bracketed_fallback_operand(self):
+        """A-R1/B-R1 (round 2 reopen review, generation 3): `guard_end` is
+        computed as the first `_SEPARATOR_CHARS` position after `||`, but
+        `{` and `(` are themselves members of `_SEPARATOR_CHARS` -- when
+        the fallback operand OPENS with a brace-group or subshell (`cd X
+        || { ...; }` / `cd X || (...)`), `guard_end` landed on that
+        opening bracket itself, so the group's own body (at-or-past that
+        position) was treated as already past the guard and wrongly
+        inherited the `cd` that just FAILED to reach it. A real shell only
+        runs the bracketed group when the `cd` failed, i.e. in the
+        directory from BEFORE the `cd` -- so each case here must resolve
+        against the payload cwd (`/shared/checkout`, not exempt) and deny,
+        exactly like the existing unbracketed `|| exit 1; <stash>` cases
+        above."""
+        cases = (
+            "cd /worktrees/review || { git stash; }",
+            "cd /worktrees/review || (git stash)",
+            "cd /worktrees/review || {\n  echo fail\n  git stash\n}",
+            "cd /worktrees/review || { cd . && git stash; }",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-R1/B-R1)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_or_guard_end_bracketed_fallback_inverse_still_abstains(self):
+        """B-R1 near miss (round 2 reopen review, generation 3): same
+        bracketed-fallback shape, but the `cd`'s own target IS the exempt
+        /worktrees/ checkout and the payload cwd is the real shared one.
+        Excluding the fallback's body from this `cd`'s reach must fall
+        through to the payload cwd (`/worktrees/review`, exempt) and
+        abstain -- not flip to a false deny by over-extending the guard in
+        the other direction."""
+        cmd = "cd /shared/checkout || { git stash; }"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                f"bracketed fallback with an exempt payload cwd must abstain (B-R1): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestForceRefspecAsksFirst(RouterTestCase):
+    """F5: a leading `+` on any push refspec forces the update, the same as
+    `--force`/`-f`, but neither force-push rule matched it. Inspect refspec
+    arguments for a leading `+` and ask, alongside non-forcing near misses."""
+
+    def test_leading_plus_refspec_asks(self):
+        cmd = "git push origin +HEAD:main"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F5)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_non_forcing_refspec_near_misses_abstain(self):
+        cases = (
+            "git push origin HEAD:main",
+            "git push origin main",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F5 near miss)")
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_quoted_leading_plus_refspec_still_asks(self):
+        """G2 (review_b round 1): masking used to blank a quoted argument's
+        content down to pure spaces, so a QUOTED leading `+` was invisible
+        to the rule even though the shell passes that exact literal
+        refspec to the push -- abstained when it should ask."""
+        cmd = "git push origin '+HEAD:main'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G2)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_quoted_non_forcing_refspec_near_miss_abstains(self):
+        """G2 near miss: a quoted but non-forcing refspec must keep
+        abstaining -- unmasking the literal content must not make the
+        destructive-arg scan over-eager."""
+        cmd = "git push origin 'main'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (G2 near miss): {proc.stdout!r}")
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestDestructiveArgumentFormsAskFirst(RouterTestCase):
+    """F6: the destructive-git rule only recognized specific argument
+    spellings/positions. Equivalent forms with long options, reordered
+    options, or checkout-with-tree must ask just the same; non-destructive
+    near misses must keep abstaining."""
+
+    def test_equivalent_destructive_forms_ask(self):
+        cases = (
+            "git clean --force -d",
+            "git reset HEAD~1 --hard",
+            "git checkout HEAD -- tracked-file",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F6)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_non_destructive_near_misses_abstain(self):
+        cases = (
+            "git clean -n",
+            "git reset --soft",
+            "git checkout -b newbranch",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F6 near miss)")
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_option_scan_does_not_cross_a_command_separator(self):
+        """F2 (review round 1 redo): `(?:\\S+\\s+)*` treats `;`/`&&`/`|` as
+        ordinary whitespace-separated tokens, so a non-destructive command
+        followed by an unrelated command containing a destructive-looking
+        flag (e.g. `rm -rf`) was scanned as one option run and asked. The
+        option-skip must stop at `;`, `&`, and `|`."""
+        cases = (
+            "git clean -n; rm -rf build",
+            "git checkout -b feat && printf -- '%s' x",
+            "git reset --soft HEAD~1 && ls --hard",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2 near miss)")
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_quoted_destructive_flags_still_ask(self):
+        """G2 (review_b round 1): masking used to blank a quoted flag's
+        content down to pure spaces, erasing it from the option scan -- a
+        quoted `--hard`/`--force` abstained even though the shell still
+        passes that exact literal flag to the command."""
+        cases = (
+            "git reset HEAD~1 '--hard'",
+            "git clean '--force' -d",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G2)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_quoted_literal_text_near_miss_abstains(self):
+        """G2 near miss: a destructive-looking flag spelled out as ordinary
+        quoted TEXT to an unrelated subcommand (not `reset`/`clean`/
+        `checkout`/`branch -D`) must keep abstaining -- unmasking literal
+        argument content must not make the destructive-arg scan cross into
+        an unrelated command's own arguments."""
+        cmd = "git commit -m 'reset --hard would be bad here'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (G2 near miss): {proc.stdout!r}")
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestMultilinePollingLoopScope(RouterTestCase):
+    """F11: rules compile with MULTILINE, not DOTALL, so the polling rule's
+    `.*` never crossed a newline -- a normal multiline `while`/`until` loop
+    abstained while its one-line equivalent asked. Match must span the loop
+    body's actual extent (bounded at its own `done`), keeping an out-of-loop
+    `gh` call from being pulled into an unrelated loop's sleep."""
+
+    def test_multiline_while_loop_asks(self):
+        cmd = "while true; do\n  gh pr checks 123\n  sleep 5\ndone"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F11)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_multiline_until_loop_asks(self):
+        cmd = "until false; do\n  gh pr checks 123\n  sleep 5\ndone"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F11)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_bounded_for_loop_over_pr_list_still_abstains(self):
+        cmd = "for n in 293 294 295; do gh pr checks $n; sleep 2; done"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F11 near miss)")
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_out_of_loop_gh_call_before_an_unrelated_loop_abstains(self):
+        cmd = "gh pr checks 123\nwhile true; do\n  sleep 5\ndone"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F11 near miss)")
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_polling_loop_after_an_earlier_unrelated_loop_still_asks(self):
+        """F7 (review round 2 redo): `finditer` never revisits text inside
+        an already-yielded span, even a REJECTED one. The first candidate
+        greedily spanned from the earlier `while read` loop all the way
+        through the later polling loop's own `done`, got rejected by
+        `_polling_loop_bounded` (two `done`s), and finditer then resumed
+        searching from that rejected span's END -- past the real polling
+        loop entirely. A genuine polling loop placed after an unrelated
+        loop must still ask."""
+        cmd = "while read x; do echo $x; done < f\nwhile true; do gh pr checks 1; sleep 5; done"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F7)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_gh_call_between_an_earlier_loops_done_and_a_later_loop_abstains(self):
+        """F3 (review round 1 redo): the loop-body gap used a lazy
+        `[\\s\\S]*?` that is not bounded to its OWN `done` -- it can skip
+        past an earlier, unrelated loop's `done` and pick up a `gh`/`sleep`
+        pair that sits between two loops, plus a `for` loop after it, and
+        ask. The gap must not cross any `done` token."""
+        cmd = (
+            "while read x; do echo $x; done < f\n"
+            "gh pr checks 123\n"
+            "sleep 5\n"
+            "for p in 1 2; do echo; done"
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F3 near miss)")
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_outer_loop_containing_a_genuine_nested_loop_still_asks(self):
+        """G3 (review_b round 1): `_polling_loop_bounded` rejected any span
+        with more than one `done` token, which also rejects a genuine OUTER
+        polling loop that merely CONTAINS a fully-closed nested bounded
+        loop (two `done`s here, one per loop, both legitimate). Must still
+        ask -- nesting is not the same thing as crossing into an unrelated
+        sibling loop (F3/F7's actual concern, covered by the near miss
+        above)."""
+        cmd = "while true; do\n  for i in 1 2; do\n    echo $i\n  done\n  gh pr checks 123\n  sleep 5\ndone"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_nested_bounded_loop_after_gh_and_sleep_still_asks(self):
+        """G5 (review_b round 2): a nested bounded loop placed AFTER the
+        `gh`+sleep pair (rather than before, G3's case) makes the lazy
+        gh-fast-polling regex's candidate span stop at the NESTED loop's own
+        `done` -- the first `done` that satisfies the CLI+sleep requirement
+        -- instead of the outer loop's real terminator further out.
+        `_polling_loop_bounded` correctly rejects that short span (depth
+        never returns to 0), but the caller then discarded the match
+        entirely instead of extending the candidate to the next `done` and
+        re-checking. Must still ask -- nesting is legitimate regardless of
+        whether it comes before or after the CLI+sleep pair."""
+        cmd = "while true; do\n  gh pr checks 123\n  sleep 5\n  for i in 1 2; do\n    echo $i\n  done\ndone"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G5)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_quoted_done_argument_does_not_terminate_the_loop_early(self):
+        """G4 (spec-level review, reopen generation 2, contract Tnqez39tp):
+        the loop-body bound only looks for the literal word `done`, with no
+        awareness that a `done` occurrence can sit inside a QUOTED argument
+        (e.g. `echo 'done'`) rather than in command position as the actual
+        `do`/`done` loop-closing keyword. `while true; do echo 'done'; gh pr
+        checks 123; sleep 5; done` has its real terminator at the very end,
+        but the quoted `'done'` argument to `echo` gets counted as if it
+        were that terminator, truncating the loop body before the `gh`+
+        `sleep` pair is ever reached -- so the base gh-fast-polling rule,
+        which DOES match this command's raw text, never gets a chance to
+        ask."""
+        cmd = "while true; do echo 'done'; gh pr checks 123; sleep 5; done"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (G4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+
+class TestF7RedactionAndLedgerPrivacy(RouterTestCase):
+    """F7: the router persists raw `match`/`preview` text into the ledger,
+    and creates the ledger dir/file with whatever the process umask leaves
+    (0755/0644 under a common 022 umask) -- both a secret-leak and a
+    world/group-readable-file class of bug. A shared redaction policy must
+    scrub every persisted text field, and the ledger dir/file must be
+    private (0700/0600) regardless of umask."""
+
+    SECRET = "sk-ant-api03-REDACTME1234567890ABCDEFGHIJK"
+
+    def test_secret_in_command_is_redacted_from_match_and_preview(self):
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    f"curl -H 'Authorization: Bearer {self.SECRET}' https://x; "
+                    "git stash"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn(self.SECRET, entry.get("match", ""))
+                self.assertNotIn(self.SECRET, entry.get("preview", ""))
+
+    def test_ledger_dir_and_file_are_private_under_permissive_umask(self):
+        old_umask = os.umask(0o022)
+        try:
+            with tempfile.TemporaryDirectory() as base:
+                ledger_dir = Path(base) / "fresh-ledger-subdir"
+                payload = make_payload("Bash", {"command": "git stash"})
+                proc = run_router_payload(payload, ledger_dir)
+                self.assertEqual(proc.returncode, 0)
+
+                ledger_file = ledger_dir / LEDGER_FILENAME
+                self.assertTrue(ledger_file.exists())
+                dir_mode = stat.S_IMODE(ledger_dir.stat().st_mode)
+                file_mode = stat.S_IMODE(ledger_file.stat().st_mode)
+                self.assertEqual(
+                    oct(dir_mode), oct(0o700),
+                    f"ledger dir must be 0700, got {oct(dir_mode)}",
+                )
+                self.assertEqual(
+                    oct(file_mode), oct(0o600),
+                    f"ledger file must be 0600, got {oct(file_mode)}",
+                )
+        finally:
+            os.umask(old_umask)
+
+    # --- review_b round 3 (G1/G2/G3): the F7 redaction policy has three
+    # concrete gaps, each demonstrated with a real-shaped secret. ---------
+
+    def test_sk_proj_and_svcacct_style_keys_are_redacted(self):
+        """G1: the generic `sk-` pattern only allows [A-Za-z0-9] in the key
+        body, so real OpenAI-shaped keys with internal hyphens/underscores
+        (`sk-proj-...`, `sk-svcacct-...`) are only partially matched (or not
+        at all) and the live suffix survives into the ledger unchanged."""
+        # No "Bearer "/"password="/etc wrapper -- isolates the `sk-`
+        # pattern itself (a wrapping keyword's own greedy `\S+` would mask
+        # this bug by accident).
+        proj_key = "sk-proj-AbCdEfGh_IjKlMnOp-QrStUvWx1234567890"
+        svcacct_key = "sk-svcacct-ZyXwVuTs_RqPoNmLk-JiHgFeDc0987654321"
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    f"echo {proj_key} {svcacct_key} && git stash"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn(proj_key, entry.get("match", ""))
+                self.assertNotIn(proj_key, entry.get("preview", ""))
+                self.assertNotIn(svcacct_key, entry.get("match", ""))
+                self.assertNotIn(svcacct_key, entry.get("preview", ""))
+
+    def test_quoted_password_with_spaces_is_fully_redacted(self):
+        """G2a: `password=...` matches `\\S+` for the value, so a quoted
+        password containing spaces (`password="hunter two secret"`) only
+        redacts up to the first space and leaks the rest of the phrase."""
+        payload = make_payload(
+            "Bash",
+            {"command": 'echo password="hunter two secret" && git stash'},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("hunter two secret", entry.get("match", ""))
+                self.assertNotIn("hunter two secret", entry.get("preview", ""))
+                self.assertNotIn("two secret", entry.get("preview", ""))
+
+    def test_json_colon_password_is_fully_redacted(self):
+        """F7 (round 2 review, blocker): every pattern above anchors on
+        `key\\s*=\\s*value` (shell-assignment shape) -- a structured JSON
+        credential field uses a COLON, never an `=`, so
+        `{"password":"hunter two secret"}` matched none of them and
+        persisted the complete value in the ledger preview."""
+        payload = make_payload(
+            "Bash",
+            {"command": 'echo \'{"password":"hunter two secret"}\' && git stash'},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("hunter two secret", entry.get("match", ""))
+                self.assertNotIn("hunter two secret", entry.get("preview", ""))
+                self.assertNotIn("two secret", entry.get("preview", ""))
+
+    def test_escaped_json_colon_password_is_fully_redacted(self):
+        """F7 (round 3 review, blocker): the round-2 pattern only matches
+        an UNESCAPED `"key":"value"` -- a raw shell argument with
+        backslash-escaped inner quotes (valid bash: `\\"` inside a
+        double-quoted string is a literal quote), or a tool_input string
+        re-escaped by `json.dumps`, produces exactly this shape and
+        matched none of the round-2 patterns."""
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    'curl --data "{\\"password\\":\\"hunter two secret\\"}" '
+                    "&& git stash"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("hunter two secret", entry.get("match", ""))
+                self.assertNotIn("hunter two secret", entry.get("preview", ""))
+                self.assertNotIn("two secret", entry.get("preview", ""))
+
+    def test_multi_level_escaped_json_colon_password_is_fully_redacted(self):
+        """F7 (round 4 review, blocker): the round-3 pattern requires
+        EXACTLY one backslash before each quote. If the credential's own
+        raw text already had escaped quotes (bash: `\\"` inside a
+        double-quoted string), a second layer of escaping (e.g.
+        `json.dumps` re-serializing that string) turns each single
+        backslash into three (`\\\\\\"password\\\\\\"`) -- the round-3
+        pattern never matched that shape."""
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    'curl --data "{\\\\\\"password\\\\\\":\\\\\\"hunter two secret\\\\\\"}" '
+                    "&& git stash"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("hunter two secret", entry.get("match", ""))
+                self.assertNotIn("hunter two secret", entry.get("preview", ""))
+                self.assertNotIn("two secret", entry.get("preview", ""))
+
+    def test_pem_block_survives_a_preceding_secret_assignment(self):
+        """G2b: `secret=...` is matched (and its value truncated at the
+        first token) BEFORE the PEM-block pattern runs, so a `secret=` (or
+        `token=`) prefix right before a PEM block eats the `-----BEGIN`
+        marker and the PEM pattern can no longer recognize (and redact) the
+        private-key body that follows."""
+        pem = (
+            "-----BEGIN PRIVATE KEY-----\n"
+            "MIIEvQIBADANBgkqhkiG9w0BAQEREDACTMEREDACTMEREDACTME\n"
+            "-----END PRIVATE KEY-----"
+        )
+        payload = make_payload(
+            "Bash",
+            {"command": f'echo "secret={pem}" && git stash'},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn(
+                    "MIIEvQIBADANBgkqhkiG9w0BAQEREDACTMEREDACTMEREDACTME",
+                    entry.get("preview", ""),
+                )
+
+    def test_cwd_field_in_ledger_entry_is_redacted(self):
+        """G3: the router persists the raw hook-payload `cwd` straight into
+        every ledger line without passing it through `redact()` -- only
+        `match`/`preview` are scrubbed. A secret embedded in `cwd` (payload
+        metadata, fully attacker-controlled) survives into the ledger."""
+        secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        payload = make_payload(
+            "Bash", {"command": "git stash"}, cwd=f"/tmp/{secret}/repo"
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn(secret, entry.get("cwd", ""))
+
+    def test_session_id_field_in_ledger_entry_is_redacted(self):
+        """G3 (review_b round 4): the router persists the raw hook-payload
+        `session_id` straight into every ledger line without passing it
+        through `redact()` -- `cwd` was fixed but `session_id` is the same
+        attacker-controlled payload metadata and was missed."""
+        secret = "ghp_ABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789"
+        payload = make_payload(
+            "Bash", {"command": "git stash"}, session_id=f"sess-{secret}"
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn(secret, entry.get("session_id", ""))
+
+    def test_escaped_quote_inside_password_does_not_leak_the_tail(self):
+        """G2 (review_b round 4): the bare-double-quote alternative
+        (`"[^"]*"`) has no escape awareness, so a raw shell value with a
+        backslash-escaped inner quote (`password="alpha \\"bravo\\"
+        charlie"`, valid bash -- `\\"` inside double quotes is a literal
+        quote) makes `[^"]*` stop at that embedded quote instead of the
+        real closing one. Only the leading fragment gets redacted and the
+        rest of the value (starting with "bravo") survives in the clear."""
+        payload = make_payload(
+            "Bash",
+            {"command": r'echo password="alpha \"bravo\" charlie" && git stash'},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("bravo", entry.get("match", ""))
+                self.assertNotIn("bravo", entry.get("preview", ""))
+                self.assertNotIn("charlie", entry.get("preview", ""))
+
+    def test_escaped_quote_followed_by_real_newline_does_not_leak_the_tail(self):
+        """G2 continued (review_b round 5): the escaped-char alternative
+        `\\.` in `(?:[^"\\]|\\.)*` requires `.`, which -- with no
+        re.DOTALL -- never matches a real newline. A trailing backslash
+        immediately before a real newline is valid bash line-continuation
+        inside a double-quoted string; confirmed against a real bash that
+        `password="alpha <backslash-newline>bravo" charlie` folds to
+        `alpha bravo charlie`. The regex alternation can't step past that
+        backslash-newline, falls out of the quoted branch, and the
+        `\\S+` fallback leaks everything after the newline in the
+        clear."""
+        payload = make_payload(
+            "Bash",
+            {"command": 'echo password="alpha \\\nbravo charlie" && git stash'},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                self.assertNotIn("bravo", entry.get("match", ""))
+                self.assertNotIn("bravo", entry.get("preview", ""))
+                self.assertNotIn("charlie", entry.get("preview", ""))
+
+    def test_masking_does_not_strip_quotes_before_redaction_sees_the_value(self):
+        """G1 (spec-level review, reopen generation 2): `evaluate()` builds
+        the ledger's `match` field by extracting `raw_matched` from
+        `scan_text` (the `executable_mask`-masked copy) and only THEN
+        calling `redact()` on it -- but masking a double-quoted argument
+        blanks the quote DELIMITERS themselves (see `_mask_literal_span`),
+        leaving the literal content visible with no surrounding quote
+        characters. `redact()`'s `password=`/`token=` pattern needs to see
+        an actual quote character to take its quoted-value alternative
+        (which can contain spaces); with the quotes already gone by the
+        time `redact()` runs, it falls through to the bare `\\S+`
+        alternative and only the first word is redacted -- the rest of a
+        multi-word password (e.g. a `git push -o password="..."` refspec
+        override) survives in the clear in the persisted `match` field."""
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    'git push -o password="alpha bravo charlie" '
+                    "origin +HEAD:main"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            ledger_path = Path(ledger_dir) / LEDGER_FILENAME
+            raw_line = ledger_path.read_text()
+            for word in ("alpha", "bravo", "charlie"):
+                self.assertNotIn(
+                    word, raw_line,
+                    f"secret word {word!r} leaked into the raw ledger line "
+                    f"(G1): {raw_line!r}",
+                )
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                for word in ("alpha", "bravo", "charlie"):
+                    self.assertNotIn(word, entry.get("match", ""))
+                    self.assertNotIn(word, entry.get("preview", ""))
+
+    def test_quote_wraps_whole_pair_is_fully_redacted(self):
+        """A-R6 (round 2 reopen review): the previous G1 fix only handles
+        `key="value"` (the quote wraps just the VALUE). A git option-value
+        pair is often quoted as a WHOLE `"key=value"` argument (the quote
+        sits BEFORE `password`, not right after `=`) -- `redact()`'s
+        pattern anchors on `\\bpassword\\s*=\\s*` and only then looks for a
+        quote character, so it never sees the leading quote and drops
+        straight to the bare `\\S+` fallback, redacting only the first
+        word."""
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    'git push -o "password=alpha bravo charlie" '
+                    "origin +HEAD:main"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            raw_line = (Path(ledger_dir) / LEDGER_FILENAME).read_text()
+            for word in ("alpha", "bravo", "charlie"):
+                self.assertNotIn(
+                    word, raw_line,
+                    f"secret word {word!r} leaked into the raw ledger line "
+                    f"(A-R6): {raw_line!r}",
+                )
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                for word in ("alpha", "bravo", "charlie"):
+                    self.assertNotIn(word, entry.get("match", ""))
+                    self.assertNotIn(word, entry.get("preview", ""))
+
+    def test_dollar_quoted_value_is_fully_redacted(self):
+        """A-R6 (round 2 reopen review): bash's ANSI-C quoting
+        (`password=$'alpha bravo charlie'`) is a common way to embed a
+        multi-word value too -- `redact()`'s quoted-value alternatives only
+        recognize a bare `"..."`/`'...'`, never `$'...'`, so it drops to
+        `\\S+` and stops at the first space (right after the leading `$'`)."""
+        payload = make_payload(
+            "Bash",
+            {
+                "command": (
+                    "git push -o password=$'alpha bravo charlie' "
+                    "origin +HEAD:main"
+                )
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(proc.returncode, 0)
+            raw_line = (Path(ledger_dir) / LEDGER_FILENAME).read_text()
+            for word in ("alpha", "bravo", "charlie"):
+                self.assertNotIn(
+                    word, raw_line,
+                    f"secret word {word!r} leaked into the raw ledger line "
+                    f"(A-R6): {raw_line!r}",
+                )
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines)
+            for entry in lines:
+                for word in ("alpha", "bravo", "charlie"):
+                    self.assertNotIn(word, entry.get("match", ""))
+                    self.assertNotIn(word, entry.get("preview", ""))
+
+
+class TestF8ManifestQuoting(RouterTestCase):
+    """F8: required-hooks.json's two Python hook commands interpolate
+    $HEX_DIR unquoted (`python3 -I -S $HEX_DIR/.hex/hooks/scripts/...py`).
+    The hook runner executes these as a real shell command line (bash -c),
+    so a HEX_DIR containing a space is word-split: Python receives a
+    truncated, nonexistent script path as argv[0] and exits non-zero."""
+
+    MANIFEST = REPO_ROOT / "system" / "hooks" / "required-hooks.json"
+
+    def _hook_commands(self):
+        manifest = json.loads(self.MANIFEST.read_text())
+        router_cmd = next(
+            e["command"] for e in manifest["PreToolUse"]
+            if "pretooluse-router.py" in e.get("command", "")
+        )
+        incident_cmd = manifest["PostToolUseFailure"][0]["command"]
+        return router_cmd, incident_cmd
+
+    def _run_from_spaced_hex_dir(self, command, stdin_payload):
+        with tempfile.TemporaryDirectory() as base:
+            spaced = Path(base) / "hex workspace with spaces"
+            scripts_dir = spaced / ".hex" / "hooks" / "scripts"
+            scripts_dir.mkdir(parents=True)
+            shutil.copy(ROUTER_SCRIPT, scripts_dir / "pretooluse-router.py")
+            shutil.copy(
+                REPO_ROOT / "system" / "hooks" / "router-rules.json",
+                spaced / ".hex" / "hooks" / "router-rules.json",
+            )
+            shutil.copy(
+                REPO_ROOT / "system" / "hooks" / "scripts" / "posttoolusefailure-incident.py",
+                scripts_dir / "posttoolusefailure-incident.py",
+            )
+            with tempfile.TemporaryDirectory() as ledger_dir:
+                env = dict(os.environ)
+                env["HEX_DIR"] = str(spaced)
+                env["HEX_LEDGER_DIR"] = ledger_dir
+                return subprocess.run(
+                    ["bash", "-c", command],
+                    input=json.dumps(stdin_payload),
+                    capture_output=True,
+                    text=True,
+                    env=env,
+                    timeout=10,
+                )
+
+    def test_router_hook_runs_from_a_path_containing_a_space(self):
+        router_cmd, _ = self._hook_commands()
+        proc = self._run_from_spaced_hex_dir(
+            router_cmd, make_payload("Bash", {"command": "git stash"})
+        )
+        self.assertEqual(
+            proc.returncode, 0,
+            f"router hook command must run from a spaced HEX_DIR; "
+            f"stderr={proc.stderr!r}",
+        )
+        self.assertIn("permissionDecision", proc.stdout)
+
+    def test_incident_hook_runs_from_a_path_containing_a_space(self):
+        _, incident_cmd = self._hook_commands()
+        payload = {
+            "session_id": "s1",
+            "transcript_path": "/tmp/t",
+            "cwd": "/repo",
+            "permission_mode": "default",
+            "hook_event_name": "PostToolUseFailure",
+            "tool_name": "Bash",
+            "tool_input": {"command": "npm test"},
+            "tool_use_id": "t1",
+            "error": "boom",
+            "is_interrupt": False,
+            "duration_ms": 1,
+        }
+        proc = self._run_from_spaced_hex_dir(incident_cmd, payload)
+        self.assertEqual(
+            proc.returncode, 0,
+            f"incident hook command must run from a spaced HEX_DIR; "
+            f"stderr={proc.stderr!r}",
+        )
+
+
+class TestF12PathRuleAnchoring(RouterTestCase):
+    """F12: rules are compiled with re.MULTILINE, so `^[^\\n]*...` matches
+    every line of the canonical text, not just the first (the actual file
+    path). A pattern that only appears inside file CONTENT must abstain --
+    only the real path, on the canonical first line, may fire."""
+
+    def test_vitest_pattern_in_content_only_abstains(self):
+        payload = make_payload(
+            "Write",
+            {"file_path": "notes.md", "content": "intro line\nfoo.test.ts\nspawnSync(cmd)"},
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                "a .test.ts/spawnSync pair inside file CONTENT (not the "
+                "canonical file_path) must not fire vitest-spawnsync",
+            )
+            self.assertEqual(
+                proc.stderr.strip(), "",
+                f"abstain/fire must produce no stderr, got {proc.stderr!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+    def test_hex_events_policy_pathname_in_content_only_abstains(self):
+        payload = make_payload(
+            "Write",
+            {
+                "file_path": "notes.md",
+                "content": "intro\n.hex-events/policies/foo.yaml mentioned here",
+            },
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(payload, ledger_dir)
+            self.assertEqual(
+                proc.stdout.strip(), "",
+                "a policy pathname mentioned inside file CONTENT (not the "
+                "canonical file_path) must not fire hex-events-flat-policy",
+            )
+            self.assertEqual(
+                proc.stderr.strip(), "",
+                f"abstain/fire must produce no stderr, got {proc.stderr!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestF18LatencyGateIsOptIn(RouterTestCase):
+    """F18: the tight per-invocation wall-clock ceiling in
+    TestLatencySanityCeiling currently runs unconditionally on every
+    correctness pass (a bare `assertLess(d, 1.0, ...)` over 20 runs) and
+    is load-sensitive on a shared worker. It must move behind an opt-in
+    env gate (e.g. ROUTER_BENCH=1); the 5s subprocess hang timeout is a
+    separate, structural guarantee and stays mandatory."""
+
+    def test_tight_latency_assertion_is_env_gated_in_source(self):
+        text = Path(__file__).read_text()
+        start = text.index("class TestLatencySanityCeiling")
+        end = text.index("\nclass ", start + 1)
+        body = text[start:end]
+        self.assertIn(
+            "ROUTER_BENCH", body,
+            "F18: the per-invocation latency ceiling must be gated behind "
+            "an opt-in ROUTER_BENCH env var, not asserted unconditionally "
+            "in every correctness run",
+        )
+
+
+class TestF21NotebookEditCanonicalization(RouterTestCase):
+    """F21: NotebookEdit is listed in TEXT_TOOLS, but canonical_text()'s
+    TEXT_TOOLS branch only ever reads file_path/new_string/content/edits.
+    NotebookEdit's actual schema is notebook_path + new_source -- neither
+    is read, so a real NotebookEdit payload canonicalizes to an empty
+    string and no rule can ever inspect it."""
+
+    def _load_router_module(self):
+        spec = importlib.util.spec_from_file_location(
+            "pretooluse_router_under_test_f21", ROUTER_SCRIPT
+        )
+        assert spec and spec.loader
+        mod = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(mod)
+        return mod
+
+    def test_notebook_path_and_new_source_both_reach_canonical_text(self):
+        mod = self._load_router_module()
+        # A real PostToolUse/PreToolUse NotebookEdit payload shape.
+        tool_input = {
+            "notebook_path": "/repo/analysis.ipynb",
+            "new_source": "result = spawnSync('ls', [])",
+            "cell_type": "code",
+            "edit_mode": "replace",
+        }
+        text = mod.canonical_text("NotebookEdit", tool_input)
+        self.assertIn("/repo/analysis.ipynb", text)
+        self.assertIn("spawnSync('ls', [])", text)
+
+    def test_new_source_alone_reaches_canonical_text_when_path_absent(self):
+        mod = self._load_router_module()
+        text = mod.canonical_text("NotebookEdit", {"new_source": "spawnSync(cmd)"})
+        self.assertIn("spawnSync(cmd)", text)
+
+
+class TestF22ProbeMktempFailure(RouterTestCase):
+    """F22: router-probe.sh only has `set -u`, never checking mktemp's own
+    exit status (`LEDGER_DIR="$(mktemp -d)"`). If mktemp fails, LEDGER_DIR
+    is empty (not unset, so `set -u` never trips); Python's `Path("")`
+    resolves to the current directory, so a failed run can silently drop
+    router-fires.jsonl into cwd while still reporting PASS/FAIL lines."""
+
+    PROBE = REPO_ROOT / "system" / "hooks" / "scripts" / "router-probe.sh"
+
+    def test_mktemp_failure_aborts_instead_of_writing_into_cwd(self):
+        with tempfile.TemporaryDirectory() as fake_bin, tempfile.TemporaryDirectory() as cwd:
+            mktemp_stub = Path(fake_bin) / "mktemp"
+            mktemp_stub.write_text(
+                "#!/bin/sh\necho 'mktemp: simulated failure' >&2\nexit 1\n"
+            )
+            mktemp_stub.chmod(0o755)
+
+            env = dict(os.environ)
+            env["PATH"] = f"{fake_bin}:{env.get('PATH', '')}"
+
+            proc = subprocess.run(
+                ["bash", str(self.PROBE)],
+                capture_output=True,
+                text=True,
+                env=env,
+                cwd=cwd,
+                timeout=60,
+            )
+
+            self.assertNotEqual(
+                proc.returncode, 0,
+                "the probe must abort when mktemp -d fails, not report a "
+                f"clean run; stdout={proc.stdout[-500:]!r}",
+            )
+            self.assertFalse(
+                (Path(cwd) / LEDGER_FILENAME).exists(),
+                "a failed mktemp must never leave a ledger file behind in cwd",
+            )
+
+
+# --- Round 3 (arrra-hex-pr-5-wf-open-ledger.md): conservative-scanner ------
+#
+# Each class below pins one ledger finding with the ledger's own exact
+# probe command(s). R1-R7 (refute verdict) and new-defects R1 are the 8
+# must-fix ids; R8/R9 (minor/nit) and new-defects R2 are pinned too because
+# the same structural fixes close them as a side effect (see the
+# adjudication file for the one-line-per-id mapping). new-defects R3 (the
+# incident hook's untested A-R6 patterns + no cross-file sync assertion)
+# is pinned in test_incident.py instead, next to the hook it's about.
+
+
+class TestBackslashNewlineContinuation(RouterTestCase):
+    """R1 (blocker): bash DELETES a `\\<newline>` line-continuation pair --
+    it folds two source lines into one logical line. A rule's
+    `[^\\n;&|]*` character class explicitly excludes a REAL newline, so a
+    continuation left visible (unmasked) in scan_text broke every Bash
+    rule whose target sat on the continued line. `executable_mask` must
+    blank a backslash-escape pair (continuation or otherwise) to spaces,
+    the same way `_mask_double_quoted` already does for one inside a
+    double-quoted span, so `[^\\n;&|]*` keeps matching across it."""
+
+    def test_force_push_across_a_line_continuation_still_asks(self):
+        cases = (
+            "git push \\\n  --force origin main",
+            "git push origin \\\n  +HEAD:main",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R1)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_destructive_ops_across_a_line_continuation_still_ask(self):
+        cases = (
+            "git reset \\\n  --hard HEAD~1",
+            "git clean \\\n  -fd",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R1)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_hex_memory_index_full_across_a_line_continuation_still_asks(self):
+        cmd = "hex memory index \\\n  --full"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_pipe_tail_across_a_line_continuation_still_flags(self):
+        cmd = "pytest -q \\\n  | tail -5"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R1)")
+            out = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertIn("additionalContext", out, cmd)
+
+    def test_stash_across_a_line_continuation_still_denies(self):
+        cmd = "git \\\nstash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_dash_c_shared_checkout_stash_across_a_line_continuation_still_denies(self):
+        cmd = "git -C /shared/checkout \\\n  stash push -m wip"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_cd_target_across_a_line_continuation_still_denies(self):
+        """R1's `_read_token` sub-case: the token-start whitespace skip
+        must ALSO skip a `\\<newline>` continuation appearing right at the
+        cd target, or it reads the bare backslash itself as the path."""
+        cmd = "cd \\\n/shared/checkout && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestEscapedSeparatorDoesNotFakeACommandBoundary(RouterTestCase):
+    """R8 (minor): the G3 backslash branch skipped an escaped separator
+    WITHOUT blanking it, so an escaped `;`/`&` (a literal character, not a
+    real separator) still faked a fresh command-position boundary for
+    whatever followed -- a false DENY. Closed as a side effect of blanking
+    every backslash-escape pair (R1)."""
+
+    def test_escaped_semicolon_and_ampersand_do_not_anchor_a_fresh_command(self):
+        cases = (
+            "echo \\; git stash",
+            "echo \\& git stash",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/shared/c"), ledger_dir
+                )
+                self.assertEqual(
+                    proc.stdout.strip(), "",
+                    f"escaped separator must not fake a command boundary (R8): {proc.stdout!r}",
+                )
+                self.assertEqual(read_ledger(ledger_dir), [])
+
+
+class TestOrGuardEndPipeAndContinuation(RouterTestCase):
+    """new-defects R1 (major): `||`'s own `guard_end` used to end at the
+    first `_SEPARATOR_CHARS` position, but a lone pipe (or `|&`) binds
+    TIGHTER than `||` and stays part of the fallback operand (`A || B | C`
+    is `A || (B | C)`), and a backslash-newline continuation is not a real
+    separator either -- both let a later command escape the guard and
+    wrongly inherit the FAILED cd's target instead of staying protected."""
+
+    def test_pipe_and_continuation_after_or_fallback_still_deny(self):
+        cases = (
+            "cd /worktrees/x || \\\n  git stash",
+            "cd /worktrees/x ||\\\ngit stash",
+            "cd /worktrees/x || \\\n  { git stash; }",
+            "cd /worktrees/x || true | git stash",
+            "cd /worktrees/x || true |& git stash",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (new-defects R1)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestOrFallbackCdDoesNotShadowThePrimary(RouterTestCase):
+    """R2 (major) + new-defects R2 (minor, closed as the symmetric fix): a
+    `cd` that IS the `||` fallback operand only ever runs when the PRIMARY
+    `cd` failed -- it must not govern anything past the whole compound when
+    the primary's own (successful) reach already covers that position."""
+
+    def test_successful_primary_cd_governs_past_a_failing_fallback_cd(self):
+        cmd = "cd /shared/checkout || cd /worktrees/x; git stash"
+        for cwd in ("/worktrees/review", "/shared/checkout"):
+            with self.subTest(cwd=cwd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd=cwd), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"cwd={cwd!r} must not abstain (R2)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cwd)
+
+
+class TestEffectiveCheckoutAfterReservedWordsAndWrappers(RouterTestCase):
+    """R3 (major): `_CD_LOCATE_RE` required a real separator character
+    immediately before `cd` -- a `cd` right after a reserved word
+    (`if`/`then`/`do`/...) or a `command`/`builtin` wrapper, or a `pushd`,
+    was invisible to the effective-checkout tracker (and, for the
+    `then`/`git` shape, to the stash rule's own command-position anchor
+    too)."""
+
+    def test_cd_after_reserved_words_and_wrappers_still_denies(self):
+        cases = (
+            "if cd /shared/checkout; then git -C . stash; fi",
+            "if cd /shared/checkout; then git stash; fi",
+            "if true; then cd /shared/checkout; git stash; fi",
+            "for d in x; do cd /shared/checkout; git stash; done",
+            "command cd /shared/checkout && git -C . stash",
+            "builtin cd /shared/checkout && git stash",
+            "pushd /shared/checkout && git stash",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+                )
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R3)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_popd_makes_the_effective_directory_uncertain_not_exempt(self):
+        """A `popd` pops the directory stack -- this router doesn't track
+        the stack, so its target is genuinely unknown (conservative:
+        unresolvable, never exempt) rather than falling back to whatever
+        an earlier `cd` on the SAME line resolved to."""
+        cmd = "cd /worktrees/x; popd; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (popd uncertainty)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestAbsoluteCheckoutTargetIsNormalizedBeforeExemption(RouterTestCase):
+    """F4 (round 2 review, major) — an ABSOLUTE `-C`/`cd` target was
+    compared against the `/worktrees/` exemption as a LITERAL string,
+    never lexically resolved first. `-C /worktrees/x/../../shared/checkout`
+    starts with the literal text "/worktrees/" and so matched the
+    exemption, even though the path actually resolves to
+    `/shared/checkout` — a real shared checkout that should stay
+    protected. Two separate spots did this: `_resolve_against_cwd`
+    returned an absolute path verbatim (its relative-path branch was
+    already correctly normalized), and `_effective_checkout`'s own `-C`
+    loop assigned an absolute value straight to `base_cwd` without ever
+    calling `_resolve_against_cwd` at all. Both now run every absolute
+    literal through `os.path.normpath` (purely lexical -- never touches
+    the real filesystem or follows a symlink), the same treatment the
+    relative case already got."""
+
+    def test_dash_capital_c_absolute_path_climbing_out_of_worktrees_still_denies(self):
+        cmd = "git -C /worktrees/x/../../shared/checkout stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_cd_absolute_path_climbing_out_of_worktrees_still_denies(self):
+        cmd = "cd /worktrees/x/../../shared/checkout && git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_dash_capital_c_absolute_path_genuinely_inside_worktrees_still_abstains(self):
+        # Regression guard: normalizing must not break the ordinary case
+        # where the absolute target genuinely IS inside /worktrees/, with
+        # no .. segments to climb out with.
+        cmd = "git -C /worktrees/x/shared stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/worktrees/review"), ledger_dir
+            )
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must still abstain: {proc.stdout!r}")
+
+
+class TestStashExemptionDoesNotCrossARealNewline(RouterTestCase):
+    """F1 (round 2 review, major) — the stash exemption's `unless_match`
+    pattern, `stash\\s+(list|show|pop|apply|drop|branch)\\b`, used `\\s+`
+    between `stash` and the exempting subcommand. `\\s` matches a literal
+    newline regardless of the `re.MULTILINE` flag this pattern is compiled
+    with (MULTILINE only changes what `^`/`$` anchor to). `git
+    stash\\nlist` is bash for TWO separate commands — a bare `git stash`
+    that genuinely runs, immediately followed by an unrelated `list`
+    command — but the exemption matched straight across that newline as
+    if it read "stash list", one safe read-only invocation, and the
+    router abstained on a real stash it should have denied.
+
+    Fixed by changing the pattern's `\\s+` to `[ \\t]+` (horizontal
+    whitespace only). This still exempts a genuine backslash-continued
+    line (`git stash \\` + newline + `list`, one logical bash command):
+    `executable_mask` already blanks a `\\<real-newline>` pair to two
+    spaces (see its own doc comment on that escape branch), so by the
+    time `unless_match` runs against `scan_text` there is no newline
+    character left there at all — only an UNESCAPED, genuinely separating
+    newline (which stays a literal `\\n` in scan_text) fails to match
+    `[ \\t]+`, exactly the case this fix targets."""
+
+    def test_stash_then_a_separate_list_command_on_the_next_line_still_denies(self):
+        cmd = "git stash\nlist"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_stash_list_on_one_line_still_abstains(self):
+        # Regression guard: the genuine same-line exemption must be
+        # unaffected by restricting `\s+` to horizontal whitespace.
+        cmd = "git stash list"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must still abstain: {proc.stdout!r}")
+
+    def test_stash_list_across_a_backslash_continued_line_still_abstains(self):
+        # Regression guard: a genuine bash line continuation (backslash
+        # immediately before the newline) is ONE logical command and must
+        # still be recognized as the exempt "stash list" invocation --
+        # executable_mask blanks the `\<newline>` pair to spaces before
+        # unless_match ever runs.
+        cmd = "git stash \\\nlist"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must still abstain: {proc.stdout!r}")
+
+
+class TestQuotedGlobalOptionArgumentWithASpace(RouterTestCase):
+    """F3 (round 2 review, major) — `_GIT_GLOBAL_OPTS`'s argument
+    alternatives (`-C\\s+\\S+`, `-c\\s+\\S+`, `--git-dir=\\S+`,
+    `--work-tree=\\S+`) all consume only up to the first WHITESPACE
+    character. `git -C '/shared/my repo' stash` leaves `repo` (plus the
+    now-blanked closing quote) unconsumed after `\\S+` stops at the space
+    inside the quoted path, so the compiled rule regex can neither loop
+    back for another global option nor reach the `stash` subcommand
+    alternation from there — the WHOLE match fails and the router
+    abstains entirely rather than denying a real invocation.
+
+    Fix: `_widen_quoted_global_opt_args` rewrites `scan_text`, replacing
+    every INTERNAL space of such a quoted argument's value with a `\\S`-
+    matching placeholder byte, using the `quote_spans` `executable_mask`
+    already collected — so `\\S+` consumes the whole quoted value as one
+    token, exactly like a real shell does."""
+
+    def test_dash_capital_c_quoted_path_with_a_space_still_denies_stash(self):
+        cmd = "git -C '/shared/my repo' stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_dash_capital_c_quoted_path_with_a_space_still_asks_force_push(self):
+        cmd = "git -C '/shared/my repo' push --force"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_dash_lowercase_c_quoted_value_with_a_space_still_denies_stash(self):
+        cmd = "git -c 'user.name=A B' stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_git_dir_quoted_value_with_a_space_still_denies_stash(self):
+        cmd = "git --git-dir='/shared/my repo/.git' stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_unquoted_dash_capital_c_path_still_denies(self):
+        # Regression guard: the widening pass must not disturb the
+        # ordinary UNQUOTED case, which `\S+` already handled correctly.
+        cmd = "git -C /shared/checkout stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestQuotedGlobalOptionArgumentRoundThreeGaps(RouterTestCase):
+    """F3 (round 3 review, blocker) — three gaps in the round-2 widening
+    fix: (1) only a literal SPACE was skipped between `-C`/`-c` and a
+    quoted value, so a TAB there defeated the widening entirely; (2) every
+    space in the whole quoted span was widened unconditionally, including
+    ones inside a genuinely LIVE substitution nested in the value, joining
+    two real command words into one and hiding the substitution's own
+    invocation; (3) `A=$ ` followed by a real command (F9 round 2's own
+    documented trade-off) went undetected because `_ASSIGN_VALUE`
+    couldn't consume the trailing bare `$`, so the assignment prefix was
+    never recognized as skippable at all."""
+
+    def test_tab_between_dash_capital_c_and_a_quoted_value_still_denies(self):
+        cmd = "git -C\t'/shared/my repo' stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_live_substitution_nested_in_a_quoted_value_still_denies(self):
+        cmd = 'git -c "user.name=$(git stash)" status'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_bare_dollar_assignment_value_still_lets_the_real_command_deny(self):
+        cmd = "A=$ git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 3)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestGitOptsWideningDualScan(RouterTestCase):
+    """F3 (round 4 review, blocker) — round 3's fix (skip widening inside
+    a live_span) avoided corrupting a nested dangerous command, but
+    created the OPPOSITE bug: an outer `-C`/`-c` value that merely
+    CONTAINS a live substitution (dangerous or not) no longer widens at
+    all, so `_GIT_GLOBAL_OPTS`'s own `\\S+` can't consume it as one token
+    and the real invocation right after it goes undetected. A genuine
+    structural conflict -- the same characters must look like one token
+    to the outer rule and real \\s-separated words to the nested
+    substitution's own rule -- resolved by keeping TWO scan_text variants
+    (plain and unconditionally-widened) and searching both for any rule
+    referencing `@GITOPTS@`, unioning matches by span."""
+
+    def test_outer_value_containing_a_harmless_live_substitution_still_denies(self):
+        cmd = 'git -c "user.name=$(printf x)" stash'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_nested_dash_capital_c_quoted_value_inside_a_substitution_still_denies(self):
+        cmd = "echo \"$(git -C '/shared/my repo' stash)\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+    def test_nested_dangerous_command_inside_a_quoted_value_still_denies(self):
+        # Regression guard: round 3's own fixed case (a dangerous
+        # invocation genuinely nested in the -c value) must not regress
+        # now that widening is unconditional again in the widened copy --
+        # this is caught via the UNWIDENED copy's own substitution anchor.
+        cmd = 'git -c "user.name=$(git stash)" status'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestGitOptsNestingAwareWidening(RouterTestCase):
+    """F3 (round 5 review, blocker) — round 4's dual scan (plain +
+    unconditionally-widened) fixed the reported examples but missed a
+    THIRD level: `git -c "user.name=$(git -C '/shared/my repo' stash)"
+    status` needs the INNER `-C` value's own space widened (for its own
+    `\\S+` skip) while the inner invocation's own command-separating
+    whitespace stays real (for its own `\\s+` match). Neither the plain
+    copy (no widening anywhere) nor the unconditionally-widened copy (the
+    outer -c's blanket widening ALSO destroys the inner separators) can
+    produce this match. Added a THIRD, nesting-aware widened copy: widen
+    per-character unless `_innermost_span_is_live` says the innermost
+    containing span at that position is live -- a deeper nested quote
+    (the inner `-C`'s own value) still widens, since its innermost span
+    is that quote, not the enclosing live one."""
+
+    def test_triple_nested_quoted_dash_capital_c_value_still_denies(self):
+        cmd = "git -c \"user.name=$(git -C '/shared/my repo' stash)\" status"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 5)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestGitOptsLeafOnlyWideningHandlesArbitraryNesting(RouterTestCase):
+    """F3 (round 6 review, blocker) — round 5's per-character "innermost
+    span is live" check fixed ONE level of nesting but still preserved a
+    DOUBLY-nested target's own internal space, since its innermost span
+    is the live substitution wrapping it, not the target itself:
+
+        git -c "user.name=$(git -c "user.name=$(printf x)" stash)" status
+
+    All three round-5 scans missed it (plain: real separators everywhere,
+    so the innermost `-c` value's own space is never widened; unconditional:
+    the outermost `-c`'s blanket widening destroys the middle invocation's
+    own separators; per-character nesting-aware: the innermost value's own
+    space has the innermost SUBSTITUTION, not that value's own quote, as
+    its innermost span, so it's preserved instead of widened).
+
+    Fixed (round 6) by replacing the per-character classification with a
+    TARGET-level one -- superseded again in round 7 by
+    `_gitopts_scan_variants`'s fully-isolated per-target variants (see
+    `TestGitOptsPerTargetVariantsHandleIntermediateInvocations` below),
+    but this test still exercises the same nesting shape and must keep
+    passing under whichever mechanism is current."""
+
+    def test_quadruple_nested_quoted_dash_c_value_still_denies(self):
+        cmd = 'git -c "user.name=$(git -c "user.name=$(printf x)" stash)" status'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 6)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestGitOptsPerTargetVariantsHandleIntermediateInvocations(RouterTestCase):
+    """F3 (round 7 review, blocker) — round 6's leaf-only widening
+    correctly finds the OUTERMOST and INNERMOST invocation's own
+    subcommand, but an INTERMEDIATE invocation (a target that both
+    CONTAINS a nested target AND is itself contained by another) is
+    neither a leaf (so it never widens) nor the untouched root (so an
+    ancestor's own widening, if any existed, would destroy its
+    separators anyway) -- there was no representation left it could be
+    found in:
+
+        git -c "user.name=$(git -c "user.name=$(git -c 'user.name=A B' status)" stash)" status
+
+    The middle invocation runs `stash` and must still be denied.
+
+    Fixed (round 7) by abandoning the search for ONE shared
+    representation entirely: `_gitopts_scan_variants` built one FULLY
+    ISOLATED variant per INDIVIDUAL quoted git-option value found
+    anywhere in the command. Superseded again in round 8 (grouped by
+    invocation instead of by individual target -- see
+    `TestGitOptsSiblingOptionsWidenTogether` below) after that
+    individual-target isolation broke on SIBLING options; this test
+    still exercises the same nesting shape and must keep passing under
+    whichever mechanism is current."""
+
+    def test_dangerous_intermediate_invocation_still_denies(self):
+        cmd = (
+            'git -c "user.name=$(git -c "user.name=$(git -c \'user.name=A B\' status)" '
+            'stash)" status'
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 7)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestGitOptsSiblingOptionsWidenTogether(RouterTestCase):
+    """F3 (round 8 review, blocker) — round 7's fix widened each quoted
+    git-option value in TOTAL isolation (one variant per target, nothing
+    else in that variant touched), which correctly solved arbitrary
+    NESTING depth but broke on SIBLINGS: a single invocation with TWO
+    `-c 'k=v'` options in a row needs `_GIT_GLOBAL_OPTS`'s own `(?:...)*`
+    repetition to consume BOTH quoted values to reach the real
+    subcommand -- widening only one at a time (round 7's approach) always
+    left the OTHER one with a real embedded space, breaking `\\S+` for
+    that occurrence in every variant.
+
+    Fixed by grouping targets by INVOCATION instead of isolating each one
+    individually: two targets are siblings -- widened together, in the
+    SAME variant -- when they have the exact same set of ancestor targets
+    (targets whose span strictly contains them). Targets at different
+    nesting depths always have different ancestor sets (preserving round
+    7's arbitrary-depth fix); targets on the SAME invocation share the
+    same ancestor set and now widen together."""
+
+    def test_two_sibling_quoted_options_on_one_invocation_still_denies(self):
+        cmd = "git -c 'user.name=A B' -c 'user.email=C D' stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 8)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestReservedWordAnchorIgnoresQuotedMentions(RouterTestCase):
+    """F2 (round 2 review, major) — `_RESERVED_LEADIN` ("if|then|elif|
+    else|while|until|do") is a plain alternative in `_CMD_PREFIX`, with no
+    lookbehind available (Rust `regex` port target) to check whether the
+    reserved word sits in REAL command position or is merely quoted text
+    `executable_mask` leaves visible (masking only blanks quote
+    delimiters/separators/backticks -- see `_mask_literal_span` -- ordinary
+    letters inside a quote stay in scan_text verbatim by design). So
+    `printf '%s\\n' 'then git stash'` -- a command that only ever prints
+    the literal string `then git stash`, never runs `git stash` at all --
+    matched the stash rule's `_CMD_PREFIX` anchor on the quoted word
+    `then` and denied.
+
+    Fix: `executable_mask` already collects `quote_spans` -- the (start,
+    end) of every top-level quoted span it walks past, used elsewhere
+    (`_extend_end_past_quote`) to extend a truncated match past a quoted
+    secret. Every `_CMD_PREFIX` alternative OTHER than the reserved-word
+    one anchors on a character `_mask_literal_span`/`_mask_double_quoted`
+    already blank inside a quote (a real separator, or the `$(`/backtick
+    pair a genuine substitution needs) -- so a match whose OWN START
+    position falls strictly inside a recorded quote span can only ever be
+    the reserved-word alternative firing on a quoted mention. `evaluate()`
+    now discards any such match before evaluating the rule further."""
+
+    def test_printf_echoing_a_reserved_word_and_stash_mention_abstains(self):
+        cmd = "printf '%s\\n' 'then git stash'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2): {proc.stdout!r}")
+
+    def test_echo_of_an_if_then_shell_snippet_abstains(self):
+        cmd = "echo 'if true; then git push --force; fi'"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2): {proc.stdout!r}")
+
+    def test_a_real_reserved_word_command_position_still_denies(self):
+        # Regression guard: the quote-span filter must not blind the
+        # reserved-word anchor to a GENUINE invocation right after `then`.
+        cmd = "if true; then git stash; fi"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/tmp/shared-repo"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestReservedWordAnchorIgnoresDoubleQuotedMentionsToo(RouterTestCase):
+    """F2 (round 3 review, major): round 2's fix restricted the quote-span
+    filter to SINGLE-quoted spans only, since a `$(...)`/backtick
+    substitution genuinely stays live inside DOUBLE quotes and a first,
+    over-broad attempt filtered those too. But that meant a
+    double-quoted span's own ORDINARY LITERAL text (just as inert as
+    single-quoted text) was never filtered at all --
+    `printf '%s\\n' "then git stash"` still denied. Fixed by tracking
+    `live_spans` (the inner body of every substitution, at any nesting
+    depth) alongside `quote_spans`: a match is filtered when it starts
+    inside SOME quote span and NOT inside a live span nested in it --
+    single-quoted spans never have one (always filters, same as round 2),
+    double-quoted literal text now filters too, and a substitution
+    genuinely inside double quotes still never does."""
+
+    def test_printf_echoing_a_reserved_word_and_stash_mention_in_double_quotes_abstains(self):
+        cmd = 'printf \'%s\\n\' "then git stash"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2 round 3): {proc.stdout!r}")
+
+    def test_real_stash_substitution_inside_double_quotes_still_denies(self):
+        # Regression guard: a genuine substitution's own executable body,
+        # nested inside double quotes, must still anchor a real
+        # command-position match -- this is exactly the shape live_spans
+        # exists to keep working (echo "$(git stash)" is a REAL invocation).
+        cmd = 'echo "$(git stash)"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F2 round 3): {proc.stdout!r}")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestQuotedLiteralFilterRespectsNesting(RouterTestCase):
+    """F2 (round 4 review, major): round 3's filter treated "starts inside
+    ANY live span" as always-live, with no regard for NESTING -- so a
+    genuinely non-executable single-quoted printf ARGUMENT sitting INSIDE
+    a live substitution's own body (`echo "$(printf '%s\\n' 'then git
+    stash')"`) was wrongly treated as live and never filtered, even though
+    a single quote suppresses expansion regardless of what encloses it.
+    Fixed by finding the INNERMOST span (quote or live) containing the
+    match -- spans nest properly, so it's whichever containing span has
+    the LARGEST start -- and filtering only when THAT one is a quote
+    span."""
+
+    def test_single_quoted_mention_nested_inside_a_live_substitution_abstains(self):
+        cmd = "echo \"$(printf '%s\\n' 'then git stash')\""
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertEqual(proc.stdout.strip(), "", f"{cmd!r} must abstain (F2 round 4): {proc.stdout!r}")
+
+    def test_real_invocation_directly_in_a_live_substitution_still_denies(self):
+        # Regression guard: the innermost-span check must not un-fix
+        # round 3's own case -- a substitution's own body, with nothing
+        # more deeply nested inside it, is still the innermost span.
+        cmd = 'echo "$(git stash)"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F2 round 4): {proc.stdout!r}")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestHeredocBacktickMarkerReachesNestedHeredocs(RouterTestCase):
+    """F23 (round 3 review, minor): the F13 fix decided whether a heredoc
+    body earned the backticks-in-unquoted-heredoc advisory inside
+    `executable_mask`'s OWN top-level loop -- a heredoc nested inside a
+    `$(...)`/backtick substitution (itself possibly inside a double-quoted
+    span) is handled by `_mask_quotes_recursive` instead and never reached
+    that check, so the advisory silently stopped firing for it. Fixed by
+    moving the decision into `_consume_heredoc_body` itself, the one
+    function every caller funnels through."""
+
+    def test_backtick_in_heredoc_nested_inside_a_quoted_substitution_still_fires(self):
+        cmd = 'echo "$(cat <<EOF\n`date`\nEOF\n)"'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertIn(
+                "additionalContext", json.loads(proc.stdout)["hookSpecificOutput"],
+                f"nested heredoc backtick must still fire (F23): {proc.stdout!r}",
+            )
+            self.assertEqual(read_ledger(ledger_dir)[0]["rule_id"], "backticks-in-unquoted-heredoc")
+
+
+class TestAssignmentPrefixWithQuotedValue(RouterTestCase):
+    """R4 (major): `_ASSIGN`'s value is `\\S*`, which can't span a quoted
+    assignment value containing spaces -- the wrapper-skip couldn't reach
+    past it, so the real subcommand was never at command position and the
+    whole rule abstained."""
+
+    def test_quoted_assignment_value_does_not_hide_the_command(self):
+        cases = (
+            'GIT_SSH_COMMAND="ssh -i key" git push --force origin main',
+            "GIT_SSH_COMMAND='ssh -i key' git push --force origin main",
+            'env FOO="a b" git push --force origin main',
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R4)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_quoted_assignment_value_before_stash_denies_from_shared_checkout(self):
+        cmd = 'FOO="a b" git stash'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/c"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestSubstitutionInsideUnquotedHeredocIsRecursivelyMasked(RouterTestCase):
+    """R5 (major): `_mask_span_preserving_substitutions` (used for an
+    UNQUOTED heredoc body) preserved a `$(...)`/backtick substitution's
+    content WHOLESALE, so a quoted literal / comment / quoted heredoc
+    nested inside one falsely denied -- unlike `_mask_double_quoted`,
+    which G3 already made comment/heredoc/quote-aware for the same
+    nesting shape."""
+
+    def test_quoted_or_commented_mention_inside_a_nested_substitution_abstains(self):
+        # The second case's LITERAL backtick pair is a genuine, unrelated
+        # match for the separate `backticks-in-unquoted-heredoc` rule (any
+        # backtick in an unquoted heredoc body is inherently risky,
+        # independent of what it contains) -- R5 is about the
+        # `git-stash-shared-checkout` rule specifically, so that rule's
+        # ABSENCE from the ledger is the precise assertion, not blank
+        # stdout for every case.
+        cases = (
+            "cat <<EOF\n$(printf '%s' 'x; git stash')\nEOF",
+            "cat <<EOF\n`printf '%s' 'x; git stash'`\nEOF",
+            "cat <<EOF\n$(cat <<'H'\n; git stash\nH\n)\nEOF",
+            "cat <<EOF\n$(true # ; git stash\n)\nEOF",
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(
+                    make_payload("Bash", {"command": cmd}, cwd="/shared/c"), ledger_dir
+                )
+                fired_ids = {line["rule_id"] for line in read_ledger(ledger_dir)}
+                self.assertNotIn(
+                    "git-stash-shared-checkout", fired_ids,
+                    f"a quoted/commented mention inside a nested substitution "
+                    f"must not falsely deny the stash rule (R5): {proc.stdout!r}",
+                )
+
+    def test_real_stash_inside_a_substitution_in_a_heredoc_body_still_denies(self):
+        cmd = "cat <<EOF\n$(git stash)\nEOF"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/c"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (R5 control)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestRedactedSpanExtendsToQuotedValueEnd(RouterTestCase):
+    """R6 (major): a rule's OWN match span can end INSIDE a quoted secret
+    value (e.g. the `+refspec` alternative matching the `+` inside a
+    `password="... +charlie ..."` argument) -- slicing raw_matched right
+    there drops the value's closing quote, so redact()'s quoted-value
+    alternative can't find it and falls back to `\\S+`, leaking the rest
+    of the phrase into the ledger's persisted `match` field."""
+
+    def test_match_span_ending_mid_quote_still_redacts_the_whole_value(self):
+        cases = (
+            'git push -o password="alpha bravo +charlie delta" origin main',
+            'git push -o "password=alpha bravo +charlie delta" origin main',
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                lines = read_ledger(ledger_dir)
+                self.assertTrue(lines, cmd)
+                for entry in lines:
+                    for word in ("alpha", "bravo", "charlie", "delta"):
+                        self.assertNotIn(
+                            word, entry.get("match", ""), f"{cmd!r}: {entry}"
+                        )
+
+
+class TestRedactSpansBackslashEscapedSpaces(RouterTestCase):
+    """R7 (major): A-R6 taught `redact()` about `"key=value"`, `'key=value'`
+    and `$'...'`, but the generic pattern's UNQUOTED alternative is still
+    `\\S+` -- a bash backslash-escaped space (`password=alpha\\ bravo\\
+    charlie`, one shell word) leaks everything after the first escaped
+    space."""
+
+    def test_backslash_escaped_spaces_in_an_unquoted_value_are_fully_redacted(self):
+        cmd = r"git push -o password=alpha\ bravo\ charlie origin +HEAD:main"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines, cmd)
+            for entry in lines:
+                for word in ("alpha", "bravo", "charlie"):
+                    self.assertNotIn(word, entry.get("match", ""), entry)
+                    self.assertNotIn(word, entry.get("preview", ""), entry)
+
+
+class TestQuotedDoneAfterSeparatorDecisionUnaffected(RouterTestCase):
+    """R9 (nit, no code change): a quoted `'done'` sitting right after a
+    separator reads as the loop terminator once masking blanks its quote
+    delimiters -- decision-neutral (it's genuinely a real, unbounded
+    polling loop either way), pinned here only so the decision itself
+    stays covered; the ledger explicitly notes no decision impact."""
+
+    def test_quoted_done_right_after_a_separator_still_asks(self):
+        cmd = "while true; do gh pr checks 123; sleep 5; 'done'; done"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), cmd)
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+
+class TestHeredocDelimiterBackslashNewlineContinuation(RouterTestCase):
+    """A-REFUTE-1 (blocker): bash line-continuation folding (already applied
+    to the character-loop scanner for R1) was never applied to
+    `_HEREDOC_START_RE`'s unquoted-delimiter alternative, which matches
+    `[A-Za-z_][A-Za-z0-9_]*` against the RAW text with no continuation
+    awareness. A `\\<newline>` pair right after the first run of delimiter
+    characters means the delimiter word is not fully resolvable by this
+    scanner (real bash would fold it into a longer word, e.g. `E\\` +
+    newline + `OF` -> the real terminator is `EOF`, verified against real
+    bash) -- so this is exactly the UNPARSEABLE case: rather than guessing
+    at a truncated delimiter (which swallows every real command up to
+    EOF-of-text as fake heredoc body), the scanner must not treat this `<<`
+    as a heredoc opener at all, leaving the rest of the text visible to
+    ordinary scanning instead of silently abstaining."""
+
+    def test_delimiter_word_split_by_a_line_continuation_still_denies(self):
+        cmd = "cat <<E\\\nOF\nbody\nEOF\ngit stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-REFUTE-1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestQuoteSpansCoverNestedSubstitutionSecrets(RouterTestCase):
+    """A-REFUTE-2 (blocker): R6's quote-span-extension fix (`quote_spans`,
+    `_extend_end_past_quote`) only records TOP-LEVEL quotes that
+    `executable_mask`'s own loop walks past directly. A quoted secret
+    nested inside a `$(...)` substitution within an UNQUOTED heredoc body
+    is masked by the wholly separate `_mask_span_preserving_substitutions`
+    -> `_mask_quotes_recursive` scanner, which had no `quote_spans`
+    parameter at all -- so a rule match ending mid-value there had no span
+    to extend into, `redact()` fell back to its bare-token alternative,
+    and a secret fragment reached the persisted ledger in the clear."""
+
+    def test_secret_inside_a_substitution_in_an_unquoted_heredoc_is_fully_redacted(self):
+        cmd = (
+            "cat <<EOF\n"
+            '$(git push -o password="alpha bravo +charlie delta" origin main)\n'
+            "EOF"
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            lines = read_ledger(ledger_dir)
+            self.assertTrue(lines, cmd)
+            for entry in lines:
+                for word in ("alpha", "bravo", "charlie", "delta"):
+                    self.assertNotIn(word, entry.get("match", ""), f"{cmd!r}: {entry}")
+
+
+class TestAssignmentValueConcatenatedSegments(RouterTestCase):
+    """A-REFUTE-3 (major): `_ASSIGN_VALUE` is a single alternation with no
+    repetition, so it can't span a value built from concatenated
+    unquoted+quoted segments (a single shell word, since bash concatenates
+    adjacent unquoted/quoted fragments with no whitespace between them --
+    `FOO=bar"baz qux"` assigns `barbaz qux`). `_ASSIGN`'s own regex could
+    only ever match ONE segment, so `_WRAPPER_SKIP`'s `(?:_ASSIGN\\s+)*`
+    iteration failed on the trailing unmatched fragment and the whole
+    wrapper-skip never reached the real subcommand. Separately,
+    `_is_assignment_value_quote`'s lookback required the quote to sit
+    DIRECTLY after `NAME=`(`$`?), so a quote preceded by unquoted content
+    had its own delimiters blanked like an ordinary quote instead of kept
+    visible for `_ASSIGN` to match."""
+
+    def test_concatenated_unquoted_and_quoted_assignment_value_does_not_hide_the_command(self):
+        cases = (
+            'FOO=bar"baz qux" git push --force origin main',
+            "FOO=bar'baz qux' git push --force origin main",
+            'FOO="a b"baz git push --force origin main',
+        )
+        for cmd in cases:
+            with self.subTest(cmd=cmd), tempfile.TemporaryDirectory() as ledger_dir:
+                proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+                self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-REFUTE-3)")
+                hso = json.loads(proc.stdout)["hookSpecificOutput"]
+                self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+
+class TestAnsiCQuoteEmbeddedEscapedQuoteIsNotAQuoteCloser(RouterTestCase):
+    """A-REFUTE-4 / B-F1 (major/blocker, same root cause): a `$'...'`
+    ANSI-C-quoted string supports a backslash-escaped `\\'` for a literal
+    apostrophe INSIDE the string -- unlike a plain single-quoted string,
+    which has no escape mechanism at all. The scanner's single-quote
+    branches all locate a span's end with an escape-UNAWARE
+    `text.find("'", ...)`, which treats `$'...'`'s opening quote exactly
+    like a plain one and stops at the first literal `'` -- the ESCAPED
+    one -- instead of the real closer. Everything from the true (now
+    orphaned) closing quote onward is then read as a fresh, unterminated
+    single-quoted span extending to end-of-text, so every real separator
+    after it is blanked and no rule can anchor a match again: a silent,
+    total bypass for the rest of the command."""
+
+    def test_ansi_c_quoted_assignment_value_with_an_escaped_quote_still_asks(self):
+        # A-REFUTE-4's exact probe: real bash assigns FOO="a'b c" here,
+        # then genuinely runs `git push --force origin main`.
+        cmd = "FOO=$'a\\'b c' git push --force origin main"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (A-REFUTE-4)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "ask", cmd)
+
+    def test_ansi_c_quoted_literal_apostrophe_before_stash_still_denies(self):
+        # B-F1's exact probe: `$'\''` is the standard bash idiom for
+        # embedding one literal apostrophe via ANSI-C quoting; `git stash`
+        # genuinely runs right after it (verified against real bash).
+        cmd = "echo $'\\'' ; git stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(
+                make_payload("Bash", {"command": cmd}, cwd="/shared/checkout"), ledger_dir
+            )
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (B-F1)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+if __name__ == "__main__":
+    unittest.main()

@@ -159,6 +159,16 @@ if [ -d "$SCRIPT_DIR/system/hooks/scripts" ]; then
     cp "$SCRIPT_DIR/system/hooks/scripts/"* "$TARGET_DIR/.hex/hooks/scripts/" 2>/dev/null || true
     chmod +x "$TARGET_DIR/.hex/hooks/scripts/"*.sh 2>/dev/null || true
 fi
+# router-rules.json is also carried by the bulk `cp -r system .hex` above, but
+# pretooluse-router.py resolves it relative to its own script dir
+# (`.hex/hooks/router-rules.json`) — copy it explicitly here too so the
+# router never silently fail-opens if the bulk-copy step above is ever
+# refactored into a per-subdir allowlist (see the system/telemetry/migrations
+# refactor guard comment near the bulk copy for the same failure class).
+if [ -f "$SCRIPT_DIR/system/hooks/router-rules.json" ]; then
+    mkdir -p "$TARGET_DIR/.hex/hooks"
+    cp "$SCRIPT_DIR/system/hooks/router-rules.json" "$TARGET_DIR/.hex/hooks/router-rules.json"
+fi
 if [ -f "$HOOKS_MANIFEST" ]; then
     mkdir -p "$TARGET_DIR/.claude"
     MANIFEST_PATH="$HOOKS_MANIFEST" SETTINGS_PATH="$TARGET_DIR/.claude/settings.json" python3 << 'PYEOF'
