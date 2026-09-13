@@ -16,7 +16,7 @@ pub fn backfill(conn: &Connection, hex_dir: &Path) -> anyhow::Result<usize> {
     // tombstoned (or deleted) facts must leave the index first
     conn.execute(
         "DELETE FROM facts_vec WHERE fact_id NOT IN
-            (SELECT id FROM facts WHERE tombstone = 0)",
+            (SELECT id FROM facts WHERE tombstone = 0 AND invalid_at IS NULL)",
         [],
     )?;
     // facts.id is TEXT (ULID) — no CAST needed, and the id can NOT be parsed
@@ -25,6 +25,7 @@ pub fn backfill(conn: &Connection, hex_dir: &Path) -> anyhow::Result<usize> {
         "SELECT f.id, f.subject || ' ' || f.predicate || ' ' || f.object
            FROM facts f
           WHERE f.tombstone = 0
+            AND f.invalid_at IS NULL
             AND f.id NOT IN (SELECT fact_id FROM facts_vec)",
     )?;
     let rows: Vec<(String, String)> = stmt
@@ -62,6 +63,7 @@ mod tests {
         let c = Connection::open_in_memory().unwrap();
         crate::memory::schema::apply_plan1_baseline_for_test(&c).unwrap();
         crate::memory::schema::apply_plan2(&c).unwrap();
+        crate::memory::schema::apply_plan3(&c).unwrap();
         c
     }
 
@@ -124,5 +126,57 @@ mod tests {
             .query_row("SELECT COUNT(*) FROM facts_vec", [], |r| r.get(0))
             .unwrap();
         assert_eq!(count, 0, "tombstoned fact's vector must be swept");
+    }
+
+    fn insert_superseded_fact(c: &Connection, id: &str, object: &str) {
+        c.execute(
+            "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,valid_from,invalid_at,superseded_by)
+             VALUES (?1,'project:hex','uses',?2,0.8,'2026-06-11','2026-06-11','2026-06-11','2026-09-05','superseder-id')",
+            rusqlite::params![id, object],
+        )
+        .unwrap();
+    }
+
+    /// RED for FIX item 4 (Twbqe1c12) — a superseded row (never tombstoned,
+    /// never deleted, only `invalid_at` set) must be excluded from the
+    /// backfill the same way a tombstoned row is: it stays in `facts`
+    /// forever for history, but it must not be re-embedded and searchable.
+    #[test]
+    fn backfill_embeds_live_facts_only_excludes_superseded() {
+        let c = fixture();
+        crate::memory::schema::apply_plan3(&c).unwrap();
+        insert_fact(&c, "f-live-1", "sqlite-vec for the vector store", 0);
+        insert_superseded_fact(&c, "f-superseded-1", "an old, now-corrected fact");
+
+        let n = backfill(&c, Path::new(".")).unwrap();
+        assert_eq!(n, 1, "only the live fact must be embedded");
+        let superseded_count: i64 = c
+            .query_row(
+                "SELECT COUNT(*) FROM facts_vec WHERE fact_id = 'f-superseded-1'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(superseded_count, 0, "superseded fact must not be embedded");
+    }
+
+    /// Companion to `backfill_sweeps_tombstoned_vectors_without_loading_embedder`:
+    /// a superseded fact's stale vector (e.g. embedded before it was
+    /// superseded) must be swept too, and the no-pending path must still
+    /// never construct the embedder.
+    #[test]
+    fn backfill_sweeps_superseded_vectors_without_loading_embedder() {
+        let c = fixture();
+        crate::memory::schema::apply_plan3(&c).unwrap();
+        insert_superseded_fact(&c, "f-superseded-1", "stale, corrected knowledge");
+        let v = vec![0.5f32; crate::memory::vector::EMBED_DIM];
+        crate::memory::vector::insert_fact_vec(&c, "f-superseded-1", &v).unwrap();
+
+        let n = backfill(&c, Path::new("/nonexistent-hex-dir")).unwrap();
+        assert_eq!(n, 0, "nothing live to embed");
+        let count: i64 = c
+            .query_row("SELECT COUNT(*) FROM facts_vec", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(count, 0, "superseded fact's vector must be swept");
     }
 }

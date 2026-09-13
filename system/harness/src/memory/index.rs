@@ -862,6 +862,13 @@ where
     // `&mut` needed) and RELEASEs (commits) only when the closure below
     // returns `Ok`; any `Err` — including one propagated by `?` from the
     // embed/storage step — rolls back to the pre-call state first.
+    //
+    // F7 (major, arrra/hex PR #9 round 2): whether this call is the one
+    // opening the transaction (`conn` was in autocommit mode right before
+    // the SAVEPOINT below) is captured up front so the Err-arm cleanup
+    // further down can fully abort ONLY the transaction this function
+    // itself owns, never a transaction a caller already had open.
+    let owns_transaction = conn.is_autocommit();
     conn.execute_batch("SAVEPOINT index_file_with_reuse")?;
 
     let result = (|| -> anyhow::Result<IndexOutcome> {
@@ -1056,17 +1063,92 @@ where
                 // finalization step, so it succeeds even while the blocking
                 // reader is still active. A secondary failure to unwind is
                 // logged loudly (S6) but does not shadow the original error.
-                if let Err(unwind_err) = conn.execute_batch("ROLLBACK") {
-                    eprintln!(
-                        "  ERROR: failed to unwind index_file_with_reuse savepoint after a \
-                         failed RELEASE ({release_err}): {unwind_err}"
-                    );
+                //
+                // B-F-new1 (major, arrra/hex PR #9 round 2, prior-round
+                // carry): that full `ROLLBACK` must only run when this call
+                // owns the transaction (see `owns_transaction` above) — the
+                // same gate F7 (below) already applies on the Err arm. A
+                // caller that wraps one or more `index_file_with_reuse`
+                // calls inside its own already-open transaction must not
+                // have that ENTIRE outer transaction discarded just because
+                // this call's own nested RELEASE failed to finalize.
+                if owns_transaction {
+                    if let Err(unwind_err) = conn.execute_batch("ROLLBACK") {
+                        eprintln!(
+                            "  ERROR: failed to unwind index_file_with_reuse savepoint after a \
+                             failed RELEASE ({release_err}): {unwind_err}"
+                        );
+                    }
+                } else {
+                    // F10 (major, arrra/hex PR #9 round 3): logging alone
+                    // left this call's own successful writes sitting inside
+                    // the still-open (never released, never rolled back)
+                    // savepoint — the caller's later COMMIT of its outer
+                    // transaction would then include them anyway, even
+                    // though this function is returning Err to say the call
+                    // failed. `Err` must mean "as if this call never
+                    // happened": roll back to this call's own savepoint
+                    // (discarding only its writes, not the caller's), then
+                    // attempt to RELEASE the now-empty savepoint so it does
+                    // not linger nested inside the caller's transaction —
+                    // same idiom as the Err-arm's combined `ROLLBACK TO
+                    // ...; RELEASE ...` below, applied here to the Ok arm's
+                    // cleanup failure.
+                    if let Err(rollback_to_err) =
+                        conn.execute_batch("ROLLBACK TO index_file_with_reuse")
+                    {
+                        eprintln!(
+                            "  ERROR: failed to roll back index_file_with_reuse's own writes \
+                             after a failed RELEASE ({release_err}): {rollback_to_err}; the \
+                             caller-owned outer transaction remains open, but this call's own \
+                             writes may still be present in it"
+                        );
+                    } else if let Err(release_err2) =
+                        conn.execute_batch("RELEASE index_file_with_reuse")
+                    {
+                        eprintln!(
+                            "  ERROR: rolled back index_file_with_reuse's own writes after a \
+                             failed RELEASE ({release_err}), but releasing the now-empty \
+                             savepoint also failed ({release_err2}); leaving the caller-owned \
+                             outer transaction in place"
+                        );
+                    }
                 }
                 Err(release_err.into())
             }
         },
         Err(e) => {
-            conn.execute_batch("ROLLBACK TO index_file_with_reuse; RELEASE index_file_with_reuse")?;
+            // F7 (major, arrra/hex PR #9 round 2): as with the Ok-arm's
+            // failed RELEASE above, `ROLLBACK TO` undoes this call's own
+            // writes, but the `RELEASE` half of this combined statement is
+            // still a COMMIT of the (now effectively empty) outermost
+            // savepoint — needing the identical RESERVED->EXCLUSIVE lock
+            // upgrade — and can fail with SQLITE_BUSY under the same
+            // blocking-reader condition. Propagating that failure via `?`
+            // used to leave the SAVEPOINT open: later calls then nest under
+            // it and can report success without ever reaching disk. Fall
+            // back to a full `ROLLBACK` only when this call owns the
+            // transaction (see `owns_transaction` above) — a caller-owned
+            // outer transaction already survived the `ROLLBACK TO` and must
+            // not be blown away by a plain `ROLLBACK` here.
+            if let Err(cleanup_err) = conn
+                .execute_batch("ROLLBACK TO index_file_with_reuse; RELEASE index_file_with_reuse")
+            {
+                if owns_transaction {
+                    if let Err(unwind_err) = conn.execute_batch("ROLLBACK") {
+                        eprintln!(
+                            "  ERROR: failed to unwind index_file_with_reuse savepoint after a \
+                             failed error-path cleanup ({cleanup_err}): {unwind_err}"
+                        );
+                    }
+                } else {
+                    eprintln!(
+                        "  ERROR: failed to release index_file_with_reuse savepoint after a \
+                         failed error-path cleanup ({cleanup_err}); leaving the caller-owned \
+                         outer transaction in place"
+                    );
+                }
+            }
             Err(e)
         }
     }
@@ -3365,6 +3447,270 @@ mod tests {
             durable_chash, new_chash,
             "F1: a subsequent successful call must persist durably to disk — \
              not be discarded when the connection is dropped"
+        );
+    }
+
+    // F7 (major, arrra/hex PR #9 round 2): the `Err(e)` arm executes
+    // `ROLLBACK TO index_file_with_reuse; RELEASE index_file_with_reuse` and
+    // propagates any cleanup failure straight through `?`. `ROLLBACK TO`
+    // undoes this call's own writes, but the finalizing `RELEASE` of the
+    // OUTERMOST savepoint is still a COMMIT — needing the identical
+    // RESERVED->EXCLUSIVE lock upgrade as the Ok-arm's RELEASE above — and
+    // can fail with SQLITE_BUSY under the same blocking-reader condition
+    // even though there is nothing left to write. Left unhandled, the
+    // SAVEPOINT stays open: the next call nests a new savepoint under it and
+    // can report success without ever reaching disk. Same construction as
+    // `index_file_with_reuse_release_failure_unwinds_and_next_call_persists`
+    // above, but the failure this time comes from the embedder (the Err arm)
+    // instead of a successful commit (the Ok arm).
+    #[test]
+    fn index_file_with_reuse_embedding_failure_under_blocking_reader_unwinds_and_next_call_persists(
+    ) {
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let db_path = tmp.path().join("memory.db");
+        let conn = super::super::open_db(&db_path).unwrap();
+        init_db(&conn).unwrap();
+        let mode: String = conn
+            .query_row("PRAGMA journal_mode=DELETE", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            mode, "delete",
+            "test setup: must be off WAL to reproduce a commit-time lock-upgrade failure"
+        );
+        conn.busy_timeout(std::time::Duration::from_millis(0))
+            .unwrap();
+        let filepath = hex_root.join("embed-fail.md");
+
+        let content_v1 = build_40_chunk_content();
+        let old_chash = content_hash(&content_v1);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v1,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.21f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        // A second connection holding an open read transaction: its SHARED
+        // lock blocks `conn`'s RESERVED->EXCLUSIVE upgrade at commit time —
+        // reached here via the Err(e) arm's `ROLLBACK TO ...; RELEASE ...`
+        // once the embedder fails below.
+        let conn2 = Connection::open(&db_path).unwrap();
+        conn2.execute_batch("BEGIN;").unwrap();
+        let _: i64 = conn2
+            .query_row("SELECT COUNT(*) FROM files", [], |r| r.get(0))
+            .unwrap();
+
+        let content_v2 = content_v1.replace(
+            "Content for chunk number 17, unique text here.",
+            "Content for chunk number 17, EDITED unique text here.",
+        );
+        let result = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v2,
+            2.0,
+            "full",
+            false,
+            |_batch| anyhow::bail!("embedding service unavailable"),
+        );
+        assert!(
+            result.is_err(),
+            "a simulated embedding failure must surface as an error"
+        );
+
+        assert!(
+            conn.is_autocommit(),
+            "F7: a failed error-path cleanup (ROLLBACK TO + RELEASE) must \
+             still unwind to the connection's entry (autocommit) state, not \
+             leave the savepoint open"
+        );
+
+        let chash_after_failed_cleanup: String = conn
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'embed-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            chash_after_failed_cleanup, old_chash,
+            "F7: the previous file's content_hash must survive a failed error-path cleanup"
+        );
+
+        // Let the blocking reader go, then a subsequent unimpeded call must
+        // commit durably — not nest under a still-open outer savepoint left
+        // behind by the failed cleanup.
+        conn2.execute_batch("COMMIT;").unwrap();
+        drop(conn2);
+
+        let content_v3 = content_v1.replace(
+            "Content for chunk number 3, unique text here.",
+            "Content for chunk number 3, EDITED again.",
+        );
+        let new_chash = content_hash(&content_v3);
+        index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content_v3,
+            3.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.42f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        )
+        .unwrap();
+
+        drop(conn);
+        let reopened = super::super::open_db(&db_path).unwrap();
+        let durable_chash: String = reopened
+            .query_row(
+                "SELECT content_hash FROM files WHERE path = 'embed-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            durable_chash, new_chash,
+            "F7: a subsequent successful call must persist durably to disk — \
+             not be discarded when the connection is dropped"
+        );
+    }
+
+    // B-F-new1 (major, arrra/hex PR #9 round 2, carried from the prior
+    // round's review_b): the Ok arm's failed-RELEASE cleanup (F1, PR #8
+    // round 2, above) unconditionally runs a full `ROLLBACK` on any RELEASE
+    // failure, unlike the Err arm's cleanup (F7, above) which gates that
+    // full `ROLLBACK` on `owns_transaction` — never blowing away a
+    // transaction a caller already had open. A caller that wraps one or
+    // more `index_file_with_reuse` calls inside its own already-open
+    // transaction (`owns_transaction = false`) whose nested RELEASE fails
+    // for any reason must not have its ENTIRE outer transaction discarded by
+    // this function's own cleanup, even though this call's own indexing
+    // work succeeded (the Ok arm). The blocking-reader/SQLITE_BUSY technique
+    // used by the F1/F7 tests above cannot reach this arm: a nested,
+    // non-outermost SAVEPOINT RELEASE succeeds even under a blocking reader
+    // (verified empirically — no EXCLUSIVE-lock upgrade is needed when not
+    // outermost), so the RELEASE is instead denied deterministically via a
+    // rusqlite authorizer hook — a fault-injection point independent of
+    // timing, locking mode, or platform.
+    #[test]
+    fn index_file_with_reuse_ok_arm_release_failure_preserves_caller_owned_outer_transaction() {
+        use rusqlite::hooks::{AuthAction, AuthContext, Authorization, TransactionOperation};
+
+        let tmp = TempDir::new().unwrap();
+        let hex_root = tmp.path();
+        let db_path = tmp.path().join("memory.db");
+        let conn = super::super::open_db(&db_path).unwrap();
+        init_db(&conn).unwrap();
+        let filepath = hex_root.join("ok-release-fail.md");
+
+        // The caller opens its own outer transaction and writes something
+        // unrelated to this call before delegating to index_file_with_reuse
+        // — `owns_transaction` (captured from `conn.is_autocommit()` right
+        // before the SAVEPOINT below) must come back false.
+        conn.execute_batch("BEGIN").unwrap();
+        conn.execute(
+            "INSERT INTO files (path, mtime, content_hash, indexed_at, chunk_count) \
+             VALUES ('caller-owned.md', 1.0, 'callerhash', '2026-01-01', 0)",
+            [],
+        )
+        .unwrap();
+
+        // Deny only the RELEASE of this function's own savepoint; every
+        // other statement (its own SAVEPOINT/INSERT/SELECT/DELETE work, and
+        // the caller's COMMIT below) is allowed.
+        conn.authorizer(Some(|ctx: AuthContext<'_>| match ctx.action {
+            AuthAction::Savepoint {
+                operation: TransactionOperation::Release,
+                savepoint_name: "index_file_with_reuse",
+            } => Authorization::Deny,
+            _ => Authorization::Allow,
+        }));
+
+        let content = build_40_chunk_content();
+        let result = index_file_with_reuse(
+            &conn,
+            &filepath,
+            hex_root,
+            &content,
+            1.0,
+            "full",
+            false,
+            |batch| {
+                Ok(batch
+                    .iter()
+                    .map(|_| vec![0.5f32; super::super::vector::EMBED_DIM])
+                    .collect())
+            },
+        );
+
+        assert!(result.is_err(), "a denied RELEASE must surface as an error");
+
+        assert!(
+            !conn.is_autocommit(),
+            "B-F-new1: a failed RELEASE on the Ok arm must not abort a \
+             caller-owned outer transaction — the connection must remain \
+             inside that transaction, not be forced back to autocommit"
+        );
+
+        // Lift the authorizer so the caller's own COMMIT (a `Transaction`
+        // action, never denied above) can proceed, then confirm the
+        // caller's earlier write actually survived: a wrongful full
+        // `ROLLBACK` in the cleanup path above would have discarded it
+        // along with everything else in the outer transaction.
+        conn.authorizer(None::<fn(AuthContext<'_>) -> Authorization>);
+        conn.execute_batch("COMMIT").unwrap();
+
+        let caller_row_survived: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'caller-owned.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            caller_row_survived, 1,
+            "B-F-new1: the caller's own uncommitted write must survive a \
+             failed nested RELEASE in index_file_with_reuse's Ok-arm cleanup"
+        );
+
+        // F10 (major, arrra/hex PR #9 round 3): an `Err` return from
+        // `index_file_with_reuse` must mean "as if this call never
+        // happened" — the caller's earlier write surviving (checked above)
+        // is necessary but not sufficient. This call's OWN work must also
+        // be gone, not merely left uncommitted-but-present inside the still
+        // -open outer savepoint for the caller's subsequent COMMIT to sweep
+        // up anyway.
+        let failed_calls_own_row_absent: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM files WHERE path = 'ok-release-fail.md'",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            failed_calls_own_row_absent, 0,
+            "F10: a failed nested RELEASE must roll back to this call's own \
+             savepoint before returning Err, so the caller's later commit \
+             cannot resurrect the failed call's own writes — index_file_with_reuse \
+             reported failure for this file and it must not exist afterward"
         );
     }
 
