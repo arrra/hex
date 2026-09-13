@@ -458,20 +458,53 @@ pub fn run_on_file(
     Ok(report)
 }
 
-/// Monotonic per-process counter appended to `facts.valid_from`. Plain SQLite
-/// `datetime('now')` has 1-second resolution, which ties whenever a judge
-/// Update chain runs faster than a second — exactly what happens inside one
-/// distill transaction (old row invalidated, new row inserted). A tied
-/// `valid_from` makes `ORDER BY valid_from` return supersede-chain history in
-/// arbitrary order instead of true insertion order (closed-loop-plan
-/// ACCEPTANCE d). The counter's own strict monotonicity (not the wall-clock
-/// prefix) is what guarantees ordering.
-static VALID_FROM_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+/// Render a validity-boundary timestamp (`facts.valid_from` / `invalid_at`).
+/// One fixed format for every value this module writes: RFC 3339, UTC (`Z`),
+/// nanosecond precision — parseable by SQLite's `datetime()`/`julianday()`
+/// (verified: `julianday('2026-09-12T10:00:00.123456789Z')` is non-NULL) and,
+/// because the format is fixed-width, lexicographically ordered the same way
+/// it is chronologically ordered (PR #10 review F1: the earlier
+/// `<ts>#<sequence>` suffix was neither RFC 3339 nor SQLite-parseable).
+fn format_validity_ts(t: chrono::DateTime<chrono::Utc>) -> String {
+    t.to_rfc3339_opts(chrono::SecondsFormat::Nanos, true)
+}
 
-fn next_valid_from() -> String {
-    let ts = chrono::Utc::now().to_rfc3339_opts(chrono::SecondsFormat::Nanos, true);
-    let seq = VALID_FROM_SEQ.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-    format!("{ts}#{seq:020}")
+/// Parse a persisted `valid_from` back into a timestamp. Rows written by this
+/// module use `format_validity_ts`; rows backfilled by the schema-5 migration
+/// carry `created_at` (SQLite `datetime('now')`: `YYYY-MM-DD HH:MM:SS`), and
+/// tests seed bare dates. Anything else is unparseable → `None`, and the
+/// caller falls back to the wall clock.
+fn parse_validity_ts(s: &str) -> Option<chrono::DateTime<chrono::Utc>> {
+    if let Ok(t) = chrono::DateTime::parse_from_rfc3339(s) {
+        return Some(t.with_timezone(&chrono::Utc));
+    }
+    if let Ok(t) = chrono::NaiveDateTime::parse_from_str(s, "%Y-%m-%d %H:%M:%S") {
+        return Some(t.and_utc());
+    }
+    if let Ok(d) = chrono::NaiveDate::parse_from_str(s, "%Y-%m-%d") {
+        return Some(d.and_hms_opt(0, 0, 0)?.and_utc());
+    }
+    None
+}
+
+/// The single transition instant for a supersede: the predecessor's
+/// `invalid_at` AND the replacement's `valid_from` (PR #10 review F3 — one
+/// timestamp, one format, one precision, so the interval closes exactly where
+/// the next one opens: no gap, no negative interval).
+///
+/// Derived MONOTONICALLY from the persisted predecessor (F2): `max(now,
+/// predecessor.valid_from + 1ns)`. A backward wall-clock step between the
+/// predecessor's write and this one can therefore never place the replacement
+/// before its predecessor under `ORDER BY valid_from`, and two updates inside
+/// the same clock tick still strictly order — the old process-local counter
+/// could do neither across a restart or a clock regression.
+fn transition_ts(now: chrono::DateTime<chrono::Utc>, prev_valid_from: &str) -> String {
+    let floor = parse_validity_ts(prev_valid_from)
+        .and_then(|p| p.checked_add_signed(chrono::Duration::nanoseconds(1)));
+    match floor {
+        Some(f) if f > now => format_validity_ts(f),
+        _ => format_validity_ts(now),
+    }
 }
 
 /// Insert a fact plus its ADD history row. fact_history.fact_id references the
@@ -486,8 +519,30 @@ fn insert_fact_with_history(
     importance: f32,
     path: &str,
 ) -> anyhow::Result<String> {
+    insert_fact_with_history_at(
+        conn,
+        subject,
+        pred,
+        obj,
+        importance,
+        path,
+        &format_validity_ts(chrono::Utc::now()),
+    )
+}
+
+/// `insert_fact_with_history` with an explicit `valid_from` — the supersede
+/// path passes the shared transition timestamp (F3) instead of sampling the
+/// clock a second time.
+fn insert_fact_with_history_at(
+    conn: &rusqlite::Connection,
+    subject: &str,
+    pred: &str,
+    obj: &str,
+    importance: f32,
+    path: &str,
+    valid_from: &str,
+) -> anyhow::Result<String> {
     let id = Ulid::new().to_string();
-    let valid_from = next_valid_from();
     conn.execute(
         "INSERT INTO facts (id,subject,predicate,object,importance,created_at,updated_at,source_ref,valid_from)
          VALUES (?1,?2,?3,?4,?5,datetime('now'),datetime('now'),?6,?7)",
@@ -527,9 +582,44 @@ fn apply_judge_decision(
     path: &str,
     report: &mut DistillReport,
 ) -> anyhow::Result<()> {
+    apply_judge_decision_at(
+        conn,
+        c,
+        pred,
+        obj,
+        decision,
+        path,
+        report,
+        chrono::Utc::now(),
+    )
+}
+
+/// `apply_judge_decision` with an injected wall clock (PR #10 review F2): the
+/// supersede boundary is derived from `now` and the persisted predecessor, so
+/// tests can replay a clock regression or two updates in one tick
+/// deterministically instead of racing the real clock.
+#[allow(clippy::too_many_arguments)]
+fn apply_judge_decision_at(
+    conn: &rusqlite::Connection,
+    c: &Candidate,
+    pred: &str,
+    obj: &str,
+    decision: judge::Decision,
+    path: &str,
+    report: &mut DistillReport,
+    now: chrono::DateTime<chrono::Utc>,
+) -> anyhow::Result<()> {
     match decision.action {
         judge::Action::Add => {
-            insert_fact_with_history(conn, &c.subject, pred, obj, c.importance, path)?;
+            insert_fact_with_history_at(
+                conn,
+                &c.subject,
+                pred,
+                obj,
+                c.importance,
+                path,
+                &format_validity_ts(now),
+            )?;
             report.adds += 1;
         }
         judge::Action::Update => {
@@ -547,21 +637,68 @@ fn apply_judge_decision(
                 // `private` param and defaults to 0, so a private fact that
                 // gets version-bumped would otherwise silently become
                 // non-private and leak through exclude_private recall.
-                let (prev, prev_private): (String, i64) = conn.query_row(
-                    "SELECT object, private FROM facts WHERE id=?1",
-                    [&tid],
-                    |r| Ok((r.get(0)?, r.get(1)?)),
+                //
+                // F4 (PR #10 review): the target must be a CURRENTLY LIVE row
+                // for THIS candidate's subject and effective predicate. By id
+                // alone, replaying the same decision twice inserted a second
+                // live replacement and overwrote the first `superseded_by`
+                // link, and a target from an unrelated subject/predicate was
+                // accepted as-is. A stale or unrelated target is a judge
+                // protocol violation, handled like an untargeted UPDATE: loud
+                // telemetry, counted as a flag, nothing written.
+                use rusqlite::OptionalExtension as _;
+                let live: Option<(String, i64, String)> = conn
+                    .query_row(
+                        "SELECT object, private, valid_from FROM facts \
+                         WHERE id=?1 AND subject=?2 AND predicate=?3 \
+                         AND invalid_at IS NULL AND tombstone = 0",
+                        rusqlite::params![tid, c.subject, pred],
+                        |r| Ok((r.get(0)?, r.get(1)?, r.get(2)?)),
+                    )
+                    .optional()?;
+                let Some((prev, prev_private, prev_valid_from)) = live else {
+                    record_flag_event(
+                        "distill::flag-stale-target",
+                        "ok",
+                        &format!(
+                            "judge said UPDATE target {} for ({},{},{}) in {} but no live row with that id/subject/predicate exists: {}",
+                            tid, c.subject, pred, obj, path, decision.reason
+                        ),
+                    );
+                    report.flags += 1;
+                    return Ok(());
+                };
+                // F3: ONE transition instant closes the old interval and opens
+                // the new one — same value, same format, same precision.
+                let transition = transition_ts(now, &prev_valid_from);
+                let new_id = insert_fact_with_history_at(
+                    conn,
+                    &c.subject,
+                    pred,
+                    obj,
+                    c.importance,
+                    path,
+                    &transition,
                 )?;
-                let new_id =
-                    insert_fact_with_history(conn, &c.subject, pred, obj, c.importance, path)?;
                 conn.execute(
                     "UPDATE facts SET private=?1 WHERE id=?2",
                     rusqlite::params![prev_private, new_id],
                 )?;
-                conn.execute(
-                    "UPDATE facts SET invalid_at=datetime('now'), superseded_by=?1, updated_at=datetime('now') WHERE id=?2",
-                    rusqlite::params![new_id, tid],
+                // Conditioned on the row still being live and checked for
+                // exactly one change (F4): a concurrent supersede of the same
+                // predecessor must fail this candidate (the caller's savepoint
+                // rolls the replacement insert back) rather than silently
+                // re-pointing `superseded_by`.
+                let changed = conn.execute(
+                    "UPDATE facts SET invalid_at=?1, superseded_by=?2, updated_at=datetime('now') \
+                     WHERE id=?3 AND invalid_at IS NULL",
+                    rusqlite::params![transition, new_id, tid],
                 )?;
+                if changed != 1 {
+                    anyhow::bail!(
+                        "supersede of {tid} changed {changed} rows (expected exactly 1): predecessor was invalidated concurrently"
+                    );
+                }
                 // fact_history.op is CHECK-constrained to
                 // ('ADD','UPDATE','DELETE','FLAG') and that table's schema is
                 // out of scope for this change (spec exclusion) — record the
@@ -1463,6 +1600,382 @@ mod tests {
             hits.iter()
                 .all(|(f, _)| f.object != "installed and live version 3.9.0"),
             "exclude_private recall must never return a supersede replacement of a private fact"
+        );
+    }
+
+    fn seed_fact(conn: &Connection, subject: &str, pred: &str, obj: &str) -> String {
+        insert_fact_with_history(conn, subject, pred, obj, 0.7, "/tmp/seed.md").unwrap()
+    }
+
+    fn update_decision(target: &str) -> judge::Decision {
+        judge::Decision {
+            action: judge::Action::Update,
+            target_id: Some(target.to_string()),
+            reason: "bump".into(),
+        }
+    }
+
+    fn supersede(conn: &Connection, target: &str, new_obj: &str, report: &mut DistillReport) {
+        supersede_at(conn, target, new_obj, report, chrono::Utc::now())
+    }
+
+    fn supersede_at(
+        conn: &Connection,
+        target: &str,
+        new_obj: &str,
+        report: &mut DistillReport,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
+        apply_judge_decision_at(
+            conn,
+            &Candidate {
+                subject: "boi".into(),
+                predicate: "has".into(),
+                object: new_obj.into(),
+                importance: 0.7,
+            },
+            "has",
+            new_obj,
+            update_decision(target),
+            "/tmp/update.md",
+            report,
+            now,
+        )
+        .unwrap();
+    }
+
+    fn validity(conn: &Connection, id: &str) -> (String, Option<String>) {
+        conn.query_row(
+            "SELECT valid_from, invalid_at FROM facts WHERE id=?1",
+            [id],
+            |r| Ok((r.get(0)?, r.get(1)?)),
+        )
+        .unwrap()
+    }
+
+    fn id_of(conn: &Connection, obj: &str) -> String {
+        conn.query_row(
+            "SELECT id FROM facts WHERE subject='boi' AND predicate='has' AND object=?1",
+            [obj],
+            |r| r.get(0),
+        )
+        .unwrap()
+    }
+
+    /// RED for PR #10 review F1: `valid_from`/`invalid_at` must be values
+    /// SQLite's own date functions can read. The old `<rfc3339>#<sequence>`
+    /// suffix made `julianday(valid_from)` NULL for every row this module
+    /// wrote. Both boundaries of a superseded row, and the replacement's
+    /// `valid_from`, must parse.
+    #[test]
+    fn validity_timestamps_are_sqlite_parseable() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let old_id = seed_fact(&conn, "boi", "has", "installed and live version 3.3.2");
+        supersede(
+            &conn,
+            &old_id,
+            "installed and live version 3.9.0",
+            &mut report,
+        );
+        let new_id = id_of(&conn, "installed and live version 3.9.0");
+
+        for (id, col) in [
+            (&old_id, "valid_from"),
+            (&old_id, "invalid_at"),
+            (&new_id, "valid_from"),
+        ] {
+            let (jd, dt): (Option<f64>, Option<String>) = conn
+                .query_row(
+                    &format!("SELECT julianday({col}), datetime({col}) FROM facts WHERE id=?1"),
+                    [id],
+                    |r| Ok((r.get(0)?, r.get(1)?)),
+                )
+                .unwrap();
+            assert!(
+                jd.is_some() && dt.is_some(),
+                "{col} of {id} must be a timestamp SQLite can parse (julianday={jd:?}, datetime={dt:?})"
+            );
+        }
+        let (vf, _) = validity(&conn, &new_id);
+        assert!(
+            chrono::DateTime::parse_from_rfc3339(&vf).is_ok(),
+            "valid_from must be RFC 3339, got {vf:?}"
+        );
+    }
+
+    /// RED for PR #10 review F2: ordering must survive a backward clock step
+    /// and two updates inside one clock tick. The transition timestamp is
+    /// derived from the persisted predecessor (`max(now, prev + 1ns)`), so
+    /// with an INJECTED clock that runs backwards the replacement still sorts
+    /// strictly after its predecessor under `ORDER BY valid_from`.
+    #[test]
+    fn supersede_order_survives_clock_regression_and_equal_ticks() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let t0 = chrono::DateTime::parse_from_rfc3339("2026-09-12T10:00:05.500Z")
+            .unwrap()
+            .with_timezone(&chrono::Utc);
+        let v332 = insert_fact_with_history_at(
+            &conn,
+            "boi",
+            "has",
+            "installed and live version 3.3.2",
+            0.7,
+            "/tmp/seed.md",
+            &format_validity_ts(t0),
+        )
+        .unwrap();
+
+        // Clock steps BACK five seconds before the first update.
+        let stepped_back = t0 - chrono::Duration::seconds(5);
+        supersede_at(
+            &conn,
+            &v332,
+            "installed and live version 3.9.0",
+            &mut report,
+            stepped_back,
+        );
+        let v390 = id_of(&conn, "installed and live version 3.9.0");
+        // Second update at the EXACT same injected instant (equal tick).
+        supersede_at(
+            &conn,
+            &v390,
+            "installed and live version 3.9.1",
+            &mut report,
+            stepped_back,
+        );
+        let v391 = id_of(&conn, "installed and live version 3.9.1");
+
+        let (vf332, _) = validity(&conn, &v332);
+        let (vf390, _) = validity(&conn, &v390);
+        let (vf391, _) = validity(&conn, &v391);
+        assert!(
+            vf390 > vf332,
+            "3.9.0 ({vf390}) must sort after 3.3.2 ({vf332}) despite the clock regression"
+        );
+        assert!(
+            vf391 > vf390,
+            "3.9.1 ({vf391}) must sort after 3.9.0 ({vf390}) despite an equal clock tick"
+        );
+        let p = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap();
+        assert!(
+            p(&vf390) > p(&vf332) && p(&vf391) > p(&vf390),
+            "chronological order must match string order"
+        );
+
+        let ordered: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT object FROM facts WHERE subject='boi' AND predicate='has' ORDER BY valid_from",
+                )
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect()
+        };
+        assert_eq!(
+            ordered,
+            vec![
+                "installed and live version 3.3.2".to_string(),
+                "installed and live version 3.9.0".to_string(),
+                "installed and live version 3.9.1".to_string(),
+            ]
+        );
+    }
+
+    /// RED for PR #10 review F3: the predecessor's `invalid_at` and the
+    /// replacement's `valid_from` are ONE timestamp — byte-equal — and every
+    /// superseded row's interval is non-negative, even for a fact created and
+    /// superseded within the same second (the old code mixed a whole-second
+    /// `datetime('now')` end with a nanosecond start).
+    #[test]
+    fn supersede_boundary_is_shared_and_intervals_are_nonnegative() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let v332 = seed_fact(&conn, "boi", "has", "installed and live version 3.3.2");
+        supersede(
+            &conn,
+            &v332,
+            "installed and live version 3.9.0",
+            &mut report,
+        );
+        let v390 = id_of(&conn, "installed and live version 3.9.0");
+        supersede(
+            &conn,
+            &v390,
+            "installed and live version 3.9.1",
+            &mut report,
+        );
+        let v391 = id_of(&conn, "installed and live version 3.9.1");
+
+        let p = |s: &str| chrono::DateTime::parse_from_rfc3339(s).unwrap();
+        for (old, new) in [(&v332, &v390), (&v390, &v391)] {
+            let (old_from, old_until) = validity(&conn, old);
+            let (new_from, _) = validity(&conn, new);
+            let old_until = old_until.expect("superseded row must carry invalid_at");
+            assert_eq!(
+                old_until, new_from,
+                "predecessor invalid_at must equal replacement valid_from byte-for-byte"
+            );
+            assert!(
+                p(&old_until) >= p(&old_from),
+                "interval must be non-negative: valid_from={old_from} invalid_at={old_until}"
+            );
+        }
+    }
+
+    /// RED for PR #10 review F4 (stale target): replaying the same Update
+    /// against an already-superseded predecessor must NOT insert a second
+    /// live replacement or overwrite the original `superseded_by` link. It is
+    /// a judge protocol violation → counted as a flag, nothing written.
+    #[test]
+    fn stale_supersede_target_is_flagged_and_leaves_history_intact() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let old_id = seed_fact(&conn, "boi", "has", "installed and live version 3.3.2");
+        supersede(
+            &conn,
+            &old_id,
+            "installed and live version 3.9.0",
+            &mut report,
+        );
+        let first_link: String = conn
+            .query_row(
+                "SELECT superseded_by FROM facts WHERE id=?1",
+                [&old_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        let facts_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        let flags_before = report.flags;
+
+        // Same predecessor again — it is no longer live.
+        supersede(
+            &conn,
+            &old_id,
+            "installed and live version 3.9.5",
+            &mut report,
+        );
+
+        let facts_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            facts_after, facts_before,
+            "a stale target must not insert a replacement"
+        );
+        let link_after: String = conn
+            .query_row(
+                "SELECT superseded_by FROM facts WHERE id=?1",
+                [&old_id],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(
+            link_after, first_link,
+            "the original superseded_by link must survive"
+        );
+        let live: i64 = conn
+            .query_row(
+                "SELECT COUNT(*) FROM facts WHERE subject='boi' AND predicate='has' AND invalid_at IS NULL",
+                [],
+                |r| r.get(0),
+            )
+            .unwrap();
+        assert_eq!(live, 1, "exactly one live row in the chain");
+        assert_eq!(
+            report.flags,
+            flags_before + 1,
+            "the stale target must be counted as a flag"
+        );
+    }
+
+    /// RED for PR #10 review F4 (unrelated target): a target row that belongs
+    /// to a different subject/predicate must be rejected — the candidate's own
+    /// (subject, predicate) is what the supersede chain is keyed on.
+    #[test]
+    fn unrelated_supersede_target_is_flagged_not_applied() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let other = seed_fact(&conn, "hex", "uses", "sqlite for memory");
+        let facts_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+
+        // Candidate is (boi, has, ...) but the target is (hex, uses, ...).
+        supersede(
+            &conn,
+            &other,
+            "installed and live version 3.9.0",
+            &mut report,
+        );
+
+        let facts_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            facts_after, facts_before,
+            "an unrelated target must write nothing"
+        );
+        let (_, invalid_at) = validity(&conn, &other);
+        assert!(invalid_at.is_none(), "the unrelated row must stay live");
+        assert_eq!(report.flags, 1);
+        assert_eq!(report.updates, 0);
+    }
+
+    /// RED for PR #10 review F12: PUBLIC recall after a supersede. A query
+    /// matching BOTH versions must return only the replacement from ordinary
+    /// recall (the predecessor is retained as a row but is not live), while
+    /// history retrieval keeps both, in `valid_from` order. The earlier
+    /// private-flag test passes even if recall ignores `invalid_at`, because
+    /// privacy filtering hides that row independently.
+    #[test]
+    fn public_recall_after_supersede_returns_replacement_only() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let old_id = seed_fact(&conn, "boi", "has", "installed and live version 3.3.2");
+        supersede(
+            &conn,
+            &old_id,
+            "installed and live version 3.9.0",
+            &mut report,
+        );
+
+        let hits =
+            crate::memory::recall::facts_recall(&conn, "installed live version", 5, None, false)
+                .unwrap();
+        let objects: Vec<&str> = hits.iter().map(|(f, _)| f.object.as_str()).collect();
+        assert!(
+            objects.contains(&"installed and live version 3.9.0"),
+            "ordinary recall must return the live replacement; got {objects:?}"
+        );
+        assert!(
+            !objects.contains(&"installed and live version 3.3.2"),
+            "ordinary recall must exclude the superseded predecessor; got {objects:?}"
+        );
+
+        let history: Vec<String> = {
+            let mut stmt = conn
+                .prepare(
+                    "SELECT object FROM facts WHERE subject='boi' AND predicate='has' ORDER BY valid_from",
+                )
+                .unwrap();
+            stmt.query_map([], |r| r.get::<_, String>(0))
+                .unwrap()
+                .filter_map(Result::ok)
+                .collect()
+        };
+        assert_eq!(
+            history,
+            vec![
+                "installed and live version 3.3.2".to_string(),
+                "installed and live version 3.9.0".to_string(),
+            ],
+            "history retrieval must retain both versions in order"
         );
     }
 }
