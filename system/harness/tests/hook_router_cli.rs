@@ -824,3 +824,110 @@ fn default_ledger_location_and_permissions_match_the_python_reference() {
         String::from_utf8_lossy(&py_led)
     );
 }
+
+/// Round 2, F7/F8: the workspace resolver's diagnostics go through the same
+/// one-line, best-effort writer as the router's own — a foreign
+/// `CLAUDE_PROJECT_DIR` containing a newline still yields exactly one line,
+/// and a closed stderr on the no-op path still exits 0.
+#[test]
+fn workspace_resolver_diagnostics_are_one_line_and_best_effort() {
+    let base = tempfile::tempdir().unwrap();
+    let weird = base.path().join("with\nnewline");
+    std::fs::create_dir_all(&weird).unwrap();
+    let firing = payload("Bash", r#"{"command": "git stash"}"#, DEFAULT_CWD);
+    let rs = run_rust(&firing, &[("CLAUDE_PROJECT_DIR", weird.to_str().unwrap())]);
+    assert_eq!(rs.code, Some(0));
+    assert!(rs.stdout.is_empty());
+    let err = String::from_utf8_lossy(&rs.stderr);
+    assert_eq!(
+        err.lines().count(),
+        1,
+        "F7: one diagnostic line, got {err:?}"
+    );
+    assert!(
+        err.contains("not a hex workspace") && err.contains("\\n"),
+        "{err:?}"
+    );
+    assert!(rs.ledger.is_empty());
+
+    // Closed stderr, both variables unset (the resolver's own no-op path).
+    let ledger = tempfile::tempdir().unwrap();
+    let mut child = Command::new(bin())
+        .args(["hook", "router"])
+        .env_clear()
+        .env("HEX_LEDGER_DIR", ledger.path())
+        .stdin(Stdio::piped())
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    drop(child.stderr.take());
+    child.stdin.take().unwrap().write_all(&firing).unwrap();
+    let out = child.wait_with_output().unwrap();
+    assert_eq!(
+        out.status.code(),
+        Some(0),
+        "F8: closed stderr on the resolver path must exit 0"
+    );
+    assert!(out.stdout.is_empty());
+    assert!(ledger_bytes(ledger.path()).is_empty());
+}
+
+/// Round 2, F14 + F18 through the CLI: a lone-surrogate heredoc delimiter
+/// terminates like the reference (both deny, same bytes), and an
+/// unterminated heredoc whose delimiter is `cd` neither panics nor diverges.
+#[test]
+fn round_two_surrogate_delimiter_and_synthetic_cd_terminator_match_the_reference() {
+    let cases: [(&str, &[u8], &str); 3] = [
+        (
+            "F14 surrogate delimiter",
+            br#"{"tool_name":"Bash","cwd":"/shared","tool_input":{"command":"cat <<'\ud800'\nbody\n\ud800\ngit stash"}}"#,
+            "deny",
+        ),
+        (
+            "F18 synthetic cd terminator",
+            br#"{"tool_name":"Bash","tool_input":{"command":"cat <<cd\nbody"}}"#,
+            "abstain",
+        ),
+        (
+            "F18 synthetic cd then a real invocation",
+            br#"{"tool_name":"Bash","tool_input":{"command":"cat <<cd\nbody\ngit stash"}}"#,
+            "abstain",
+        ),
+    ];
+    for (label, raw, expected) in cases {
+        let py = run_python(raw);
+        let rs = run_rust(raw, &[("HEX_DIR", STAGED.path().to_str().unwrap())]);
+        assert_eq!(
+            rs.code,
+            Some(0),
+            "{label}: exit; stderr={}",
+            String::from_utf8_lossy(&rs.stderr)
+        );
+        assert!(
+            rs.stderr.is_empty(),
+            "{label}: {}",
+            String::from_utf8_lossy(&rs.stderr)
+        );
+        assert_eq!(py.code, Some(0), "{label}: python exit");
+        assert_eq!(
+            String::from_utf8_lossy(&rs.stdout),
+            String::from_utf8_lossy(&py.stdout),
+            "{label}: stdout"
+        );
+        assert_eq!(
+            String::from_utf8_lossy(&strip_ts(&rs.ledger)),
+            String::from_utf8_lossy(&strip_ts(&py.ledger)),
+            "{label}: ledger"
+        );
+        let out = String::from_utf8_lossy(&rs.stdout);
+        if expected == "abstain" {
+            assert!(out.is_empty(), "{label}: expected abstain, got {out}");
+        } else {
+            assert!(
+                out.contains(&format!(r#""permissionDecision": "{expected}""#)),
+                "{label}: {out}"
+            );
+        }
+    }
+}

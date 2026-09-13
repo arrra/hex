@@ -29,17 +29,37 @@ pub fn resolve_hex_dir(hook_name: &str) -> Option<PathBuf> {
             if path.join(".hex/version.txt").is_file() {
                 Some(path)
             } else {
-                eprintln!(
-                    "[hook/{hook_name}] not a hex workspace ({dir}) and HEX_DIR unset — no-op"
+                diagnostic(
+                    hook_name,
+                    &format!("not a hex workspace ({dir}) and HEX_DIR unset — no-op"),
                 );
                 None
             }
         }
         Err(_) => {
-            eprintln!("[hook/{hook_name}] HEX_DIR/CLAUDE_PROJECT_DIR both unset — no-op");
+            diagnostic(hook_name, "HEX_DIR/CLAUDE_PROJECT_DIR both unset — no-op");
             None
         }
     }
+}
+
+/// Collapse a diagnostic to exactly one line: every line break (a foreign
+/// `CLAUDE_PROJECT_DIR` value, a regex engine's multi-line error, a rule
+/// id) is escaped, never printed (PR #6 review F7).
+pub(crate) fn one_line(msg: &str) -> String {
+    msg.replace("\r\n", "\\n").replace(['\n', '\r'], "\\n")
+}
+
+/// Best-effort single stderr line for a hook's no-op/failure path (PR #6
+/// review F8): a closed stderr pipe must never panic the hook or change its
+/// exit status, so this never uses `eprintln!`.
+pub(crate) fn diagnostic(hook_name: &str, msg: &str) {
+    use std::io::Write as _;
+    let line = format!("[hook/{hook_name}] {}\n", one_line(msg));
+    let stderr = std::io::stderr();
+    let mut h = stderr.lock();
+    let _ = h.write_all(line.as_bytes());
+    let _ = h.flush();
 }
 
 #[derive(Subcommand)]
