@@ -401,7 +401,30 @@ _GIT_GLOBAL_OPTS = r"(?:(?:-C\s+\S+|-c\s+\S+|--git-dir=\S+|--work-tree=\S+)\s+)*
 _GIT_OPT_TAKING_ARG = ("-C", "-c", "--git-dir=", "--work-tree=")
 
 
-def _widen_quoted_global_opt_args(text, scan_text, quote_spans):
+def _innermost_span_is_live(position, quote_spans, live_spans):
+    """F2/F3 (round 4 review continued): `quote_spans` and `live_spans`
+    nest properly -- every `live_span` sits strictly inside some
+    `quote_span`, and a `quote_span` can itself sit inside an outer
+    `live_span` (a quoted argument to a command genuinely running inside
+    a substitution). The INNERMOST span containing a given position is
+    therefore whichever containing span (of either kind) has the LARGEST
+    start. Returns `(innermost_start, innermost_is_live)` -- `(-1, False)`
+    when no span contains `position` at all. Shared by `evaluate()`'s
+    quoted-literal-text filter and `_widen_quoted_global_opt_args`'s
+    nesting-aware widening mode, so the two never disagree about which
+    characters are genuinely live."""
+    innermost_start = -1
+    innermost_is_live = False
+    for q_start, q_end in quote_spans:
+        if q_start <= position < q_end and q_start > innermost_start:
+            innermost_start, innermost_is_live = q_start, False
+    for l_start, l_end in live_spans:
+        if l_start <= position < l_end and l_start > innermost_start:
+            innermost_start, innermost_is_live = l_start, True
+    return innermost_start, innermost_is_live
+
+
+def _widen_quoted_global_opt_args(text, scan_text, quote_spans, live_spans=None):
     """Returns a copy of `scan_text` with every INTERNAL space of a
     QUOTED `-C`/`-c`/`--git-dir=`/`--work-tree=` argument value replaced
     with `\\x01` -- a byte `\\S` still matches, so `_GIT_GLOBAL_OPTS`'s
@@ -422,33 +445,47 @@ def _widen_quoted_global_opt_args(text, scan_text, quote_spans):
     plus whitespace. An unquoted argument (no span starts there) is left
     untouched; `\\S+` already handles it correctly.
 
-    F3 (round 3 review, blocker; skipping live_spans here was round 3's
-    OWN fix, since reverted): a quoted global-option value can itself
-    contain a genuinely LIVE substitution -- `-c "user.name=$(...)"`.
-    Skipping widening inside that substitution's body avoided corrupting
-    it, but broke the OUTER value's own `\\S+`-consumability instead
-    (`-c "user.name=$(printf x)" stash` and an inner `-C '/shared/my
-    repo' stash` invocation nested in a substitution both lost their
-    match) -- a genuine structural
-    conflict, not a bug in either direction alone: the SAME characters
-    need to look like "one \\S+ token" to the outer rule and "real \\s+-
-    separated words" to a rule matching the nested substitution's own
-    body, and one `scan_text` cannot be both at once. `evaluate()` now
-    resolves this by keeping TWO scan_text variants -- this one (widened
-    unconditionally, ignoring nesting entirely) and the original
-    unwidened one -- and searching both for any rule whose pattern
-    references `@GITOPTS@`, so the outer skip is found in the widened
-    copy while a nested dangerous command survives, fully intact, in the
-    unwidened one (its own `\\$\\(\\s*`/backtick anchor gives it command
-    position independent of whatever encloses it)."""
+    F3 (round 3 review, blocker; round 4 review, blocker): a quoted
+    global-option value can itself contain a genuinely LIVE substitution
+    -- `-c "user.name=$(...)"`. Skipping widening inside that
+    substitution's body (round 3's fix) avoided corrupting it, but broke
+    the OUTER value's own `\\S+`-consumability instead. Widening it
+    unconditionally instead (round 4's fix, via `evaluate()` keeping TWO
+    scan_text variants and searching both) fixed that, but missed a
+    THIRD level: `-c "user.name=$(-C '/shared/my repo' stash)"` needs the
+    INNER `-C` value's own space widened (so ITS OWN skip works) while
+    the inner invocation's OWN command-separating whitespace stays real
+    (so its OWN `\\s+` still matches) -- unconditional widening destroys
+    the latter by blanketing the entire outer span, including the
+    genuinely-live separators nested inside it.
+
+    `live_spans`, when given (round 4 continued): switches to a THIRD,
+    nesting-aware mode -- per character, widen unless
+    `_innermost_span_is_live` says the innermost containing span at that
+    exact position is live. A deeper NESTED quote inside the live
+    substitution (like the inner `-C`'s own value) still widens, since
+    its innermost span is that quote, not the live one; the live
+    substitution's own bare separator whitespace does not. `evaluate()`
+    keeps THREE scan_text variants for `@GITOPTS@` rules: plain (real
+    separators everywhere, for a nested dangerous command with no further
+    nested quoting), unconditionally widened (this function with
+    `live_spans=None`, for an outer value merely containing a harmless or
+    dangerous substitution with no quoting of its own), and nesting-aware
+    widened (this function with `live_spans` given, for a substitution
+    that ITSELF needs a quoted option value skipped)."""
     out = list(scan_text)
 
     def _widen_span_if_quoted_at(arg_start):
         for q_start, q_end in quote_spans:
             if q_start == arg_start:
                 for k in range(q_start, q_end):
-                    if out[k] == " ":
-                        out[k] = "\x01"
+                    if out[k] != " ":
+                        continue
+                    if live_spans is not None:
+                        _, is_live = _innermost_span_is_live(k, quote_spans, live_spans)
+                        if is_live:
+                            continue
+                    out[k] = "\x01"
                 return
 
     for opt in _GIT_OPT_TAKING_ARG:
@@ -2217,18 +2254,37 @@ def evaluate(payload):
     quote_spans = []
     live_spans = []
     scan_text = executable_mask(text, quote_spans, live_spans) if tool_name == "Bash" else text
-    # F3 (round 3 review, blocker): a quoted `-C`/`-c`/`--git-dir=`/
-    # `--work-tree=` value must look like ONE token to `_GIT_GLOBAL_OPTS`'s
-    # `\S+`, but a genuinely live substitution nested in that SAME value
-    # needs its own real whitespace intact for its own rule to match --
-    # one shared scan_text cannot be both at once (see
-    # `_widen_quoted_global_opt_args`'s docstring for the two concrete
-    # commands this broke either way). `scan_text_widened` is consulted
-    # ADDITIONALLY, only for rules whose pattern references `@GITOPTS@`
-    # (see `uses_gitopts` in `load_rules`) -- every other rule keeps using
-    # plain `scan_text` exactly as before.
+    # F3 (round 3 + round 4 review, blocker): a quoted `-C`/`-c`/
+    # `--git-dir=`/`--work-tree=` value must look like ONE token to
+    # `_GIT_GLOBAL_OPTS`'s `\S+`, but a genuinely live substitution nested
+    # in that SAME value needs its own real whitespace intact for its own
+    # rule to match -- one shared scan_text cannot be both at once (see
+    # `_widen_quoted_global_opt_args`'s docstring for the concrete
+    # commands each variant alone still missed). THREE variants are
+    # consulted, ADDITIONALLY, only for rules whose pattern references
+    # `@GITOPTS@` (see `uses_gitopts` in `load_rules`) -- every other rule
+    # keeps using plain `scan_text` exactly as before:
+    #   - scan_text_widened: every quoted value's spaces widened
+    #     unconditionally -- an outer value merely CONTAINING a
+    #     substitution (harmless or dangerous) needs this for its own
+    #     `\S+` to consume it; a nested dangerous command with no further
+    #     nested quoting of its own is still found via `scan_text` instead
+    #     (its own `\$\(\s*`/backtick anchor is independent of the outer
+    #     value's parsing).
+    #   - scan_text_widened_aware: widened per-character via
+    #     `_innermost_span_is_live` -- for when the NESTED substitution
+    #     ITSELF needs a quoted option value skipped (an even deeper
+    #     level of `-C`/`-c` inside the outer value): that inner quote
+    #     still widens (its innermost span is the quote, not the
+    #     enclosing live one), while the inner invocation's own real
+    #     command-separating whitespace does not.
     scan_text_widened = (
         _widen_quoted_global_opt_args(text, scan_text, quote_spans) if tool_name == "Bash" else scan_text
+    )
+    scan_text_widened_aware = (
+        _widen_quoted_global_opt_args(text, scan_text, quote_spans, live_spans)
+        if tool_name == "Bash"
+        else scan_text
     )
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
     paren_depths = _paren_depths(scan_text)
@@ -2283,15 +2339,12 @@ def evaluate(payload):
         # quote_span can itself sit inside an outer live_span), so the
         # INNERMOST one is whichever CONTAINING span has the LARGEST
         # start. Filter only when that innermost span is a quote_span.
-        start = m.start()
-        innermost_start = -1
-        innermost_is_live = False
-        for q_start, q_end in quote_spans:
-            if q_start <= start < q_end and q_start > innermost_start:
-                innermost_start, innermost_is_live = q_start, False
-        for l_start, l_end in live_spans:
-            if l_start <= start < l_end and l_start > innermost_start:
-                innermost_start, innermost_is_live = l_start, True
+        # Shares `_innermost_span_is_live` with `_widen_quoted_global_opt_
+        # args`'s nesting-aware mode (F3, round 4 review) so the two never
+        # disagree about which characters are genuinely live.
+        innermost_start, innermost_is_live = _innermost_span_is_live(
+            m.start(), quote_spans, live_spans
+        )
         return innermost_start >= 0 and not innermost_is_live
 
     fires = []
@@ -2299,17 +2352,23 @@ def evaluate(payload):
         if not rule["tool_re"].search(tool_name):
             continue
         candidates = list(rule["match_re"].finditer(scan_text))
-        if rule.get("uses_gitopts") and scan_text_widened is not scan_text:
-            # F3 (round 3 review, blocker): this rule's pattern references
-            # `@GITOPTS@` -- also search the widened copy for an outer
-            # `-C`/`-c`/... argument's own skip, and union in any match not
-            # already found (by span) in the plain copy. The common case
-            # (no quoted global option at all) matches identically in both
-            # and contributes nothing new here.
+        if rule.get("uses_gitopts"):
+            # F3 (round 3 + round 4 review, blocker): this rule's pattern
+            # references `@GITOPTS@` -- also search the two widened
+            # copies (see the comment above `scan_text_widened` for what
+            # each one alone catches) and union in any match not already
+            # found (by span) in a copy already searched. The common case
+            # (no quoted global option at all) matches identically across
+            # all three and contributes nothing new here.
             seen_spans = {(m.start(), m.end()) for m in candidates}
-            for m in rule["match_re"].finditer(scan_text_widened):
-                if (m.start(), m.end()) not in seen_spans:
-                    candidates.append(m)
+            for extra_scan_text in (scan_text_widened, scan_text_widened_aware):
+                if extra_scan_text is scan_text:
+                    continue
+                for m in rule["match_re"].finditer(extra_scan_text):
+                    span = (m.start(), m.end())
+                    if span not in seen_spans:
+                        seen_spans.add(span)
+                        candidates.append(m)
         all_matches = [
             m for m in candidates if not _match_starts_inside_quoted_literal_text(m)
         ]

@@ -3659,6 +3659,30 @@ class TestGitOptsWideningDualScan(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestGitOptsNestingAwareWidening(RouterTestCase):
+    """F3 (round 5 review, blocker) — round 4's dual scan (plain +
+    unconditionally-widened) fixed the reported examples but missed a
+    THIRD level: `git -c "user.name=$(git -C '/shared/my repo' stash)"
+    status` needs the INNER `-C` value's own space widened (for its own
+    `\\S+` skip) while the inner invocation's own command-separating
+    whitespace stays real (for its own `\\s+` match). Neither the plain
+    copy (no widening anywhere) nor the unconditionally-widened copy (the
+    outer -c's blanket widening ALSO destroys the inner separators) can
+    produce this match. Added a THIRD, nesting-aware widened copy: widen
+    per-character unless `_innermost_span_is_live` says the innermost
+    containing span at that position is live -- a deeper nested quote
+    (the inner `-C`'s own value) still widens, since its innermost span
+    is that quote, not the enclosing live one."""
+
+    def test_triple_nested_quoted_dash_capital_c_value_still_denies(self):
+        cmd = "git -c \"user.name=$(git -C '/shared/my repo' stash)\" status"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 5)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 class TestReservedWordAnchorIgnoresQuotedMentions(RouterTestCase):
     """F2 (round 2 review, major) — `_RESERVED_LEADIN` ("if|then|elif|
     else|while|until|do") is a plain alternative in `_CMD_PREFIX`, with no
