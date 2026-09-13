@@ -11,9 +11,10 @@ use std::time::{Duration, SystemTime};
 const DOC_PREFIX: &str = "search_document: ";
 const QUERY_PREFIX: &str = "search_query: ";
 
-/// Read current resident set size (RSS) in MB on Linux via /proc/self/statm.
-/// Returns None on non-Linux or read failure. Used by OBS-019 diagnosis to
-/// pinpoint where memory blows up during indexing.
+/// Read current resident set size (RSS) in MB on Linux via /proc/self/statm,
+/// or on macOS via `proc_pidinfo(PROC_PIDTASKINFO)`. Returns None on other
+/// platforms or read failure. Used by OBS-019 diagnosis to pinpoint where
+/// memory blows up during indexing.
 pub fn rss_mb() -> Option<u64> {
     #[cfg(target_os = "linux")]
     {
@@ -23,7 +24,26 @@ pub fn rss_mb() -> Option<u64> {
         let page_size: u64 = 4096;
         Some(resident_pages * page_size / (1024 * 1024))
     }
-    #[cfg(not(target_os = "linux"))]
+    #[cfg(target_os = "macos")]
+    {
+        let pid = std::process::id() as libc::c_int;
+        let mut info: libc::proc_taskinfo = unsafe { std::mem::zeroed() };
+        let size = std::mem::size_of::<libc::proc_taskinfo>() as libc::c_int;
+        let ret = unsafe {
+            libc::proc_pidinfo(
+                pid,
+                libc::PROC_PIDTASKINFO,
+                0,
+                &mut info as *mut _ as *mut libc::c_void,
+                size,
+            )
+        };
+        if ret != size {
+            return None; // short read / failure — proc_pidinfo returns bytes written
+        }
+        Some(info.pti_resident_size / (1024 * 1024))
+    }
+    #[cfg(not(any(target_os = "linux", target_os = "macos")))]
     {
         None
     }
@@ -162,6 +182,34 @@ mod tests {
     #[test]
     fn clear_stale_locks_noop_on_missing_dir() {
         clear_stale_locks(Path::new("/tmp/does-not-exist-hex-fastembed"));
+    }
+
+    // RED (T7ngzd5vn task Tnp7675fh, spec Sb82zegf2): rss_mb() is Linux-only
+    // today (cfg(target_os = "linux") in the fn above), so on macOS this
+    // currently fails at the `.is_some()` assert. Pins the contract: Some(>0)
+    // on macOS.
+    //
+    // F8 (minor, arrra/hex PR #8 round 1): this test previously also
+    // asserted RSS grew by >= 32 MB after touching a 64 MB allocation. That
+    // bound is unsound in-process — the allocator can satisfy the touch from
+    // pages it already holds resident (no growth at all), and a parallel
+    // test thread can free memory between the two measurements (a spurious
+    // shrink), so the assertion can fail despite `rss_mb()`/`proc_pidinfo`
+    // being entirely correct. Keeping only the availability + positive-value
+    // checks (per the finding's own remediation: isolate the growth probe in
+    // a subprocess with a controlled baseline, OR keep only these) avoids
+    // adding subprocess plumbing for a minor, non-regression-bearing
+    // assertion.
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn rss_mb_reports_resident_memory_on_macos() {
+        let rss = rss_mb();
+        assert!(rss.is_some(), "rss_mb() should be Some on macOS, got None");
+        let rss_mb_value = rss.unwrap();
+        assert!(
+            rss_mb_value > 0,
+            "rss_mb() should be > 0, got {rss_mb_value}"
+        );
     }
 
     // Model-dependent: requires the nomic ONNX weights. Run explicitly with
