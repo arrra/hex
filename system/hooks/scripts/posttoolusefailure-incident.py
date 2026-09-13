@@ -27,18 +27,18 @@ PREVIEW_MAX = 200
 # Covers current API-key/token shapes so persisted ledger text (match,
 # preview, incident error/args_preview) never carries a live credential.
 _REDACT_PATTERNS = [
-    (re.compile(r"sk-ant-[A-Za-z0-9\-_]{8,}"), "sk-ant-***REDACTED***"),
+    (re.compile(r"sk-ant-[A-Za-z0-9\-_]{8,}", re.ASCII), "sk-ant-***REDACTED***"),
     # G1 (review_b round 3): real OpenAI-shaped keys (sk-proj-..., sk-svcacct-...)
     # use hyphens/underscores inside the key body, not just alnum -- the old
     # alnum-only charset stopped at the first "-" and left most of the key
     # (everything after "proj"/"svcacct") unredacted.
-    (re.compile(r"sk-[A-Za-z0-9\-_]{8,}"), "sk-***REDACTED***"),
-    (re.compile(r"ghp_[A-Za-z0-9]{16,}"), "***REDACTED-GH-TOKEN***"),
-    (re.compile(r"github_pat_[A-Za-z0-9_]{16,}"), "***REDACTED-GH-TOKEN***"),
-    (re.compile(r"xox[abp]-[A-Za-z0-9\-]{8,}"), "***REDACTED-SLACK-TOKEN***"),
-    (re.compile(r"AKIA[A-Z0-9]{16}"), "***REDACTED-AWS-KEY***"),
-    (re.compile(r"(?i)\bpit-[A-Za-z0-9\-_]{8,}"), "pit-***REDACTED***"),
-    (re.compile(r"(?i)bearer\s+\S+"), "Bearer ***REDACTED***"),
+    (re.compile(r"sk-[A-Za-z0-9\-_]{8,}", re.ASCII), "sk-***REDACTED***"),
+    (re.compile(r"ghp_[A-Za-z0-9]{16,}", re.ASCII), "***REDACTED-GH-TOKEN***"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{16,}", re.ASCII), "***REDACTED-GH-TOKEN***"),
+    (re.compile(r"xox[abp]-[A-Za-z0-9\-]{8,}", re.ASCII), "***REDACTED-SLACK-TOKEN***"),
+    (re.compile(r"AKIA[A-Z0-9]{16}", re.ASCII), "***REDACTED-AWS-KEY***"),
+    (re.compile(r"(?i)\bpit-[A-Za-z0-9\-_]{8,}", re.ASCII), "pit-***REDACTED***"),
+    (re.compile(r"(?i)bearer\s+\S+", re.ASCII), "Bearer ***REDACTED***"),
     # G2b (review_b round 3): the PEM-block pattern MUST run before the
     # generic `secret=`/`token=` pattern below -- that pattern's value is
     # `\S+` (stops at the first whitespace), so a `secret=` immediately
@@ -47,7 +47,8 @@ _REDACT_PATTERNS = [
     (
         re.compile(
             r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?"
-            r"-----END [A-Z0-9 ]*PRIVATE KEY-----"
+            r"-----END [A-Z0-9 ]*PRIVATE KEY-----",
+            re.ASCII,
         ),
         "***REDACTED-PEM-BLOCK***",
     ),
@@ -66,20 +67,23 @@ _REDACT_PATTERNS = [
     (
         re.compile(
             r"""(?i)"(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""(?:[^"\\]|\\[\s\S])*\""""
+            r"""(?:[^"\\]|\\[\s\S])*\"""",
+            re.ASCII,
         ),
         r'"\1=***REDACTED***"',
     ),
     (
         re.compile(
-            r"""(?i)'(password|token|secret|api[_-]?key)\s*=\s*[^']*'"""
+            r"""(?i)'(password|token|secret|api[_-]?key)\s*=\s*[^']*'""",
+            re.ASCII,
         ),
         r"'\1=***REDACTED***'",
     ),
     (
         re.compile(
             r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""\$'(?:[^'\\]|\\.)*'"""
+            r"""\$'(?:[^'\\]|\\.)*'""",
+            re.ASCII,
         ),
         r"\1=***REDACTED***",
     ),
@@ -125,7 +129,8 @@ _REDACT_PATTERNS = [
     (
         re.compile(
             r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""(\\"(?:[^"\\]|\\[\s\S])*\\"|"(?:[^"\\]|\\[\s\S])*"|'[^']*'|(?:[^\s\\]|\\.)+)"""
+            r"""(\\"(?:[^"\\]|\\[\s\S])*\\"|"(?:[^"\\]|\\[\s\S])*"|'[^']*'|(?:[^\s\\]|\\.)+)""",
+            re.ASCII,
         ),
         r"\1=***REDACTED***",
     ),
@@ -141,7 +146,8 @@ _REDACT_PATTERNS = [
     (
         re.compile(
             r"""(?i)"(password|token|secret|api[_-]?key)"\s*:\s*\""""
-            r"""(?:[^"\\]|\\[\s\S])*\""""
+            r"""(?:[^"\\]|\\[\s\S])*\"""",
+            re.ASCII,
         ),
         r'"\1":"***REDACTED***"',
     ),
@@ -162,7 +168,8 @@ _REDACT_PATTERNS = [
     (
         re.compile(
             r"""(?i)(\\+)"(password|token|secret|api[_-]?key)\\+"\s*:\s*\\+\""""
-            r"""(?:[^"\\]|\\[\s\S])*\\+\""""
+            r"""(?:[^"\\]|\\[\s\S])*\\+\"""",
+            re.ASCII,
         ),
         r'\1"\2\1":\1"***REDACTED***\1"',
     ),
