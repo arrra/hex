@@ -1826,6 +1826,111 @@ mod tests {
         );
     }
 
+    /// PR #10 round-2 review F13: a timeout must terminate the direct
+    /// child's DESCENDANTS too, not just the child. The fixture backgrounds
+    /// a long-lived grandchild (recording its pid), then hangs the direct
+    /// child; after `run_with_timeout` gives up, the grandchild must be
+    /// gone. Before the fix `child.kill()` reaped only `sh` and the
+    /// `sleep` survived (this test fails there).
+    #[cfg(unix)]
+    #[test]
+    fn test_run_with_timeout_terminates_descendants_of_the_direct_child() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("descendant.pid");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "sleep 300 & echo $! > '{}'; wait",
+            pidfile.display()
+        ));
+        let result = crate::doctor::checks::harness_buildable::run_with_timeout(
+            &mut cmd,
+            std::time::Duration::from_millis(500),
+        );
+        assert!(
+            result.is_err(),
+            "the hung child must time out, got {result:?}"
+        );
+
+        let mut pid: Option<i32> = None;
+        for _ in 0..50 {
+            if let Ok(s) = std::fs::read_to_string(&pidfile) {
+                if let Ok(p) = s.trim().parse::<i32>() {
+                    pid = Some(p);
+                    break;
+                }
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        let pid = pid.expect("the fixture must have recorded its descendant's pid");
+
+        // `kill(pid, 0)` probes existence without signalling.
+        let mut alive = true;
+        for _ in 0..100 {
+            // SAFETY: signal 0 delivers nothing; it only reports whether the
+            // pid exists.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if alive {
+            // Clean up so a failing run doesn't leak the sleeper.
+            // SAFETY: the pid is our own fixture's descendant.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        assert!(
+            !alive,
+            "F13: descendant {pid} survived the timeout — only the direct child was killed"
+        );
+    }
+
+    /// F13, drain path: the direct child exits at once but a descendant
+    /// keeps stdout open; when the bounded drain gives up, that descendant
+    /// must be terminated as well (it is what holds the pipe).
+    #[cfg(unix)]
+    #[test]
+    fn test_run_with_timeout_terminates_descendant_holding_the_pipe_after_drain_timeout() {
+        let tmp = tempfile::tempdir().unwrap();
+        let pidfile = tmp.path().join("descendant.pid");
+        let mut cmd = std::process::Command::new("sh");
+        cmd.arg("-c").arg(format!(
+            "(sleep 300 >&1 & echo $! > '{}') ; exit 0",
+            pidfile.display()
+        ));
+        let result = crate::doctor::checks::harness_buildable::run_with_timeout(
+            &mut cmd,
+            std::time::Duration::from_millis(500),
+        );
+        assert!(result.is_err(), "the drain must time out, got {result:?}");
+        let pid: i32 = std::fs::read_to_string(&pidfile)
+            .expect("pidfile")
+            .trim()
+            .parse()
+            .expect("pid");
+        let mut alive = true;
+        for _ in 0..100 {
+            // SAFETY: signal 0 only probes existence.
+            if unsafe { libc::kill(pid, 0) } != 0 {
+                alive = false;
+                break;
+            }
+            std::thread::sleep(std::time::Duration::from_millis(20));
+        }
+        if alive {
+            // SAFETY: our own fixture's descendant.
+            unsafe {
+                libc::kill(pid, libc::SIGKILL);
+            }
+        }
+        assert!(
+            !alive,
+            "F13: the descendant holding stdout ({pid}) survived the drain timeout"
+        );
+    }
+
     #[test]
     fn test_run_with_timeout_shares_one_drain_budget_across_stdout_and_stderr() {
         // G2 (follow-up from review_b): the first fix computed a single
@@ -2116,6 +2221,61 @@ mod tests {
             err.contains("include_str!") && err.contains("outside this export's root"),
             "error must name the escaping include! call and explain why, got: {err}"
         );
+    }
+
+    /// PR #10 round-2 review F14: `include_str! { … }` and
+    /// `include_bytes![ … ]` are valid invocations that the paren-only
+    /// parser silently skipped, so an absolute target in either form
+    /// bypassed the containment check. Both must be refused exactly like
+    /// the paren form; a brace-delimited call naming a COMMITTED relative
+    /// file must still export.
+    #[cfg(unix)]
+    #[test]
+    fn test_export_committed_head_checks_include_targets_with_brace_and_bracket_delimiters() {
+        // Plain templates (not format strings): `{}` is replaced below.
+        for (label, call) in [
+            ("brace", "include_str! { \"{}\" }"),
+            ("bracket", "include_bytes![ \"{}\" ]"),
+            ("brace-include", "include! {\"{}\"}"),
+        ] {
+            let (tmp, harness) = init_repo_for_export_tests();
+            let external = tmp.path().join("outside-the-repo.txt");
+            std::fs::write(&external, "not part of any commit").unwrap();
+            let body = format!("pub const DATA: &str = {call};\n")
+                .replace("{}", &external.display().to_string());
+            std::fs::write(harness.join("src/lib.rs"), body).unwrap();
+            run_git(tmp.path(), &["add", "-A"]);
+            run_git(
+                tmp.path(),
+                &["commit", "-q", "-m", "absolute include target"],
+            );
+            let result = crate::doctor::checks::harness_buildable::export_committed_head_for_tests(
+                tmp.path(),
+            );
+            let err = result.expect_err(&format!(
+                "F14 ({label}): an absolute include target must refuse the export regardless of delimiter"
+            ));
+            assert!(
+                err.contains("outside this export's root"),
+                "F14 ({label}): error must explain the escape, got: {err}"
+            );
+        }
+
+        // Positive: a committed, relative target through the brace form.
+        let (tmp, harness) = init_repo_for_export_tests();
+        std::fs::write(harness.join("src/data.txt"), "committed\n").unwrap();
+        std::fs::write(
+            harness.join("src/lib.rs"),
+            "pub const DATA: &str = include_str! { \"data.txt\" };\n",
+        )
+        .unwrap();
+        run_git(tmp.path(), &["add", "-A"]);
+        run_git(
+            tmp.path(),
+            &["commit", "-q", "-m", "brace include of a committed file"],
+        );
+        crate::doctor::checks::harness_buildable::export_committed_head_for_tests(tmp.path())
+            .expect("F14: a brace-delimited include of a committed file must export");
     }
 
     #[cfg(unix)]

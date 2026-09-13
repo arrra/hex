@@ -128,10 +128,14 @@ fn run_and_log_to<W: std::io::Write, E: std::io::Write>(
     let output = match ctx.run_output(argv) {
         Ok(output) => output,
         Err(e) => {
+            // Spawn failure: nothing was captured, so this is the job's ONE
+            // completion record. The error text is flattened to a single
+            // line so the `[job_id]` prefix covers all of it (PR #10 F9).
             let elapsed = started.elapsed();
+            let detail = e.to_string().replace(['\n', '\r'], " ");
             let _ = writeln!(
                 err,
-                "[{job_id}] exit=error elapsed_ms={} error={e}",
+                "[{job_id}] exit=error elapsed_ms={} error={detail}",
                 elapsed.as_millis()
             );
             return Err(e);
@@ -141,13 +145,13 @@ fn run_and_log_to<W: std::io::Write, E: std::io::Write>(
     for line in job_log_lines(job_id, &output, elapsed) {
         let _ = writeln!(out, "{line}");
     }
+    // PR #10 review F8/F9: `job_log_lines` has already written the single
+    // completion record (`exit=<code|signal> elapsed_ms=...`) and forwarded
+    // every child line with the prefix. A non-zero exit is propagated as the
+    // `Err` WITHOUT a second `exit=` summary — the error's stderr/stdout
+    // head-tail would only duplicate output that is already in the log above.
     let program = argv.first().map(String::as_str).unwrap_or("");
     if let Some(e) = hex::worker::ctx::exit_error(program, &output) {
-        let _ = writeln!(
-            err,
-            "[{job_id}] exit=error elapsed_ms={} error={e}",
-            elapsed.as_millis()
-        );
         return Err(e);
     }
     Ok(())
@@ -198,8 +202,16 @@ pub fn worker() -> Worker {
     Worker::new("hex-memory-maintenance")
         .on_cron_named("index", CRON_INDEX, run_index)
         .on_cron_named("quick", CRON_CONSOLIDATE_QUICK, run_consolidate_quick)
-        .on_cron_named("parse-transcripts", CRON_PARSE_TRANSCRIPTS, run_parse_transcripts)
-        .on_cron_named("consolidate-full", CRON_CONSOLIDATE_FULL, run_consolidate_full)
+        .on_cron_named(
+            "parse-transcripts",
+            CRON_PARSE_TRANSCRIPTS,
+            run_parse_transcripts,
+        )
+        .on_cron_named(
+            "consolidate-full",
+            CRON_CONSOLIDATE_FULL,
+            run_consolidate_full,
+        )
         .on_cron_named("maintain-weekly", CRON_MAINTAIN, run_maintain)
 }
 
@@ -231,20 +243,113 @@ mod tests {
     #[test]
     fn failing_job_forwards_both_streams_then_propagates_nonzero_exit() {
         let ctx = Ctx::new();
-        let argv: Vec<String> =
-            vec!["sh".into(), "-c".into(), "echo out1; echo err1 >&2; exit 3".into()];
+        let argv: Vec<String> = vec![
+            "sh".into(),
+            "-c".into(),
+            "echo out1; echo err1 >&2; exit 3".into(),
+        ];
         let mut out: Vec<u8> = Vec::new();
         let mut err: Vec<u8> = Vec::new();
 
         let res = run_and_log_to("hex::memory::index", &ctx, &argv, &mut out, &mut err);
 
-        assert!(res.is_err(), "a non-zero exit must still propagate as Err");
+        let propagated = match res {
+            Err(e) => e.to_string(),
+            Ok(()) => panic!("a non-zero exit must still propagate as Err"),
+        };
         let out_s = String::from_utf8(out).expect("utf8");
         let err_s = String::from_utf8(err).expect("utf8");
-        assert!(out_s.contains("[hex::memory::index] out1"), "stdout line lost: {out_s}");
-        assert!(out_s.contains("[hex::memory::index] err1"), "stderr line lost: {out_s}");
-        assert!(out_s.contains("exit=3"), "exit-status line missing: {out_s}");
-        assert!(err_s.contains("exited 3"), "propagated error missing: {err_s}");
+        assert!(
+            out_s.contains("[hex::memory::index] out1"),
+            "stdout line lost: {out_s}"
+        );
+        assert!(
+            out_s.contains("[hex::memory::index] err1"),
+            "stderr line lost: {out_s}"
+        );
+        assert!(
+            out_s.contains("exit=3"),
+            "exit-status line missing: {out_s}"
+        );
+        assert!(
+            propagated.contains("exited 3"),
+            "propagated error missing: {propagated}"
+        );
+        assert!(
+            err_s.is_empty(),
+            "PR #10 F8: the exit line above is the only completion record; got {err_s:?}"
+        );
+    }
+
+    /// RED for PR #10 review F8: a failed child yields EXACTLY ONE completion
+    /// summary across both writers — the numeric `exit=<code>` record from
+    /// `job_log_lines`. The previous code appended a second `exit=error`
+    /// record to the error writer; production routes both streams into one
+    /// log, so the documented one-completion-record contract broke.
+    #[test]
+    fn failing_job_emits_exactly_one_completion_summary_across_both_streams() {
+        let ctx = Ctx::new();
+        let argv: Vec<String> = vec![
+            "sh".into(),
+            "-c".into(),
+            "echo out1; echo err1 >&2; exit 3".into(),
+        ];
+        let mut out: Vec<u8> = Vec::new();
+        let mut err: Vec<u8> = Vec::new();
+
+        let _ = run_and_log_to("hex::memory::index", &ctx, &argv, &mut out, &mut err);
+
+        let combined = format!(
+            "{}{}",
+            String::from_utf8(out).expect("utf8"),
+            String::from_utf8(err).expect("utf8")
+        );
+        let exit_lines: Vec<&str> = combined.lines().filter(|l| l.contains(" exit=")).collect();
+        assert_eq!(
+            exit_lines.len(),
+            1,
+            "exactly one completion summary expected, got {exit_lines:?} in:\n{combined}"
+        );
+        assert!(
+            exit_lines[0].starts_with("[hex::memory::index] exit=3 elapsed_ms="),
+            "the surviving record must be the numeric exit line, got {:?}",
+            exit_lines[0]
+        );
+    }
+
+    /// RED for PR #10 review F9: every line that reaches either writer for a
+    /// failed child carries the `[job_id]` prefix — including when the child
+    /// wrote MULTI-LINE stderr, and when stderr is empty so the propagated
+    /// error would fall back to (multi-line) stdout. Before the fix, the
+    /// second `exit=error ... error=<head/tail>` record interpolated child
+    /// text into one `writeln!`, and any embedded line break produced an
+    /// unprefixed log line.
+    #[test]
+    fn every_line_for_a_failed_child_is_prefixed_multiline_stderr_and_stdout_fallback() {
+        let ctx = Ctx::new();
+        let cases: [&str; 2] = [
+            // multi-line stderr
+            "printf 'e1\\ne2\\ne3\\n' >&2; exit 4",
+            // empty stderr → stdout fallback, multi-line stdout
+            "printf 'o1\\no2\\no3\\n'; exit 5",
+        ];
+        for script in cases {
+            let argv: Vec<String> = vec!["sh".into(), "-c".into(), script.into()];
+            let mut out: Vec<u8> = Vec::new();
+            let mut err: Vec<u8> = Vec::new();
+            let _ = run_and_log_to("hex::memory::maintain", &ctx, &argv, &mut out, &mut err);
+            let combined = format!(
+                "{}{}",
+                String::from_utf8(out).expect("utf8"),
+                String::from_utf8(err).expect("utf8")
+            );
+            for line in combined.lines().filter(|l| !l.is_empty()) {
+                assert!(
+                    line.starts_with("[hex::memory::maintain] "),
+                    "unprefixed line {line:?} for script {script:?} in:\n{combined}"
+                );
+            }
+        }
     }
 
     #[test]
@@ -370,7 +475,10 @@ mod tests {
 
         let result = run_and_log_to("hex::memory::maintain", &ctx, &argv, &mut out, &mut err);
         assert!(result.is_err(), "a spawn failure must propagate as Err");
-        assert!(out.is_empty(), "a failed job must not write to the stdout writer");
+        assert!(
+            out.is_empty(),
+            "a failed job must not write to the stdout writer"
+        );
 
         let captured = String::from_utf8(err).expect("captured stderr must be valid utf8");
         assert!(
