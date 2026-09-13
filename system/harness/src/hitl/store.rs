@@ -184,10 +184,17 @@ pub struct Config {
     /// `alert::notify`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub imessage_handle: Option<String>,
+    /// Hour-of-day (0-23) the daily digest fires, in the operator's LOCAL
+    /// time (`chrono::Local`), never UTC.
     #[serde(default = "default_digest_hour")]
     pub digest_hour: u32,
+    /// Start of the quiet-hours window (0-23), in the operator's LOCAL time
+    /// (`chrono::Local`), never UTC. See `quiet_end`.
     #[serde(default = "default_quiet_start")]
     pub quiet_start: u32,
+    /// End of the quiet-hours window (0-23), in the operator's LOCAL time
+    /// (`chrono::Local`), never UTC. Half-open `[quiet_start, quiet_end)`,
+    /// wraps past midnight when `quiet_start > quiet_end` (default 22..8).
     #[serde(default = "default_quiet_end")]
     pub quiet_end: u32,
     /// Individual pings per calendar day; the digest is excluded from the cap.
