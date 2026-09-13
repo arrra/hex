@@ -351,6 +351,18 @@ pub(crate) fn run_with_timeout_and_stdin(
     timeout: Duration,
     stdin_data: Option<Vec<u8>>,
 ) -> Result<Output, String> {
+    // PR #10 round-2 review F13: `child.kill()` only ever reaches the direct
+    // child (cargo). Its compiler and build-script descendants inherit the
+    // capture pipes and survive a timeout, holding the reader threads and
+    // pipes open while later checks launch more builds. Run the child as
+    // the leader of its OWN process group so every descendant can be
+    // terminated together (`kill_process_group`) on either timeout path —
+    // the wait loop below and the pipe-drain bound after it.
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        cmd.process_group(0);
+    }
     let mut child = cmd
         .stdin(if stdin_data.is_some() {
             Stdio::piped()
@@ -361,6 +373,7 @@ pub(crate) fn run_with_timeout_and_stdin(
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("failed to spawn command: {e}"))?;
+    let group_leader = child.id();
 
     if let Some(data) = stdin_data {
         let mut stdin_pipe = child.stdin.take().expect("stdin was piped");
@@ -402,6 +415,7 @@ pub(crate) fn run_with_timeout_and_stdin(
             Ok(Some(status)) => break Ok(status),
             Ok(None) => {
                 if start.elapsed() >= timeout {
+                    kill_process_group(group_leader);
                     let _ = child.kill();
                     let _ = child.wait();
                     break Err(format!("command timed out after {timeout:?}"));
@@ -431,24 +445,75 @@ pub(crate) fn run_with_timeout_and_stdin(
             .saturating_sub(start.elapsed())
             .max(Duration::from_millis(200));
     let stdout_budget = drain_deadline.saturating_duration_since(Instant::now());
-    let stdout = stdout_rx.recv_timeout(stdout_budget).map_err(|_| {
-        format!(
-            "command exited but its stdout was not closed within {stdout_budget:?} \
-             (a descendant process may still be holding the pipe open)"
-        )
-    })?;
+    let stdout = match stdout_rx.recv_timeout(stdout_budget) {
+        Ok(buf) => buf,
+        Err(_) => {
+            // F13: whatever descendant still holds the pipe is part of the
+            // child's process group — terminate it rather than leave it
+            // running (and the pipe open) behind this check.
+            kill_process_group(group_leader);
+            return Err(format!(
+                "command exited but its stdout was not closed within {stdout_budget:?} \
+                 (a descendant process was still holding the pipe open; its process \
+                 group has been terminated)"
+            ));
+        }
+    };
     let stderr_budget = drain_deadline.saturating_duration_since(Instant::now());
-    let stderr = stderr_rx.recv_timeout(stderr_budget).map_err(|_| {
-        format!(
-            "command exited but its stderr was not closed within {stderr_budget:?} \
-             (a descendant process may still be holding the pipe open)"
-        )
-    })?;
+    let stderr = match stderr_rx.recv_timeout(stderr_budget) {
+        Ok(buf) => buf,
+        Err(_) => {
+            kill_process_group(group_leader);
+            return Err(format!(
+                "command exited but its stderr was not closed within {stderr_budget:?} \
+                 (a descendant process was still holding the pipe open; its process \
+                 group has been terminated)"
+            ));
+        }
+    };
     Ok(Output {
         status,
         stdout,
         stderr,
     })
+}
+
+/// SIGKILL every process in the group led by `leader` (the child spawned by
+/// `run_with_timeout_and_stdin`, which `process_group(0)` made a group
+/// leader, plus every descendant it spawned that did not leave the group —
+/// cargo's rustc/build-script children do not). A no-op when the group is
+/// already gone. Unix only; elsewhere only the direct child is reachable.
+fn kill_process_group(leader: u32) {
+    #[cfg(unix)]
+    {
+        let pgid = leader as libc::pid_t;
+        if pgid > 0 {
+            // SAFETY: plain syscall with a validated positive pgid; killing a
+            // group we created ourselves. A stale id can only target a group
+            // that happens to have been recycled in the sub-second window
+            // between the child's exit and this call — accepted.
+            unsafe {
+                libc::kill(-pgid, libc::SIGKILL);
+            }
+        }
+    }
+    #[cfg(not(unix))]
+    {
+        let _ = leader;
+    }
+}
+
+/// The closing delimiter for a macro invocation opened with `open` —
+/// Rust accepts `m!(...)`, `m!{...}` and `m![...]` alike (PR #10 round-2
+/// review F14: only the paren form was recognized, so
+/// `include_str! { "/tmp/x" }` skipped the containment check entirely).
+fn macro_delimiter(open: u8) -> Option<u8> {
+    match open {
+        b'(' => Some(b')'),
+        b'{' => Some(b'}'),
+        b'[' => Some(b']'),
+        _ => None,
+    }
 }
 
 /// A committed path or symlink target, preserving git's raw bytes exactly.
@@ -1010,16 +1075,14 @@ fn try_resolve_concat_literal(content: &[u8], start: usize) -> Option<(Vec<u8>, 
     while i < content.len() && content[i].is_ascii_whitespace() {
         i += 1;
     }
-    if content.get(i) != Some(&b'(') {
-        return None;
-    }
+    let closer = macro_delimiter(*content.get(i)?)?;
     i += 1;
     let mut out = Vec::new();
     loop {
         while i < content.len() && content[i].is_ascii_whitespace() {
             i += 1;
         }
-        if content.get(i) == Some(&b')') {
+        if content.get(i) == Some(&closer) {
             return Some((out, i + 1));
         }
         let (piece, after) = extract_string_literal_argument(content, i)?;
@@ -1030,7 +1093,7 @@ fn try_resolve_concat_literal(content: &[u8], start: usize) -> Option<(Vec<u8>, 
         }
         match content.get(i) {
             Some(&b',') => i += 1,
-            Some(&b')') => return Some((out, i + 1)),
+            Some(&c) if c == closer => return Some((out, i + 1)),
             _ => return None, // not an all-literal concat! call — out of scope
         }
     }
@@ -1101,9 +1164,7 @@ fn try_resolve_cargo_safe_concat(content: &[u8], start: usize) -> Option<usize> 
     while i < content.len() && content[i].is_ascii_whitespace() {
         i += 1;
     }
-    if content.get(i) != Some(&b'(') {
-        return None;
-    }
+    let concat_closer = macro_delimiter(*content.get(i)?)?;
     i += 1;
     while i < content.len() && content[i].is_ascii_whitespace() {
         i += 1;
@@ -1115,9 +1176,7 @@ fn try_resolve_cargo_safe_concat(content: &[u8], start: usize) -> Option<usize> 
     while i < content.len() && content[i].is_ascii_whitespace() {
         i += 1;
     }
-    if content.get(i) != Some(&b'(') {
-        return None;
-    }
+    let env_closer = macro_delimiter(*content.get(i)?)?;
     i += 1;
     while i < content.len() && content[i].is_ascii_whitespace() {
         i += 1;
@@ -1130,10 +1189,10 @@ fn try_resolve_cargo_safe_concat(content: &[u8], start: usize) -> Option<usize> 
     while i < content.len() && content[i].is_ascii_whitespace() {
         i += 1;
     }
-    if content.get(i) != Some(&b')') {
+    if content.get(i) != Some(&env_closer) {
         return None; // env!(...) itself malformed or has a second argument
     }
-    i += 1; // past env!(...)'s own closing paren
+    i += 1; // past env!(...)'s own closing delimiter
             // Round-9 review: `concat!` inserts NO separator between its
             // arguments, so a `..` segment can be SYNTHESIZED across a literal
             // boundary even when no single literal contains one on its own —
@@ -1148,7 +1207,7 @@ fn try_resolve_cargo_safe_concat(content: &[u8], start: usize) -> Option<usize> 
             i += 1;
         }
         match content.get(i) {
-            Some(&b')') => {
+            Some(&c) if c == concat_closer => {
                 return suffix_has_no_parent_dir_segment(&suffix).then_some(i + 1);
             }
             Some(&b',') => {
@@ -1156,7 +1215,7 @@ fn try_resolve_cargo_safe_concat(content: &[u8], start: usize) -> Option<usize> 
                 while i < content.len() && content[i].is_ascii_whitespace() {
                     i += 1;
                 }
-                if content.get(i) == Some(&b')') {
+                if content.get(i) == Some(&concat_closer) {
                     // Trailing comma before concat!'s own close.
                     return suffix_has_no_parent_dir_segment(&suffix).then_some(i + 1);
                 }
@@ -1292,9 +1351,15 @@ fn validate_source_include_targets_stay_within_export(
                 while i < content.len() && content[i].is_ascii_whitespace() {
                     i += 1;
                 }
-                if i >= content.len() || content[i] != b'(' {
+                // F14 (PR #10 round-2 review): `(`, `{` and `[` are all valid
+                // invocation delimiters; the paren-only check let
+                // `include_str! { "/abs/path" }` skip this guard entirely. A
+                // macro name followed by anything else cannot be an
+                // invocation at all (rustc rejects it), so nothing is skipped
+                // that could compile.
+                let Some(closer) = content.get(i).copied().and_then(macro_delimiter) else {
                     continue;
-                }
+                };
                 i += 1;
                 while i < content.len() && content[i].is_ascii_whitespace() {
                     i += 1;
@@ -1335,7 +1400,7 @@ fn validate_source_include_targets_stay_within_export(
                             j += 1;
                         }
                     }
-                    (j < content.len() && content[j] == b')').then_some(outcome)
+                    (j < content.len() && content[j] == closer).then_some(outcome)
                 });
 
                 let Some(outcome) = resolved else {

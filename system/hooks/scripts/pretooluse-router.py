@@ -51,6 +51,7 @@ is documented here instead):
   git-global-options skip inline; see `_expand_placeholders` below for the
   one shared definition both expand to.
 """
+import fcntl
 import json
 import os
 import re
@@ -73,18 +74,18 @@ TEXT_TOOLS = ("Edit", "Write", "MultiEdit", "NotebookEdit")
 # Covers current API-key/token shapes so persisted ledger text (match,
 # preview, incident error/args_preview) never carries a live credential.
 _REDACT_PATTERNS = [
-    (re.compile(r"sk-ant-[A-Za-z0-9\-_]{8,}"), "sk-ant-***REDACTED***"),
+    (re.compile(r"sk-ant-[A-Za-z0-9\-_]{8,}", re.ASCII), "sk-ant-***REDACTED***"),
     # G1 (review_b round 3): real OpenAI-shaped keys (sk-proj-..., sk-svcacct-...)
     # use hyphens/underscores inside the key body, not just alnum -- the old
     # alnum-only charset stopped at the first "-" and left most of the key
     # (everything after "proj"/"svcacct") unredacted.
-    (re.compile(r"sk-[A-Za-z0-9\-_]{8,}"), "sk-***REDACTED***"),
-    (re.compile(r"ghp_[A-Za-z0-9]{16,}"), "***REDACTED-GH-TOKEN***"),
-    (re.compile(r"github_pat_[A-Za-z0-9_]{16,}"), "***REDACTED-GH-TOKEN***"),
-    (re.compile(r"xox[abp]-[A-Za-z0-9\-]{8,}"), "***REDACTED-SLACK-TOKEN***"),
-    (re.compile(r"AKIA[A-Z0-9]{16}"), "***REDACTED-AWS-KEY***"),
-    (re.compile(r"(?i)\bpit-[A-Za-z0-9\-_]{8,}"), "pit-***REDACTED***"),
-    (re.compile(r"(?i)bearer\s+\S+"), "Bearer ***REDACTED***"),
+    (re.compile(r"sk-[A-Za-z0-9\-_]{8,}", re.ASCII), "sk-***REDACTED***"),
+    (re.compile(r"ghp_[A-Za-z0-9]{16,}", re.ASCII), "***REDACTED-GH-TOKEN***"),
+    (re.compile(r"github_pat_[A-Za-z0-9_]{16,}", re.ASCII), "***REDACTED-GH-TOKEN***"),
+    (re.compile(r"xox[abp]-[A-Za-z0-9\-]{8,}", re.ASCII), "***REDACTED-SLACK-TOKEN***"),
+    (re.compile(r"AKIA[A-Z0-9]{16}", re.ASCII), "***REDACTED-AWS-KEY***"),
+    (re.compile(r"(?i)\bpit-[A-Za-z0-9\-_]{8,}", re.ASCII), "pit-***REDACTED***"),
+    (re.compile(r"(?i)bearer\s+\S+", re.ASCII), "Bearer ***REDACTED***"),
     # G2b (review_b round 3): the PEM-block pattern MUST run before the
     # generic `secret=`/`token=` pattern below -- that pattern's value is
     # `\S+` (stops at the first whitespace), so a `secret=` immediately
@@ -93,7 +94,8 @@ _REDACT_PATTERNS = [
     (
         re.compile(
             r"-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----[\s\S]*?"
-            r"-----END [A-Z0-9 ]*PRIVATE KEY-----"
+            r"-----END [A-Z0-9 ]*PRIVATE KEY-----",
+            re.ASCII,
         ),
         "***REDACTED-PEM-BLOCK***",
     ),
@@ -112,20 +114,23 @@ _REDACT_PATTERNS = [
     (
         re.compile(
             r"""(?i)"(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""(?:[^"\\]|\\[\s\S])*\""""
+            r"""(?:[^"\\]|\\[\s\S])*\"""",
+            re.ASCII,
         ),
         r'"\1=***REDACTED***"',
     ),
     (
         re.compile(
-            r"""(?i)'(password|token|secret|api[_-]?key)\s*=\s*[^']*'"""
+            r"""(?i)'(password|token|secret|api[_-]?key)\s*=\s*[^']*'""",
+            re.ASCII,
         ),
         r"'\1=***REDACTED***'",
     ),
     (
         re.compile(
             r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""\$'(?:[^'\\]|\\.)*'"""
+            r"""\$'(?:[^'\\]|\\.)*'""",
+            re.ASCII,
         ),
         r"\1=***REDACTED***",
     ),
@@ -171,7 +176,8 @@ _REDACT_PATTERNS = [
     (
         re.compile(
             r"""(?i)\b(password|token|secret|api[_-]?key)\s*=\s*"""
-            r"""(\\"(?:[^"\\]|\\[\s\S])*\\"|"(?:[^"\\]|\\[\s\S])*"|'[^']*'|(?:[^\s\\]|\\.)+)"""
+            r"""(\\"(?:[^"\\]|\\[\s\S])*\\"|"(?:[^"\\]|\\[\s\S])*"|'[^']*'|(?:[^\s\\]|\\.)+)""",
+            re.ASCII,
         ),
         r"\1=***REDACTED***",
     ),
@@ -187,7 +193,8 @@ _REDACT_PATTERNS = [
     (
         re.compile(
             r"""(?i)"(password|token|secret|api[_-]?key)"\s*:\s*\""""
-            r"""(?:[^"\\]|\\[\s\S])*\""""
+            r"""(?:[^"\\]|\\[\s\S])*\"""",
+            re.ASCII,
         ),
         r'"\1":"***REDACTED***"',
     ),
@@ -208,7 +215,8 @@ _REDACT_PATTERNS = [
     (
         re.compile(
             r"""(?i)(\\+)"(password|token|secret|api[_-]?key)\\+"\s*:\s*\\+\""""
-            r"""(?:[^"\\]|\\[\s\S])*\\+\""""
+            r"""(?:[^"\\]|\\[\s\S])*\\+\"""",
+            re.ASCII,
         ),
         r'\1"\2\1":\1"***REDACTED***\1"',
     ),
@@ -241,9 +249,25 @@ def _open_private_append(path):
     """Open `path` for append, creating it 0600 if new; also force 0600 on
     an already-existing file (same 'existing paths handled explicitly'
     reasoning as `_ensure_private_dir` -- the mode passed to `os.open` only
-    applies when the file is newly created)."""
-    fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+    applies when the file is newly created).
+
+    PR #6 review F9 -- coordinated append shared with the Rust port
+    (`append_ledger_at` in system/harness/src/hook/router.rs): the file is
+    held under an exclusive advisory lock for the whole append (released
+    when the returned file object closes), and an INCOMPLETE TAIL left by an
+    earlier writer (a short write that never reached its newline) is
+    repaired first by writing the missing newline, so the fragment stays an
+    isolated unparseable line instead of being glued onto this batch's first
+    record. Opened O_RDWR (not O_WRONLY) purely so the last byte can be
+    inspected; every write still goes to the end via O_APPEND."""
+    fd = os.open(path, os.O_RDWR | os.O_CREAT | os.O_APPEND, 0o600)
     os.chmod(path, 0o600)
+    fcntl.flock(fd, fcntl.LOCK_EX)
+    size = os.fstat(fd).st_size
+    if size > 0:
+        os.lseek(fd, size - 1, os.SEEK_SET)
+        if os.read(fd, 1) != b"\n":
+            os.write(fd, b"\n")
     return os.fdopen(fd, "a")
 
 # Command-boundary characters used to scope `unless_match` when a rule's
@@ -550,7 +574,7 @@ def _expand_placeholders(pattern):
 # qux"`) can sit between them, exactly the shape `_ASSIGN_VALUE`'s own
 # repeated `_ASSIGN_SEGMENT` now matches. The trailing `(?:[^\s'"]*)`
 # mirrors that segment's unquoted alternative so the two stay in sync.
-_ASSIGN_QUOTE_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\$?(?:[^\s'\"]*)\Z")
+_ASSIGN_QUOTE_PREFIX_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*=\$?(?:[^\s'\"]*)\Z", re.ASCII)
 _ASSIGN_QUOTE_LOOKBACK = 64  # assignment names are short; bounds the check to O(1)
 
 
@@ -647,7 +671,7 @@ def _single_quote_span_end(text, i, limit):
 # (`echo`/"please do not run" aren't one of the wrapper keywords `@PREFIX@`
 # skips), independent of whether the letters are visible.
 
-_HEREDOC_START_RE = re.compile(r"<<(-)?\s*(?:'([^'\n]*)'|\"([^\"\n]*)\"|([A-Za-z_][A-Za-z0-9_]*))")
+_HEREDOC_START_RE = re.compile(r"<<(-)?\s*(?:'([^'\n]*)'|\"([^\"\n]*)\"|([A-Za-z_][A-Za-z0-9_]*))", re.ASCII)
 
 
 def _heredoc_start_match(text, pos):
@@ -1541,8 +1565,8 @@ def _window_bounds(sep_positions, text_len, start, end):
 # at its start. `_read_token` (reading from the UNMASKED text at this same
 # offset -- masking preserves length/offsets 1:1) skips any further real
 # whitespace itself before parsing the argument.
-_DASH_C_LOCATE_RE = re.compile(r"-C\s")
-_GIT_DIR_LOCATE_RE = re.compile(r"--git-dir=")
+_DASH_C_LOCATE_RE = re.compile(r"-C\s", re.ASCII)
+_GIT_DIR_LOCATE_RE = re.compile(r"--git-dir=", re.ASCII)
 # R3 (round 3): a bare separator-anchor missed a `cd`/`pushd`/`popd` right
 # after a reserved word (`if`/`then`/`do`/...) or a `command`/`builtin`
 # wrapper -- none of those are `_SEPARATOR_CHARS`, so the effective-checkout
@@ -1555,7 +1579,8 @@ _GIT_DIR_LOCATE_RE = re.compile(r"--git-dir=")
 _CD_LOCATE_RE = re.compile(
     r"(?:^|[;&|(){}\n]\s*|" + _RESERVED_LEADIN + r")"
     + _WRAPPER_SKIP
-    + r"(cd|pushd|popd)\b"
+    + r"(cd|pushd|popd)\b",
+    re.ASCII,
 )
 
 
@@ -1671,7 +1696,7 @@ def _paren_depths(scan_text):
     return depths
 
 
-_OR_GUARD_RE = re.compile(r"[ \t]*\|\|")
+_OR_GUARD_RE = re.compile(r"[ \t]*\|\|", re.ASCII)
 
 
 def _skip_balanced_group(scan_text, open_idx):
@@ -2102,7 +2127,7 @@ def _effective_checkout(text, scan_text, match_start, match_end, payload_cwd, cd
 # very first thing in the text -- is ever a genuine loop keyword; real
 # bash never recognizes either as a reserved word anywhere else (an
 # argument, mid-word, right after another word with no separator).
-_LOOP_TOKEN_RE = re.compile(r"\b(?:do|done)\b")
+_LOOP_TOKEN_RE = re.compile(r"\b(?:do|done)\b", re.ASCII)
 
 
 def _is_command_position(text, idx):
@@ -2182,6 +2207,18 @@ def canonical_text(tool_name, tool_input):
     return json.dumps(tool_input, sort_keys=True, separators=(",", ":"))
 
 
+# PR #6 review F13 -- shared regex semantics with the Rust port. Every rule
+# pattern (and every internal pattern in this file) is compiled with
+# re.ASCII in addition to re.MULTILINE, so `\w`/`\d`/`\s`/`\b`/`\B` and
+# case-insensitive matching mean the ASCII subset on BOTH sides: Rust's
+# `regex` crate has no lookaround and its Unicode `\w` includes combining
+# marks (`stash` + U+0301 is one word there, two in Python's Unicode mode),
+# so the only semantics the two engines can share exactly is the ASCII one.
+# The port rewrites each pattern into explicit ASCII classes; this flag is
+# the reference's half of that contract.
+_RULE_FLAGS = re.MULTILINE | re.ASCII
+
+
 def load_rules():
     with open(RULES_PATH, "r") as f:
         raw_rules = json.load(f)
@@ -2194,8 +2231,8 @@ def load_rules():
         compiled.append(
             {
                 "id": rule["id"],
-                "tool_re": re.compile(rule["tool"], re.MULTILINE),
-                "match_re": re.compile(match_pattern, re.MULTILINE),
+                "tool_re": re.compile(rule["tool"], _RULE_FLAGS),
+                "match_re": re.compile(match_pattern, _RULE_FLAGS),
                 # F3 (round 3-7 review, blocker): whether this rule needs
                 # the SEPARATE per-target widened scan_text variants too
                 # -- see `_gitopts_scan_variants`'s docstring for why one
@@ -2205,8 +2242,8 @@ def load_rules():
                 # since `@GITOPTS@` itself is a placeholder token, not
                 # literal regex text.
                 "uses_gitopts": "@GITOPTS@" in rule["match"],
-                "unless_cwd_re": re.compile(unless_cwd, re.MULTILINE) if unless_cwd else None,
-                "unless_match_re": re.compile(unless_match_pattern, re.MULTILINE) if unless_match_pattern else None,
+                "unless_cwd_re": re.compile(unless_cwd, _RULE_FLAGS) if unless_cwd else None,
+                "unless_match_re": re.compile(unless_match_pattern, _RULE_FLAGS) if unless_match_pattern else None,
                 # F1/F10: per-rule exemption scope. "invocation" = unless_match
                 # is judged from THIS occurrence's own command window only
                 # (e.g. the stash rule: a safe-looking subcommand elsewhere in
@@ -2502,7 +2539,7 @@ def evaluate(payload):
                 if _cwd_exempts(candidate):
                     continue
                 matched_text = candidate.group(0)
-                tail = re.search(r"\w+\Z", matched_text)
+                tail = re.search(r"\w+\Z", matched_text, re.ASCII)
                 anchor = candidate.start() + (tail.start() if tail else len(matched_text))
                 if unless_re.match(scan_text, anchor) is None:
                     m = candidate
