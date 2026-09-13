@@ -80,13 +80,15 @@ fn pystr(s: &str) -> PyStr {
 }
 
 /// Where lone surrogate code points land when a `PyStr` has to become a
-/// Rust `String` (regex haystacks, path operations): U+F0000 + (cp - D800),
-/// inside Supplementary Private Use Area-A. Every regex this router runs is
+/// Rust `String` for the regex engine: U+F0000 + (cp - D800), inside
+/// Supplementary Private Use Area-A. Every regex this router runs is
 /// ASCII-class based, so a PUA char and a surrogate are indistinguishable to
-/// it (both are "not a word/space/numeral char, matched by `.`"). The mapping
-/// is only reversed (`cps_from_str`) for text derived from a payload that
-/// actually carried a lone surrogate, so genuine PUA-A characters round-trip
-/// untouched in every other case.
+/// it (both are "not a word/space/numeral char, matched by `.`"). The `String`
+/// view is READ-ONLY: no text is ever converted back from it (PR #6 round-2
+/// F14) — every value that leaves the router (matches, previews, resolved
+/// paths, heredoc delimiters) is sliced or rebuilt from the original code
+/// points using the engine's offsets, so a genuine U+F0000 and a lone U+D800
+/// never collapse into each other.
 const SURROGATE_PUA_BASE: u32 = 0xF0000;
 
 fn cp_to_char(cp: u32) -> char {
@@ -99,24 +101,6 @@ fn cp_to_char(cp: u32) -> char {
 
 fn cps_to_string(cps: &[u32]) -> String {
     cps.iter().map(|&c| cp_to_char(c)).collect()
-}
-
-fn cps_from_str(s: &str, restore_surrogates: bool) -> PyStr {
-    s.chars()
-        .map(|c| {
-            let cp = c as u32;
-            if restore_surrogates && (SURROGATE_PUA_BASE..SURROGATE_PUA_BASE + 0x800).contains(&cp)
-            {
-                0xD800 + (cp - SURROGATE_PUA_BASE)
-            } else {
-                cp
-            }
-        })
-        .collect()
-}
-
-fn has_lone_surrogate(cps: &[u32]) -> bool {
-    cps.iter().any(|c| (0xD800..=0xDFFF).contains(c))
 }
 
 /// The subset of Python's object model a JSON document can produce.
@@ -448,10 +432,20 @@ impl JsonParser<'_> {
                 c if c < 0x20 => {
                     return Err(format!("Invalid control character at: char {}", self.i));
                 }
-                _ => {
-                    // Decode one UTF-8 scalar (stdin was validated as UTF-8).
-                    let rest = std::str::from_utf8(&self.b[self.i..]).map_err(|e| e.to_string())?;
-                    let ch = rest.chars().next().ok_or("unexpected end")?;
+                b0 => {
+                    // Decode ONE UTF-8 scalar from its lead byte (the input
+                    // is a `&str`, so the sequence is well-formed). Validating
+                    // the whole remaining document per character made string
+                    // decoding quadratic (PR #6 round-2 F17).
+                    let len = match b0 {
+                        0x00..=0x7f => 1,
+                        0xc0..=0xdf => 2,
+                        0xe0..=0xef => 3,
+                        _ => 4,
+                    };
+                    let end = (self.i + len).min(self.b.len());
+                    let s = std::str::from_utf8(&self.b[self.i..end]).map_err(|e| e.to_string())?;
+                    let ch = s.chars().next().ok_or("unexpected end")?;
                     out.push(ch as u32);
                     self.i += ch.len_utf8();
                 }
@@ -885,18 +879,18 @@ pub fn translate_py_regex(pat: &str) -> Result<String, String> {
                     'u' => {
                         let hex: String = chars[i..(i + 4).min(n)].iter().collect();
                         i += 4;
-                        out.push_str(&format!("\\x{{{hex}}}"));
+                        push_hex_escape(&mut out, &hex, 4, ci, true);
                     }
                     'U' => {
                         let hex: String = chars[i..(i + 8).min(n)].iter().collect();
                         i += 8;
-                        out.push_str(&format!("\\x{{{hex}}}"));
+                        push_hex_escape(&mut out, &hex, 8, ci, true);
                     }
                     'A' | 'Z' | 'B' => return Err(format!("bad escape \\{e} inside a class")),
                     'x' => {
                         let hex: String = chars[i..(i + 2).min(n)].iter().collect();
                         i += 2;
-                        out.push_str(&format!("\\x{hex}"));
+                        push_hex_escape(&mut out, &hex, 2, ci, true);
                     }
                     other => {
                         out.push('\\');
@@ -961,18 +955,18 @@ pub fn translate_py_regex(pat: &str) -> Result<String, String> {
                     'u' => {
                         let hex: String = chars[i..(i + 4).min(n)].iter().collect();
                         i += 4;
-                        out.push_str(&format!("\\x{{{hex}}}"));
+                        push_hex_escape(&mut out, &hex, 4, ci, false);
                     }
                     'U' => {
                         let hex: String = chars[i..(i + 8).min(n)].iter().collect();
                         i += 8;
-                        out.push_str(&format!("\\x{{{hex}}}"));
+                        push_hex_escape(&mut out, &hex, 8, ci, false);
                     }
                     '0' => out.push_str("\\x00"),
                     'x' => {
                         let hex: String = chars[i..(i + 2).min(n)].iter().collect();
                         i += 2;
-                        out.push_str(&format!("\\x{hex}"));
+                        push_hex_escape(&mut out, &hex, 2, ci, false);
                     }
                     d if d.is_ascii_digit() => {
                         return Err(format!("backreference \\{d} is not supported"))
@@ -1074,6 +1068,35 @@ pub fn translate_py_regex(pat: &str) -> Result<String, String> {
     Ok(out)
 }
 
+/// Emit a decoded `\x`/`\u`/`\U` escape. Under a leading `(?i)`, an escape
+/// that names an ASCII letter gets the same case expansion as a literal
+/// letter (PR #10 round-3 F16: Python's `(?i)\x61` matches `A`; so must the
+/// translation, outside and inside a class).
+fn push_hex_escape(out: &mut String, hex: &str, width: usize, ci: bool, in_class: bool) {
+    if ci && hex.len() == width {
+        if let Some(ch) = u32::from_str_radix(hex, 16)
+            .ok()
+            .and_then(char::from_u32)
+            .filter(|c| c.is_ascii_alphabetic())
+        {
+            if !in_class {
+                out.push('[');
+            }
+            out.push(ch);
+            out.push(swap_case(ch));
+            if !in_class {
+                out.push(']');
+            }
+            return;
+        }
+    }
+    if width == 2 {
+        out.push_str(&format!("\\x{hex}"));
+    } else {
+        out.push_str(&format!("\\x{{{hex}}}"));
+    }
+}
+
 fn swap_case(c: char) -> char {
     if c.is_ascii_lowercase() {
         c.to_ascii_uppercase()
@@ -1157,46 +1180,82 @@ const REDACT_PATTERNS: &[(&str, &str)] = &[
     ),
 ];
 
-fn redact_patterns() -> &'static [(Regex, String)] {
-    static COMPILED: std::sync::OnceLock<Vec<(Regex, String)>> = std::sync::OnceLock::new();
+/// One piece of a parsed Python replacement template (`\1` = group 1).
+enum ReplPiece {
+    Lit(PyStr),
+    Group(usize),
+}
+
+fn redact_patterns() -> &'static [(Regex, Vec<ReplPiece>)] {
+    static COMPILED: std::sync::OnceLock<Vec<(Regex, Vec<ReplPiece>)>> = std::sync::OnceLock::new();
     COMPILED.get_or_init(|| {
         REDACT_PATTERNS
             .iter()
             .map(|(pat, repl)| {
                 let re = static_re(pat);
-                // Python `\1` → regex `${1}` (braces so a following literal
-                // character can't be read as part of the group name).
-                let mut r = String::new();
+                let mut pieces: Vec<ReplPiece> = Vec::new();
+                let mut lit: PyStr = Vec::new();
                 let mut chars = repl.chars().peekable();
                 while let Some(c) = chars.next() {
                     if c == '\\' {
                         if let Some(d) = chars.peek().copied().filter(|d| d.is_ascii_digit()) {
                             chars.next();
-                            r.push_str(&format!("${{{d}}}"));
+                            if !lit.is_empty() {
+                                pieces.push(ReplPiece::Lit(std::mem::take(&mut lit)));
+                            }
+                            pieces.push(ReplPiece::Group(d.to_digit(10).unwrap_or(0) as usize));
                             continue;
                         }
                     }
-                    if c == '$' {
-                        r.push_str("$$");
-                        continue;
-                    }
-                    r.push(c);
+                    lit.push(c as u32);
                 }
-                (re, r)
+                if !lit.is_empty() {
+                    pieces.push(ReplPiece::Lit(lit));
+                }
+                (re, pieces)
             })
             .collect()
     })
 }
 
-/// Scrub every known secret shape out of `text` (Python `redact`): a no-op
-/// for empty input.
-fn redact(text: &str) -> String {
-    if text.is_empty() {
-        return text.to_string();
+/// Scrub every known secret shape out of `cps` (Python `redact`): a no-op
+/// for empty input. Matching runs on the `String` view, but the output is
+/// rebuilt from the ORIGINAL code points using the match/group offsets —
+/// never converted back from the view — so lone surrogates and genuine
+/// private-use characters both survive exactly (PR #6 round-2 F14).
+fn redact_cps(cps: &[u32]) -> PyStr {
+    if cps.is_empty() {
+        return Vec::new();
     }
-    let mut cur = text.to_string();
-    for (re, repl) in redact_patterns() {
-        cur = re.replace_all(&cur, repl.as_str()).into_owned();
+    let mut cur: PyStr = cps.to_vec();
+    for (re, template) in redact_patterns() {
+        let view = CpText::new(cur.clone());
+        let mut out: PyStr = Vec::new();
+        let mut last = 0usize;
+        let mut matched_any = false;
+        for caps in re.captures_iter(&view.s) {
+            matched_any = true;
+            let m = caps.get(0).expect("group 0");
+            let (ms, me) = (view.cp(m.start()), view.cp(m.end()));
+            out.extend_from_slice(&cur[last..ms]);
+            for piece in template {
+                match piece {
+                    ReplPiece::Lit(lit) => out.extend_from_slice(lit),
+                    // An unmatched group expands to nothing (Python ≥ 3.5).
+                    ReplPiece::Group(n) => {
+                        if let Some(g) = caps.get(*n) {
+                            out.extend_from_slice(&cur[view.cp(g.start())..view.cp(g.end())]);
+                        }
+                    }
+                }
+            }
+            last = me;
+        }
+        if !matched_any {
+            continue;
+        }
+        out.extend_from_slice(&cur[last..]);
+        cur = out;
     }
     cur
 }
@@ -1204,15 +1263,12 @@ fn redact(text: &str) -> String {
 /// `redact()` on a Python value the way the reference calls it on a payload
 /// field: a falsy value is returned as-is (`if not text: return text`), a
 /// truthy non-`str` raises `TypeError` in `pattern.sub` — fail-open.
-fn redact_value(v: &PyValue, restore_surrogates: bool) -> Result<PyValue, String> {
+fn redact_value(v: &PyValue) -> Result<PyValue, String> {
     if !v.truthy() {
         return Ok(v.clone());
     }
     match v {
-        PyValue::Str(s) => Ok(PyValue::Str(cps_from_str(
-            &redact(&cps_to_string(s)),
-            restore_surrogates,
-        ))),
+        PyValue::Str(s) => Ok(PyValue::Str(redact_cps(s))),
         other => Err(format!(
             "expected string or bytes-like object, got '{}' (Python: TypeError in redact)",
             other.type_name()
@@ -1436,10 +1492,17 @@ fn heredoc_start_match(text: &CpText, pos: usize) -> Option<HeredocStart> {
     let m = caps.get(0)?;
     let end = text.cp(text.byte(pos) + m.end());
     let strip_tabs = caps.get(1).is_some();
+    // The delimiter is sliced from the ORIGINAL code points via the capture
+    // offsets, never taken from the `String` view (PR #6 round-2 F14): a
+    // lone-surrogate delimiter would otherwise come back as its private-use
+    // placeholder and never match its own terminator line.
+    let base = text.byte(pos);
+    let slice_cps =
+        |g: regex::Match<'_>| text.cps[text.cp(base + g.start())..text.cp(base + g.end())].to_vec();
     let (delim, quoted) = if let Some(g) = caps.get(2) {
-        (pystr(g.as_str()), true)
+        (slice_cps(g), true)
     } else if let Some(g) = caps.get(3) {
-        (pystr(g.as_str()), true)
+        (slice_cps(g), true)
     } else {
         let g = caps.get(4)?;
         // Unquoted delimiter immediately followed by a backslash: not
@@ -1447,7 +1510,7 @@ fn heredoc_start_match(text: &CpText, pos: usize) -> Option<HeredocStart> {
         if end < text.len() && is_ch(text.cps[end], '\\') {
             return None;
         }
-        (pystr(g.as_str()), false)
+        (slice_cps(g), false)
     };
     Some(HeredocStart {
         end,
@@ -1963,8 +2026,14 @@ fn looks_like_resolvable_path(token: &[u32]) -> bool {
 
 /// Read one shell argument token at `pos` in the UNMASKED text (reference
 /// `_read_token`): `(value_or_None, end_pos)`.
-fn read_token(text: &[u32], mut pos: usize) -> (Option<PyStr>, usize) {
+fn read_token(text: &[u32], pos: usize) -> (Option<PyStr>, usize) {
     let n = text.len();
+    // `pos` can lie PAST the unmasked text: `executable_mask` appends a
+    // synthetic terminator line for an unterminated heredoc, and a `cd` in
+    // that synthetic line is located in scan_text coordinates (PR #6
+    // round-2 F18). Python's slicing clamps silently (`text[16:16] == ""`,
+    // an unresolvable token); do the same instead of indexing out of range.
+    let mut pos = pos.min(n);
     while pos < n {
         if in_set(text[pos], " \t") {
             pos += 1;
@@ -2019,46 +2088,60 @@ fn read_token(text: &[u32], mut pos: usize) -> (Option<PyStr>, usize) {
     )
 }
 
-/// `posixpath.normpath` — purely lexical.
-fn posix_normpath(path: &str) -> String {
+const SLASH: u32 = '/' as u32;
+const DOT: u32 = '.' as u32;
+
+/// `posixpath.normpath` — purely lexical, on code points (so a path holding
+/// a lone surrogate or a private-use character is normalized without ever
+/// passing via the placeholder `String` view).
+fn posix_normpath(path: &[u32]) -> PyStr {
     if path.is_empty() {
-        return ".".into();
+        return vec![DOT];
     }
-    let mut initial_slashes = usize::from(path.starts_with('/'));
-    if initial_slashes == 1 && path.starts_with("//") && !path.starts_with("///") {
+    let mut initial_slashes = usize::from(path[0] == SLASH);
+    if initial_slashes == 1 && path.get(1) == Some(&SLASH) && path.get(2) != Some(&SLASH) {
         initial_slashes = 2;
     }
-    let mut new_comps: Vec<&str> = Vec::new();
-    for comp in path.split('/') {
-        if comp.is_empty() || comp == "." {
+    let mut new_comps: Vec<&[u32]> = Vec::new();
+    for comp in path.split(|&c| c == SLASH) {
+        if comp.is_empty() || comp == [DOT] {
             continue;
         }
-        if comp != ".."
+        let is_dotdot = comp == [DOT, DOT];
+        if !is_dotdot
             || (initial_slashes == 0 && new_comps.is_empty())
-            || new_comps.last() == Some(&"..")
+            || new_comps.last().is_some_and(|l| *l == [DOT, DOT])
         {
             new_comps.push(comp);
         } else if !new_comps.is_empty() {
             new_comps.pop();
         }
     }
-    let joined = new_comps.join("/");
-    let out = format!("{}{}", "/".repeat(initial_slashes), joined);
+    let mut out: PyStr = vec![SLASH; initial_slashes];
+    for (i, comp) in new_comps.iter().enumerate() {
+        if i > 0 {
+            out.push(SLASH);
+        }
+        out.extend_from_slice(comp);
+    }
     if out.is_empty() {
-        ".".into()
+        vec![DOT]
     } else {
         out
     }
 }
 
-/// `posixpath.join(a, b)` for two components.
-fn posix_join(a: &str, b: &str) -> String {
-    if b.starts_with('/') {
-        b.to_string()
-    } else if a.is_empty() || a.ends_with('/') {
-        format!("{a}{b}")
+/// `posixpath.join(a, b)` for two components, on code points.
+fn posix_join(a: &[u32], b: &[u32]) -> PyStr {
+    if b.first() == Some(&SLASH) {
+        b.to_vec()
+    } else if a.is_empty() || a.last() == Some(&SLASH) {
+        [a, b].concat()
     } else {
-        format!("{a}/{b}")
+        let mut v = a.to_vec();
+        v.push(SLASH);
+        v.extend_from_slice(b);
+        v
     }
 }
 
@@ -2069,10 +2152,9 @@ type Cwd = PyValue;
 
 /// Reference `_resolve_against_cwd`: absolute → normpath; no usable base →
 /// the path itself; a truthy non-str base → `TypeError` (fail-open).
-fn resolve_against_cwd(path: &[u32], base: Option<&Cwd>, ss: bool) -> Result<PyStr, String> {
-    let p = cps_to_string(path);
-    if p.starts_with('/') {
-        return Ok(cps_from_str(&posix_normpath(&p), ss));
+fn resolve_against_cwd(path: &[u32], base: Option<&Cwd>) -> Result<PyStr, String> {
+    if path.first() == Some(&SLASH) {
+        return Ok(posix_normpath(path));
     }
     let Some(base) = base else {
         return Ok(path.to_vec());
@@ -2081,10 +2163,7 @@ fn resolve_against_cwd(path: &[u32], base: Option<&Cwd>, ss: bool) -> Result<PyS
         return Ok(path.to_vec());
     }
     match base {
-        PyValue::Str(b) => Ok(cps_from_str(
-            &posix_normpath(&posix_join(&cps_to_string(b), &p)),
-            ss,
-        )),
+        PyValue::Str(b) => Ok(posix_normpath(&posix_join(b, path))),
         other => Err(format!(
             "expected str, bytes or os.PathLike object, not {} (Python: TypeError in os.path.join)",
             other.type_name()
@@ -2208,7 +2287,6 @@ fn precompute_cd_reach_info(
     scan: &CpText,
     depths: &[i64],
     payload_cwd: &Cwd,
-    ss: bool,
 ) -> Result<CdReach, String> {
     let mut reach = CdReach {
         starts: Vec::new(),
@@ -2269,7 +2347,6 @@ fn precompute_cd_reach_info(
             Some(v) => Some(PyValue::Str(resolve_against_cwd(
                 &v,
                 base_for_this_cd.as_ref(),
-                ss,
             )?)),
             None => None,
         };
@@ -2322,7 +2399,6 @@ fn effective_checkout(
     match_end: usize,
     payload_cwd: &Cwd,
     reach: &CdReach,
-    ss: bool,
 ) -> Result<Option<Cwd>, String> {
     let st = statics();
     let invocation = scan.slice(match_start, match_end);
@@ -2337,16 +2413,12 @@ fn effective_checkout(
         let Some(value) = value else {
             return Ok(None);
         };
-        if value.first().is_some_and(|&c| is_ch(c, '/')) {
-            base_cwd = Some(PyValue::Str(cps_from_str(
-                &posix_normpath(&cps_to_string(&value)),
-                ss,
-            )));
+        if value.first() == Some(&SLASH) {
+            base_cwd = Some(PyValue::Str(posix_normpath(&value)));
         } else if base_cwd.is_some() {
             base_cwd = Some(PyValue::Str(resolve_against_cwd(
                 &value,
                 base_cwd.as_ref(),
-                ss,
             )?));
         } else {
             return Ok(None);
@@ -2648,9 +2720,6 @@ pub struct LedgerContext {
     pub cwd: PyValue,
     /// Redacted canonical text, first 300 code points (ledger `preview`).
     pub preview: PyStr,
-    /// The payload carried a lone surrogate somewhere; text derived from it
-    /// via a `String` round-trip maps the placeholder back.
-    pub restore_surrogates: bool,
 }
 
 /// The pure result of evaluating one PreToolUse payload against a rule set.
@@ -2710,9 +2779,6 @@ fn decide_inner(rules: &[Rule], raw_stdin: &str) -> Result<Outcome, String> {
         .unwrap_or_else(|| PyValue::str(""));
 
     let text_cps = canonical_text(&tool_name, &tool_input)?;
-    let ss = has_lone_surrogate(&text_cps)
-        || cwd.as_pystr().is_some_and(|s| has_lone_surrogate(s))
-        || session_id.as_pystr().is_some_and(|s| has_lone_surrogate(s));
     let text = CpText::new(text_cps);
     let is_bash = tool_name == "Bash";
 
@@ -2739,7 +2805,7 @@ fn decide_inner(rules: &[Rule], raw_stdin: &str) -> Result<Outcome, String> {
         .map(|(i, _)| i)
         .collect();
     let depths = paren_depths(&scan.cps);
-    let reach = precompute_cd_reach_info(&text, &scan, &depths, &cwd, ss)?;
+    let reach = precompute_cd_reach_info(&text, &scan, &depths, &cwd)?;
     let compiled = compile_rules(rules)?;
 
     let match_starts_inside_quoted_literal_text = |start: usize| -> bool {
@@ -2787,7 +2853,7 @@ fn decide_inner(rules: &[Rule], raw_stdin: &str) -> Result<Outcome, String> {
             let Some(re) = &rule.unless_cwd_re else {
                 return Ok(false);
             };
-            let eff = effective_checkout(&text, &scan, cand.0, cand.1, &cwd, &reach, ss)?;
+            let eff = effective_checkout(&text, &scan, cand.0, cand.1, &cwd, &reach)?;
             match eff {
                 None => Ok(false),
                 Some(PyValue::Str(s)) => Ok(re.is_match(&cps_to_string(&s))),
@@ -2915,10 +2981,9 @@ fn decide_inner(rules: &[Rule], raw_stdin: &str) -> Result<Outcome, String> {
 
         let (raw_start, raw_end) = match_override_span.unwrap_or(m);
         let raw_end = extend_end_past_quote(&spans.quote, raw_end);
-        let raw_matched = cps_to_string(
-            &text.cps[raw_start.min(text.len())..raw_end.max(raw_start).min(text.len())],
-        );
-        let matched: PyStr = cps_from_str(&redact(&raw_matched), ss)
+        let raw_matched =
+            &text.cps[raw_start.min(text.len())..raw_end.max(raw_start).min(text.len())];
+        let matched: PyStr = redact_cps(raw_matched)
             .into_iter()
             .take(MATCH_TRUNCATE)
             .collect();
@@ -2936,7 +3001,7 @@ fn decide_inner(rules: &[Rule], raw_stdin: &str) -> Result<Outcome, String> {
 
     // Ledger context — `redact()` is applied to the persisted copies of
     // session_id/cwd at write time in the reference (`redact_value`).
-    let preview: PyStr = cps_from_str(&redact(&text.s), ss)
+    let preview: PyStr = redact_cps(&text.cps)
         .into_iter()
         .take(PREVIEW_TRUNCATE)
         .collect();
@@ -2951,7 +3016,6 @@ fn decide_inner(rules: &[Rule], raw_stdin: &str) -> Result<Outcome, String> {
             tool: tool_name,
             cwd,
             preview,
-            restore_surrogates: ss,
         },
     })
 }
@@ -3005,8 +3069,8 @@ fn ensure_private_dir(dir: &std::path::Path) -> Result<(), String> {
 /// Render the ledger lines for one invocation — `json.dumps(entry,
 /// sort_keys=True)` per fire, exactly the reference's bytes.
 pub fn ledger_lines_for(fires: &[Fire], ctx: &LedgerContext, ts: &str) -> Result<String, String> {
-    let session_id = redact_value(&ctx.session_id, ctx.restore_surrogates)?;
-    let cwd = redact_value(&ctx.cwd, ctx.restore_surrogates)?;
+    let session_id = redact_value(&ctx.session_id)?;
+    let cwd = redact_value(&ctx.cwd)?;
     let mut lines: Vec<String> = Vec::with_capacity(fires.len());
     for fire in fires {
         let entry = PyValue::Dict(vec![
@@ -3092,12 +3156,9 @@ pub fn stdout_document(winner: &Fire) -> String {
     format!("{}\n", dumps(&doc, false, false))
 }
 
-/// Collapse a diagnostic to exactly one line (review F7): line breaks are
-/// escaped, never printed — regex errors, rule ids and paths can all carry
-/// them.
-pub fn one_line(msg: &str) -> String {
-    msg.replace("\r\n", "\\n").replace(['\n', '\r'], "\\n")
-}
+/// One-line diagnostic formatting is shared by every hook (review F7; the
+/// workspace resolver in `hook/mod.rs` uses the same function).
+pub(crate) use super::one_line;
 
 /// Best-effort single stderr line (review F8): a closed stderr must not
 /// panic or change the exit status.
@@ -4073,6 +4134,15 @@ mod tests {
         let ci = build_regex(r"(?i)token").unwrap();
         assert!(ci.is_match("TOKEN"));
         assert!(!ci.is_match("to\u{212A}en"));
+        // PR #10 round-3 F16: escaped letters fold too, outside and inside a
+        // class, while non-letter escapes stay exact.
+        assert_eq!(translate_py_regex(r"(?i)\x61").unwrap(), "[aA]");
+        assert_eq!(translate_py_regex(r"(?i)[\x61B]").unwrap(), "[aABb]");
+        assert!(build_regex(r"(?i)\x61").unwrap().is_match("A"));
+        assert!(build_regex(r"(?i)[\x61]").unwrap().is_match("A"));
+        assert!(build_regex(r"(?i)b").unwrap().is_match("B"));
+        assert!(!build_regex(r"(?i)\x31").unwrap().is_match("a"));
+        assert_eq!(translate_py_regex(r"(?i)\x2d").unwrap(), r"\x2d");
         // Every seed rule pattern (placeholders expanded) translates and
         // compiles.
         for rule in load_seed_rules() {
@@ -4150,9 +4220,19 @@ mod tests {
             r#"{"pair":"\ud83d\ude00","q":"\ud800 x \udfff"}"#
         );
         let q = v.get("q").unwrap().as_pystr().unwrap();
-        assert!(has_lone_surrogate(q));
-        // Round trip via the String view restores the surrogate.
-        assert_eq!(cps_from_str(&cps_to_string(q), true), *q);
+        assert!(q.contains(&0xD800));
+        // Redaction rebuilds from code points: a lone surrogate AND a genuine
+        // private-use character (the placeholder's own range) both survive.
+        let mixed: PyStr = vec![0xD800, 0xF0000, 'x' as u32, 0xDFFF];
+        assert_eq!(redact_cps(&mixed), mixed);
+        // ...and a real secret next to them is still scrubbed, exactly.
+        let mut with_secret = vec![0xD800, ' ' as u32];
+        with_secret.extend(pystr("sk-ant-api03-ABCDEFGHIJKLMNOP"));
+        with_secret.push(0xF0000);
+        let mut expected = vec![0xD800, ' ' as u32];
+        expected.extend(pystr("sk-ant-***REDACTED***"));
+        expected.push(0xF0000);
+        assert_eq!(redact_cps(&with_secret), expected);
         // A high surrogate followed by a non-low escape stays two code points.
         let v = parse_json(r#""\ud800\u0041""#).unwrap();
         assert_eq!(v, PyValue::Str(vec![0xD800, 0x41]));
@@ -4283,12 +4363,114 @@ mod tests {
             ("", "."),
             ("a/", "a"),
         ] {
-            assert_eq!(posix_normpath(input), expected, "{input}");
+            assert_eq!(
+                cps_to_string(&posix_normpath(&pystr(input))),
+                expected,
+                "{input}"
+            );
         }
-        assert_eq!(posix_join("/a", "b"), "/a/b");
-        assert_eq!(posix_join("/a/", "b"), "/a/b");
-        assert_eq!(posix_join("/a", "/b"), "/b");
-        assert_eq!(posix_join("", "b"), "b");
+        let j = |a: &str, b: &str| cps_to_string(&posix_join(&pystr(a), &pystr(b)));
+        assert_eq!(j("/a", "b"), "/a/b");
+        assert_eq!(j("/a/", "b"), "/a/b");
+        assert_eq!(j("/a", "/b"), "/b");
+        assert_eq!(j("", "b"), "b");
+        // Code points that have no faithful `String` form survive normpath.
+        let odd: PyStr = vec![SLASH, 0xD800, SLASH, DOT, DOT, SLASH, 0xF0000];
+        assert_eq!(posix_normpath(&odd), vec![SLASH, 0xF0000]);
+    }
+
+    // ---- Review round 2: F14 / F17 / F18 ----
+
+    /// F14: a lone-surrogate heredoc delimiter must still terminate its
+    /// own body — the delimiter is sliced from the original code points, so
+    /// the command after the terminator line is evaluated like Python does.
+    #[test]
+    fn surrogate_heredoc_delimiter_terminates_like_the_reference() {
+        let rules = load_seed_rules();
+        let raw = r#"{"tool_name":"Bash","cwd":"/shared","tool_input":{"command":"cat <<'\ud800'\nbody\n\ud800\ngit stash"}}"#;
+        let w = winner_of(decide(&rules, raw));
+        assert_eq!(w.decision, "deny");
+        // Differential: the live reference denies too, with identical bytes.
+        let ledger_dir = tempfile::tempdir().unwrap();
+        let out = run_python_reference(raw, ledger_dir.path());
+        assert!(out.status.success() && out.stderr.is_empty());
+        assert_eq!(String::from_utf8_lossy(&out.stdout), stdout_document(&w));
+        // A genuine private-use char next to a lone surrogate keeps both in
+        // the ledger preview, exactly as the reference writes them.
+        let raw2 = "{\"tool_name\":\"Bash\",\"cwd\":\"/shared\",\"tool_input\":{\"command\":\"echo \\ud800\u{F0000}; git stash\"}}";
+        let (fires, ctx) = match decide(&rules, raw2) {
+            Outcome::Fired { fires, ctx, .. } => (fires, ctx),
+            other => panic!("expected Fired, got {other:?}"),
+        };
+        let line = ledger_lines_for(&fires, &ctx, "TS").unwrap();
+        assert!(line.contains(r#"\ud800\udb80\udc00"#), "{line}");
+        let ledger_dir = tempfile::tempdir().unwrap();
+        run_python_reference(raw2, ledger_dir.path());
+        let py = std::fs::read_to_string(ledger_dir.path().join(LEDGER_FILENAME)).unwrap();
+        let strip = |s: &str| {
+            Regex::new(r#""ts": "[^"]*""#)
+                .unwrap()
+                .replace_all(s, "\"ts\": \"TS\"")
+                .into_owned()
+        };
+        assert_eq!(strip(&line), strip(&py));
+    }
+
+    /// F17: string decoding is linear — a 1 MiB content field parses in
+    /// well under a second instead of revalidating the whole suffix per
+    /// character.
+    #[test]
+    fn large_json_strings_parse_in_linear_time() {
+        let big = "x".repeat(1 << 20);
+        let raw = format!(
+            r#"{{"tool_name":"Write","tool_input":{{"file_path":"notes.md","content":"{big}"}}}}"#
+        );
+        let started = std::time::Instant::now();
+        let v = parse_json(&raw).unwrap();
+        let elapsed = started.elapsed();
+        assert_eq!(
+            v.get("tool_input")
+                .unwrap()
+                .get("content")
+                .unwrap()
+                .as_pystr()
+                .unwrap()
+                .len(),
+            1 << 20
+        );
+        assert!(
+            elapsed < std::time::Duration::from_secs(2),
+            "1 MiB string took {elapsed:?}"
+        );
+        // Non-ASCII content decodes correctly through the lead-byte path.
+        let v = parse_json("\"h\u{e9}\u{1F600}\"").unwrap();
+        assert_eq!(v, PyValue::Str(vec!['h' as u32, 0xE9, 0x1F600]));
+    }
+
+    /// F18: a synthetic heredoc terminator whose delimiter is `cd` is found
+    /// by the cd locator PAST the unmasked text; the token read there must
+    /// clamp like Python's slicing instead of indexing out of range.
+    #[test]
+    fn synthetic_terminator_named_cd_does_not_panic_and_matches_the_reference() {
+        let rules = load_seed_rules();
+        for raw in [
+            r#"{"tool_name":"Bash","tool_input":{"command":"cat <<cd\nbody"}}"#,
+            r#"{"tool_name":"Bash","tool_input":{"command":"cat <<cd\nbody\ngit stash"}}"#,
+            r#"{"tool_name":"Bash","cwd":"/worktrees/x","tool_input":{"command":"git stash; cat <<pushd\nbody"}}"#,
+        ] {
+            let outcome = decide(&rules, raw);
+            assert!(!matches!(outcome, Outcome::Error(_)), "{raw}: {outcome:?}");
+            let ledger_dir = tempfile::tempdir().unwrap();
+            let out = run_python_reference(raw, ledger_dir.path());
+            assert!(out.status.success() && out.stderr.is_empty(), "{raw}");
+            let expected = match &outcome {
+                Outcome::Fired {
+                    winner: Some(w), ..
+                } => stdout_document(w),
+                _ => String::new(),
+            };
+            assert_eq!(String::from_utf8_lossy(&out.stdout), expected, "{raw}");
+        }
     }
 
     /// `executable_mask` output is compared against the reference's own
