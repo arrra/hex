@@ -753,7 +753,10 @@ class TestScriptSafety(RouterTestCase):
     the real content behind "fast, no LLM, no network, no git".
     """
 
-    ALLOWED_IMPORTS = {"sys", "os", "re", "json", "hashlib", "time", "datetime", "pathlib"}
+    # `fcntl` (PR #6 review F9): the ledger append takes an advisory
+    # exclusive lock shared with the Rust port's writer -- stdlib, POSIX-only,
+    # which is the only platform these hooks run on.
+    ALLOWED_IMPORTS = {"sys", "os", "re", "json", "hashlib", "time", "datetime", "pathlib", "fcntl"}
     FORBIDDEN_TOKENS = ("subprocess", "socket", "urllib", "http", "requests", "git ", "gh ")
 
     def _assert_safe_script(self, path):
