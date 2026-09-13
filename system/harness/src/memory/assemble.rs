@@ -174,7 +174,7 @@ fn detect_entity_subjects(conn: &Connection, query: &str) -> Vec<String> {
             // wider match from flooding the merge.
             let slug = lower
                 .split_once(':')
-                .map(|(_, s)| s)
+                .map(|(_, rhs)| rhs)
                 .unwrap_or(lower.as_str());
             for piece in slug.split([':', '-', '_', '/', ' ']) {
                 if piece.len() >= 3 && toks.contains(piece) {
