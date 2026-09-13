@@ -67,3 +67,16 @@ When migrating a live refresh job (Slack bot token, X OAuth2) into a bundle:
 - Harness: `system/scripts/hex-integration-check.sh` — single-probe runner with atomic state + locks + transition events.
 - Template: `templates/integrations/_template/` — copy for every new integration.
 - Reference instance: the hex instance that develops the foundation. If you maintain a private hex instance alongside this foundation repo, its `projects/integrations/modular-integration-architecture.md` contains the design doc that led to this version.
+
+## Other system/scripts utilities
+
+Not every script under `system/scripts/` is an integration bundle tool. `system/scripts/workflow-report-export.py` exports finished Claude Code Workflow run records into `$HEX_DIR/projects/<project>/workflow-reports/` so `hex memory index` can pick them up; it ships with no hardcoded project names and reads an optional `$HEX_DIR/.hex/config/workflow-projects.toml` mapping file (falling back to a guessed repo basename, then `_unmapped`). It exits 1 on a malformed run record, a per-record write failure, a record whose destination escapes `$HEX_DIR/projects/` even via the `_unmapped` fallback (e.g. a symlinked project directory) and is dropped, an invalid `workflow-projects.toml` rule, or an explicitly-supplied `--claude-projects` root that doesn't exist (the default root being absent just means an empty, successful scan). Run it with `--help` for the mapping-file format.
+
+When no mapping rule matches, the project is inferred from the run's `result` under a **conservative rule** (adopted after spec review round 4 found the earlier free-text heuristics unreliable — see `projects/hex-foundation/review-rounds/` in a hex instance for the ledger):
+
+- A structured field the record itself labels as a path (`repo`, `repoPath`, `repository`, `repoDir`, `path`, `cwd`, `workdir`, `directory`, `workspace`) is consumed as a **complete value** — never tokenized, never truncated at a space. The first such key present is authoritative: if its value isn't a non-empty string, isn't an absolute path, or contains a control character, the record goes straight to `projects/_unmapped/` with a WARN — it never falls through to try another key or to the free-text scan below.
+- Otherwise, the first absolute path mentioned in free text is used only when it is **unambiguous**: a match already ending in a recognized file extension (e.g. `.py`, `.ts`) is trusted regardless of what follows it, since no filename is ever truncated mid-extension; a bare directory name with no extension is trusted unless the text immediately after it could plausibly be more of the same (space-broken) path name, in which case the record goes to `_unmapped` with a WARN naming both readings rather than guessing.
+
+The exporter never resolves an ambiguous path by skipping past it and searching further into the text — that used to be able to land on an unrelated, wrong project.
+
+The free-text scan only looks at the first 4,000 characters of the `result` (independent of the 60,000-character cap on the rendered report body): a real repo path is essentially always named near the front of a workflow's narration, and without this cap a `result` carrying one long unbroken token (a base64 blob, a minified stack trace, a screenshot data URI) could stall the scan.
