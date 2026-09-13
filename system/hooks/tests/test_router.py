@@ -3698,21 +3698,52 @@ class TestGitOptsLeafOnlyWideningHandlesArbitraryNesting(RouterTestCase):
     space has the innermost SUBSTITUTION, not that value's own quote, as
     its innermost span, so it's preserved instead of widened).
 
-    Fixed by replacing the per-character classification with a
-    TARGET-level one: a `-C`/`-c`/... quoted value is a "leaf" when no
-    OTHER such value's span sits strictly inside it. Only leaves are
-    widened in the new `scan_text_widened_leaves` variant -- the
-    innermost invocation's own quoted value is always a leaf (nothing
-    can nest inside it) and always widens, with everything ABOVE it left
-    completely untouched, preserving every enclosing invocation's own
-    real separators. This generalizes to any nesting depth without
-    needing a new fixed variant per level."""
+    Fixed (round 6) by replacing the per-character classification with a
+    TARGET-level one -- superseded again in round 7 by
+    `_gitopts_scan_variants`'s fully-isolated per-target variants (see
+    `TestGitOptsPerTargetVariantsHandleIntermediateInvocations` below),
+    but this test still exercises the same nesting shape and must keep
+    passing under whichever mechanism is current."""
 
     def test_quadruple_nested_quoted_dash_c_value_still_denies(self):
         cmd = 'git -c "user.name=$(git -c "user.name=$(printf x)" stash)" status'
         with tempfile.TemporaryDirectory() as ledger_dir:
             proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
             self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 6)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestGitOptsPerTargetVariantsHandleIntermediateInvocations(RouterTestCase):
+    """F3 (round 7 review, blocker) — round 6's leaf-only widening
+    correctly finds the OUTERMOST and INNERMOST invocation's own
+    subcommand, but an INTERMEDIATE invocation (a target that both
+    CONTAINS a nested target AND is itself contained by another) is
+    neither a leaf (so it never widens) nor the untouched root (so an
+    ancestor's own widening, if any existed, would destroy its
+    separators anyway) -- there was no representation left it could be
+    found in:
+
+        git -c "user.name=$(git -c "user.name=$(git -c 'user.name=A B' status)" stash)" status
+
+    The middle invocation runs `stash` and must still be denied.
+
+    Fixed by abandoning the search for ONE shared representation
+    entirely: `_gitopts_scan_variants` now builds one FULLY ISOLATED
+    variant PER quoted git-option value found anywhere in the command,
+    each widening ONLY that one value's own range and leaving every
+    ancestor AND descendant completely untouched. Every invocation's own
+    subcommand is findable in ITS OWN dedicated variant, regardless of
+    how deep it sits or where in the chain it falls."""
+
+    def test_dangerous_intermediate_invocation_still_denies(self):
+        cmd = (
+            'git -c "user.name=$(git -c "user.name=$(git -c \'user.name=A B\' status)" '
+            'stash)" status'
+        )
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 7)")
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 

@@ -468,68 +468,62 @@ def _find_gitopt_quote_targets(text, quote_spans):
     return targets
 
 
-def _widen_quoted_global_opt_args(text, scan_text, quote_spans, leaves_only=False):
-    """Returns a copy of `scan_text` with every INTERNAL space of a
-    QUOTED `-C`/`-c`/`--git-dir=`/`--work-tree=` argument value (each one
-    found by `_find_gitopt_quote_targets`) replaced with `\\x01` -- a byte
-    `\\S` still matches, so `_GIT_GLOBAL_OPTS`'s `\\S+` alternatives can
-    consume the whole quoted value as one token exactly the way a real
-    shell treats it as one argument. Never changes `scan_text`'s length,
-    so every other position-based computation downstream (sep_positions,
-    paren_depths, quote_spans itself) stays valid unchanged.
-
-    F3 (round 3-6 review, blocker) -- three rounds of the same structural
-    conflict, one nesting level deeper each time: a quoted global-option
-    value can itself contain a genuinely LIVE substitution
-    (`-c "user.name=$(...)"`), and that substitution can ITSELF contain
-    ANOTHER quoted global-option value needing the identical treatment
-    (`-c "user.name=$(-C '/shared/my repo' stash)"`, or one level deeper
-    still: `-c "user.name=$(-c "user.name=$(printf x)" stash)"`). Skipping
-    widening inside a nested substitution (round 3) preserved it but broke
-    the OUTER value's own `\\S+`-consumability; widening unconditionally
-    (round 4) fixed that but destroyed a nested invocation's own
-    command-separating whitespace; a per-character "innermost span is
-    live" check (round 5) fixed ONE level of that but still preserved a
-    doubly-nested target's own internal space, since ITS innermost span is
-    the live substitution wrapping it, not the target itself.
-
-    `leaves_only=True` (round 6's fix) sidesteps trying to classify
-    individual CHARACTERS at all: a target is a "leaf" when no OTHER
-    target's span sits strictly inside it. Only leaf targets are widened
-    in this mode; a target that CONTAINS a nested target is left
-    completely untouched -- both its own literal text and its nested
-    invocation's real separators. This generalizes cleanly regardless of
-    how many `-C`/`-c` values are nested inside each other: the
-    DEEPEST invocation's own quoted value is always a leaf (nothing can
-    be nested inside it) and always gets widened, letting its own
-    subcommand match with its own separators fully intact; the
-    ENCLOSING invocation's own subcommand (if any) is instead found via
-    the SEPARATE `leaves_only=False` (unconditional) pass, which
-    blankets the whole outer span regardless of what it contains.
-    `evaluate()` searches `scan_text` (plain), this function with
-    `leaves_only=False`, and this function with `leaves_only=True` for
-    any rule referencing `@GITOPTS@`, unioning matches by span -- each
-    variant catches a different nesting shape, and the common case (no
-    quoted global option at all) matches identically across all three."""
-    targets = _find_gitopt_quote_targets(text, quote_spans)
-    if leaves_only:
-        # A target is a leaf when no OTHER target's span sits strictly
-        # inside it. Compared by INDEX, not value/identity -- two
-        # distinct occurrences could in principle share the exact same
-        # span, and index comparison stays correct regardless.
-        targets = [
-            t for i, t in enumerate(targets)
-            if not any(
-                j != i and t[0] <= other[0] and other[1] <= t[1]
-                for j, other in enumerate(targets)
-            )
-        ]
+def _widen_single_target(scan_text, q_start, q_end):
+    """Returns a copy of `scan_text` with every space inside
+    `[q_start, q_end)` replaced with `\\x01` -- a byte `\\S` still
+    matches, so `_GIT_GLOBAL_OPTS`'s `\\S+` alternatives can consume that
+    ONE quoted value as one token, exactly the way a real shell treats it
+    as one argument. Nothing OUTSIDE `[q_start, q_end)` is touched --
+    length-preserving, so every other position-based computation
+    downstream stays valid."""
     out = list(scan_text)
-    for q_start, q_end in targets:
-        for k in range(q_start, q_end):
-            if out[k] == " ":
-                out[k] = "\x01"
+    for k in range(q_start, q_end):
+        if out[k] == " ":
+            out[k] = "\x01"
     return "".join(out)
+
+
+def _gitopts_scan_variants(text, scan_text, quote_spans):
+    """Returns one `scan_text` variant PER `-C`/`-c`/`--git-dir=`/
+    `--work-tree=` quoted VALUE found anywhere in `text` (at ANY nesting
+    depth, via `_find_gitopt_quote_targets`) -- each variant widens ONLY
+    that ONE target's own range and leaves every other character in the
+    whole text -- ancestors AND descendants alike -- completely
+    untouched. `evaluate()` searches a `@GITOPTS@` rule against `scan_text`
+    (plain) plus every one of these variants, unioning matches by span.
+
+    F3 (round 3-7 review, blocker) -- FOUR rounds of the same structural
+    conflict kept reappearing one nesting level deeper each time, because
+    every earlier fix tried to answer "widen or preserve?" with ONE
+    shared representation (either per-command-wide, or per-CHARACTER, or
+    per-"is this a leaf" classification) that necessarily traded a
+    correct answer at one nesting level for a wrong one at another --
+    round 6's own leaf-only fix, for instance, correctly finds the
+    OUTERMOST and INNERMOST invocation's own subcommand, but an
+    INTERMEDIATE invocation (a target that both CONTAINS a nested target
+    AND is ITSELF contained by another) is neither a leaf (so it never
+    widens) nor the untouched root (so its own ancestor's blanket
+    widening, if any existed, would have destroyed its separators anyway)
+    -- there was no single representation left for it to be found in.
+
+    The fix stops trying to find ONE shared representation at all: EVERY
+    target gets its OWN dedicated, fully isolated variant. For target T,
+    _widen_single_target(scan_text, *T) widens T's ENTIRE range
+    unconditionally (regardless of what's nested inside T -- irrelevant
+    to T's own invocation, which only needs its OWN value to look like
+    one token) while leaving literally everything outside T -- including
+    every ANCESTOR target that encloses T -- completely real. That means
+    T's own enclosing invocation's own command-separating whitespace
+    (which lives OUTSIDE T, in whatever contains T) is never touched by
+    T's own variant, so T's own subcommand is always findable regardless
+    of how deep T sits or how much is nested inside it. This holds for
+    every target independently, so it generalizes to any nesting depth
+    AND any position in the chain (outermost, innermost, or anywhere
+    between) without needing to classify or special-case any of them."""
+    return [
+        _widen_single_target(scan_text, q_start, q_end)
+        for q_start, q_end in _find_gitopt_quote_targets(text, quote_spans)
+    ]
 
 
 def _expand_placeholders(pattern):
@@ -2200,13 +2194,14 @@ def load_rules():
                 "id": rule["id"],
                 "tool_re": re.compile(rule["tool"], re.MULTILINE),
                 "match_re": re.compile(match_pattern, re.MULTILINE),
-                # F3 (round 3 review, blocker): whether this rule needs the
-                # SEPARATE widened scan_text pass too -- see evaluate()'s
-                # own comment on `scan_text_widened` for why one shared
-                # scan_text can't serve both this and a nested live
-                # substitution's own match at once. Checked on the RAW
-                # (pre-placeholder-expansion) pattern, since `@GITOPTS@`
-                # itself is a placeholder token, not literal regex text.
+                # F3 (round 3-7 review, blocker): whether this rule needs
+                # the SEPARATE per-target widened scan_text variants too
+                # -- see `_gitopts_scan_variants`'s docstring for why one
+                # shared scan_text can't serve both this and a nested
+                # invocation's own match at once, at any nesting depth.
+                # Checked on the RAW (pre-placeholder-expansion) pattern,
+                # since `@GITOPTS@` itself is a placeholder token, not
+                # literal regex text.
                 "uses_gitopts": "@GITOPTS@" in rule["match"],
                 "unless_cwd_re": re.compile(unless_cwd, re.MULTILINE) if unless_cwd else None,
                 "unless_match_re": re.compile(unless_match_pattern, re.MULTILINE) if unless_match_pattern else None,
@@ -2271,38 +2266,21 @@ def evaluate(payload):
     quote_spans = []
     live_spans = []
     scan_text = executable_mask(text, quote_spans, live_spans) if tool_name == "Bash" else text
-    # F3 (round 3 + round 4 review, blocker): a quoted `-C`/`-c`/
-    # `--git-dir=`/`--work-tree=` value must look like ONE token to
-    # `_GIT_GLOBAL_OPTS`'s `\S+`, but a genuinely live substitution nested
-    # in that SAME value needs its own real whitespace intact for its own
-    # rule to match -- one shared scan_text cannot be both at once (see
-    # `_widen_quoted_global_opt_args`'s docstring for the concrete
-    # commands each variant alone still missed). THREE variants are
-    # consulted, ADDITIONALLY, only for rules whose pattern references
-    # `@GITOPTS@` (see `uses_gitopts` in `load_rules`) -- every other rule
-    # keeps using plain `scan_text` exactly as before:
-    #   - scan_text_widened: every quoted value's spaces widened
-    #     unconditionally -- an outer value merely CONTAINING a
-    #     substitution (harmless or dangerous) needs this for its own
-    #     `\S+` to consume it; a nested dangerous command with no further
-    #     nested quoting of its own is still found via `scan_text` instead
-    #     (its own `\$\(\s*`/backtick anchor is independent of the outer
-    #     value's parsing).
-    #   - scan_text_widened_leaves: only LEAF targets widened (a target
-    #     that CONTAINS no other target's span) -- for when a nested
-    #     substitution ITSELF needs a quoted option value skipped, at ANY
-    #     depth: the deepest invocation's own quoted value is always a
-    #     leaf and always widens, letting its own subcommand match with
-    #     its own separators fully intact, while every ENCLOSING target
-    #     is left completely untouched (its own subcommand, if dangerous,
-    #     is instead found via `scan_text_widened`'s unconditional pass).
-    scan_text_widened = (
-        _widen_quoted_global_opt_args(text, scan_text, quote_spans) if tool_name == "Bash" else scan_text
-    )
-    scan_text_widened_leaves = (
-        _widen_quoted_global_opt_args(text, scan_text, quote_spans, leaves_only=True)
-        if tool_name == "Bash"
-        else scan_text
+    # F3 (round 3-7 review, blocker): a quoted `-C`/`-c`/`--git-dir=`/
+    # `--work-tree=` value must look like ONE token to `_GIT_GLOBAL_OPTS`'s
+    # `\S+`, but a genuinely live substitution nested in that SAME value
+    # needs its own real whitespace intact for its own rule to match --
+    # one shared scan_text cannot serve every nesting level at once (see
+    # `_gitopts_scan_variants`'s docstring for why four earlier attempts
+    # at a single shared representation each broke a different depth).
+    # `gitopts_scan_variants` holds one fully-isolated variant PER quoted
+    # git-option value found anywhere in the command, each widening ONLY
+    # that one value's own range -- consulted ADDITIONALLY, only for
+    # rules whose pattern references `@GITOPTS@` (see `uses_gitopts` in
+    # `load_rules`); every other rule keeps using plain `scan_text`
+    # exactly as before.
+    gitopts_scan_variants = (
+        _gitopts_scan_variants(text, scan_text, quote_spans) if tool_name == "Bash" else []
     )
     sep_positions = [i for i, ch in enumerate(scan_text) if ch in _SEPARATOR_CHARS]
     paren_depths = _paren_depths(scan_text)
@@ -2367,18 +2345,16 @@ def evaluate(payload):
         if not rule["tool_re"].search(tool_name):
             continue
         candidates = list(rule["match_re"].finditer(scan_text))
-        if rule.get("uses_gitopts"):
-            # F3 (round 3 + round 4 review, blocker): this rule's pattern
-            # references `@GITOPTS@` -- also search the two widened
-            # copies (see the comment above `scan_text_widened` for what
-            # each one alone catches) and union in any match not already
-            # found (by span) in a copy already searched. The common case
-            # (no quoted global option at all) matches identically across
-            # all three and contributes nothing new here.
+        if rule.get("uses_gitopts") and gitopts_scan_variants:
+            # F3 (round 3-7 review, blocker): this rule's pattern
+            # references `@GITOPTS@` -- also search every per-target
+            # widened variant (see `_gitopts_scan_variants`'s docstring)
+            # and union in any match not already found (by span) in a
+            # variant already searched. The common case (no quoted global
+            # option at all) means an empty variant list, contributing
+            # nothing new here.
             seen_spans = {(m.start(), m.end()) for m in candidates}
-            for extra_scan_text in (scan_text_widened, scan_text_widened_leaves):
-                if extra_scan_text is scan_text:
-                    continue
+            for extra_scan_text in gitopts_scan_variants:
                 for m in rule["match_re"].finditer(extra_scan_text):
                     span = (m.start(), m.end())
                     if span not in seen_spans:
