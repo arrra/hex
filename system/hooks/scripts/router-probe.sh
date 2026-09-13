@@ -36,22 +36,35 @@ REPO_ROOT="$(cd "$SCRIPT_DIR/../../.." && pwd)"
 ROUTER_IMPL="${ROUTER_IMPL:-python}"
 HEX_ROUTER_BIN="${HEX_ROUTER_BIN:-${CARGO_TARGET_DIR:-$REPO_ROOT/target}/release/hex}"
 LEDGER_DIR="$(mktemp -d)" || exit 1
-RUST_HEX_DIR="${HEX_DIR:-}"
 SHIM_DIR=""
+# Cleanup is armed the moment a temporary directory exists (PR #6 review
+# F12) — a setup failure below must never leak one. It also runs on every
+# `exit 1` path in the shim block.
+trap 'rm -rf "$LEDGER_DIR"; [ -n "$SHIM_DIR" ] && rm -rf "$SHIM_DIR"' EXIT
+RUST_HEX_DIR="${HEX_DIR:-}"
 if [ "$ROUTER_IMPL" = "rust" ] \
   && [ ! -f "${HEX_DIR:-/nonexistent}/.hex/hooks/router-rules.json" ] \
   && [ -f "$REPO_ROOT/system/hooks/router-rules.json" ]; then
-  SHIM_DIR="$(mktemp -d)"
-  mkdir -p "$SHIM_DIR/.hex"
-  if [ -f "$REPO_ROOT/system/version.txt" ]; then
-    cp "$REPO_ROOT/system/version.txt" "$SHIM_DIR/.hex/version.txt"
-  else
-    printf '0.0.0-probe\n' > "$SHIM_DIR/.hex/version.txt"
+  # F12: every shim-setup step checks its own status. `set -u` alone did not
+  # catch a failed `mktemp -d` here — SHIM_DIR stayed EMPTY (set, so -u never
+  # tripped) and the version write + hooks symlink below targeted `/.hex`.
+  SHIM_DIR="$(mktemp -d)" || { echo "[router-probe] mktemp -d failed for the layout shim" >&2; exit 1; }
+  if [ -z "$SHIM_DIR" ] || [ ! -d "$SHIM_DIR" ]; then
+    echo "[router-probe] mktemp -d returned no usable directory for the layout shim" >&2
+    exit 1
   fi
-  ln -s "$REPO_ROOT/system/hooks" "$SHIM_DIR/.hex/hooks"
+  mkdir -p "$SHIM_DIR/.hex" || { echo "[router-probe] cannot create $SHIM_DIR/.hex" >&2; exit 1; }
+  if [ -f "$REPO_ROOT/system/version.txt" ]; then
+    cp "$REPO_ROOT/system/version.txt" "$SHIM_DIR/.hex/version.txt" \
+      || { echo "[router-probe] cannot copy version.txt into the layout shim" >&2; exit 1; }
+  else
+    printf '0.0.0-probe\n' > "$SHIM_DIR/.hex/version.txt" \
+      || { echo "[router-probe] cannot write version.txt into the layout shim" >&2; exit 1; }
+  fi
+  ln -s "$REPO_ROOT/system/hooks" "$SHIM_DIR/.hex/hooks" \
+    || { echo "[router-probe] cannot link system/hooks into the layout shim" >&2; exit 1; }
   RUST_HEX_DIR="$SHIM_DIR"
 fi
-trap 'rm -rf "$LEDGER_DIR"; [ -n "$SHIM_DIR" ] && rm -rf "$SHIM_DIR"' EXIT
 
 python3 - "$ROUTER" "$LEDGER_DIR" "$ROUTER_IMPL" "$HEX_ROUTER_BIN" "$REPO_ROOT" "$RUST_HEX_DIR" <<'PYEOF'
 import json
