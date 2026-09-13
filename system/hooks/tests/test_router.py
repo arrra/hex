@@ -3728,13 +3728,15 @@ class TestGitOptsPerTargetVariantsHandleIntermediateInvocations(RouterTestCase):
 
     The middle invocation runs `stash` and must still be denied.
 
-    Fixed by abandoning the search for ONE shared representation
-    entirely: `_gitopts_scan_variants` now builds one FULLY ISOLATED
-    variant PER quoted git-option value found anywhere in the command,
-    each widening ONLY that one value's own range and leaving every
-    ancestor AND descendant completely untouched. Every invocation's own
-    subcommand is findable in ITS OWN dedicated variant, regardless of
-    how deep it sits or where in the chain it falls."""
+    Fixed (round 7) by abandoning the search for ONE shared
+    representation entirely: `_gitopts_scan_variants` built one FULLY
+    ISOLATED variant per INDIVIDUAL quoted git-option value found
+    anywhere in the command. Superseded again in round 8 (grouped by
+    invocation instead of by individual target -- see
+    `TestGitOptsSiblingOptionsWidenTogether` below) after that
+    individual-target isolation broke on SIBLING options; this test
+    still exercises the same nesting shape and must keep passing under
+    whichever mechanism is current."""
 
     def test_dangerous_intermediate_invocation_still_denies(self):
         cmd = (
@@ -3744,6 +3746,34 @@ class TestGitOptsPerTargetVariantsHandleIntermediateInvocations(RouterTestCase):
         with tempfile.TemporaryDirectory() as ledger_dir:
             proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
             self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 7)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
+class TestGitOptsSiblingOptionsWidenTogether(RouterTestCase):
+    """F3 (round 8 review, blocker) — round 7's fix widened each quoted
+    git-option value in TOTAL isolation (one variant per target, nothing
+    else in that variant touched), which correctly solved arbitrary
+    NESTING depth but broke on SIBLINGS: a single invocation with TWO
+    `-c 'k=v'` options in a row needs `_GIT_GLOBAL_OPTS`'s own `(?:...)*`
+    repetition to consume BOTH quoted values to reach the real
+    subcommand -- widening only one at a time (round 7's approach) always
+    left the OTHER one with a real embedded space, breaking `\\S+` for
+    that occurrence in every variant.
+
+    Fixed by grouping targets by INVOCATION instead of isolating each one
+    individually: two targets are siblings -- widened together, in the
+    SAME variant -- when they have the exact same set of ancestor targets
+    (targets whose span strictly contains them). Targets at different
+    nesting depths always have different ancestor sets (preserving round
+    7's arbitrary-depth fix); targets on the SAME invocation share the
+    same ancestor set and now widen together."""
+
+    def test_two_sibling_quoted_options_on_one_invocation_still_denies(self):
+        cmd = "git -c 'user.name=A B' -c 'user.email=C D' stash"
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 8)")
             hso = json.loads(proc.stdout)["hookSpecificOutput"]
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 

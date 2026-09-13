@@ -468,62 +468,64 @@ def _find_gitopt_quote_targets(text, quote_spans):
     return targets
 
 
-def _widen_single_target(scan_text, q_start, q_end):
-    """Returns a copy of `scan_text` with every space inside
-    `[q_start, q_end)` replaced with `\\x01` -- a byte `\\S` still
-    matches, so `_GIT_GLOBAL_OPTS`'s `\\S+` alternatives can consume that
-    ONE quoted value as one token, exactly the way a real shell treats it
-    as one argument. Nothing OUTSIDE `[q_start, q_end)` is touched --
+def _widen_targets(scan_text, targets):
+    """Returns a copy of `scan_text` with every space inside ANY of the
+    given `(q_start, q_end)` `targets` replaced with `\\x01` -- a byte
+    `\\S` still matches, so `_GIT_GLOBAL_OPTS`'s `\\S+` alternatives can
+    consume each quoted value as one token, exactly the way a real shell
+    treats it as one argument. Nothing outside these ranges is touched --
     length-preserving, so every other position-based computation
     downstream stays valid."""
     out = list(scan_text)
-    for k in range(q_start, q_end):
-        if out[k] == " ":
-            out[k] = "\x01"
+    for q_start, q_end in targets:
+        for k in range(q_start, q_end):
+            if out[k] == " ":
+                out[k] = "\x01"
     return "".join(out)
 
 
 def _gitopts_scan_variants(text, scan_text, quote_spans):
-    """Returns one `scan_text` variant PER `-C`/`-c`/`--git-dir=`/
-    `--work-tree=` quoted VALUE found anywhere in `text` (at ANY nesting
-    depth, via `_find_gitopt_quote_targets`) -- each variant widens ONLY
-    that ONE target's own range and leaves every other character in the
-    whole text -- ancestors AND descendants alike -- completely
-    untouched. `evaluate()` searches a `@GITOPTS@` rule against `scan_text`
-    (plain) plus every one of these variants, unioning matches by span.
+    """Returns one `scan_text` variant PER GROUP of `-C`/`-c`/
+    `--git-dir=`/`--work-tree=` quoted VALUES that belong to the SAME
+    invocation -- at ANY nesting depth, via `_find_gitopt_quote_targets`.
+    `evaluate()` searches a `@GITOPTS@` rule against `scan_text` (plain)
+    plus every one of these variants, unioning matches by span.
 
-    F3 (round 3-7 review, blocker) -- FOUR rounds of the same structural
-    conflict kept reappearing one nesting level deeper each time, because
-    every earlier fix tried to answer "widen or preserve?" with ONE
-    shared representation (either per-command-wide, or per-CHARACTER, or
-    per-"is this a leaf" classification) that necessarily traded a
-    correct answer at one nesting level for a wrong one at another --
-    round 6's own leaf-only fix, for instance, correctly finds the
-    OUTERMOST and INNERMOST invocation's own subcommand, but an
-    INTERMEDIATE invocation (a target that both CONTAINS a nested target
-    AND is ITSELF contained by another) is neither a leaf (so it never
-    widens) nor the untouched root (so its own ancestor's blanket
-    widening, if any existed, would have destroyed its separators anyway)
-    -- there was no single representation left for it to be found in.
+    F3 (round 3-8 review, blocker) -- FIVE rounds of the same structural
+    conflict kept reappearing, because every earlier fix tried to answer
+    "widen or preserve?" with too coarse or too fine a grouping. Round 7's
+    fix (one variant per INDIVIDUAL target, in total isolation) correctly
+    solved arbitrary NESTING depth, but broke on SIBLINGS: a single-level
+    invocation with two `-c 'k=v'` options in a row (e.g. one setting
+    `user.name`, another setting `user.email`, then a real subcommand)
+    has two quoted values on the SAME invocation, and `_GIT_GLOBAL_OPTS`'s
+    own
+    `(?:...)*` repetition needs to consume BOTH `-c <value>` pairs in one
+    match to reach `stash` -- widening only one value at a time (round
+    7's approach) always left the OTHER one with a real embedded space,
+    breaking `\\S+` for that occurrence every time, in every variant.
 
-    The fix stops trying to find ONE shared representation at all: EVERY
-    target gets its OWN dedicated, fully isolated variant. For target T,
-    _widen_single_target(scan_text, *T) widens T's ENTIRE range
-    unconditionally (regardless of what's nested inside T -- irrelevant
-    to T's own invocation, which only needs its OWN value to look like
-    one token) while leaving literally everything outside T -- including
-    every ANCESTOR target that encloses T -- completely real. That means
-    T's own enclosing invocation's own command-separating whitespace
-    (which lives OUTSIDE T, in whatever contains T) is never touched by
-    T's own variant, so T's own subcommand is always findable regardless
-    of how deep T sits or how much is nested inside it. This holds for
-    every target independently, so it generalizes to any nesting depth
-    AND any position in the chain (outermost, innermost, or anywhere
-    between) without needing to classify or special-case any of them."""
-    return [
-        _widen_single_target(scan_text, q_start, q_end)
-        for q_start, q_end in _find_gitopt_quote_targets(text, quote_spans)
-    ]
+    The right grouping is neither "everything" (round 4) nor "one target
+    alone" (round 7) but "everything belonging to the same invocation":
+    two targets are SIBLINGS -- widened together, in the same variant --
+    when they have the exact same set of ANCESTOR targets (targets whose
+    span strictly contains them). Targets at different nesting depths, or
+    under different parents, always have different ancestor sets and so
+    land in different variants (preserving round 7's arbitrary-depth
+    fix); targets hanging directly off the SAME invocation (no target
+    contains one but not the other) share the empty (or identical
+    non-empty) ancestor set and land in the SAME variant, so ALL of that
+    invocation's own quoted values widen together while every ancestor
+    and every nested descendant invocation stays completely untouched."""
+    targets = _find_gitopt_quote_targets(text, quote_spans)
+    groups = {}
+    for i, t in enumerate(targets):
+        ancestor_key = frozenset(
+            j for j, other in enumerate(targets)
+            if j != i and other[0] <= t[0] and t[1] <= other[1]
+        )
+        groups.setdefault(ancestor_key, []).append(t)
+    return [_widen_targets(scan_text, group) for group in groups.values()]
 
 
 def _expand_placeholders(pattern):
