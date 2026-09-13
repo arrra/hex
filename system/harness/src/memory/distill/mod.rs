@@ -389,7 +389,16 @@ pub fn run_on_file(
                         }
                     };
                     let write_start = std::time::Instant::now();
-                    apply_judge_decision(&sp, &c, &pred, &obj, decision, path, &mut report)?;
+                    apply_judge_decision(
+                        &sp,
+                        &c,
+                        &pred,
+                        &obj,
+                        decision,
+                        &nearest_ids,
+                        path,
+                        &mut report,
+                    )?;
                     write_dur += write_start.elapsed();
                 }
             }
@@ -573,12 +582,14 @@ fn record_flag_event(event: &str, status: &str, detail: &str) {
 /// FLAG/UPDATE/ADD write paths are unit-testable against an FK-enforcing
 /// connection without a live judge (the target-less FLAG path is the exact
 /// 2026-08-17 production failure).
+#[allow(clippy::too_many_arguments)]
 fn apply_judge_decision(
     conn: &rusqlite::Connection,
     c: &Candidate,
     pred: &str,
     obj: &str,
     decision: judge::Decision,
+    offered: &[String],
     path: &str,
     report: &mut DistillReport,
 ) -> anyhow::Result<()> {
@@ -588,6 +599,7 @@ fn apply_judge_decision(
         pred,
         obj,
         decision,
+        offered,
         path,
         report,
         chrono::Utc::now(),
@@ -598,6 +610,12 @@ fn apply_judge_decision(
 /// supersede boundary is derived from `now` and the persisted predecessor, so
 /// tests can replay a clock regression or two updates in one tick
 /// deterministically instead of racing the real clock.
+///
+/// `offered` (F4, round 2): the fact ids the judge was actually shown for
+/// this candidate (`dedup::classify`'s `nearest_ids` — a `LIMIT 1` query
+/// today, so exactly one). An UPDATE may only supersede one of those: a
+/// target the judge never received the contents of is a protocol violation,
+/// even when it is a live row for the same subject/predicate.
 #[allow(clippy::too_many_arguments)]
 fn apply_judge_decision_at(
     conn: &rusqlite::Connection,
@@ -605,6 +623,7 @@ fn apply_judge_decision_at(
     pred: &str,
     obj: &str,
     decision: judge::Decision,
+    offered: &[String],
     path: &str,
     report: &mut DistillReport,
     now: chrono::DateTime<chrono::Utc>,
@@ -646,6 +665,18 @@ fn apply_judge_decision_at(
                 // accepted as-is. A stale or unrelated target is a judge
                 // protocol violation, handled like an untargeted UPDATE: loud
                 // telemetry, counted as a flag, nothing written.
+                if !offered.iter().any(|o| *o == tid) {
+                    record_flag_event(
+                        "distill::flag-unoffered-target",
+                        "ok",
+                        &format!(
+                            "judge said UPDATE target {} for ({},{},{}) in {} but that id was not among the offered rows {:?}: {}",
+                            tid, c.subject, pred, obj, path, offered, decision.reason
+                        ),
+                    );
+                    report.flags += 1;
+                    return Ok(());
+                }
                 use rusqlite::OptionalExtension as _;
                 let live: Option<(String, i64, String)> = conn
                     .query_row(
@@ -795,8 +826,17 @@ mod tests {
             target_id: None,
             reason: "ambiguous vs existing".into(),
         };
-        apply_judge_decision(&conn, &c, "prefers", "tea", d, "/tmp/t.md", &mut report)
-            .expect("target-less FLAG must not error (this was the FK bug)");
+        apply_judge_decision(
+            &conn,
+            &c,
+            "prefers",
+            "tea",
+            d,
+            &[],
+            "/tmp/t.md",
+            &mut report,
+        )
+        .expect("target-less FLAG must not error (this was the FK bug)");
         assert_eq!(report.flags, 1);
         let hist: i64 = conn
             .query_row("SELECT COUNT(*) FROM fact_history", [], |r| r.get(0))
@@ -832,7 +872,17 @@ mod tests {
             target_id: Some(id.clone()),
             reason: "contradicts".into(),
         };
-        apply_judge_decision(&conn, &c, "prefers", "tea", d, "/tmp/t.md", &mut report).unwrap();
+        apply_judge_decision(
+            &conn,
+            &c,
+            "prefers",
+            "tea",
+            d,
+            &[id.clone()],
+            "/tmp/t.md",
+            &mut report,
+        )
+        .unwrap();
         let flags: i64 = conn
             .query_row(
                 "SELECT COUNT(*) FROM fact_history WHERE op='FLAG' AND fact_id=?1",
@@ -1274,6 +1324,7 @@ mod tests {
             "has",
             "installed and live version 3.9.0",
             update_decision,
+            &[old_id.clone()],
             "/tmp/update.md",
             &mut report,
         )
@@ -1342,6 +1393,7 @@ mod tests {
                 target_id: Some(v332_id.clone()),
                 reason: "bump".into(),
             },
+            &[v332_id.clone()],
             "/tmp/u1.md",
             &mut report,
         )
@@ -1371,6 +1423,7 @@ mod tests {
                 target_id: Some(v390_id.clone()),
                 reason: "bump".into(),
             },
+            &[v390_id.clone()],
             "/tmp/u2.md",
             &mut report,
         )
@@ -1466,6 +1519,7 @@ mod tests {
                 target_id: Some(old_id.clone()),
                 reason: "version bump".into(),
             },
+            &[old_id.clone()],
             "/tmp/update.md",
             &mut report,
         )
@@ -1576,6 +1630,7 @@ mod tests {
                 target_id: Some(old_id.clone()),
                 reason: "version bump".into(),
             },
+            &[old_id.clone()],
             "/tmp/update.md",
             &mut report,
         )
@@ -1626,6 +1681,17 @@ mod tests {
         report: &mut DistillReport,
         now: chrono::DateTime<chrono::Utc>,
     ) {
+        supersede_offered_at(conn, target, &[target.to_string()], new_obj, report, now)
+    }
+
+    fn supersede_offered_at(
+        conn: &Connection,
+        target: &str,
+        offered: &[String],
+        new_obj: &str,
+        report: &mut DistillReport,
+        now: chrono::DateTime<chrono::Utc>,
+    ) {
         apply_judge_decision_at(
             conn,
             &Candidate {
@@ -1637,11 +1703,67 @@ mod tests {
             "has",
             new_obj,
             update_decision(target),
+            offered,
             "/tmp/update.md",
             report,
             now,
         )
         .unwrap();
+    }
+
+    /// RED for PR #10 review F4 (round 2): `dedup::classify` offers the judge
+    /// ONE id (`LIMIT 1`). With two live rows for the same subject/predicate,
+    /// an UPDATE naming the row the judge was NOT shown must be rejected —
+    /// live + matching key is not enough, the judge never saw its contents.
+    #[test]
+    fn unoffered_live_target_with_the_same_key_is_flagged_not_superseded() {
+        let conn = fixture_conn();
+        let mut report = DistillReport::default();
+        let shown = seed_fact(&conn, "boi", "has", "installed and live version 3.3.2");
+        let hidden = seed_fact(&conn, "boi", "has", "a second live row for the same key");
+        let facts_before: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+
+        // The judge was offered `shown` only, but targets `hidden`.
+        supersede_offered_at(
+            &conn,
+            &hidden,
+            &[shown.clone()],
+            "installed and live version 3.9.0",
+            &mut report,
+            chrono::Utc::now(),
+        );
+
+        let facts_after: i64 = conn
+            .query_row("SELECT COUNT(*) FROM facts", [], |r| r.get(0))
+            .unwrap();
+        assert_eq!(
+            facts_after, facts_before,
+            "an unoffered target must write nothing"
+        );
+        for id in [&shown, &hidden] {
+            let (_, invalid_at) = validity(&conn, id);
+            assert!(invalid_at.is_none(), "{id} must stay live");
+        }
+        assert_eq!(
+            report.flags, 1,
+            "the unoffered target must be counted as a flag"
+        );
+        assert_eq!(report.updates, 0);
+
+        // The offered row itself still supersedes normally.
+        supersede_offered_at(
+            &conn,
+            &shown,
+            &[shown.clone()],
+            "installed and live version 3.9.0",
+            &mut report,
+            chrono::Utc::now(),
+        );
+        let (_, invalid_at) = validity(&conn, &shown);
+        assert!(invalid_at.is_some());
+        assert_eq!(report.updates, 1);
     }
 
     fn validity(conn: &Connection, id: &str) -> (String, Option<String>) {
