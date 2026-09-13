@@ -3683,6 +3683,40 @@ class TestGitOptsNestingAwareWidening(RouterTestCase):
             self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
 
 
+class TestGitOptsLeafOnlyWideningHandlesArbitraryNesting(RouterTestCase):
+    """F3 (round 6 review, blocker) — round 5's per-character "innermost
+    span is live" check fixed ONE level of nesting but still preserved a
+    DOUBLY-nested target's own internal space, since its innermost span
+    is the live substitution wrapping it, not the target itself:
+
+        git -c "user.name=$(git -c "user.name=$(printf x)" stash)" status
+
+    All three round-5 scans missed it (plain: real separators everywhere,
+    so the innermost `-c` value's own space is never widened; unconditional:
+    the outermost `-c`'s blanket widening destroys the middle invocation's
+    own separators; per-character nesting-aware: the innermost value's own
+    space has the innermost SUBSTITUTION, not that value's own quote, as
+    its innermost span, so it's preserved instead of widened).
+
+    Fixed by replacing the per-character classification with a
+    TARGET-level one: a `-C`/`-c`/... quoted value is a "leaf" when no
+    OTHER such value's span sits strictly inside it. Only leaves are
+    widened in the new `scan_text_widened_leaves` variant -- the
+    innermost invocation's own quoted value is always a leaf (nothing
+    can nest inside it) and always widens, with everything ABOVE it left
+    completely untouched, preserving every enclosing invocation's own
+    real separators. This generalizes to any nesting depth without
+    needing a new fixed variant per level."""
+
+    def test_quadruple_nested_quoted_dash_c_value_still_denies(self):
+        cmd = 'git -c "user.name=$(git -c "user.name=$(printf x)" stash)" status'
+        with tempfile.TemporaryDirectory() as ledger_dir:
+            proc = run_router_payload(make_payload("Bash", {"command": cmd}, cwd="/tmp"), ledger_dir)
+            self.assertTrue(proc.stdout.strip(), f"{cmd!r} must not abstain (F3 round 6)")
+            hso = json.loads(proc.stdout)["hookSpecificOutput"]
+            self.assertEqual(hso.get("permissionDecision"), "deny", cmd)
+
+
 class TestReservedWordAnchorIgnoresQuotedMentions(RouterTestCase):
     """F2 (round 2 review, major) — `_RESERVED_LEADIN` ("if|then|elif|
     else|while|until|do") is a plain alternative in `_CMD_PREFIX`, with no
