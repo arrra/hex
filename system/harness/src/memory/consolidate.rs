@@ -91,7 +91,6 @@ fn op_catchup_distill(conn: &mut Connection) -> anyhow::Result<()> {
     Ok(())
 }
 
-
 // ---------------------------------------------------------------------------
 // Conservative fact canonicalization (recall-fix task Tsfwg7d2v; diagnosis root
 // cause 2: fact-store duplication and subject fragmentation).
@@ -406,7 +405,6 @@ fn tombstone_duplicate_fact(
     Ok(())
 }
 
-
 // PAUSED — see the op registration above. Kept compiled (not deleted) so the
 // re-enable diff is one line once the access counter ships.
 #[allow(dead_code)]
@@ -421,7 +419,6 @@ fn op_prune(conn: &mut Connection) -> anyhow::Result<()> {
     )?;
     Ok(())
 }
-
 
 /// One quick tick may not hold the consolidate lock indefinitely — the
 /// nightly full run needs it (lock_wait_budget = 45m). 10 minutes processes
